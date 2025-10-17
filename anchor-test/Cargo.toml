@@ -1,0 +1,12 @@
+[package]
+name = "anchor-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = { path = "../../lang" }
+rand = "0.10.0-rc.0"         
+solana-sdk = "2.2.1"
+anyhow = "1.0"
+anchor-test-macro = { path = "./anchor-test-macro" }  
+anchor-fuzz-macro = { path = "./anchor-fuzz-macro" }
