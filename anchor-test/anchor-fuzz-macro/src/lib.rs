@@ -56,8 +56,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
         mod #mod_name {
             use super::*;
-            use std::cell::RefCell;
-            use std::rc::Rc;
             pub const MAP_SIZE: usize = 1 << 16;
 
             pub struct DefaultTraceCollector {
@@ -118,7 +116,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
             let scheduler = QueueScheduler::new();
 
-
             let cov_ptr = unsafe { shmem.as_slice_mut().as_mut_ptr() };
             let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
             let pc_observer = HitcountsMapObserver::new(std_map);
@@ -144,7 +141,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 #(#deser_stmts)*
 
-                // Create fuzz test context with collector attached//
+                // Create fuzz test context with collector attached
                 let mut ctx = anchor_test_context::TestContext::with_trace_collector(Rc::new(RefCell::new(collector)));
 
                 // Call user function
