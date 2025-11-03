@@ -1,0 +1,26 @@
+[workspace] 
+
+[package]
+name = "anchor_counter_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+litesvm = "0.6.1"
+solana-program = "=2.2.1"
+solana-sdk = "=2.2.1"
+anchor-test = { path = "../../../anchor-test" }
+anchor-test-context = { path = "../../../anchor-test/anchor-test-context" }
+anchor-fuzz-harness = { path = "../../../anchor-test/anchor-fuzz-harness" }
+anchor-lang = "0.31.1"
+arbitrary = { version = "1", features = ["derive"] }
+once_cell = "1"
+libafl = { version = "0.13", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.13", features = ["std"] }
+
+
+anchor_counter = { path = "../programs/anchor-counter", features = ["no-entrypoint"] }
+
+[[bin]]
+name = "fuzz_increment"
+path = "src/main.rs"

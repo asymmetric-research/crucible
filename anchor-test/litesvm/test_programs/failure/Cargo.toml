@@ -1,0 +1,13 @@
+[package]
+name = "failure"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-account-info.workspace = true
+solana-program-entrypoint.workspace = true
+solana-program-error.workspace = true
+solana-pubkey.workspace = true

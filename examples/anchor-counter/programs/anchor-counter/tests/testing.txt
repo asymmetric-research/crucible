@@ -1,0 +1,235 @@
+/// Reference program
+use anchor_lang::prelude::*;
+declare_id!("...");
+#[program]
+pub mod counter {
+    use super::*;
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        ctx.accounts.counter.count = 0;
+        Ok(())
+    }
+    pub fn increment(ctx: Context<Update>) -> Result<()> {
+        ctx.accounts.counter.count += 1;
+        Ok(())
+    }
+    pub fn decrement(ctx: Context<Update>) -> Result<()> {
+        if ctx.accounts.counter.count > 0 {
+            ctx.accounts.counter.count -= 1;
+        }
+        Ok(())
+    }
+}
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = payer, space = 8 + Counter::INIT_SPACE)]
+    pub counter: Account<'info, Counter>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)]
+pub struct Update<'info> {
+    #[account(mut)]
+    pub counter: Account<'info, Counter>,
+}
+#[account]
+#[derive(InitSpace)]
+pub struct Counter {
+    pub count: u64,
+}
+/// Testing Begins
+use anchor_lang::prelude::*;
+use anchor_test::{TestContext, anchor_test, anchor_fuzz, anchor_fuzz_invariant};
+use counter::{Counter, ID as PROGRAM_ID};
+use solana_sdk::{signature::Keypair, system_program};
+struct CounterFixture {
+    ctx: TestContext,
+    counter_pda: Pubkey,
+    program_id: Pubkey,
+    payer: Keypair,
+}
+impl CounterFixture {
+    fn setup(ctx: &mut TextContext) -> Self {
+        let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
+        let ctx = ctx.add_program(&program_id, "target/deploy/counter");
+        let payer = Keypair::new();
+        // Create payer account
+        ctx.create_account()
+            .pubkey(payer.pubkey())
+            .lamports(10_000_000)
+            .owner(system_program::id())
+            .create()
+            .unwrap();
+        // Derive counter PDA
+        let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &program_id);
+        // Initialize counter
+        ctx.program(program_id)
+            .call(counter::instruction::Initialize {})
+            .accounts(counter::accounts::Initialize {
+                counter: counter_pda,
+                payer: payer.pubkey(),
+                system_program: system_program::id(),
+            })
+            .signers(&[&payer])
+            .send()
+            .unwrap();
+        Self { ctx, counter_pda, program_id, payer }
+    }
+    // ===== ACTIONS =====
+    pub fn increment(&mut self, arg: u64) {
+    }
+    pub fn decrement(uu&mut self) {
+        self.ctx
+            .program(self.program_id)
+            .call(counter::instruction::Decrement {})
+            .accounts(counter::accounts::Update {
+                counter: self.counter_pda,
+            })
+            .signers(&[&self.payer])
+            .send()
+            .unwrap();
+    }
+}
+// Unit test - runs once
+#[anchor_test(CounterFixture)]
+fn test_increment(fixture: &mut CounterFixture) {
+    fixture.increment();
+    let counter = fixture.ctx
+        .read_anchor_account::<Counter>(&fixture.counter_pda)
+        .unwrap();
+    assert_eq!(counter.count, 1);
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+enum CounterAction {
+    Increment(u64),
+    Decrement,
+}
+
+//fn ... {
+//    let input = Unstructured::(...)
+//    let ctx = TestContext::new();
+//    fuzz_increment(&mut ctx, input);
+//
+//    log_coverage(ctx);
+//}
+
+// Stateless fuzz test - executes X runs
+#[anchor_fuzz(runs = 256)]
+fn fuzz_increment(fixture: &mut TestContext, action: CounterAction) {
+    CounterFixture::setup(fixture);
+
+    if actions.len() != 2 {
+        return;
+    }
+
+    for action in actions {
+        match action {
+            CounterAction::Increment(amt) => {
+                self.ctx
+                    .program(self.program_id)
+                    .call(counter::instruction::Increment {})
+                    .accounts(counter::accounts::Update {
+                        counter: self.counter_pda,
+                    })
+                    .signers(&[&self.payer])
+                    .send()
+                    .unwrap();
+            }
+        }
+    }
+}
+// Stateful invariant test - runs 256 times with depth 15 verifying the invariants after each execution
+#[anchor_invariant_test(CounterFixture, runs = 256, depth = 15)]
+fn invariant_test(fixture: &CounterFixture) {
+    let counter = fixture.ctx
+        .read_anchor_account::<Counter>(&fixture.counter_pda)
+        .unwrap();
+    // Check all invariants after every execution
+    assert!(counter.count >= 0, "Count must be non-negative");
+    assert!(counter.count <= 1000, "Count must be below max");
+}
+/// ===== EXPANDED MACRO =====
+///
+
+#[anchor_fuzz(runs = 256)]
+
+// #[anchor_fuzz_invariant(CounterFixture, runs = 256, depth = 15)]
+#[derive(Arbitrary, Debug, Clone)]
+enum CounterAction {
+    Increment(u64),
+    Decrement,
+}
+#[test]
+fn run_invariant_fuzzer() {
+    let corpus = load_corpus(); // Your corpus loader
+    for (i, test_case) in corpus.iter().take(256).enumerate() {
+        println!("Running test case {}", i);
+        fuzz_invariant_counter(test_case);
+    }
+}
+fn fuzz_invariant_counter(data: &[u8]) {
+    let mut u = Unstructured::new(data);
+    // Generate action sequence (up to depth)
+    let depth = 15;
+    let actions: Vec<CounterAction> = (0..depth)
+        .filter_map(|_| u.arbitrary().ok())
+        .collect();
+    if actions.is_empty() {
+        return; // Skip invalid inputs
+    }
+    // Setup fresh fixture
+    let mut fixture = CounterFixture::setup();
+    // Execute action sequence
+    for action in actions {
+        // Execute action
+        match action {
+            CounterAction::Increment => fixture.increment(),
+            CounterAction::Decrement => fixture.decrement(),
+        }
+        // Check invariants after each action
+        let counter = fixture.ctx
+            .read_anchor_account::<Counter>(&fixture.counter_pda)
+            .unwrap();
+        // Check all invariants after every execution
+        assert!(counter.count >= 0, "Count must be non-negative");
+        assert!(counter.count <= 1000, "Count must be below max");
+    }
+}
+
+
+
+
+
+fn ... {
+    let input = Unstructured::(...)
+    let ctx = TestContext::new();
+    fuzz_increment(&mut ctx, input);
+
+    log_coverage(ctx);
+}
+
+#[anchor_fuzz(runs = 256)]
+fn fuzz_increment(fixture: &mut TestContext, action: CounterAction) {
+    CounterFixture::setup(fixture);
+
+    if actions.len() != 2 {
+        return;
+    }
+
+    for action in actions {
+        match action {
+            CounterAction::Increment(amt) => {
+                self.ctx
+                    .program(self.program_id)
+                    .call(counter::instruction::Increment {})
+                    .accounts(counter::accounts::Update {
+                        counter: self.counter_pda,
+                    })
+                    .signers(&[&self.payer])
+                    .send()
+                    .unwrap();
+            }
+        }
+    }
+}

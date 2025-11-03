@@ -1,0 +1,108 @@
+[package]
+name = "litesvm"
+description = "A fast and lightweight Solana VM simulator for testing solana programs"
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[features]
+internal-test = []
+nodejs-internal = ["dep:qualifier_attr"]
+
+[dependencies]
+ansi_term.workspace = true
+bincode.workspace = true
+indexmap.workspace = true
+itertools.workspace = true
+log.workspace = true
+qualifier_attr = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+solana-account.workspace = true
+solana-address-lookup-table-interface.workspace = true
+solana-bpf-loader-program.workspace = true
+solana-builtins.workspace = true
+solana-clock.workspace = true
+solana-compute-budget.workspace = true
+solana-compute-budget-instruction.workspace = true
+solana-config-program.workspace = true
+solana-epoch-rewards.workspace = true
+solana-epoch-schedule.workspace = true
+solana-feature-set.workspace = true
+solana-fee.workspace = true
+solana-fee-structure.workspace = true
+solana-hash.workspace = true
+solana-instruction.workspace = true
+solana-instructions-sysvar.workspace = true
+solana-keypair.workspace = true
+solana-last-restart-slot.workspace = true
+solana-loader-v3-interface.workspace = true
+solana-loader-v4-interface.workspace = true
+solana-log-collector.workspace = true
+solana-measure.workspace = true
+solana-message.workspace = true
+solana-native-token.workspace = true
+solana-nonce.workspace = true
+solana-nonce-account.workspace = true
+solana-precompiles.workspace = true
+solana-program-error.workspace = true
+solana-program-runtime.workspace = true
+solana-pubkey.workspace = true
+solana-rent.workspace = true
+solana-reserved-account-keys.workspace = true
+solana-sdk-ids.workspace = true
+solana-sha256-hasher.workspace = true
+solana-signature.workspace = true
+solana-signer.workspace = true
+solana-slot-hashes.workspace = true
+solana-slot-history.workspace = true
+solana-stake-interface.workspace = true
+solana-svm-transaction.workspace = true
+solana-system-interface.workspace = true
+solana-system-program.workspace = true
+solana-sysvar.workspace = true
+solana-sysvar-id.workspace = true
+solana-timings.workspace = true
+solana-transaction = { workspace = true, features = ["precompiles", "verify"] }
+solana-transaction-context.workspace = true
+solana-transaction-error.workspace = true
+solana-vote-program.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+ed25519-dalek.workspace = true
+libsecp256k1.workspace = true
+serde.workspace = true
+solana-clock.workspace = true
+solana-compute-budget-interface.workspace = true
+solana-ed25519-program.workspace = true
+solana-keypair.workspace = true
+solana-program-option.workspace = true
+solana-program-pack.workspace = true
+solana-program-test.workspace = true
+solana-pubkey.workspace = true
+solana-secp256k1-program.workspace = true
+solana-signer.workspace = true
+spl-associated-token-account-client.workspace = true
+spl-token.workspace = true
+test-log.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "banks_client_comparison"
+required-features = ["internal-test"]
+harness = false
+
+[[bench]]
+name = "simple_bench"
+harness = false
+
+[[bench]]
+name = "max_perf"
+harness = false

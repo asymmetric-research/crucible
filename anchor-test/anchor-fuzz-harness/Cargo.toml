@@ -1,0 +1,15 @@
+[package]
+name = "anchor-fuzz-harness"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "anchor_fuzz_harness"
+path = "src/lib.rs"
+
+[dependencies]
+libafl = { version = "0.13", features = ["std", "cli"]}
+libafl_bolts = { version = "0.13", features = ["std"] }
+litesvm = { workspace=true}
+solana-sdk="=2.2.1"
+solana-message="=2.2.1"

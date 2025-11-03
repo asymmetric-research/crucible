@@ -1,3 +1,4 @@
+
 /// Testing Begins
 use anchor_counter::{Counter, ID as PROGRAM_ID, accounts, instruction};
 use anchor_test_context::TestContext;
@@ -18,7 +19,7 @@ impl CounterFixture {
     pub fn setup() -> Self {
         let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
         let ctx = TestContext::new();
-        ctx.add_program(&program_id, "../../target/deploy/anchor_counter.so").unwrap();
+        ctx.add_program(&program_id, "../target/deploy/anchor_counter.so").unwrap();
 
         let payer = Keypair::new();
         // Create payer account
