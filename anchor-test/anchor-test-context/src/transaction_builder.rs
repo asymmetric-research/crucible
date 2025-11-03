@@ -1,18 +1,16 @@
-use std::rc::Rc;
-use std::cell::RefCell;
 use litesvm::LiteSVM;
 use solana_sdk::{
     instruction::Instruction,
     signature::Keypair,
 };
 
-pub struct TransactionBuilder {
-    pub(crate) svm: Rc<RefCell<LiteSVM>>,
+pub struct TransactionBuilder<'a> {
+    pub(crate) svm: &'a mut LiteSVM,
     pub(crate) instructions: Vec<Instruction>,  
     pub(crate) signers: Vec<Keypair>,
 }
 
-impl TransactionBuilder {
+impl TransactionBuilder<'_> {
     pub fn add_instruction<F>(mut self, builder: F) -> Self 
     where
         F: FnOnce() -> Instruction,

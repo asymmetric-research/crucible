@@ -2,53 +2,19 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse_macro_input, ItemFn, FnArg,
-    parse::Parse, parse::ParseStream, Token, Ident, Expr, Lit
 };
 
-struct AnchorFuzzArgs {
-    setup: Expr,
-    runs: Option<usize>,
-}
-
-impl Parse for AnchorFuzzArgs {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut setup = None;
-        let mut runs = None;
-        
-        while !input.is_empty() {
-            let key: Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
-            
-            match key.to_string().as_str() {
-                "setup" => {
-                    setup = Some(input.parse()?);
-                }
-                "runs" => {
-                    let lit: Lit = input.parse()?;
-                    if let Lit::Int(int_lit) = lit {
-                        runs = Some(int_lit.base10_parse()?);
-                    }
-                }
-                _ => return Err(syn::Error::new(key.span(), "Unknown parameter. Expected 'setup' or 'runs'")),
-            }
-            
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            }
-        }
-        
-        let setup = setup.ok_or_else(|| 
-            syn::Error::new(input.span(), "Missing required parameter: setup")
-        )?;
-        
-        Ok(AnchorFuzzArgs { setup, runs })
-    }
-}
+// No macro args are supported anymore
 
 #[proc_macro_attribute]
 pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
-
-    let args = parse_macro_input!(args as AnchorFuzzArgs);
+    // Disallow arguments
+    if !proc_macro2::TokenStream::from(args.clone()).is_empty() {
+        return syn::Error::new_spanned(
+            proc_macro2::TokenStream::from(args),
+            "anchor_fuzz takes no arguments"
+        ).to_compile_error().into();
+    }
     let input_fn = parse_macro_input!(item as ItemFn);
     
     let fn_name = &input_fn.sig.ident;
@@ -57,16 +23,13 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     if inputs.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig,
-            "Function must have at least one parameter (fixture)"
+            "Function must have at least one parameter (context)"
         ).to_compile_error().into();
     }
     
-    let setup_expr = &args.setup;
-    let runs = args.runs.unwrap_or(256);
-    
-    // Build parameter parsing (skip first param which is fixture)
+    // Build parameter parsing (skip first param which is context)
     let mut deser_stmts = Vec::new();
-    let mut call_args = vec![quote! { &mut fixture }];
+    let mut call_args = vec![quote! { &mut ctx }];
     
     for (i, arg) in inputs.iter().enumerate().skip(1) {
         let FnArg::Typed(pat_ty) = arg else { 
@@ -87,39 +50,135 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         call_args.push(quote! { #param_name });
     }
     
+    let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
     let expanded = quote! {
         #input_fn
-        
-        fn main() {
-            use std::sync::Arc;
-            use std::sync::atomic::{AtomicUsize, Ordering};
-            use arbitrary::Unstructured;
-            use libafl::prelude::ExitKind;
-            
-            let max_runs = #runs;
-            let run_count = Arc::new(AtomicUsize::new(0));
-            let run_count_clone = run_count.clone();
-            
-            anchor_fuzz_harness::run_harness(move |data: &[u8]| -> ExitKind {
-                // Check iteration limit
-                if run_count_clone.fetch_add(1, Ordering::SeqCst) >= max_runs {
-                    std::process::exit(0);
+
+        mod #mod_name {
+            use super::*;
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            pub const MAP_SIZE: usize = 1 << 16;
+
+            pub struct DefaultTraceCollector {
+                ptr: *mut u8,
+                len: usize,
+            }
+
+            impl DefaultTraceCollector {
+                pub fn from_raw(ptr: *mut u8, len: usize) -> Self { Self { ptr, len } }
+
+                pub fn reset(&mut self) {
+                    unsafe { std::ptr::write_bytes(self.ptr, 0, self.len); }
                 }
-                
-                let mut u = Unstructured::new(data);
-                
-                // Parse all parameters
+
+                fn hash_edge(prev: usize, cur: usize) -> usize {
+                    const MULTIPLIER: usize = 16777619;
+                    ((prev.wrapping_mul(MULTIPLIER)) ^ cur) % MAP_SIZE
+                }
+            }
+
+            impl anchor_test_context::TraceCollector for DefaultTraceCollector {
+                fn trace(&mut self, _m: &solana_message::SanitizedMessage, traces: &[Vec<[u64; 12]>]) {
+                    if !traces.is_empty() {
+                        let mut prev_pc = 0usize;
+                        for entry in traces[0].iter() {
+                            let next_pc = entry[11] as usize;
+                            let edge_hash = Self::hash_edge(prev_pc, next_pc);
+                            unsafe {
+                                let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
+                                buf[edge_hash] = buf[edge_hash].saturating_add(1);
+                            }
+                            prev_pc = next_pc;
+                        }
+                    }
+                }
+            }
+        }
+
+        fn main() {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+
+            use libafl::prelude::*;
+            use libafl::monitors::tui::TuiMonitor;
+            use libafl_bolts::tuples::tuple_list;
+            use libafl_bolts::{current_nanos, rands::StdRand, AsSlice, AsSliceMut};
+            use libafl_bolts::shmem::{ShMemProvider, StdShMemProvider};
+            use std::time::Duration;
+            use arbitrary::Unstructured;
+            
+            let mut shmem_provider = StdShMemProvider::new().expect("failed to create ShMemProvider");
+            let mut shmem = shmem_provider
+                .new_shmem(#mod_name::MAP_SIZE)
+                .expect("failed to allocate shared memory for coverage map");
+
+            let monitor = TuiMonitor::builder().build();
+            let mut mgr = SimpleEventManager::new(monitor);
+
+            let scheduler = QueueScheduler::new();
+
+
+            let cov_ptr = unsafe { shmem.as_slice_mut().as_mut_ptr() };
+            let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
+            let pc_observer = HitcountsMapObserver::new(std_map);
+
+            let mut feedback = MaxMapFeedback::new(&pc_observer);
+            let mut objective = CrashFeedback::new();
+
+            let seed = current_nanos().max(1);
+            let rand = StdRand::with_seed(seed);
+            let corpus = InMemoryCorpus::<BytesInput>::new();
+            let solutions = OnDiskCorpus::new("crashes").expect("failed to create crash dir");
+            let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
+                .expect("failed to create StdState");
+
+            let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
+                let mut collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                collector.reset();
+
+                // Build params
+                let bytes_ref = input.target_bytes();
+                let slice = bytes_ref.as_slice();
+                let mut u = Unstructured::new(slice);
+
                 #(#deser_stmts)*
-                
-                // Setup fixture
-                let mut fixture = #setup_expr();
-                
+
+                // Create fuzz test context with collector attached//
+                let mut ctx = anchor_test_context::TestContext::with_trace_collector(Rc::new(RefCell::new(collector)));
+
                 // Call user function
                 #fn_name(#(#call_args),*);
-                
+
                 ExitKind::Ok
-            });
+            };
+
+            let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+            let timeout = Duration::from_millis(10000);
+            let mut executor = InProcessForkExecutor::new(
+                &mut harness_wrapper,
+                tuple_list!(pc_observer),
+                &mut fuzzer,
+                &mut state,
+                &mut mgr,
+                timeout,
+                shmem_provider,
+            )
+            .expect("failed to create InProcessForkExecutor");
+
+            // Initialize corpus with a single zeroed buffer
+            let input = BytesInput::new(vec![0u8; 256]);
+            fuzzer
+                .add_input(&mut state, &mut executor, &mut mgr, input)
+                .expect("failed to add seed input");
+
+            let mutator = StdScheduledMutator::new(havoc_mutations());
+            let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+
+            fuzzer
+                .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
+                .expect("error in fuzz loop");
         }
-    }; 
+    };
     TokenStream::from(expanded)
 }

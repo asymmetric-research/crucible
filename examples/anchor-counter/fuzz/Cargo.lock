@@ -214,17 +214,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anchor-fuzz-harness"
-version = "0.1.0"
-dependencies = [
- "libafl",
- "libafl_bolts",
- "litesvm 0.6.0",
- "solana-message",
- "solana-sdk",
-]
-
-[[package]]
 name = "anchor-fuzz-macro"
 version = "0.1.0"
 dependencies = [
@@ -312,11 +301,11 @@ dependencies = [
 name = "anchor-test-context"
 version = "0.1.0"
 dependencies = [
- "anchor-fuzz-harness",
  "anchor-lang",
  "anyhow",
  "litesvm 0.6.0",
  "solana-client",
+ "solana-message",
  "solana-program",
  "solana-program-pack",
  "solana-sdk",
@@ -334,7 +323,6 @@ dependencies = [
 name = "anchor_counter_fuzz"
 version = "0.1.0"
 dependencies = [
- "anchor-fuzz-harness",
  "anchor-lang",
  "anchor-test",
  "anchor-test-context",
@@ -344,6 +332,7 @@ dependencies = [
  "libafl_bolts",
  "litesvm 0.6.1",
  "once_cell",
+ "solana-message",
  "solana-program",
  "solana-sdk",
 ]

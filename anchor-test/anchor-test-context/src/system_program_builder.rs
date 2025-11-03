@@ -1,12 +1,10 @@
-use std::rc::Rc;
-use std::cell::RefCell;
 use litesvm::LiteSVM;
 
-pub struct SystemProgramBuilder {
-    pub(crate) svm: Rc<RefCell<LiteSVM>>,
+pub struct SystemProgramBuilder<'a> {
+    pub(crate) svm: &'a mut LiteSVM,
 }
 
-impl SystemProgramBuilder {
+impl<'a> SystemProgramBuilder<'a> {
     // TODO: Implement system program methods like:
     // - transfer()
     // - create_account()

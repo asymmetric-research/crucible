@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
 
 declare_id!("CQ2VvuR8Du2WQq1XWmzBKxmK4arc7BVReWMxUMW3nJs5");

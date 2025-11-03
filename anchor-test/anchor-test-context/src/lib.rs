@@ -25,7 +25,6 @@ pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::account_builders::AccountBuilderBase;
-use anchor_fuzz_harness;
  
 
 mod account_builders;
@@ -34,40 +33,42 @@ mod program_builder;
 mod transaction_builder;
 mod system_program_builder;
 
-pub use anchor_fuzz_harness::DefaultTraceCollector;
-pub use anchor_fuzz_harness::TRACE_COLLECTOR;
-use litesvm::types::TraceCollector;
+pub use litesvm::types::TraceCollector;
+
+struct NoopTraceCollector;
+
+impl TraceCollector for NoopTraceCollector {
+    fn trace(&mut self, _message: &solana_message::SanitizedMessage, _traces: &[Vec<[u64; 12]>]) {}
+}
 
 pub struct TestContext {
-    svm: Rc<RefCell<LiteSVM>>,
+    svm: LiteSVM,
 }
 
 impl TestContext {
     pub fn new() -> Self {
-        let svm = anchor_fuzz_harness::TRACE_COLLECTOR.with(|tc| {
-            // Cast to trait object for LiteSVM
-            let trace_collector: Rc<RefCell<dyn TraceCollector>> = tc.clone();
-            Rc::new(RefCell::new(
-                LiteSVM::new().with_trace_collector(trace_collector)
-            ))
-        });
-        
+        let trace_collector: Rc<RefCell<dyn TraceCollector>> = Rc::new(RefCell::new(NoopTraceCollector));
+        let svm = LiteSVM::new().with_trace_collector(trace_collector);
+        Self { svm }
+    }
+
+    pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
+        let svm = LiteSVM::new().with_trace_collector(trace_collector);
         Self { svm }
     }
     
-    pub fn add_program(&self, program_id: &Pubkey, program_path: &str) -> Result<()> {
+    pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
         let program_data = std::fs::read(program_path)?;
-        
-        self.svm.borrow_mut().add_program(program_id.clone(), &program_data);
+        self.svm.add_program(program_id.clone(), &program_data);
         Ok(())
     }
 
     /// Account Creation Helpers
 
     // Create a basic default account
-    pub fn create_account(&self) -> GenericAccountBuilder {
+    pub fn create_account(&mut self) -> GenericAccountBuilder<'_> {
         GenericAccountBuilder {
-            svm: self.svm.clone(),
+            svm: &mut self.svm,
             address: Pubkey::default(),  
             account_state: Account {
                 lamports: 0,  
@@ -80,10 +81,10 @@ impl TestContext {
     }
     
     // Create a mint account
-    pub fn create_mint(&self) -> MintAccountBuilder {
+    pub fn create_mint(&mut self) -> MintAccountBuilder<'_> {
         let rent = Rent::default();
         MintAccountBuilder {
-            svm: self.svm.clone(),
+            svm: &mut self.svm,
             address: Pubkey::default(),
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Mint::LEN),
@@ -103,10 +104,10 @@ impl TestContext {
     }
     
     // Create an ATA account
-    pub fn create_token_account(&self) -> TokenAccountBuilder {
+    pub fn create_token_account(&mut self) -> TokenAccountBuilder<'_> {
         let rent = Rent::default();
         TokenAccountBuilder {
-            svm: self.svm.clone(),
+            svm: &mut self.svm,
             address: Pubkey::default(),
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Account::LEN),
@@ -131,7 +132,7 @@ impl TestContext {
 
     // Read an account at a Pubkey
     pub fn read_account(&self, address: &Pubkey) -> Result<Account> {
-        self.svm.borrow()
+        self.svm
             .get_account(address)
             .ok_or_else(|| anyhow::anyhow!("Account not found: {}", address))
     }
@@ -153,14 +154,14 @@ impl TestContext {
     /// Setters
 
     // Write account directly to SVM
-    pub fn write_account(&self, address: &Pubkey, account: Account) -> Result<()> {
-        self.svm.borrow_mut().set_account(*address, account);
+    pub fn write_account(&mut self, address: &Pubkey, account: Account) -> Result<()> {
+        let _ = self.svm.set_account(*address, account);
         Ok(())
     }
     
     // Serialize with discriminator, write to SVM
     pub fn write_anchor_account<T: AnchorSerialize + Discriminator>(
-        &self, 
+        &mut self, 
         address: &Pubkey, 
         data: &T
     ) -> Result<()> {
@@ -173,7 +174,7 @@ impl TestContext {
         
         // Update account data and write back
         account.data = account_data;
-        self.svm.borrow_mut().set_account(*address, account);
+        let _ = self.svm.set_account(*address, account);
         
         Ok(())
     }
@@ -181,18 +182,18 @@ impl TestContext {
     /// Callers - each returns a builder
 
     // Escape hatch for raw instructions
-    pub fn raw_call(&self, instruction: Instruction) -> InstructionBuilder {
+    pub fn raw_call(&mut self, instruction: Instruction) -> InstructionBuilder<'_> {
         InstructionBuilder {
-            svm: self.svm.clone(),
+            svm: &mut self.svm,
             instruction,
             signers: vec![],
         }
     }
     
     // For calling Anchor programs dynamically
-    pub fn program(&self, program_id: Pubkey) -> ProgramBuilder {  
+    pub fn program(&mut self, program_id: Pubkey) -> ProgramBuilder<'_> {  
         ProgramBuilder {
-            svm: self.svm.clone(),  
+            svm: &mut self.svm,  
             instruction: Instruction {
                 program_id,
                 accounts: vec![],
@@ -203,9 +204,9 @@ impl TestContext {
     }
     
     // For batching multiple instructions
-    pub fn transaction(&self) -> TransactionBuilder {
+    pub fn transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder {
-            svm: self.svm.clone(),
+            svm: &mut self.svm,
             instructions: vec![],
             signers: vec![],
         }

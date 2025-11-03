@@ -7,7 +7,6 @@ edition = "2021"
 members = [
     "anchor-test-context", 
     "anchor-fuzz-macro",
-    "anchor-fuzz-harness",
 ]
 resolver = "2"
 

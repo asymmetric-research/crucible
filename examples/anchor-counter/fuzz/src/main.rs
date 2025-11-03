@@ -8,17 +8,16 @@ use arbitrary::Arbitrary;
 use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey};
 use solana_sdk::signature::Signer;
 
-struct CounterFixture {
-    ctx: TestContext,
+struct CounterFixture<'a> {
+    ctx: &'a mut TestContext,
     counter_pda: Pubkey,
     program_id: Pubkey,
     payer: Keypair,
 }
 
-impl CounterFixture {
-    pub fn setup() -> Self {
+impl<'a> CounterFixture<'a> {
+    pub fn setup(ctx: &'a mut TestContext) -> Self {
         let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
-        let ctx = TestContext::new();
         ctx.add_program(&program_id, "../target/deploy/anchor_counter.so").unwrap();
 
         let payer = Keypair::new();
@@ -32,7 +31,7 @@ impl CounterFixture {
         // Derive counter PDA
         let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &program_id);
         // Initialize counter
-        let res = ctx.program(program_id)
+        let _ = ctx.program(program_id)
             .call(instruction::Initialize {})
             .accounts(accounts::Initialize {
                 counter: counter_pda,
@@ -41,12 +40,13 @@ impl CounterFixture {
             })
             .signers(&[&payer])
             .send()
+            .unwrap()
             .unwrap();
         Self { ctx, counter_pda, program_id, payer }
     }
     // ===== ACTIONS =====
     pub fn increment(&mut self) {
-        let result = self.ctx
+        let _ = self.ctx
             .program(self.program_id)
             .call(instruction::Increment {})
             .accounts(accounts::Update {
@@ -54,6 +54,7 @@ impl CounterFixture {
             })
             .signers(&[&self.payer])
             .send()
+            .unwrap()
             .unwrap();
     }
     pub fn decrement(&mut self) {
@@ -65,6 +66,7 @@ impl CounterFixture {
             })
             .signers(&[&self.payer])
             .send()
+            .unwrap()
             .unwrap();
     }
 }
@@ -72,7 +74,8 @@ impl CounterFixture {
 // Basic unit test using fixture
 #[test]
 fn test_increment() {
-    let mut fixture = CounterFixture::setup();
+    let mut ctx = TestContext::new();
+    let mut fixture = CounterFixture::setup(&mut ctx);
     fixture.increment();
     fixture.increment();
     fixture.increment();
@@ -88,8 +91,9 @@ enum Action {
     Decrement,
 }
 
-#[anchor_fuzz(setup=CounterFixture::setup, runs=256)]
-fn fuzz_increment(fixture: &mut CounterFixture, actions: Vec<Action>) {
+#[anchor_fuzz]
+fn fuzz_increment(ctx: &mut TestContext, actions: Vec<Action>) {
+    let mut fixture = CounterFixture::setup(ctx);
     for action in actions {
         match action {
             Action::Increment => fixture.increment(),

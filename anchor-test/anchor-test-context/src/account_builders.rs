@@ -1,5 +1,3 @@
-use std::rc::Rc;
-use std::cell::RefCell;
 use litesvm::LiteSVM;
 use solana_sdk::{
     account::Account,
@@ -9,8 +7,8 @@ use spl_token::solana_program::program_option::COption;
 use solana_program::program_pack::Pack;
 use anyhow::Result;
 
-pub struct GenericAccountBuilder {
-    pub(crate) svm: Rc<RefCell<LiteSVM>>,
+pub struct GenericAccountBuilder<'a> {
+    pub(crate) svm: &'a mut LiteSVM,
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
 }
@@ -55,35 +53,35 @@ pub trait AccountBuilderBase: Sized {
     }
 }
 
-impl AccountBuilderBase for GenericAccountBuilder {
+impl AccountBuilderBase for GenericAccountBuilder<'_> {
     fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
     fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
 }
 
-impl GenericAccountBuilder {
+impl GenericAccountBuilder<'_> {
     pub fn create(self) -> Result<()> {
         // Ensure address has been set
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
-        self.svm.borrow_mut().set_account(self.address, self.account_state);
+        let _ = self.svm.set_account(self.address, self.account_state);
         Ok(())
     }
 }
 
-pub struct MintAccountBuilder {
-    pub(crate) svm: Rc<RefCell<LiteSVM>>,
+pub struct MintAccountBuilder<'a> {
+    pub(crate) svm: &'a mut LiteSVM,
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
     pub(crate) mint: spl_token::state::Mint,
 }
 
-impl AccountBuilderBase for MintAccountBuilder {
+impl AccountBuilderBase for MintAccountBuilder<'_> {
     fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
     fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
 }
 
-impl MintAccountBuilder {
+impl MintAccountBuilder<'_> {
     pub fn create(self) -> Result<()> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
@@ -91,7 +89,7 @@ impl MintAccountBuilder {
 
         let mut account = self.account_state;
         spl_token::state::Mint::pack(self.mint, &mut account.data)?;
-        self.svm.borrow_mut().set_account(self.address, account); 
+        let _ = self.svm.set_account(self.address, account); 
         Ok(())
     }
 
@@ -124,19 +122,19 @@ impl MintAccountBuilder {
     }
 }
 
-pub struct TokenAccountBuilder {
-    pub(crate) svm: Rc<RefCell<LiteSVM>>,
+pub struct TokenAccountBuilder<'a> {
+    pub(crate) svm: &'a mut LiteSVM,
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
     pub(crate) token_state: spl_token::state::Account,
 }
 
-impl AccountBuilderBase for TokenAccountBuilder {
+impl AccountBuilderBase for TokenAccountBuilder<'_> {
     fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
     fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
 }
 
-impl TokenAccountBuilder {
+impl TokenAccountBuilder<'_> {
     pub fn create(self) -> Result<()> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
@@ -152,7 +150,7 @@ impl TokenAccountBuilder {
 
         let mut account = self.account_state;
         spl_token::state::Account::pack(self.token_state, &mut account.data)?;
-        self.svm.borrow_mut().set_account(self.address, account); 
+        let _ = self.svm.set_account(self.address, account); 
         Ok(())
     }
 
