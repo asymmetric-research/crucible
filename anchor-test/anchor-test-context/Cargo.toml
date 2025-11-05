@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-litesvm = { workspace = true }
+litesvm.workspace = true
 anchor-lang = { path = "../../../lang" }
 
 spl-token = "7.0"
