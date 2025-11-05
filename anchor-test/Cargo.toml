@@ -7,6 +7,7 @@ edition = "2021"
 members = [
     "anchor-test-context", 
     "anchor-fuzz-macro",
+    "anchor-invariant-macro",
 ]
 resolver = "2"
 
@@ -104,6 +105,8 @@ rand = "0.8"
 anyhow = { workspace = true }
 anchor-test-context = { path = "./anchor-test-context" }
 anchor-fuzz-macro = { path = "./anchor-fuzz-macro" }
+anchor-invariant-macro = { path = "./anchor-invariant-macro" }
+
 [workspace.lints]
 rust.missing_debug_implementations = "warn"
 rust.missing_docs = "warn"

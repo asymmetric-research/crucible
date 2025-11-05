@@ -1,12 +1,13 @@
-
-/// Testing Begins
 use anchor_counter::{Counter, ID as PROGRAM_ID, accounts, instruction};
-use anchor_test_context::TestContext;
-use anchor_test_context::AccountBuilderBase;
+use anchor_test::TestContext;
+use anchor_test::AccountBuilderBase;
 use anchor_test::anchor_fuzz;  
+use anchor_test::fuzz_fixture;  
+use anchor_test::invariant_test;  
 use arbitrary::Arbitrary;
 use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey};
 use solana_sdk::signature::Signer;
+
 
 struct CounterFixture<'a> {
     ctx: &'a mut TestContext,
@@ -15,6 +16,7 @@ struct CounterFixture<'a> {
     payer: Keypair,
 }
 
+#[fuzz_fixture]
 impl<'a> CounterFixture<'a> {
     pub fn setup(ctx: &'a mut TestContext) -> Self {
         let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
@@ -45,7 +47,7 @@ impl<'a> CounterFixture<'a> {
         Self { ctx, counter_pda, program_id, payer }
     }
     // ===== ACTIONS =====
-    pub fn increment(&mut self) {
+    pub fn action_increment(&mut self) {
         let _ = self.ctx
             .program(self.program_id)
             .call(instruction::Increment {})
@@ -57,7 +59,7 @@ impl<'a> CounterFixture<'a> {
             .unwrap()
             .unwrap();
     }
-    pub fn decrement(&mut self) {
+    pub fn action_decrement(&mut self) {
         self.ctx
             .program(self.program_id)
             .call(instruction::Decrement {})
@@ -76,9 +78,9 @@ impl<'a> CounterFixture<'a> {
 fn test_increment() {
     let mut ctx = TestContext::new();
     let mut fixture = CounterFixture::setup(&mut ctx);
-    fixture.increment();
-    fixture.increment();
-    fixture.increment();
+    fixture.action_increment();
+    fixture.action_increment();
+    fixture.action_increment();
     let mut counter = fixture.ctx
         .read_anchor_account::<Counter>(&fixture.counter_pda)
         .unwrap();
@@ -94,10 +96,23 @@ enum Action {
 #[anchor_fuzz]
 fn fuzz_increment(ctx: &mut TestContext, actions: Vec<Action>) {
     let mut fixture = CounterFixture::setup(ctx);
+
     for action in actions {
         match action {
-            Action::Increment => fixture.increment(),
-            Action::Decrement => fixture.decrement(),
+            Action::Increment => fixture.action_increment(),
+            Action::Decrement => fixture.action_decrement(),
         }
+        let counter = fixture.ctx
+            .read_anchor_account::<Counter>(&fixture.counter_pda)
+            .unwrap();
+        assert!(counter.count < 1);
     }
+}
+
+#[invariant_test(CounterFixture::setup, num_actions_before_reset = 5)]
+fn invariant_increment(fixture: &CounterFixture) {
+    let counter = fixture.ctx
+        .read_anchor_account::<Counter>(&fixture.counter_pda)
+        .unwrap();
+    assert!(counter.count < 4);
 }

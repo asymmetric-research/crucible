@@ -223,6 +223,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-invariant-macro"
+version = "0.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
+]
+
+[[package]]
 name = "anchor-lang"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -292,6 +301,7 @@ name = "anchor-test"
 version = "0.1.0"
 dependencies = [
  "anchor-fuzz-macro",
+ "anchor-invariant-macro",
  "anchor-test-context",
  "anyhow",
  "rand 0.8.5",

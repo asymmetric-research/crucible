@@ -18,6 +18,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
     
     let fn_name = &input_fn.sig.ident;
+    let feature_name = fn_name.to_string();  // Use function name as feature
     let inputs: Vec<_> = input_fn.sig.inputs.iter().collect();
     
     if inputs.is_empty() {
@@ -54,6 +55,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #input_fn
 
+        #[cfg(feature = #feature_name)]  
         mod #mod_name {
             use super::*;
             pub const MAP_SIZE: usize = 1 << 16;
@@ -94,8 +96,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
+        #[cfg(feature = #feature_name)]  
         fn main() {
             use std::cell::RefCell;
+            use std::process;
+            use core::iter::Once;
             use std::rc::Rc;
 
             use libafl::prelude::*;
@@ -131,22 +136,23 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .expect("failed to create StdState");
 
             let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
+                std::panic::set_hook(Box::new(|_| {
+                    process::abort();
+                }));
                 let mut collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 collector.reset();
 
-                // Build params
+                // Wrap in catch_unwind to convert panics to crashes
                 let bytes_ref = input.target_bytes();
                 let slice = bytes_ref.as_slice();
                 let mut u = Unstructured::new(slice);
 
                 #(#deser_stmts)*
 
-                // Create fuzz test context with collector attached
                 let mut ctx = anchor_test_context::TestContext::with_trace_collector(Rc::new(RefCell::new(collector)));
 
-                // Call user function
+            
                 #fn_name(#(#call_args),*);
-
                 ExitKind::Ok
             };
 
