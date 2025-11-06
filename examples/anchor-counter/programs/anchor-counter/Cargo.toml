@@ -18,13 +18,5 @@ no-log-ix-name = []
 test-sbf = []
 
 [dependencies]
-anchor-lang = { path = "../../../../../lang" }
-
-[dev-dependencies]
-anchor_counter = { path = ".", features = ["no-entrypoint"] }
-spl-token = { version = "6.0", features = ["no-entrypoint"] }
-anchor-test = { path = "../../../../anchor-test" }
-anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
-solana-sdk = "2.3"
-solana-program = "2.3"
+anchor-lang = "0.32.1"
 

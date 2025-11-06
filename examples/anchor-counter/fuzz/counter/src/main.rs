@@ -20,7 +20,7 @@ struct CounterFixture<'a> {
 impl<'a> CounterFixture<'a> {
     pub fn setup(ctx: &'a mut TestContext) -> Self {
         let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
-        ctx.add_program(&program_id, "../../target/deploy/anchor_counter.so").unwrap();
+        ctx.add_program(&program_id, "../target/deploy/anchor_counter.so").unwrap();
 
         let payer = Keypair::new();
         // Create payer account
@@ -114,5 +114,5 @@ fn invariant_increment(fixture: &CounterFixture) {
     let counter = fixture.ctx
         .read_anchor_account::<Counter>(&fixture.counter_pda)
         .unwrap();
-    assert!(counter.count < 4);
+    assert!(counter.count < 2);
 }
