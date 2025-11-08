@@ -1,12 +1,12 @@
 [package]
-name = "anchor_counter"
+name = "staking"
 version = "0.1.0"
 description = "Created with Anchor"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "anchor_counter"
+name = "staking"
 
 [features]
 default = []
@@ -15,8 +15,14 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build"]
-test-sbf = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
 
 [dependencies]
-anchor-lang = {path="../../../../../lang"}
+anchor-lang = {path = "../../../../../lang"}
 
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -1,0 +1,20 @@
+[package]
+name = "staking_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-test = { path = "/home/tlue/auditing/solana/anchor-fuzzing/fuzz/anchor-test" }
+anchor-test-context = { path = "/home/tlue/auditing/solana/anchor-fuzzing/fuzz/anchor-test/anchor-test-context" }
+anchor-lang = { path = "../../../../../lang" }
+arbitrary = { version = "1", features = ["derive"] }
+libafl = { version = "0.13", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.13", features = ["std"] }
+solana-message = "2.3"
+solana-sdk = "2.3"
+
+staking = { path = "../../programs/staking", features = ["no-entrypoint"] }
+
+[features]
+fuzz_staking = []
+invariant_fuzz = []

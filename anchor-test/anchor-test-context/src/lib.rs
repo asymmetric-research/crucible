@@ -130,6 +130,25 @@ impl TestContext {
     }
     /// Getters
 
+    pub fn slot(&self) -> u64 {
+        self.svm.get_sysvar::<solana_sdk::clock::Clock>().slot
+    }
+
+    pub fn warp_to_slot(&mut self, slot: u64) {
+        self.svm.warp_to_slot(slot);
+    }
+    
+    // Add this helper to advance both slot and unix timestamp
+    pub fn advance_slots(&mut self, slots: u64) {
+        let current_slot = self.slot();
+        let target_slot = current_slot + slots;
+        self.svm.warp_to_slot(target_slot);
+    }
+
+    pub fn get_account(&self, address: &Pubkey) -> Result<Account> {
+        self.read_account(address)
+    }
+
     // Read an account at a Pubkey
     pub fn read_account(&self, address: &Pubkey) -> Result<Account> {
         self.svm
@@ -137,7 +156,7 @@ impl TestContext {
             .ok_or_else(|| anyhow::anyhow!("Account not found: {}", address))
     }
     
-    // Read anchor account at address and deserialize the 
+    // Read anchor account at address and deserialize the data
     pub fn read_anchor_account<T: AnchorDeserialize>(&self, address: &Pubkey) -> Result<T> {
         let account = self.read_account(address)?;
         

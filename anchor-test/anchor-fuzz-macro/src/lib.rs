@@ -4,8 +4,6 @@ use syn::{
     parse_macro_input, ItemFn, FnArg,
 };
 
-// No macro args are supported anymore
-
 #[proc_macro_attribute]
 pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     // Disallow arguments
@@ -15,10 +13,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             "anchor_fuzz takes no arguments"
         ).to_compile_error().into();
     }
+    
     let input_fn = parse_macro_input!(item as ItemFn);
     
     let fn_name = &input_fn.sig.ident;
-    let feature_name = fn_name.to_string();  // Use function name as feature
+    let feature_name = fn_name.to_string();
     let inputs: Vec<_> = input_fn.sig.inputs.iter().collect();
     
     if inputs.is_empty() {
@@ -31,6 +30,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     // Build parameter parsing (skip first param which is context)
     let mut deser_stmts = Vec::new();
     let mut call_args = vec![quote! { &mut ctx }];
+    let mut show_params = Vec::new();
     
     for (i, arg) in inputs.iter().enumerate().skip(1) {
         let FnArg::Typed(pat_ty) = arg else { 
@@ -49,9 +49,37 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         });
         
         call_args.push(quote! { #param_name });
+        show_params.push((param_name.clone(), ty.clone()));
     }
     
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
+    let show_fn_name = quote::format_ident!("__show_{}", fn_name);
+    
+    // Generate show code based on number of params
+    let show_body = if show_params.len() == 1 {
+        let (param_name, param_ty) = &show_params[0];
+        quote! {
+            let #param_name: #param_ty = arbitrary::Arbitrary::arbitrary(&mut u)
+                .expect("Failed to deserialize crash input");
+            
+            println!("Crash Input:");
+            for (i, action) in #param_name.iter().enumerate() {
+                println!("  {}: {:?}", i, action);
+            }
+        }
+    } else {
+        // Multiple params - just debug print them
+        let param_names: Vec<_> = show_params.iter().map(|(name, _)| name).collect();
+        let param_types: Vec<_> = show_params.iter().map(|(_, ty)| ty).collect();
+        quote! {
+            #(
+                let #param_names: #param_types = arbitrary::Arbitrary::arbitrary(&mut u)
+                    .expect("Failed to deserialize parameter");
+                println!("{}: {:?}", stringify!(#param_names), #param_names);
+            )*
+        }
+    };
+    
     let expanded = quote! {
         #input_fn
 
@@ -96,8 +124,29 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
+        #[cfg(feature = #feature_name)]
+        pub fn #show_fn_name() {
+            use arbitrary::Unstructured;
+            use std::io::Read;
+            
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)
+                .expect("Failed to read crash input from stdin");
+            
+            let mut u = Unstructured::new(&bytes);
+            
+            #show_body
+        }
+
         #[cfg(feature = #feature_name)]  
         fn main() {
+            // Check for show mode first
+            if std::env::var("SHOW_CRASH").is_ok() {
+                #show_fn_name();
+                return;
+            }
+            
+            // Normal fuzzing mode
             use std::cell::RefCell;
             use std::process;
             use core::iter::Once;
@@ -142,7 +191,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 let mut collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 collector.reset();
 
-                // Wrap in catch_unwind to convert panics to crashes
                 let bytes_ref = input.target_bytes();
                 let slice = bytes_ref.as_slice();
                 let mut u = Unstructured::new(slice);
@@ -151,7 +199,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 let mut ctx = anchor_test_context::TestContext::with_trace_collector(Rc::new(RefCell::new(collector)));
 
-            
                 #fn_name(#(#call_args),*);
                 ExitKind::Ok
             };
@@ -169,7 +216,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             )
             .expect("failed to create InProcessForkExecutor");
 
-            // Initialize corpus with a single zeroed buffer
             let input = BytesInput::new(vec![0u8; 256]);
             fuzzer
                 .add_input(&mut state, &mut executor, &mut mgr, input)
@@ -183,5 +229,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .expect("error in fuzz loop");
         }
     };
+    
     TokenStream::from(expanded)
 }

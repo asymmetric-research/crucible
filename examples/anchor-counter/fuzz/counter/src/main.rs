@@ -1,9 +1,5 @@
-use anchor_counter::{Counter, ID as PROGRAM_ID, accounts, instruction};
-use anchor_test::TestContext;
-use anchor_test::AccountBuilderBase;
-use anchor_test::anchor_fuzz;  
-use anchor_test::fuzz_fixture;  
-use anchor_test::invariant_test;  
+use anchor_counter::*;
+use anchor_test::*;
 use arbitrary::Arbitrary;
 use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey};
 use solana_sdk::signature::Signer;
@@ -19,8 +15,8 @@ struct CounterFixture<'a> {
 #[fuzz_fixture]
 impl<'a> CounterFixture<'a> {
     pub fn setup(ctx: &'a mut TestContext) -> Self {
-        let program_id = Pubkey::new_from_array(PROGRAM_ID.to_bytes());
-        ctx.add_program(&program_id, "../target/deploy/anchor_counter.so").unwrap();
+        let program_id = Pubkey::new_from_array(ID.to_bytes());
+        ctx.add_program(&program_id, "target/deploy/anchor_counter.so").unwrap();
 
         let payer = Keypair::new();
         // Create payer account
@@ -42,7 +38,6 @@ impl<'a> CounterFixture<'a> {
             })
             .signers(&[&payer])
             .send()
-            .unwrap()
             .unwrap();
         Self { ctx, counter_pda, program_id, payer }
     }
@@ -56,7 +51,6 @@ impl<'a> CounterFixture<'a> {
             })
             .signers(&[&self.payer])
             .send()
-            .unwrap()
             .unwrap();
     }
     pub fn action_decrement(&mut self) {
@@ -68,7 +62,6 @@ impl<'a> CounterFixture<'a> {
             })
             .signers(&[&self.payer])
             .send()
-            .unwrap()
             .unwrap();
     }
 }
@@ -94,7 +87,7 @@ enum Action {
 }
 
 #[anchor_fuzz]
-fn fuzz_increment(ctx: &mut TestContext, actions: Vec<Action>) {
+fn fuzz_counter(ctx: &mut TestContext, actions: Vec<Action>) {
     let mut fixture = CounterFixture::setup(ctx);
 
     for action in actions {
