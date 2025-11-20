@@ -1,40 +1,47 @@
 use staking::*;
 use anchor_test::*;
-use arbitrary::Arbitrary;
-use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey, signature::Signer};
+use solana_sdk::{signature::{Keypair, keypair_from_seed}, system_program, pubkey::Pubkey, signature::Signer};
+use std::rc::Rc;
 
 const INITIAL_BALANCE: u64 = 100_000_000_000;
 const REWARD_RATE: u64 = 1000;
 
-struct StakingFixture<'a> {
-    ctx: &'a mut TestContext,
+#[derive(Clone)]
+struct User {
+    keypair: Rc<Keypair>,
+    user_pda: Pubkey,
+    initial_balance: u64,
+    stake_time: u128,
+    last_update_slot: u64,
+}
+
+#[derive(Clone)]
+struct StakingFixture {
+    ctx: TestContext,
     pool_pda: Pubkey,
     program_id: Pubkey,
     users: Vec<User>,
-    funder: Keypair,
-}
-
-struct User {
-    keypair: Keypair,
-    user_pda: Pubkey,
-    initial_balance: u64,
-    stake_time: u128,  // ADD: accumulated (stake × slots)
-    last_update_slot: u64,  // ADD: when we last updated stake_time
+    funder: Rc<Keypair>,
 }
 
 #[fuzz_fixture]
-impl<'a> StakingFixture<'a> {
-    pub fn setup(ctx: &'a mut TestContext) -> Self {
+impl StakingFixture {
+    // Called ONCE to setup initial state (programs + accounts)
+    pub fn setup() -> Self {
+        let mut ctx = TestContext::new();
         let program_id = Pubkey::new_from_array(ID.to_bytes());
+        
+        // Load program
         ctx.add_program(&program_id, "target/deploy/staking.so").unwrap();
-
+        
         let (pool_pda, _) = Pubkey::find_program_address(&[b"pool"], &program_id);
+        let current_slot = ctx.slot();
         
-        let current_slot = ctx.slot();  // GET CURRENT SLOT
-        
+        // Create users with deterministic seeds wrapped in Rc
         let mut users = Vec::new();
-        for _ in 0..3 {
-            let keypair = Keypair::new();
+        for i in 0..3 {
+            let keypair = Rc::new(Keypair::new());
+            
             ctx.create_account()
                 .pubkey(keypair.pubkey())
                 .lamports(INITIAL_BALANCE)
@@ -43,16 +50,17 @@ impl<'a> StakingFixture<'a> {
                 .unwrap();
             
             let (user_pda, _) = Pubkey::find_program_address(&[b"user", keypair.pubkey().as_ref()], &program_id);
-            users.push(User { 
-                keypair, 
-                user_pda, 
+            users.push(User {
+                keypair,
+                user_pda,
                 initial_balance: INITIAL_BALANCE,
                 stake_time: 0,
-                last_update_slot: current_slot,  // INITIALIZE TO CURRENT SLOT, NOT 0
+                last_update_slot: current_slot,
             });
         }
         
-        let funder = Keypair::new();
+        // Create funder
+        let funder = Rc::new(Keypair::new());
         ctx.create_account()
             .pubkey(funder.pubkey())
             .lamports(1_000_000_000_000)
@@ -68,10 +76,11 @@ impl<'a> StakingFixture<'a> {
                 payer: users[0].keypair.pubkey(),
                 system_program: system_program::id(),
             })
-            .signers(&[&users[0].keypair])
+            .signers(&[&*users[0].keypair])
             .send()
             .unwrap();
         
+        // Initialize all users
         for user in &users {
             ctx.program(program_id)
                 .call(instruction::InitializeUser {})
@@ -80,7 +89,7 @@ impl<'a> StakingFixture<'a> {
                     staker: user.keypair.pubkey(),
                     system_program: system_program::id(),
                 })
-                .signers(&[&user.keypair])
+                .signers(&[&*user.keypair])
                 .send()
                 .unwrap();
         }
@@ -89,7 +98,7 @@ impl<'a> StakingFixture<'a> {
         ctx.program(program_id)
             .call(instruction::FundRewards { amount: 100_000_000_000 })
             .accounts(accounts::FundRewards { pool: pool_pda, funder: funder.pubkey() })
-            .signers(&[&funder])
+            .signers(&[&*funder])
             .send()
             .unwrap();
 
@@ -113,80 +122,79 @@ impl<'a> StakingFixture<'a> {
 
     /// ACTIONS
 
-    pub fn action_stake(&mut self, user_idx: usize, amount: u64) {
-        
-        self.update_user_stake_time(user_idx % self.users.len());  
-        let user = &self.users[user_idx % self.users.len()];
+    pub fn action_stake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) {
+        self.update_user_stake_time(user_idx);
+        let user = &self.users[user_idx];
         let balance = self.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
         let safe_amount = amount.min(balance.saturating_sub(10_000_000));
         
-        let ct = self.ctx.program(self.program_id)
+        let _ct = self.ctx.program(self.program_id)
             .call(instruction::Stake { amount: safe_amount })
             .accounts(accounts::Stake {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),  
+                system_program: system_program::id(),
             })
-            .signers(&[&user.keypair])
+            .signers(&[&*user.keypair])
             .send();
     }
     
-    pub fn action_unstake(&mut self, user_idx: usize, amount: u64) {
-        self.update_user_stake_time(user_idx % self.users.len());
-        let user = &self.users[user_idx % self.users.len()];
+    pub fn action_unstake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) {
+
+        self.update_user_stake_time(user_idx);
+        let user = &self.users[user_idx];
         if self.ctx.get_account(&user.user_pda).is_err() { return; }
         
         let user_account = self.ctx.read_anchor_account::<UserAccount>(&user.user_pda).unwrap();
         let safe_amount = amount.min(user_account.staked_amount);
         if safe_amount == 0 { return; }
         
-        let ct = self.ctx.program(self.program_id)
+        let _ct = self.ctx.program(self.program_id)
             .call(instruction::Unstake { amount: safe_amount })
             .accounts(accounts::Unstake {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),  
+                system_program: system_program::id(),
             })
-            .signers(&[&user.keypair])
+            .signers(&[&*user.keypair])
             .send()
             .unwrap();
     }
     
-    pub fn action_claim(&mut self, user_idx: usize) {
-        self.update_user_stake_time(user_idx % self.users.len());  
+    pub fn action_claim(&mut self, #[range(0..3)] user_idx: usize) {
+        self.update_user_stake_time(user_idx);
         
-        let user = &self.users[user_idx % self.users.len()];
+        let user = &self.users[user_idx];
         if self.ctx.get_account(&user.user_pda).is_err() { return; }
         
-        let ct = self.ctx.program(self.program_id)
+        let _ct = self.ctx.program(self.program_id)
             .call(instruction::ClaimRewards {})
             .accounts(accounts::ClaimRewards {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
             })
-            .signers(&[&user.keypair])
+            .signers(&[&*user.keypair])
             .send()
             .unwrap();
     }
     
-    pub fn action_advance_slots(&mut self, slots: u64) {
+    pub fn action_advance_slots(&mut self, #[range(0..10000)] slots: u64) {
         // Update all users before advancing time
         for i in 0..self.users.len() {
             self.update_user_stake_time(i);
         }
         
-        let new_slot = self.ctx.slot() + (slots % 10_000);
+        let new_slot = self.ctx.slot() + slots;
         self.ctx.warp_to_slot(new_slot);
     }
 }
 
 #[test]
 fn test_stake_reward_debt_exploit() {
-    let mut ctx = TestContext::new();
-    let mut fixture = StakingFixture::setup(&mut ctx);
+    let mut fixture = StakingFixture::setup();
     
     fixture.action_stake(0, 1000);
     fixture.action_stake(1, 1000);
@@ -212,53 +220,35 @@ fn test_stake_reward_debt_exploit() {
     assert!(pending_exploited > rewards1 * 100);
 }
 
-
-#[derive(Arbitrary, Debug, Clone)]
-enum Action {
-    Stake { user_idx: u8, amount: u64 },
-    Unstake { user_idx: u8, amount: u64 },
-    Claim { user_idx: u8 },
-    AdvanceSlots { slots: u64 },
-}
-
 #[anchor_fuzz]
-fn fuzz_staking(ctx: &mut TestContext, actions: Vec<Action>) {
-    let mut fixture = StakingFixture::setup(ctx);
+fn fuzz_single_stake(fixture: &mut StakingFixture, #[range(0..100_000)] amount: u64) {
+    fixture.action_stake(0, amount);
     
-    for action in actions.iter().take(20) {
-        match action {
-            Action::Stake { user_idx, amount } => 
-                fixture.action_stake(*user_idx as usize % 3, *amount % 10_000_000),
-            Action::Unstake { user_idx, amount } => 
-                fixture.action_unstake(*user_idx as usize % 3, *amount % 10_000_000),
-            Action::Claim { user_idx } => 
-                fixture.action_claim(*user_idx as usize % 3),
-            Action::AdvanceSlots { slots } => 
-                fixture.action_advance_slots(*slots % 1000),
-        }
+    let user = &fixture.users[0];
+    if let Ok(user_account) = fixture.ctx.read_anchor_account::<UserAccount>(&user.user_pda) {
+        let balance = fixture.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
+        let total = balance + user_account.staked_amount;
+        
+        assert!(total <= INITIAL_BALANCE, "User somehow gained lamports!");
     }
 }
 
-#[invariant_test(StakingFixture::setup, num_actions_before_reset = 4)]
-fn invariant_fuzz(fixture: &StakingFixture) {
+#[invariant_test]
+fn invariant_fuzz(fixture: &mut StakingFixture) {
     let current_slot = fixture.ctx.slot();
     
-    // Update stake-time for all users
     let mut total_stake_time = 0u128;
     for user in &fixture.users {
         if let Ok(user_account) = fixture.ctx.read_anchor_account::<UserAccount>(&user.user_pda) {
-            // Calculate stake-time since last check
             let slots_elapsed = current_slot.saturating_sub(user.last_update_slot);
             let stake_time_delta = (user_account.staked_amount as u128) * (slots_elapsed as u128);
             let user_stake_time = user.stake_time + stake_time_delta;
             total_stake_time += user_stake_time;
             
-            // Calculate actual rewards earned
             let balance = fixture.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
             let total_value = balance + user_account.staked_amount;
             let actual_rewards = total_value.saturating_sub(user.initial_balance);
             
-            // Calculate expected rewards based on stake-time proportion
             let total_rewards_available = REWARD_RATE as u128 * current_slot as u128;
             let expected_rewards = if total_stake_time > 0 {
                 (user_stake_time * total_rewards_available / total_stake_time) as u64

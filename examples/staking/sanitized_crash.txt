@@ -1,0 +1,5 @@
+Crash Input:
+  0: Stake { user_idx: 1, amount: 11646767828446157081 }
+  1: AdvanceSlots { slots: 2042 }
+  2: Stake { user_idx: 1, amount: 11936046054910567845 }
+  3: Claim { user_idx: 1}

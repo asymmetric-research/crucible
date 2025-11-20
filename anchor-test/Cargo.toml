@@ -7,7 +7,8 @@ edition = "2021"
 members = [
     "anchor-test-context", 
     "anchor-fuzz-macro",
-    "anchor-invariant-macro",
+    "anchor-invariant-macro", 
+    "anchor-macro-utils",
 ]
 resolver = "2"
 

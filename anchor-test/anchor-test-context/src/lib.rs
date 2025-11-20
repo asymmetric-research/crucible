@@ -41,19 +41,26 @@ impl TraceCollector for NoopTraceCollector {
     fn trace(&mut self, _message: &solana_message::SanitizedMessage, _traces: &[Vec<[u64; 12]>]) {}
 }
 
+
+#[derive(Clone)]
 pub struct TestContext {
     svm: LiteSVM,
 }
 
 impl TestContext {
     pub fn new() -> Self {
-        let trace_collector: Rc<RefCell<dyn TraceCollector>> = Rc::new(RefCell::new(NoopTraceCollector));
-        let svm = LiteSVM::new().with_trace_collector(trace_collector);
+        // Disable sigverify and blockhash for perf
+        let svm = LiteSVM::new()
+            .with_sigverify(false)
+            .with_blockhash_check(false);
         Self { svm }
     }
 
     pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
-        let svm = LiteSVM::new().with_trace_collector(trace_collector);
+        let svm = LiteSVM::new()
+            .with_sigverify(false)
+            .with_blockhash_check(false)
+            .with_trace_collector(trace_collector);
         Self { svm }
     }
     
@@ -61,6 +68,22 @@ impl TestContext {
         let program_data = std::fs::read(program_path)?;
         self.svm.add_program(program_id.clone(), &program_data);
         Ok(())
+    }
+
+    pub fn from_svm(svm: LiteSVM) -> Self {
+        Self { svm }
+    }
+    
+    pub fn into_svm(self) -> LiteSVM {
+        self.svm
+    }
+
+    pub fn clone_with_trace_collector(&self, trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
+        let cloned_svm = self.svm.clone()
+            .with_trace_collector(trace_collector)
+            .with_sigverify(false)
+            .with_blockhash_check(false);
+        Self { svm: cloned_svm }
     }
 
     /// Account Creation Helpers

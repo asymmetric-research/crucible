@@ -1,37 +1,118 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, ItemFn, FnArg,
+    parse::{Parse, ParseStream},
+    parse_macro_input, ItemFn, FnArg, Token, Type,
 };
+use anchor_macro_utils::RangeConstraint;
 
 #[proc_macro_attribute]
 pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
-    // Disallow arguments
     if !proc_macro2::TokenStream::from(args.clone()).is_empty() {
         return syn::Error::new_spanned(
             proc_macro2::TokenStream::from(args),
-            "anchor_fuzz takes no arguments"
+            "anchor_fuzz no longer takes arguments - fixture type is inferred from first parameter"
         ).to_compile_error().into();
     }
     
-    let input_fn = parse_macro_input!(item as ItemFn);
+    let mut input_fn = parse_macro_input!(item as ItemFn);
     
     let fn_name = &input_fn.sig.ident;
     let feature_name = fn_name.to_string();
+    
+    // Parse range constraints 
+    let range_constraints: std::collections::HashMap<usize, RangeConstraint> = input_fn.sig.inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, arg)| {
+            if let FnArg::Typed(pat_ty) = arg {
+                pat_ty.attrs.iter()
+                    .find(|a| a.path().is_ident("range"))
+                    .and_then(|attr| RangeConstraint::from_attr(attr).ok())
+                    .map(|constraint| (i, constraint))
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    // Strip range attributes to prevent compiler errors 
+    for arg in &mut input_fn.sig.inputs {
+        if let FnArg::Typed(pat_ty) = arg {
+            pat_ty.attrs.retain(|a| !a.path().is_ident("range"));
+        }
+    }
+    
+    // Collect references to inputs
     let inputs: Vec<_> = input_fn.sig.inputs.iter().collect();
     
+    // Must have the fixture as one parameter
     if inputs.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig,
-            "Function must have at least one parameter (context)"
+            "Function must have at least one parameter (fixture: &mut FixtureType)"
         ).to_compile_error().into();
     }
     
-    // Build parameter parsing (skip first param which is context)
+    // Extract fixture type from first parameter
+    let FnArg::Typed(first_param) = inputs[0] else {
+        return syn::Error::new_spanned(
+            inputs[0],
+            "First parameter must be typed (fixture: &mut FixtureType)"
+        ).to_compile_error().into();
+    };
+    
+    // Extract type from &mut FixtureType
+    let fixture_type = match &*first_param.ty {
+        Type::Reference(type_ref) => {
+            if type_ref.mutability.is_none() {
+                return syn::Error::new_spanned(
+                    &first_param.ty,
+                    "Fixture parameter must be mutable (&mut FixtureType)"
+                ).to_compile_error().into();
+            }
+            &*type_ref.elem
+        }
+        _ => {
+            return syn::Error::new_spanned(
+                &first_param.ty,
+                "Fixture parameter must be a mutable reference (&mut FixtureType)"
+            ).to_compile_error().into();
+        }
+    };
+    
+    let fixture_name = match fixture_type {
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .map(|s| &s.ident)
+            .expect("Expected fixture type name"),
+        _ => {
+            return syn::Error::new_spanned(
+                fixture_type,
+                "Expected a simple type path for fixture"
+            ).to_compile_error().into();
+        }
+    };
+    
+    // Get the actual parameter name
+    let fixture_param_name = match &*first_param.pat {
+        syn::Pat::Ident(pat_ident) => &pat_ident.ident,
+        _ => {
+            return syn::Error::new_spanned(
+                &first_param.pat,
+                "Expected simple identifier for fixture parameter"
+            ).to_compile_error().into();
+        }
+    };
+    
+    // Build parameter parsing - skip first param which is fixture
     let mut deser_stmts = Vec::new();
-    let mut call_args = vec![quote! { &mut ctx }];
+    let mut call_args = vec![quote! { &mut #fixture_param_name }];
     let mut show_params = Vec::new();
     
+    // Parse each input (skip first - that's fixture)
     for (i, arg) in inputs.iter().enumerate().skip(1) {
         let FnArg::Typed(pat_ty) = arg else { 
             return syn::Error::new_spanned(arg, "Expected typed parameter")
@@ -41,45 +122,80 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         let ty = &pat_ty.ty;
         let param_name = quote::format_ident!("param_{}", i);
         
+        // Look up range constraint from saved HashMap
+        let range_constraint = range_constraints.get(&i);
+        
+        // Deserialize the parameter
         deser_stmts.push(quote! {
-            let #param_name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
+            let mut #param_name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
                 Ok(v) => v,
                 Err(_) => return libafl::prelude::ExitKind::Ok,
             };
         });
+
+        // Apply constraint if present
+        if let Some(constraint) = range_constraint {
+            let start = constraint.start;
+            let range_size = if constraint.inclusive {
+                constraint.end - constraint.start + 1
+            } else {
+                constraint.end - constraint.start
+            };
+            deser_stmts.push(quote! {
+                #param_name = (#start as #ty) + (#param_name % (#range_size as #ty));
+            });
+        }
         
         call_args.push(quote! { #param_name });
-        show_params.push((param_name.clone(), ty.clone()));
+        show_params.push((param_name.clone(), ty.clone(), range_constraint.cloned()));
     }
     
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
     let show_fn_name = quote::format_ident!("__show_{}", fn_name);
     
-    // Generate show code based on number of params
-    let show_body = if show_params.len() == 1 {
-        let (param_name, param_ty) = &show_params[0];
-        quote! {
-            let #param_name: #param_ty = arbitrary::Arbitrary::arbitrary(&mut u)
-                .expect("Failed to deserialize crash input");
-            
-            println!("Crash Input:");
-            for (i, action) in #param_name.iter().enumerate() {
-                println!("  {}: {:?}", i, action);
+    // Generate show code
+    let show_body = {
+        let param_deserializations: Vec<_> = show_params.iter().map(|(name, ty, range_constraint)| {
+            if let Some(constraint) = range_constraint {
+                let start = constraint.start;
+                let range_size = if constraint.inclusive {
+                    constraint.end - constraint.start + 1
+                } else {
+                    constraint.end - constraint.start
+                };
+                quote! {
+                    let mut #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
+                        .expect("Failed to deserialize parameter");
+                    #name = (#start as #ty) + (#name % (#range_size as #ty));
+                    println!("{}: {:#?}", stringify!(#name), #name);
+                }
+            } else {
+                quote! {
+                    let #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
+                        .expect("Failed to deserialize parameter");
+                    println!("{}: {:#?}", stringify!(#name), #name);
+                }
             }
-        }
-    } else {
-        // Multiple params - just debug print them
-        let param_names: Vec<_> = show_params.iter().map(|(name, _)| name).collect();
-        let param_types: Vec<_> = show_params.iter().map(|(_, ty)| ty).collect();
+        }).collect();
+        
         quote! {
-            #(
-                let #param_names: #param_types = arbitrary::Arbitrary::arbitrary(&mut u)
-                    .expect("Failed to deserialize parameter");
-                println!("{}: {:?}", stringify!(#param_names), #param_names);
-            )*
+            println!("Crash Input:");
+            #(#param_deserializations)*
         }
     };
     
+    // Template setup - call setup() once to build fully initialized fixture
+    let template_setup = quote! {
+        let template_fixture = #fixture_name::setup();
+    };
+    
+    // Per-iteration setup - clone fixture and replace ctx with new trace collector
+    let iteration_setup = quote! {
+        let mut #fixture_param_name = template_fixture.clone();
+        let collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+        #fixture_param_name.ctx = #fixture_param_name.ctx.clone_with_trace_collector(Rc::new(RefCell::new(collector)));
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -140,18 +256,15 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
         #[cfg(feature = #feature_name)]  
         fn main() {
-            // Check for show mode first
             if std::env::var("SHOW_CRASH").is_ok() {
                 #show_fn_name();
                 return;
             }
             
-            // Normal fuzzing mode
             use std::cell::RefCell;
             use std::process;
-            use core::iter::Once;
             use std::rc::Rc;
-
+            use libafl::mutators::StdMOptMutator;
             use libafl::prelude::*;
             use libafl::monitors::tui::TuiMonitor;
             use libafl_bolts::tuples::tuple_list;
@@ -165,31 +278,38 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .new_shmem(#mod_name::MAP_SIZE)
                 .expect("failed to allocate shared memory for coverage map");
 
-            let monitor = TuiMonitor::builder().build();
+            let monitor = TuiMonitor::builder()
+                .title("Fuzzer Monitor")
+                .enhanced_graphics(false)  
+                .build();
             let mut mgr = SimpleEventManager::new(monitor);
-
-            let scheduler = QueueScheduler::new();
 
             let cov_ptr = unsafe { shmem.as_slice_mut().as_mut_ptr() };
             let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-            let pc_observer = HitcountsMapObserver::new(std_map);
+            let pc_observer = HitcountsMapObserver::new(std_map).track_indices();
 
+            let scheduler = IndexesLenTimeMinimizerScheduler::new(
+                &pc_observer,
+                QueueScheduler::new()
+            );
+          
             let mut feedback = MaxMapFeedback::new(&pc_observer);
             let mut objective = CrashFeedback::new();
 
             let seed = current_nanos().max(1);
             let rand = StdRand::with_seed(seed);
             let corpus = InMemoryCorpus::<BytesInput>::new();
-            let solutions = OnDiskCorpus::new("crashes").expect("failed to create crash dir");
+            let path = format!("crashes/{}", #feature_name);
+            let solutions = OnDiskCorpus::new(path).expect("failed to create crash dir");
             let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
                 .expect("failed to create StdState");
+
+            #template_setup
 
             let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
                 std::panic::set_hook(Box::new(|_| {
                     process::abort();
                 }));
-                let mut collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
-                collector.reset();
 
                 let bytes_ref = input.target_bytes();
                 let slice = bytes_ref.as_slice();
@@ -197,7 +317,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 #(#deser_stmts)*
 
-                let mut ctx = anchor_test_context::TestContext::with_trace_collector(Rc::new(RefCell::new(collector)));
+                #iteration_setup
 
                 #fn_name(#(#call_args),*);
                 ExitKind::Ok
@@ -221,7 +341,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .add_input(&mut state, &mut executor, &mut mgr, input)
                 .expect("failed to add seed input");
 
-            let mutator = StdScheduledMutator::new(havoc_mutations());
+            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 2, 5)
+                .expect("failed to create mutator");
             let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
             fuzzer

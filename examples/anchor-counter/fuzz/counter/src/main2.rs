@@ -87,12 +87,13 @@ enum Action {
 }
 
 #[anchor_fuzz]
-fn fuzz_counter(ctx: &mut TestContext, actions: Vec<Action>) {
+fn fuzz_counter(ctx: &mut TestContext, actions: Vec<Action>, #[range(1..100)] inc_amount: u64) {
     let mut fixture = CounterFixture::setup(ctx);
 
     for action in actions {
+        //setup
         match action {
-            Action::Increment => fixture.action_increment(),
+            Action::Increment => fixture.action_increment(iinc_amount),
             Action::Decrement => fixture.action_decrement(),
         }
         let counter = fixture.ctx
