@@ -10,7 +10,6 @@ use solana_sdk::{
     rent::Rent,
 };
 use anchor_lang::{
-    //prelude::*,
     AnchorDeserialize, 
     AnchorSerialize,
     Discriminator,
@@ -25,7 +24,7 @@ pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::account_builders::AccountBuilderBase;
- 
+use std::collections::HashSet;
 
 mod account_builders;
 mod instruction_builder;
@@ -41,19 +40,32 @@ impl TraceCollector for NoopTraceCollector {
     fn trace(&mut self, _message: &solana_message::SanitizedMessage, _traces: &[Vec<[u64; 12]>]) {}
 }
 
-
-#[derive(Clone)]
 pub struct TestContext {
     svm: LiteSVM,
+    pending_instructions: Vec<Instruction>,
+    pending_signers: Vec<Keypair>,
+}
+
+impl Clone for TestContext {
+    fn clone(&self) -> Self {
+        Self {
+            svm: self.svm.clone(),
+            pending_instructions: self.pending_instructions.clone(),
+            pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+        }
+    }
 }
 
 impl TestContext {
     pub fn new() -> Self {
-        // Disable sigverify and blockhash for perf
         let svm = LiteSVM::new()
             .with_sigverify(false)
             .with_blockhash_check(false);
-        Self { svm }
+        Self { 
+            svm,
+            pending_instructions: Vec::new(),
+            pending_signers: Vec::new(),
+        }
     }
 
     pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
@@ -61,9 +73,13 @@ impl TestContext {
             .with_sigverify(false)
             .with_blockhash_check(false)
             .with_trace_collector(trace_collector);
-        Self { svm }
-    }
-    
+        Self { 
+            svm,
+            pending_instructions: Vec::new(),
+            pending_signers: Vec::new(),
+        }
+    } 
+
     pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
         let program_data = std::fs::read(program_path)?;
         self.svm.add_program(program_id.clone(), &program_data);
@@ -71,7 +87,11 @@ impl TestContext {
     }
 
     pub fn from_svm(svm: LiteSVM) -> Self {
-        Self { svm }
+        Self { 
+            svm,
+            pending_instructions: Vec::new(),
+            pending_signers: Vec::new(),
+        }
     }
     
     pub fn into_svm(self) -> LiteSVM {
@@ -83,7 +103,12 @@ impl TestContext {
             .with_trace_collector(trace_collector)
             .with_sigverify(false)
             .with_blockhash_check(false);
-        Self { svm: cloned_svm }
+
+        Self { 
+            svm: cloned_svm,
+            pending_instructions: self.pending_instructions.clone(),
+            pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+        }
     }
 
     /// Account Creation Helpers
@@ -91,7 +116,7 @@ impl TestContext {
     // Create a basic default account
     pub fn create_account(&mut self) -> GenericAccountBuilder<'_> {
         GenericAccountBuilder {
-            svm: &mut self.svm,
+            ctx: self,
             address: Pubkey::default(),  
             account_state: Account {
                 lamports: 0,  
@@ -107,7 +132,7 @@ impl TestContext {
     pub fn create_mint(&mut self) -> MintAccountBuilder<'_> {
         let rent = Rent::default();
         MintAccountBuilder {
-            svm: &mut self.svm,
+            ctx: self,
             address: Pubkey::default(),
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Mint::LEN),
@@ -130,7 +155,7 @@ impl TestContext {
     pub fn create_token_account(&mut self) -> TokenAccountBuilder<'_> {
         let rent = Rent::default();
         TokenAccountBuilder {
-            svm: &mut self.svm,
+            ctx: self,
             address: Pubkey::default(),
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Account::LEN),
@@ -226,7 +251,7 @@ impl TestContext {
     // Escape hatch for raw instructions
     pub fn raw_call(&mut self, instruction: Instruction) -> InstructionBuilder<'_> {
         InstructionBuilder {
-            svm: &mut self.svm,
+            ctx: self,
             instruction,
             signers: vec![],
         }
@@ -235,7 +260,7 @@ impl TestContext {
     // For calling Anchor programs dynamically
     pub fn program(&mut self, program_id: Pubkey) -> ProgramBuilder<'_> {  
         ProgramBuilder {
-            svm: &mut self.svm,  
+            ctx: self,
             instruction: Instruction {
                 program_id,
                 accounts: vec![],
@@ -248,9 +273,36 @@ impl TestContext {
     // For batching multiple instructions
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder {
-            svm: &mut self.svm,
+            ctx: self,
             instructions: vec![],
             signers: vec![],
         }
+    }
+
+    pub fn send_batch(&mut self) -> Result<()> {
+        // Empty queue is a noop
+        if self.pending_instructions.is_empty() {
+            return Ok(());
+        }
+
+        // Deduplicate signers while preserving order (first = fee payer)
+        let mut seen = std::collections::HashSet::new();
+        let unique_signers: Vec<&Keypair> = self.pending_signers
+            .iter()
+            .filter(|k| seen.insert(k.pubkey()))
+            .collect();
+
+        // Send transaction with all queued instructions
+        let _result = instruction_builder::send_transaction(
+            &mut self.svm,
+            self.pending_instructions.clone(),
+            &unique_signers
+        )?;
+    
+        // Clear queue regardless of success/failure
+        self.pending_instructions.clear();
+        self.pending_signers.clear();
+
+        Ok(())
     }
 }

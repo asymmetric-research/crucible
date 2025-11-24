@@ -1,4 +1,4 @@
-use litesvm::LiteSVM;
+use crate::TestContext;
 use solana_sdk::{
     instruction::Instruction,
     signature::{Keypair, Signer},
@@ -8,7 +8,7 @@ use solana_sdk::{
 use anyhow::Result;
 
 pub struct InstructionBuilder<'a> {
-    pub(crate) svm: &'a mut LiteSVM,
+    pub(crate) ctx: &'a mut TestContext,
     pub(crate) instruction: Instruction,  
     pub(crate) signers: Vec<Keypair>,     
 }
@@ -20,38 +20,47 @@ impl InstructionBuilder<'_> {
     }
 
     pub fn send(self) -> Result<litesvm::types::TransactionResult> {  
-        send_instruction(self.svm, self.instruction, &self.signers)
+        send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)
+    }
+
+    pub fn add_transaction(self) -> Result<()> {
+        self.ctx.pending_instructions.push(self.instruction);
+        self.ctx.pending_signers.extend(self.signers);
+        Ok(())
     }
 }
 
 pub fn send_instruction(
-    svm: &mut LiteSVM,
+    svm: &mut litesvm::LiteSVM,
     instruction: Instruction,
     signers: &[Keypair],
+) -> Result<litesvm::types::TransactionResult> {
+    let signer_refs: Vec<&Keypair> = signers.iter().collect();
+    send_transaction(svm, vec![instruction], &signer_refs)
+}
+
+pub fn send_transaction(
+    svm: &mut litesvm::LiteSVM,
+    instructions: Vec<Instruction>,
+    signers: &[&Keypair],
 ) -> Result<litesvm::types::TransactionResult> {
     if signers.is_empty() {
         return Err(anyhow::anyhow!("At least one signer (fee payer) is required"));
     }
-    // Expire so we don't get AlreadyProcessed
-    svm.expire_blockhash(); 
-
-    // Get recent blockhash from SVM
+    
+    svm.expire_blockhash();
     let blockhash = svm.latest_blockhash();
-
-    // Create message with single instruction
+    
     let message = Message::new_with_blockhash(
-        &[instruction],
-        Some(&signers[0].pubkey()),  // First signer as payer
+        &instructions,
+        Some(&signers[0].pubkey()),
         &blockhash,
     );
-
-    // Create transaction
+    
     let tx = VersionedTransaction::try_new(
-        VersionedMessage::Legacy(message), 
+        VersionedMessage::Legacy(message),
         signers
     )?;
-
-    let result = svm.send_transaction(tx);
-
-    Ok(result)
+    
+    Ok(svm.send_transaction(tx))
 }

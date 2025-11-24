@@ -1,0 +1,50 @@
+[package]
+name = "marginfi"
+version = "0.1.4"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "marginfi"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = ["mainnet-beta"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+test-bpf = ["test", "debug"]
+test = []
+client = []
+devnet = []
+mainnet-beta = []
+debug = []
+staging = []
+
+[dependencies]
+spl-transfer-hook-interface = "0.9.0"
+
+anchor-lang = { path = "/home/tlue/auditing/solana/anchor-fuzzing/lang" }
+anchor-spl = { path = "/home/tlue/auditing/solana/anchor-fuzzing/spl", features = ["token_2022"] }
+
+pyth-solana-receiver-sdk = "*"
+switchboard-on-demand = "*"
+solana-stake-interface = "*"
+
+borsh = "1.5.7"
+bytemuck = "1.22.0"
+fixed = "=1.28.0"
+fixed-macro = "1.2.0"
+lazy_static = "1.4.0"
+type-layout = "0.2.0"
+static_assertions = "1.1.0"
+cfg-if = "1.0.0"
+enum_dispatch = "0.3.13"
+solana-security-txt = "1.1.1"
+solana-sdk="*"
+
+[patch.crates-io]
+anchor-lang = { path = "/home/tlue/auditing/solana/anchor-fuzzing/lang" }
+anchor-spl = { path = "/home/tlue/auditing/solana/anchor-fuzzing/spl" }

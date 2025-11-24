@@ -18,3 +18,5 @@ staking = { path = "../../programs/staking", features = ["no-entrypoint"] }
 [features]
 fuzz_staking = []
 invariant_fuzz = []
+fuzz_single_stake = []
+invariant_fuzz_batched = []

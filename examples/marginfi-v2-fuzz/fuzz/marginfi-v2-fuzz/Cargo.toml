@@ -1,0 +1,21 @@
+[package]
+name = "marginfi-v2-fuzz_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-test = { path = "/home/tlue/auditing/solana/anchor-fuzzing/fuzz/anchor-test" }
+anchor-test-context = { path = "/home/tlue/auditing/solana/anchor-fuzzing/fuzz/anchor-test/anchor-test-context" }
+arbitrary = { version = "1", features = ["derive"] }
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude", "tui_monitor"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+solana-message = "2.3"
+solana-sdk = "2.3"
+
+marginfi_program = { path = "../../programs/marginfi", package = "marginfi", features = ["no-entrypoint"] }
+anchor-lang = { path = "../../../../../lang" }
+anchor-spl = { path = "../../../../../spl" }
+
+[features]
+fuzz_single = []
+invariant_test = []

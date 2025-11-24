@@ -16,5 +16,5 @@ solana-sdk = "2.3"
 solana-message = "2.3"
 
 [features]
-fuzz_counter = []
+fuzz_single = []
 invariant_increment = []

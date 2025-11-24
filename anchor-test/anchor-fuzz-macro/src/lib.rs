@@ -46,7 +46,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     // Collect references to inputs
     let inputs: Vec<_> = input_fn.sig.inputs.iter().collect();
     
-    // Must have the fixture as one parameter
+    // Must have at least one parameter (the fixture)
     if inputs.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig,
@@ -232,6 +232,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             unsafe {
                                 let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
                                 buf[edge_hash] = buf[edge_hash].saturating_add(1);
+                                //buf[edge_hash] = 1;
                             }
                             prev_pc = next_pc;
                         }

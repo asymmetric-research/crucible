@@ -149,6 +149,10 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                         #(#dispatch_arms)*
                     }
                 }
+                #[doc(hidden)]
+                pub fn __auto_flush(&mut self) {
+                    let _ = self.ctx.send_batch();
+                }
             }
         }
     };
@@ -218,6 +222,7 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 #fn_body
             }
+        fixture.__auto_flush();
         }
     };
 

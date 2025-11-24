@@ -1,11 +1,11 @@
-use litesvm::LiteSVM;
+use crate::TestContext;
 use solana_sdk::{
     instruction::Instruction,
     signature::Keypair,
 };
 
 pub struct TransactionBuilder<'a> {
-    pub(crate) svm: &'a mut LiteSVM,
+    pub(crate) ctx: &'a mut TestContext,
     pub(crate) instructions: Vec<Instruction>,  
     pub(crate) signers: Vec<Keypair>,
 }
@@ -25,7 +25,6 @@ impl TransactionBuilder<'_> {
     }
 
     pub fn send(self) -> anyhow::Result<litesvm::types::TransactionResult> {
-        // TODO: Implement batched transaction sending
         todo!("Transaction batching not yet implemented")
     }
 }

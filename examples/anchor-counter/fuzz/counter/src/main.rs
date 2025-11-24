@@ -1,47 +1,55 @@
 use anchor_counter::*;
 use anchor_test::*;
-use arbitrary::Arbitrary;
-use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey};
-use solana_sdk::signature::Signer;
+use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey, signature::Signer};
+use std::rc::Rc;
 
-
-struct CounterFixture<'a> {
-    ctx: &'a mut TestContext,
+#[derive(Clone)]
+struct CounterFixture {
+    ctx: TestContext,
     counter_pda: Pubkey,
     program_id: Pubkey,
-    payer: Keypair,
+    payer: Rc<Keypair>,
 }
 
 #[fuzz_fixture]
-impl<'a> CounterFixture<'a> {
-    pub fn setup(ctx: &'a mut TestContext) -> Self {
+impl CounterFixture {
+    /// Called ONCE to setup initial state (programs + accounts)
+    pub fn setup() -> Self {
+        let mut ctx = TestContext::new();
         let program_id = Pubkey::new_from_array(ID.to_bytes());
+        
         ctx.add_program(&program_id, "target/deploy/anchor_counter.so").unwrap();
 
-        let payer = Keypair::new();
+        let payer = Rc::new(Keypair::new());
+        
         // Create payer account
         ctx.create_account()
             .pubkey(payer.pubkey())
-            .lamports(10_000_000)
+            .lamports(10_000_000_000)
             .owner(system_program::id())
             .create()
             .unwrap();
+        
         // Derive counter PDA
         let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &program_id);
+        
         // Initialize counter
-        let _ = ctx.program(program_id)
+        ctx.program(program_id)
             .call(instruction::Initialize {})
             .accounts(accounts::Initialize {
                 counter: counter_pda,
                 payer: payer.pubkey(),
                 system_program: system_program::id(),
             })
-            .signers(&[&payer])
+            .signers(&[&*payer])
             .send()
             .unwrap();
+        
         Self { ctx, counter_pda, program_id, payer }
     }
+
     // ===== ACTIONS =====
+    
     pub fn action_increment(&mut self) {
         let _ = self.ctx
             .program(self.program_id)
@@ -49,64 +57,59 @@ impl<'a> CounterFixture<'a> {
             .accounts(accounts::Update {
                 counter: self.counter_pda,
             })
-            .signers(&[&self.payer])
-            .send()
-            .unwrap();
+            .signers(&[&*self.payer])
+            .send();
     }
+    
     pub fn action_decrement(&mut self) {
-        self.ctx
+        let _ = self.ctx
             .program(self.program_id)
             .call(instruction::Decrement {})
             .accounts(accounts::Update {
                 counter: self.counter_pda,
             })
-            .signers(&[&self.payer])
-            .send()
-            .unwrap();
+            .signers(&[&*self.payer])
+            .send();
     }
 }
 
-// Basic unit test using fixture
+// Basic unit test
 #[test]
 fn test_increment() {
-    let mut ctx = TestContext::new();
-    let mut fixture = CounterFixture::setup(&mut ctx);
+    let mut fixture = CounterFixture::setup();
     fixture.action_increment();
     fixture.action_increment();
     fixture.action_increment();
-    let mut counter = fixture.ctx
+    
+    let counter = fixture.ctx
         .read_anchor_account::<Counter>(&fixture.counter_pda)
         .unwrap();
     assert_eq!(counter.count, 3);
 }
 
-#[derive(Arbitrary, Debug, Clone)]
-enum Action {
-    Increment,
-    Decrement,
-}
-
+// Simple single-input fuzz test
 #[anchor_fuzz]
-fn fuzz_counter(ctx: &mut TestContext, actions: Vec<Action>, #[range(1..100)] inc_amount: u64) {
-    let mut fixture = CounterFixture::setup(ctx);
-
-    for action in actions {
-        //setup
-        match action {
-            Action::Increment => fixture.action_increment(iinc_amount),
-            Action::Decrement => fixture.action_decrement(),
-        }
-        let counter = fixture.ctx
-            .read_anchor_account::<Counter>(&fixture.counter_pda)
-            .unwrap();
-        assert!(counter.count < 1);
+fn fuzz_single(fixture: &mut CounterFixture, #[range(1..100)] iterations: u64) {
+    for _ in 0..iterations {
+        fixture.action_increment();
     }
-}
-
-#[invariant_test(CounterFixture::setup, num_actions_before_reset = 5)]
-fn invariant_increment(fixture: &CounterFixture) {
+    
     let counter = fixture.ctx
         .read_anchor_account::<Counter>(&fixture.counter_pda)
         .unwrap();
-    assert!(counter.count < 2);
+    
+    // Invariant: count should never exceed iterations
+    assert!(counter.count <= iterations);
+}
+
+// Stateful invariant test - fuzzer generates random action sequences automatically
+#[invariant_test]
+fn invariant_counter(fixture: &mut CounterFixture) {
+    // This runs after EACH action in the sequence
+    let counter = fixture.ctx
+        .read_anchor_account::<Counter>(&fixture.counter_pda)
+        .unwrap();
+    
+    // Example invariant: count should stay below some threshold
+    assert!(counter.count < 1000, "Counter exceeded max value: {}", counter.count);
 }

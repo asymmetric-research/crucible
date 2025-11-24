@@ -246,6 +246,7 @@ dependencies = [
 name = "anchor-fuzz-macro"
 version = "0.1.0"
 dependencies = [
+ "anchor-macro-utils",
  "proc-macro2",
  "quote",
  "syn 2.0.106",
@@ -255,6 +256,7 @@ dependencies = [
 name = "anchor-invariant-macro"
 version = "0.1.0"
 dependencies = [
+ "anchor-macro-utils",
  "proc-macro2",
  "quote",
  "syn 2.0.106",
@@ -321,6 +323,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+]
+
+[[package]]
+name = "anchor-macro-utils"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
 ]
 
 [[package]]
