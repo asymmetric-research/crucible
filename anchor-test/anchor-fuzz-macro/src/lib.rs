@@ -232,7 +232,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             unsafe {
                                 let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
                                 buf[edge_hash] = buf[edge_hash].saturating_add(1);
-                                //buf[edge_hash] = 1;
                             }
                             prev_pc = next_pc;
                         }
@@ -342,7 +341,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .add_input(&mut state, &mut executor, &mut mgr, input)
                 .expect("failed to add seed input");
 
-            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 2, 5)
+            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 2, 8)
                 .expect("failed to create mutator");
             let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 

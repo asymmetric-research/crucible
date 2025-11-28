@@ -30,6 +30,19 @@ impl ProgramBuilder<'_> {
         self
     }
 
+    pub fn remaining_accounts(mut self, accounts: Vec<solana_sdk::pubkey::Pubkey>) -> Self {
+        use solana_sdk::instruction::AccountMeta;
+        for pubkey in accounts {
+            self.instruction.accounts.push(AccountMeta::new_readonly(pubkey, false));
+        }
+        self
+    }
+
+    pub fn remaining_accounts_metas(mut self, metas: Vec<solana_sdk::instruction::AccountMeta>) -> Self {
+        self.instruction.accounts.extend(metas);
+        self
+    }
+
     pub fn signers(mut self, signers: &[&Keypair]) -> Self {
         self.signers = signers.iter().map(|k| k.insecure_clone()).collect();
         self

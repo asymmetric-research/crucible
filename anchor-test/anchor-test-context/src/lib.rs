@@ -41,8 +41,8 @@ impl TraceCollector for NoopTraceCollector {
 }
 
 pub struct TestContext {
-    svm: LiteSVM,
-    pending_instructions: Vec<Instruction>,
+    pub svm: LiteSVM,
+    pub pending_instructions: Vec<Instruction>,
     pending_signers: Vec<Keypair>,
 }
 
@@ -56,17 +56,37 @@ impl Clone for TestContext {
     }
 }
 
+
 impl TestContext {
     pub fn new() -> Self {
-        let svm = LiteSVM::new()
+        let svm = LiteSVM::default()
             .with_sigverify(false)
-            .with_blockhash_check(false);
+            .with_blockhash_check(false)
+            .with_transaction_history(0)
+            .with_builtins()
+            .with_lamports(1_000_000u64.wrapping_mul(1_000_000))
+            .with_sysvars()
+            .with_precompiles();
+            //.with_spl_programs()
+            
         Self { 
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
         }
     }
+    //pub fn new() -> Self {
+    //    let svm = LiteSVM::default()
+    //        .with_sigverify(false)
+    //        .with_blockhash_check(false)
+    //        .with_transaction_history(0);
+    //        
+    //    Self { 
+    //        svm,
+    //        pending_instructions: Vec::new(),
+    //        pending_signers: Vec::new(),
+    //    }
+    //}
 
     pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
         let svm = LiteSVM::new()
@@ -150,8 +170,6 @@ impl TestContext {
             },
         }
     }
-    
-    // Create an ATA account
     pub fn create_token_account(&mut self) -> TokenAccountBuilder<'_> {
         let rent = Rent::default();
         TokenAccountBuilder {
@@ -176,21 +194,62 @@ impl TestContext {
             },
         }
     }
-    /// Getters
-
-    pub fn slot(&self) -> u64 {
-        self.svm.get_sysvar::<solana_sdk::clock::Clock>().slot
+    
+    /// Transfer tokens between accounts
+    pub fn transfer_tokens(
+        &mut self,
+        from: &Pubkey,
+        to: &Pubkey,
+        owner: &Keypair,
+        amount: u64,
+    ) -> anyhow::Result<()> {
+        self.raw_call(spl_token::instruction::transfer(
+                &spl_token::id(),
+                from,
+                to,
+                &owner.pubkey(),
+                &[],
+                amount,
+            )?)
+            .signers(&[owner])
+            .send()?;
+        Ok(())
+    }
+    
+    pub fn mint_to(
+        &mut self,
+        mint: &Pubkey,
+        destination: &Pubkey,
+        amount: u64,
+        authority: &Rc<Keypair>,
+    ) -> anyhow::Result<()> {
+        self.raw_call(spl_token::instruction::mint_to(
+                &spl_token::id(),
+                mint,
+                destination,
+                &authority.pubkey(),
+                &[],
+                amount,
+            )?)
+            .signers(&[&**authority])
+            .send()?;
+        Ok(())
     }
 
     pub fn warp_to_slot(&mut self, slot: u64) {
         self.svm.warp_to_slot(slot);
     }
     
-    // Add this helper to advance both slot and unix timestamp
     pub fn advance_slots(&mut self, slots: u64) {
         let current_slot = self.slot();
         let target_slot = current_slot + slots;
         self.svm.warp_to_slot(target_slot);
+    }
+
+    /// Getters
+
+    pub fn slot(&self) -> u64 {
+        self.svm.get_sysvar::<solana_sdk::clock::Clock>().slot
     }
 
     pub fn get_account(&self, address: &Pubkey) -> Result<Account> {
@@ -216,6 +275,14 @@ impl TestContext {
         // Deserialize from bytes after discriminator
         T::deserialize(&mut &account.data[8..])
             .map_err(|e| anyhow::anyhow!("Failed to deserialize account: {}", e))
+    }
+
+    pub fn token_balance(&self, token_account: &Pubkey) -> u64 {
+        self.svm
+            .get_account(token_account)
+            .and_then(|acc| spl_token::state::Account::unpack(&acc.data).ok())
+            .map(|state| state.amount)
+            .unwrap_or(0)
     }
 
     /// Setters
@@ -279,10 +346,10 @@ impl TestContext {
         }
     }
 
-    pub fn send_batch(&mut self) -> Result<()> {
+    pub fn send_batch(&mut self) -> Result<Option<litesvm::types::TransactionResult>> {
         // Empty queue is a noop
         if self.pending_instructions.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         // Deduplicate signers while preserving order (first = fee payer)
@@ -293,16 +360,17 @@ impl TestContext {
             .collect();
 
         // Send transaction with all queued instructions
-        let _result = instruction_builder::send_transaction(
+        let result = instruction_builder::send_transaction(
             &mut self.svm,
             self.pending_instructions.clone(),
             &unique_signers
         )?;
-    
+
         // Clear queue regardless of success/failure
         self.pending_instructions.clear();
         self.pending_signers.clear();
 
-        Ok(())
+        Ok(Some(result))
     }
 }
+

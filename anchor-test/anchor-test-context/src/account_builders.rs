@@ -59,13 +59,13 @@ impl AccountBuilderBase for GenericAccountBuilder<'_> {
 }
 
 impl GenericAccountBuilder<'_> {
-    pub fn create(self) -> Result<()> {
+    pub fn create(self) -> Result<Pubkey> {
         // Ensure address has been set
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
         let _ = self.ctx.svm.set_account(self.address, self.account_state);
-        Ok(())
+        Ok(self.address)
     }
 }
 
@@ -82,7 +82,7 @@ impl AccountBuilderBase for MintAccountBuilder<'_> {
 }
 
 impl MintAccountBuilder<'_> {
-    pub fn create(self) -> Result<()> {
+    pub fn create(self) -> Result<Pubkey> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
@@ -90,7 +90,7 @@ impl MintAccountBuilder<'_> {
         let mut account = self.account_state;
         spl_token::state::Mint::pack(self.mint, &mut account.data)?;
         let _ = self.ctx.svm.set_account(self.address, account); 
-        Ok(())
+        Ok(self.address)
     }
 
     pub fn mint_authority(mut self, authority: Pubkey) -> Self {
@@ -135,7 +135,7 @@ impl AccountBuilderBase for TokenAccountBuilder<'_> {
 }
 
 impl TokenAccountBuilder<'_> {
-    pub fn create(self) -> Result<()> {
+    pub fn create(self) -> Result<Pubkey> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         } 
@@ -151,7 +151,7 @@ impl TokenAccountBuilder<'_> {
         let mut account = self.account_state;
         spl_token::state::Account::pack(self.token_state, &mut account.data)?;
         let _ = self.ctx.svm.set_account(self.address, account); 
-        Ok(())
+        Ok(self.address)
     }
 
     pub fn mint(mut self, mint: Pubkey) -> Self {

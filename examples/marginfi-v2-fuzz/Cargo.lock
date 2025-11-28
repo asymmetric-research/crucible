@@ -1729,6 +1729,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "digest"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3176,6 +3182,7 @@ version = "0.1.4"
 dependencies = [
  "anchor-lang 0.32.1",
  "anchor-spl",
+ "anyhow",
  "borsh 1.5.7",
  "bytemuck",
  "cfg-if",
@@ -3183,6 +3190,7 @@ dependencies = [
  "fixed",
  "fixed-macro",
  "lazy_static",
+ "pretty_assertions",
  "pyth-solana-receiver-sdk",
  "solana-sdk",
  "solana-security-txt",
@@ -3201,10 +3209,16 @@ dependencies = [
  "anchor-spl",
  "anchor-test",
  "anchor-test-context",
+ "anyhow",
  "arbitrary",
+ "bytemuck",
+ "fixed",
+ "fixed-macro",
  "libafl",
  "libafl_bolts",
+ "litesvm",
  "marginfi",
+ "pyth-solana-receiver-sdk",
  "solana-message 2.4.0",
  "solana-sdk",
 ]
@@ -3686,6 +3700,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "pretty_assertions"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
+dependencies = [
+ "diff",
+ "yansi",
 ]
 
 [[package]]
@@ -8965,6 +8989,12 @@ name = "xxhash-rust"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yoke"
