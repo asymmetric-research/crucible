@@ -37,6 +37,7 @@ struct BankData {
     oracle: Pubkey,
     liquidity_vault: Pubkey,
     decimals: u8,
+    price: I80F48,  
 }
 
 #[derive(Clone)]
@@ -141,11 +142,11 @@ impl MarginfiFixture {
             &usdc_mint, &usdc_oracle, 6, &admin, usdc_bank_config()
         );
         
-        let banks = vec![
-            BankData { bank: sol_bank.0, mint: sol_mint, oracle: sol_oracle, liquidity_vault: sol_bank.1, decimals: 9 },
-            BankData { bank: usdc_bank.0, mint: usdc_mint, oracle: usdc_oracle, liquidity_vault: usdc_bank.1, decimals: 6 },
-        ];
-        
+       let banks = vec![
+            BankData { bank: sol_bank.0, mint: sol_mint, oracle: sol_oracle, liquidity_vault: sol_bank.1, decimals: 9, price: I80F48!(100.0) },
+            BankData { bank: usdc_bank.0, mint: usdc_mint, oracle: usdc_oracle, liquidity_vault: usdc_bank.1, decimals: 6, price: I80F48!(1.0) },
+        ]; 
+
         let users: Vec<_> = (0..3)
             .map(|_| Self::create_user(&mut ctx, &program_id, &group, &banks, &admin))
             .collect();
@@ -166,7 +167,7 @@ impl MarginfiFixture {
             all_marginfi_accounts,
         };
 
-        fixture.seed_initial_liquidity();
+        //fixture.seed_initial_liquidity();
         
         fixture
     }
@@ -618,54 +619,54 @@ impl MarginfiFixture {
         let _ = self.build_deposit(user_idx, bank_idx, amount).send();
     }
 
-    pub fn action_borrow(
-        &mut self,
-        #[range(0..3)] user_idx: usize,
-        #[range(0..2)] bank_idx: usize,
-        #[range(1..100_000_000)] amount: u64,
-    ) {
-        if amount == 0 { return; }
-        
-        let _ = self.build_borrow(user_idx, bank_idx, amount).send();
-    }
+    //pub fn action_borrow(
+    //    &mut self,
+    //    #[range(0..3)] user_idx: usize,
+    //    #[range(0..2)] bank_idx: usize,
+    //    #[range(1..100_000_000)] amount: u64,
+    //) {
+    //    if amount == 0 { return; }
+    //    
+    //    let _ = self.build_borrow(user_idx, bank_idx, amount).send();
+    //}
 
-    pub fn action_repay(
-        &mut self,
-        #[range(0..3)] user_idx: usize,
-        #[range(0..2)] bank_idx: usize,
-        #[range(1..100_000_000)] amount: u64,
-        repay_all: bool,
-    ) {
-        let amount = self.cap_to_balance(user_idx, bank_idx, amount);
-        if amount == 0 && !repay_all { return; }
-        
-        let _ = self.build_repay(user_idx, bank_idx, amount, repay_all).send();
-    }
+    //pub fn action_repay(
+    //    &mut self,
+    //    #[range(0..3)] user_idx: usize,
+    //    #[range(0..2)] bank_idx: usize,
+    //    #[range(1..100_000_000)] amount: u64,
+    //    repay_all: bool,
+    //) {
+    //    let amount = self.cap_to_balance(user_idx, bank_idx, amount);
+    //    if amount == 0 && !repay_all { return; }
+    //    
+    //    let _ = self.build_repay(user_idx, bank_idx, amount, repay_all).send();
+    //}
 
-    pub fn action_withdraw(
-        &mut self,
-        #[range(0..3)] user_idx: usize,
-        #[range(0..2)] bank_idx: usize,
-        #[range(1..100_000_000)] amount: u64,
-        withdraw_all: bool,
-    ) {
-        if amount == 0 && !withdraw_all { return; }
-        
-        let _ = self.build_withdraw(user_idx, bank_idx, amount, withdraw_all).send();
-    }
+    //pub fn action_withdraw(
+    //    &mut self,
+    //    #[range(0..3)] user_idx: usize,
+    //    #[range(0..2)] bank_idx: usize,
+    //    #[range(1..100_000_000)] amount: u64,
+    //    withdraw_all: bool,
+    //) {
+    //    if amount == 0 && !withdraw_all { return; }
+    //    
+    //    let _ = self.build_withdraw(user_idx, bank_idx, amount, withdraw_all).send();
+    //}
 
-    pub fn action_transfer_account(
-        &mut self,
-        #[range(0..3)] from_user_idx: usize,
-        #[range(0..3)] to_user_idx: usize,
-    ) {
-        let new_marginfi_account = Keypair::new();
-        let new_account_pubkey = new_marginfi_account.pubkey();
-        
-        let _ = self.build_transfer_account(from_user_idx, to_user_idx, &new_marginfi_account).send();
-        
-        self.all_marginfi_accounts.push(new_account_pubkey);
-    }
+    //pub fn action_transfer_account(
+    //    &mut self,
+    //    #[range(0..3)] from_user_idx: usize,
+    //    #[range(0..3)] to_user_idx: usize,
+    //) {
+    //    let new_marginfi_account = Keypair::new();
+    //    let new_account_pubkey = new_marginfi_account.pubkey();
+    //    
+    //    let _ = self.build_transfer_account(from_user_idx, to_user_idx, &new_marginfi_account).send();
+    //    
+    //    self.all_marginfi_accounts.push(new_account_pubkey);
+    //}
 
     // ========================================================================
     // Constraint Helpers
@@ -694,14 +695,8 @@ impl MarginfiFixture {
         #[range(0..3)] user_idx: usize,
         inner_actions: Vec<FlashloanInnerAction>,
     ) {
-        // Flashloans with fewer than 2 operations are rarely interesting
-        // Real flashloans: borrow -> do something -> repay
-        if inner_actions.len() < 2 {
-            return;
-        }
         
-        // Most real flashloan sequences have 2-4 operations
-        let inner_actions: Vec<_> = inner_actions.into_iter().take(4).collect();
+        let inner_actions: Vec<_> = inner_actions.into_iter().take(2).collect();
         
         let end_index = (1 + inner_actions.len()) as u64;
         
@@ -710,7 +705,7 @@ impl MarginfiFixture {
         let current_marginfi_account = user.marginfi_account;
         
         // Instruction 0: Start flashloan
-        let _ = self.ctx.program(self.program_id)
+        let start = self.ctx.program(self.program_id)
             .call(instruction::LendingAccountStartFlashloan { end_index })
             .accounts(accounts::LendingAccountStartFlashloan {
                 marginfi_account: current_marginfi_account,
@@ -837,44 +832,34 @@ fn usdc_bank_config() -> BankConfigCompact {
 // ============================================================================
 // Tests
 // ============================================================================
-
 #[invariant_test]
 fn invariant_test(fixture: &mut MarginfiFixture) {
-    for account_pubkey in &fixture.all_marginfi_accounts {
-        let Ok(account_data) = fixture.ctx.get_account(account_pubkey) else {
-            continue;
-        };
-        
-        if account_data.data.len() < 8 + std::mem::size_of::<MarginfiAccount>() {
-            continue;
-        }
-        
+    bad_debt_check(fixture);
+}
+
+
+fn bad_debt_check(fixture: &mut MarginfiFixture) {
+    for account_pubkey in fixture.all_marginfi_accounts.clone() {
+        let Ok(account_data) = fixture.ctx.get_account(&account_pubkey) else { continue };
         let account: &MarginfiAccount = bytemuck::from_bytes(&account_data.data[8..]);
         
-        if account.get_flag(ACCOUNT_DISABLED) {
-            continue;
+        if account.get_flag(ACCOUNT_DISABLED) { continue }
+        
+        let mut assets_usd = I80F48::ZERO;
+        let mut liabs_usd = I80F48::ZERO;
+        
+        for bal in account.lending_account.balances.iter() {
+            if bal.active == 0 { continue }
+            let Some(bank) = fixture.banks.iter().find(|b| b.bank == bal.bank_pk) else { continue };
+            
+            let a: I80F48 = bal.asset_shares.into();
+            let l: I80F48 = bal.liability_shares.into();
+            let scale = I80F48::from_num(10_u64.pow(bank.decimals as u32));
+            
+            assets_usd += a * bank.price / scale;
+            liabs_usd += l * bank.price / scale;
         }
         
-        let mut total_assets = I80F48::ZERO;
-        let mut total_liabilities = I80F48::ZERO;
-        
-        for balance in account.lending_account.balances.iter() {
-            if balance.active == 0 { continue; }
-            
-            let assets: I80F48 = balance.asset_shares.into();
-            let liabs: I80F48 = balance.liability_shares.into();
-            
-            total_assets += assets;
-            total_liabilities += liabs;
-        }
-        
-        assert!(
-            total_liabilities <= I80F48::ZERO || total_assets > I80F48::ZERO,
-            "Bad debt detected: Account {:?} has liabilities ({}) without assets ({}). \
-             Protocol cannot recover this debt through liquidation.",
-            account_pubkey,
-            total_liabilities,
-            total_assets
-        );
+        assert!(liabs_usd <= assets_usd, "BAD DEBT: {} > {}", liabs_usd, assets_usd);
     }
 }

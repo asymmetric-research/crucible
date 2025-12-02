@@ -59,15 +59,7 @@ impl Clone for TestContext {
 
 impl TestContext {
     pub fn new() -> Self {
-        let svm = LiteSVM::default()
-            .with_sigverify(false)
-            .with_blockhash_check(false)
-            .with_transaction_history(0)
-            .with_builtins()
-            .with_lamports(1_000_000u64.wrapping_mul(1_000_000))
-            .with_sysvars()
-            .with_precompiles();
-            //.with_spl_programs()
+        let svm = LiteSVM::new();
             
         Self { 
             svm,
@@ -75,21 +67,10 @@ impl TestContext {
             pending_signers: Vec::new(),
         }
     }
-    //pub fn new() -> Self {
-    //    let svm = LiteSVM::default()
-    //        .with_sigverify(false)
-    //        .with_blockhash_check(false)
-    //        .with_transaction_history(0);
-    //        
-    //    Self { 
-    //        svm,
-    //        pending_instructions: Vec::new(),
-    //        pending_signers: Vec::new(),
-    //    }
-    //}
 
     pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
         let svm = LiteSVM::new()
+            .with_transaction_history(0)
             .with_sigverify(false)
             .with_blockhash_check(false)
             .with_trace_collector(trace_collector);
