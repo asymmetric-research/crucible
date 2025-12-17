@@ -212,32 +212,19 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             impl DefaultTraceCollector {
                 pub fn from_raw(ptr: *mut u8, len: usize) -> Self { Self { ptr, len } }
 
-                pub fn reset(&mut self) {
-                    unsafe { std::ptr::write_bytes(self.ptr, 0, self.len); }
-                }
-                fn hash_edge(prev: usize, cur: usize) -> usize {
-                    const MULTIPLIER: usize = 16777619;
-                    (((prev.wrapping_mul(MULTIPLIER)) >> 1 ^ cur) * cur) % MAP_SIZE
-                }
-
             }
-
             impl anchor_test_context::TraceCollector for DefaultTraceCollector {
                 fn trace(&mut self, _m: &solana_message::SanitizedMessage, traces: &[Vec<[u64; 12]>]) {
-                    // Get ALL traces
                     for trace in traces {
-                        let mut prev_pc = 0usize;
-                        if !trace.is_empty() {
-                            for entry in trace.iter() {
-                                let next_pc = entry[11] as usize;
-                                let edge_hash = Self::hash_edge(prev_pc, next_pc);
-                                unsafe {
-                                    let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
-                                    //buf[edge_hash] = buf[edge_hash].saturating_add(1);
-                                    buf[edge_hash] = 1;
-                                }
-                                prev_pc = next_pc;
+                        let mut prev_location = 0usize;
+                        for entry in trace {
+                            let cur_location = ((entry[11] as usize) >> 4) ^ ((entry[11] as usize) << 8);
+
+                            unsafe {
+                                let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
+                                buf[(cur_location ^ prev_location) % MAP_SIZE] = 1;
                             }
+                            prev_location = cur_location >> 1;
                         }
                     }
                 }
@@ -357,4 +344,3 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     
     TokenStream::from(expanded)
 }
-

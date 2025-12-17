@@ -13,4 +13,3 @@ solana-program.workspace = true
 solana-program-pack.workspace = true
 solana-message.workspace = true
 anyhow.workspace = true
-
