@@ -6,10 +6,18 @@ edition = "2021"
 [dependencies]
 litesvm.workspace = true
 anchor-lang.workspace = true
+anyhow.workspace = true
+
+# Client-side crates - versions resolved by cargo
+solana-pubkey.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-signature.workspace = true
+solana-account.workspace = true
+solana-transaction.workspace = true
+solana-message.workspace = true
+solana-hash.workspace = true
+solana-program-runtime.workspace = true
+solana-transaction-context.workspace = true
 
 spl-token.workspace = true
-solana-sdk.workspace = true
-solana-program.workspace = true
-solana-program-pack.workspace = true
-solana-message.workspace = true
-anyhow.workspace = true

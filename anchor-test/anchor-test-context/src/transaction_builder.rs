@@ -1,8 +1,6 @@
 use crate::TestContext;
-use solana_sdk::{
-    instruction::Instruction,
-    signature::Keypair,
-};
+use anchor_lang::solana_program::instruction::Instruction;
+use solana_keypair::Keypair;
 
 pub struct TransactionBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,

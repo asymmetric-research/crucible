@@ -1,5 +1,5 @@
 use anchor_test::*;
-use anchor_lang::prelude::*;
+use anchor_test::anchor_lang::prelude::*;
 use solana_sdk::{
     signature::{Keypair, Signer},
     pubkey::Pubkey,
@@ -14,15 +14,63 @@ use marginfi_program::{
     instruction,
     accounts,
     state::marginfi_group::{
-        BankConfigCompact, WrappedI80F48, 
+        BankConfigCompact, WrappedI80F48,
         BankOperationalState, RiskTier, InterestRateConfigCompact,
     },
     state::marginfi_account::{MarginfiAccount, ACCOUNT_DISABLED},
 };
-use pyth_solana_receiver_sdk::price_update::{PriceUpdateV2, PriceFeedMessage, VerificationLevel};
-use anchor_spl::token::spl_token;
+use anchor_test::anchor_spl::token::spl_token;
+
+// ============================================================================
+// Local Pyth Type Definitions (to avoid dependency conflicts)
+// ============================================================================
+
+/// Pyth Solana Receiver program ID
+pub mod pyth_local {
+    use super::*;
+    use borsh::{BorshSerialize, BorshDeserialize};
+
+    // rec5EKMGg6MxZYaMdyBps2bnnCNHi6KCYuQedA7GsAuW
+    pub const ID: Pubkey = Pubkey::new_from_array([
+        0x0c, 0x0b, 0xea, 0x79, 0x8f, 0x5d, 0x1a, 0x39,
+        0x4a, 0x89, 0x3f, 0x83, 0x3a, 0x3e, 0x03, 0x9e,
+        0x95, 0x43, 0x2f, 0x13, 0xea, 0xf8, 0x31, 0x79,
+        0x44, 0x10, 0x8f, 0x22, 0xf3, 0x75, 0x03, 0x55,
+    ]);
+
+    #[derive(Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+    #[repr(u8)]
+    pub enum VerificationLevel {
+        Partial { num_signatures: u8 },
+        Full,
+    }
+
+    #[derive(Clone, Copy, BorshSerialize, BorshDeserialize)]
+    #[repr(C)]
+    pub struct PriceFeedMessage {
+        pub feed_id: [u8; 32],
+        pub price: i64,
+        pub conf: u64,
+        pub exponent: i32,
+        pub publish_time: i64,
+        pub prev_publish_time: i64,
+        pub ema_price: i64,
+        pub ema_conf: u64,
+    }
+
+    #[derive(Clone, Copy, BorshSerialize, BorshDeserialize)]
+    #[repr(C)]
+    pub struct PriceUpdateV2 {
+        pub write_authority: Pubkey,
+        pub verification_level: VerificationLevel,
+        pub price_message: PriceFeedMessage,
+        pub posted_slot: u64,
+    }
+}
+
+use pyth_local::{PriceUpdateV2, PriceFeedMessage, VerificationLevel};
 use bytemuck;
-use anchor_lang::InstructionData;
+use anchor_test::anchor_lang::InstructionData;
 
 // ============================================================================
 // Fixture Data Structures
@@ -477,7 +525,7 @@ mod fixture_helpers {
         
         ctx.create_account()
             .pubkey(oracle.pubkey())
-            .owner(pyth_solana_receiver_sdk::ID)
+            .owner(pyth_local::ID)
             .lamports(10_000_000)
             .data(&data)
             .create()

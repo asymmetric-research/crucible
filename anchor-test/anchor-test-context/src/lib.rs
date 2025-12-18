@@ -1,21 +1,21 @@
 use std::rc::Rc;
-use std::cell::RefCell;
 use litesvm::LiteSVM;
-use solana_sdk::{
-    account::Account,
-    pubkey::Pubkey,
-    signature::{Keypair, Signer},
-    instruction::Instruction,
-    system_program,
-    rent::Rent,
-};
+use solana_account::Account;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
+use solana_pubkey::Pubkey;
+
+// Re-export types from anchor-lang for anchor program interactions
+use anchor_lang::prelude::{Clock, Rent};
+use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::system_program;
 use anchor_lang::{
-    AnchorDeserialize, 
+    AnchorDeserialize,
     AnchorSerialize,
     Discriminator,
 };
 use spl_token::solana_program::program_option::COption;
-use solana_program::program_pack::Pack;
+use anchor_lang::solana_program::program_pack::Pack;
 use anyhow::Result;
 pub use crate::account_builders::MintAccountBuilder;
 pub use crate::account_builders::GenericAccountBuilder;
@@ -24,20 +24,21 @@ pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::account_builders::AccountBuilderBase;
-use std::collections::HashSet;
 
 mod account_builders;
 mod instruction_builder;
 mod program_builder;
 mod transaction_builder;
 mod system_program_builder;
+pub mod trace_collector;
 
-pub use litesvm::types::TraceCollector;
+pub use litesvm::InvocationInspectCallback;
 
-struct NoopTraceCollector;
-
-impl TraceCollector for NoopTraceCollector {
-    fn trace(&mut self, _message: &solana_message::SanitizedMessage, _traces: &[Vec<[u64; 12]>]) {}
+// Re-export types needed by generated code
+pub mod fuzz_types {
+    pub use solana_transaction::sanitized::SanitizedTransaction;
+    pub use solana_transaction_context::IndexOfAccount;
+    pub use solana_program_runtime::invoke_context::InvokeContext;
 }
 
 pub struct TestContext {
@@ -68,13 +69,13 @@ impl TestContext {
         }
     }
 
-    pub fn with_trace_collector(trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
-        let svm = LiteSVM::new()
+    pub fn with_invocation_callback<C: InvocationInspectCallback + 'static>(callback: C) -> Self {
+        let mut svm = LiteSVM::new_debuggable(true)
             .with_transaction_history(0)
             .with_sigverify(false)
-            .with_blockhash_check(false)
-            .with_trace_collector(trace_collector);
-        Self { 
+            .with_blockhash_check(false);
+        svm.set_invocation_inspect_callback(callback);
+        Self {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
@@ -99,13 +100,13 @@ impl TestContext {
         self.svm
     }
 
-    pub fn clone_with_trace_collector(&self, trace_collector: Rc<RefCell<dyn TraceCollector>>) -> Self {
-        let cloned_svm = self.svm.clone()
-            .with_trace_collector(trace_collector)
+    pub fn clone_with_invocation_callback<C: InvocationInspectCallback + 'static>(&self, callback: C) -> Self {
+        let mut cloned_svm = self.svm.clone()
             .with_sigverify(false)
             .with_blockhash_check(false);
+        cloned_svm.set_invocation_inspect_callback(callback);
 
-        Self { 
+        Self {
             svm: cloned_svm,
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
@@ -230,7 +231,7 @@ impl TestContext {
     /// Getters
 
     pub fn slot(&self) -> u64 {
-        self.svm.get_sysvar::<solana_sdk::clock::Clock>().slot
+        self.svm.get_sysvar::<Clock>().slot
     }
 
     pub fn get_account(&self, address: &Pubkey) -> Result<Account> {

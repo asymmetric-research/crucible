@@ -1,10 +1,9 @@
 use crate::TestContext;
-use solana_sdk::{
-    instruction::Instruction,
-    signature::{Keypair, Signer},
-    message::{Message, VersionedMessage},
-    transaction::VersionedTransaction,
-};
+use anchor_lang::solana_program::instruction::Instruction;
+use solana_keypair::Keypair;
+use solana_signer::Signer;
+use solana_message::{legacy::Message, VersionedMessage};
+use solana_transaction::versioned::VersionedTransaction;
 use anyhow::Result;
 
 pub struct InstructionBuilder<'a> {

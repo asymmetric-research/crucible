@@ -26,11 +26,11 @@ staging = []
 [dependencies]
 spl-transfer-hook-interface = "0.9.0"
 
-anchor-lang = { path = "/home/tlue/auditing/solana/anchor-fuzzing/lang" }
-anchor-spl = { path = "/home/tlue/auditing/solana/anchor-fuzzing/spl", features = ["token_2022"] }
+anchor-lang = ">=0.31"
+anchor-spl = { version = ">=0.31", features = ["token_2022"] }
 
-pyth-solana-receiver-sdk = "*"
-switchboard-on-demand = "*"
+pyth-solana-receiver-sdk = { version = "1.1.0", default-features = false }
+switchboard-on-demand = { version = "0.11.3", default-features = false, features = ["solana-v3"] }
 solana-stake-interface = "*"
 
 borsh = "1.5.7"
@@ -50,6 +50,3 @@ anyhow = "1.0"
 pretty_assertions = "1"
 anyhow = "1"
 
-[patch.crates-io]
-anchor-lang = { path = "/home/tlue/auditing/solana/anchor-fuzzing/lang" }
-anchor-spl = { path = "/home/tlue/auditing/solana/anchor-fuzzing/spl" }

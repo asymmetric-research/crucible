@@ -9,19 +9,23 @@ anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude", "tui_monitor"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
-solana-message = "2.3"
-solana-sdk = "2.3"
+solana-message = "3.0"
+solana-program = "3.0"
+solana-pubkey = "3.0"
+solana-keypair = "3.1"
+solana-signer = "3.0"
+solana-signature = "3.1"
+solana-instruction = "3.1"
 
 marginfi_program = { path = "../../programs/marginfi", package = "marginfi", features = ["no-entrypoint"] }
-anchor-lang = { path = "../../../../../lang" }
-anchor-spl = { path = "../../../../../spl" }
+# anchor-lang and anchor-spl are re-exported from anchor-test 
 
-pyth-solana-receiver-sdk = "*"
+# pyth-solana-receiver-sdk removed - types redefined locally in main.rs
 anyhow = "1.0"
 fixed = "1.28"
 fixed-macro = "1.2"
 bytemuck = "1.14"
-litesvm = { git = "https://github.com/asymmetric-research/litesvm-tracing", branch = "v0.7.1-with-tracing" }
+litesvm = { git = "https://github.com/procdump/litesvm", branch = "feat/register_tracing2", features = ["register-tracing"] }
 
 
 [features]

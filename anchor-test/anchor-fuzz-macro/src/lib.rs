@@ -189,43 +189,71 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         let template_fixture = #fixture_name::setup();
     };
     
-    // Per-iteration setup - clone fixture and replace ctx with new trace collector
+    // Per-iteration setup - clone fixture and replace ctx with new invocation callback
     let iteration_setup = quote! {
         let mut #fixture_param_name = template_fixture.clone();
-        let collector = #mod_name::DefaultTraceCollector::from_raw(cov_ptr, #mod_name::MAP_SIZE);
-        #fixture_param_name.ctx = #fixture_param_name.ctx.clone_with_trace_collector(Rc::new(RefCell::new(collector)));
+        let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+        #fixture_param_name.ctx = #fixture_param_name.ctx.clone_with_invocation_callback(callback);
     };
 
     let expanded = quote! {
         #input_fn
 
-        #[cfg(feature = #feature_name)]  
+        #[cfg(feature = #feature_name)]
         mod #mod_name {
             use super::*;
             pub const MAP_SIZE: usize = 1 << 16;
 
-            pub struct DefaultTraceCollector {
+            pub struct FuzzCallback {
                 ptr: *mut u8,
                 len: usize,
             }
 
-            impl DefaultTraceCollector {
+            unsafe impl Send for FuzzCallback {}
+            unsafe impl Sync for FuzzCallback {}
+
+            impl FuzzCallback {
                 pub fn from_raw(ptr: *mut u8, len: usize) -> Self { Self { ptr, len } }
 
-            }
-            impl anchor_test_context::TraceCollector for DefaultTraceCollector {
-                fn trace(&mut self, _m: &solana_message::SanitizedMessage, traces: &[Vec<[u64; 12]>]) {
-                    for trace in traces {
-                        let mut prev_location = 0usize;
-                        for entry in trace {
-                            let cur_location = ((entry[11] as usize) >> 4) ^ ((entry[11] as usize) << 8);
-
-                            unsafe {
-                                let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
-                                buf[(cur_location ^ prev_location) % MAP_SIZE] = 1;
-                            }
-                            prev_location = cur_location >> 1;
+                fn process_trace(&self, register_trace: &[[u64; 12]]) {
+                    if register_trace.is_empty() {
+                        return;
+                    }
+                    let mut prev_location = 0usize;
+                    for regs in register_trace.iter() {
+                        let pc = regs[11] as usize;
+                        let cur_location = (pc >> 4) ^ (pc << 8);
+                        unsafe {
+                            let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
+                            buf[(cur_location ^ prev_location) % MAP_SIZE] =
+                                buf[(cur_location ^ prev_location) % MAP_SIZE].wrapping_add(1);
                         }
+                        prev_location = cur_location >> 1;
+                    }
+                }
+            }
+
+            impl anchor_test_context::InvocationInspectCallback for FuzzCallback {
+                fn before_invocation(
+                    &self,
+                    _tx: &anchor_test_context::fuzz_types::SanitizedTransaction,
+                    _program_indices: &[anchor_test_context::fuzz_types::IndexOfAccount],
+                    _invoke_context: &anchor_test_context::fuzz_types::InvokeContext,
+                ) {}
+
+                fn after_invocation(
+                    &self,
+                    invoke_context: &anchor_test_context::fuzz_types::InvokeContext,
+                    register_tracing_enabled: bool,
+                ) {
+                    if register_tracing_enabled {
+                        invoke_context.iterate_vm_traces(
+                            &|_instruction_context,
+                              _executable,
+                              register_trace| {
+                                self.process_trace(register_trace);
+                            },
+                        );
                     }
                 }
             }
@@ -252,9 +280,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 return;
             }
             
-            use std::cell::RefCell;
             use std::process;
-            use std::rc::Rc;
             use libafl::mutators::StdMOptMutator;
             use libafl::prelude::*;
             use libafl::monitors::tui::TuiMonitor;

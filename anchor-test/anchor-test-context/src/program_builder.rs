@@ -1,8 +1,7 @@
 use crate::TestContext;
-use solana_sdk::{
-    instruction::Instruction,
-    signature::Keypair,
-};
+use solana_pubkey::Pubkey;
+use solana_keypair::Keypair;
+use anchor_lang::solana_program::instruction::{Instruction, AccountMeta};
 use anchor_lang::{InstructionData, ToAccountMetas};
 use anyhow::Result;
 use crate::instruction_builder;
@@ -30,15 +29,14 @@ impl ProgramBuilder<'_> {
         self
     }
 
-    pub fn remaining_accounts(mut self, accounts: Vec<solana_sdk::pubkey::Pubkey>) -> Self {
-        use solana_sdk::instruction::AccountMeta;
+    pub fn remaining_accounts(mut self, accounts: Vec<Pubkey>) -> Self {
         for pubkey in accounts {
             self.instruction.accounts.push(AccountMeta::new_readonly(pubkey, false));
         }
         self
     }
 
-    pub fn remaining_accounts_metas(mut self, metas: Vec<solana_sdk::instruction::AccountMeta>) -> Self {
+    pub fn remaining_accounts_metas(mut self, metas: Vec<AccountMeta>) -> Self {
         self.instruction.accounts.extend(metas);
         self
     }

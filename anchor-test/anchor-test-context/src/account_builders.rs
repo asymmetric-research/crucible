@@ -1,10 +1,8 @@
 use crate::TestContext;
-use solana_sdk::{
-    account::Account,
-    pubkey::Pubkey,
-};
+use solana_account::Account;
+use solana_pubkey::Pubkey;
 use spl_token::solana_program::program_option::COption;
-use solana_program::program_pack::Pack;
+use anchor_lang::solana_program::program_pack::Pack;
 use anyhow::Result;
 
 pub struct GenericAccountBuilder<'a> {
