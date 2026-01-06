@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::collections::HashSet;
 use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_keypair::Keypair;
@@ -38,13 +39,25 @@ pub use litesvm::InvocationInspectCallback;
 pub mod fuzz_types {
     pub use solana_transaction::sanitized::SanitizedTransaction;
     pub use solana_transaction_context::IndexOfAccount;
-    pub use solana_program_runtime::invoke_context::InvokeContext;
+    pub use solana_program_runtime::invoke_context::{InvokeContext, Executable};
+    pub use solana_sbpf::ebpf;
+}
+
+/// Stores program data for reloading into debuggable SVMs
+#[derive(Clone)]
+pub struct ProgramData {
+    pub program_id: Pubkey,
+    pub data: Vec<u8>,
 }
 
 pub struct TestContext {
     pub svm: LiteSVM,
     pub pending_instructions: Vec<Instruction>,
     pending_signers: Vec<Keypair>,
+    /// Programs loaded into this context (for reloading into debuggable SVMs)
+    programs: Vec<ProgramData>,
+    /// Account pubkeys that have been set (for copying to debuggable SVMs)
+    tracked_accounts: HashSet<Pubkey>,
 }
 
 impl Clone for TestContext {
@@ -53,19 +66,52 @@ impl Clone for TestContext {
             svm: self.svm.clone(),
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+            programs: self.programs.clone(),
+            tracked_accounts: self.tracked_accounts.clone(),
         }
     }
 }
 
 
+/// Empty callback that does nothing - used during setup to avoid DefaultRegisterTracingCallback
+/// trying to find .so files on disk for built-in programs.
+pub struct EmptyInvocationCallback;
+
+impl InvocationInspectCallback for EmptyInvocationCallback {
+    fn before_invocation(
+        &self,
+        _tx: &solana_transaction::sanitized::SanitizedTransaction,
+        _program_indices: &[solana_transaction_context::IndexOfAccount],
+        _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
+    ) {}
+
+    fn after_invocation(
+        &self,
+        _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
+        _register_tracing_enabled: bool,
+    ) {}
+}
+
 impl TestContext {
     pub fn new() -> Self {
-        let svm = LiteSVM::new();
-            
-        Self { 
+        // When ANCHOR_FUZZ_DEBUGGABLE is set (by the fuzz macro), create a debuggable SVM
+        // so programs are loaded with register tracing support baked in.
+        // Use EmptyInvocationCallback to suppress "Error collecting register tracing" messages
+        // from DefaultRegisterTracingCallback trying to find .so files for built-in programs.
+        let svm = if std::env::var("ANCHOR_FUZZ_DEBUGGABLE").is_ok() {
+            let mut svm = LiteSVM::new_debuggable(true);
+            svm.set_invocation_inspect_callback(EmptyInvocationCallback);
+            svm
+        } else {
+            LiteSVM::new()
+        };
+
+        Self {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
+            programs: Vec::new(),
+            tracked_accounts: HashSet::new(),
         }
     }
 
@@ -79,38 +125,73 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
+            programs: Vec::new(),
+            tracked_accounts: HashSet::new(),
         }
-    } 
+    }
 
     pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
         let program_data = std::fs::read(program_path)?;
         self.svm.add_program(program_id.clone(), &program_data);
+        // Store program data for reloading into debuggable SVMs
+        self.programs.push(ProgramData {
+            program_id: *program_id,
+            data: program_data,
+        });
         Ok(())
     }
 
     pub fn from_svm(svm: LiteSVM) -> Self {
-        Self { 
+        Self {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
+            programs: Vec::new(),
+            tracked_accounts: HashSet::new(),
         }
     }
-    
+
     pub fn into_svm(self) -> LiteSVM {
         self.svm
     }
 
+    /// Clone this context and set an invocation callback for coverage tracking.
+    /// The source SVM must have been created with debuggable mode (via ANCHOR_FUZZ_DEBUGGABLE env var)
+    /// for register tracing to work. Cloning preserves the debuggable state and loaded programs.
     pub fn clone_with_invocation_callback<C: InvocationInspectCallback + 'static>(&self, callback: C) -> Self {
-        let mut cloned_svm = self.svm.clone()
-            .with_sigverify(false)
-            .with_blockhash_check(false);
+        // Just clone the SVM directly and set callback - don't use builder methods
+        // as they may create a fresh SVM and lose account data
+        let mut cloned_svm = self.svm.clone();
         cloned_svm.set_invocation_inspect_callback(callback);
 
         Self {
             svm: cloned_svm,
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+            programs: self.programs.clone(),
+            tracked_accounts: self.tracked_accounts.clone(),
         }
+    }
+
+    /// Track an account pubkey so it gets copied when cloning with invocation callback.
+    /// Called internally by account builders.
+    pub fn track_account(&mut self, pubkey: Pubkey) {
+        self.tracked_accounts.insert(pubkey);
+    }
+
+    /// Get count of tracked accounts (for debugging)
+    pub fn tracked_accounts_count(&self) -> usize {
+        self.tracked_accounts.len()
+    }
+
+    /// Get count of loaded programs (for debugging)
+    pub fn programs_count(&self) -> usize {
+        self.programs.len()
+    }
+
+    /// Check if a specific account exists in the SVM (for debugging)
+    pub fn account_exists(&self, pubkey: &Pubkey) -> bool {
+        self.svm.get_account(pubkey).is_some()
     }
 
     /// Account Creation Helpers
@@ -271,6 +352,7 @@ impl TestContext {
 
     // Write account directly to SVM
     pub fn write_account(&mut self, address: &Pubkey, account: Account) -> Result<()> {
+        self.tracked_accounts.insert(*address);
         let _ = self.svm.set_account(*address, account);
         Ok(())
     }
@@ -334,6 +416,9 @@ impl TestContext {
             return Ok(None);
         }
 
+        let debug = std::env::var("FUZZ_DEBUG").is_ok();
+        let num_ixs = self.pending_instructions.len();
+
         // Deduplicate signers while preserving order (first = fee payer)
         let mut seen = std::collections::HashSet::new();
         let unique_signers: Vec<&Keypair> = self.pending_signers
@@ -341,12 +426,37 @@ impl TestContext {
             .filter(|k| seen.insert(k.pubkey()))
             .collect();
 
+        if debug {
+            eprintln!("[TX] Sending batch with {} instructions", num_ixs);
+            for (i, ix) in self.pending_instructions.iter().enumerate() {
+                eprintln!("[TX]   ix[{}]: program={}", i, ix.program_id);
+            }
+        }
+
         // Send transaction with all queued instructions
         let result = instruction_builder::send_transaction(
             &mut self.svm,
             self.pending_instructions.clone(),
             &unique_signers
         )?;
+
+        if debug {
+            match &result {
+                Ok(meta) => {
+                    eprintln!("[TX] SUCCESS - compute_units={}, logs:", meta.compute_units_consumed);
+                    for log in &meta.logs {
+                        eprintln!("[TX]   {}", log);
+                    }
+                }
+                Err(failed) => {
+                    eprintln!("[TX] FAILED - error: {:?}", failed.err);
+                    eprintln!("[TX]   logs:");
+                    for log in &failed.meta.logs {
+                        eprintln!("[TX]   {}", log);
+                    }
+                }
+            }
+        }
 
         // Clear queue regardless of success/failure
         self.pending_instructions.clear();

@@ -4,7 +4,7 @@ use crate::{
     state::marginfi_account::MarginfiAccount,
 };
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::sysvar::Sysvar;
+use solana_sysvar::Sysvar;
 
 pub fn initialize_account(ctx: Context<MarginfiAccountInitialize>) -> MarginfiResult {
     let MarginfiAccountInitialize {

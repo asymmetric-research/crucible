@@ -1,0 +1,10 @@
+# Crash artifacts from fuzzing
+crashes/
+
+# Claude Code context file
+CLAUDE.md
+
+# Common
+.DS_Store
+target/
+**/*.rs.bk

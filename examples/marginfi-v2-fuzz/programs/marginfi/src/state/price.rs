@@ -1,5 +1,6 @@
 use crate::{
     check, check_eq,
+    compat::{deserialize_price_update_v2, pyth_push_oracle_id, pyth_receiver_id, to_legacy_clock},
     constants::{
         CONF_INTERVAL_MULTIPLE, EXP_10_I80F48, MAX_CONF_INTERVAL, MIN_PYTH_PUSH_VERIFICATION_LEVEL,
         NATIVE_STAKE_ID, PYTH_ID, SPL_SINGLE_POOL_ID, STD_DEV_MULTIPLE, SWITCHBOARD_PULL_ID,
@@ -10,8 +11,8 @@ use crate::{
 };
 use anchor_lang::prelude::borsh;
 use anchor_lang::prelude::*;
-use solana_sdk::borsh::try_from_slice_unchecked;
-use solana_sdk::stake::state::StakeStateV2;
+use borsh::BorshDeserialize;
+use solana_stake_interface::state::StakeStateV2;
 use anchor_spl::token::Mint;
 use bytemuck::{Pod, Zeroable};
 use enum_dispatch::enum_dispatch;
@@ -128,13 +129,14 @@ impl OraclePriceFeedAdapter {
                 if live!() {
                     check_eq!(
                         *account_info.owner,
-                        pyth_solana_receiver_sdk::id(),
+                        pyth_receiver_id(),
                         MarginfiError::PythPushWrongAccountOwner
                     );
                 } else {
                     // On localnet, allow the mock program ID -OR- the real one
+                    let pyth_recv_id = pyth_receiver_id();
                     let owner_ok = account_info.owner.eq(&PYTH_ID)
-                        || account_info.owner.eq(&pyth_solana_receiver_sdk::id());
+                        || account_info.owner.eq(&pyth_recv_id);
                     check!(owner_ok, MarginfiError::PythPushWrongAccountOwner);
                 }
 
@@ -199,7 +201,8 @@ impl OraclePriceFeedAdapter {
 
                 let lst_mint = Account::<'info, Mint>::try_from(&ais[1]).unwrap();
                 let lst_supply = lst_mint.supply;
-                let stake_state = try_from_slice_unchecked::<StakeStateV2>(&ais[2].data.borrow())?;
+                let stake_state: StakeStateV2 = bincode::deserialize(&ais[2].data.borrow())
+                    .map_err(|_| error!(MarginfiError::InvalidOracleSetup))?;
                 let (_, stake) = match stake_state {
                     StakeStateV2::Stake(meta, stake, _) => (meta, stake),
                     _ => panic!("unsupported stake state"), // TODO emit more specific error
@@ -221,8 +224,8 @@ impl OraclePriceFeedAdapter {
 
                 if live!() {
                     check_eq!(
-                        account_info.owner,
-                        &pyth_solana_receiver_sdk::id(),
+                        *account_info.owner,
+                        pyth_receiver_id(),
                         MarginfiError::StakedPythPushWrongAccountOwner
                     );
                 } else {
@@ -231,8 +234,9 @@ impl OraclePriceFeedAdapter {
                     // * Note: Typically price updates are owned by `pyth_solana_receiver_sdk` and the oracle
                     // feed account itself is owned by PYTH ID. On localnet, the mock program may own both for
                     // simplicity.
+                    let pyth_recv_id = pyth_receiver_id();
                     let owner_ok = account_info.owner.eq(&PYTH_ID)
-                        || account_info.owner.eq(&pyth_solana_receiver_sdk::id());
+                        || account_info.owner.eq(&pyth_recv_id);
                     check!(owner_ok, MarginfiError::StakedPythPushWrongAccountOwner);
                 }
 
@@ -385,7 +389,7 @@ impl OraclePriceFeedAdapter {
 
                     // Sanity check the mint. Note: spl-single-pool uses a classic Token, never Token22
                     check!(
-                        oracle_ais[1].owner == &SPL_TOKEN_PROGRAM_ID,
+                        oracle_ais[1].owner == &spl_token::id(),
                         MarginfiError::StakePoolValidationFailed
                     );
                     check_eq!(
@@ -596,7 +600,7 @@ pub fn load_price_update_v2_checked(ai: &AccountInfo) -> MarginfiResult<PriceUpd
     if live!() {
         check_eq!(
             *ai.owner,
-            pyth_solana_receiver_sdk::id(),
+            pyth_receiver_id(),
             MarginfiError::PythPushWrongAccountOwner
         );
     } else {
@@ -605,7 +609,8 @@ pub fn load_price_update_v2_checked(ai: &AccountInfo) -> MarginfiResult<PriceUpd
         // * Note: Typically price updates are owned by `pyth_solana_receiver_sdk` and the oracle
         // feed account itself is owned by PYTH ID. On localnet, the mock program may own both for
         // simplicity.
-        let owner_ok = ai.owner.eq(&PYTH_ID) || ai.owner.eq(&pyth_solana_receiver_sdk::id());
+        let pyth_recv_id = pyth_receiver_id();
+        let owner_ok = ai.owner.eq(&PYTH_ID) || ai.owner.eq(&pyth_recv_id);
         check!(owner_ok, MarginfiError::PythPushWrongAccountOwner);
     }
 
@@ -620,9 +625,9 @@ pub fn load_price_update_v2_checked(ai: &AccountInfo) -> MarginfiResult<PriceUpd
         MarginfiError::PythPushInvalidAccount
     );
 
-    Ok(PriceUpdateV2::deserialize(
-        &mut &price_feed_data.as_ref()[8..],
-    )?)
+    // Use compat helper to deserialize with pyth SDK's anchor-lang (borsh 0.10)
+    deserialize_price_update_v2(price_feed_data.as_ref())
+        .map_err(|_| error!(MarginfiError::PythPushInvalidAccount))
 }
 
 #[cfg_attr(feature = "client", derive(Clone, Debug))]
@@ -674,9 +679,10 @@ impl PythPushOraclePriceFeed {
             &price_feed_account.price_message.feed_id
         };
 
+        let legacy_clock = to_legacy_clock(clock);
         let price = price_feed_account
             .get_price_no_older_than_with_custom_verification_level(
-                clock,
+                &legacy_clock,
                 max_age,
                 feed_id,
                 MIN_PYTH_PUSH_VERIFICATION_LEVEL,
@@ -840,7 +846,7 @@ impl PythPushOraclePriceFeed {
     /// Marginfi sponsored feed id
     /// `constants::PYTH_PUSH_MARGINFI_SPONSORED_SHARD_ID = 3301`
     pub fn find_oracle_address(shard_id: u16, feed_id: &FeedId) -> (Pubkey, u8) {
-        Pubkey::find_program_address(&[&shard_id.to_le_bytes(), feed_id], &PYTH_PUSH_ORACLE_ID)
+        Pubkey::find_program_address(&[&shard_id.to_le_bytes(), feed_id], &pyth_push_oracle_id())
     }
 }
 

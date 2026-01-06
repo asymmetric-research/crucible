@@ -1,14 +1,39 @@
 use anchor_test::*;
 use anchor_test::anchor_lang::prelude::*;
-use solana_sdk::{
-    signature::{Keypair, Signer},
-    pubkey::Pubkey,
-    system_program,
-    sysvar,
-};
+use solana_keypair::Keypair;
+use solana_signer::Signer;
+use solana_pubkey::Pubkey;
+use anchor_test::anchor_lang::system_program;
+
+// Sysvar IDs for Solana v3
+mod sysvar {
+    pub mod rent {
+        // SysvarRent111111111111111111111111111111111
+        pub fn id() -> solana_pubkey::Pubkey {
+            solana_pubkey::Pubkey::new_from_array([
+                0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51,
+                0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1, 0x7f,
+                0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44,
+                0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00, 0x00, 0x00,
+            ])
+        }
+    }
+    pub mod instructions {
+        // Sysvar1nstructions1111111111111111111111111
+        pub fn id() -> solana_pubkey::Pubkey {
+            solana_pubkey::Pubkey::new_from_array([
+                0x06, 0xa7, 0xd5, 0x17, 0x18, 0x7b, 0xd1, 0x66,
+                0x35, 0xda, 0xd4, 0x04, 0x55, 0xfd, 0xc2, 0xc0,
+                0xc1, 0x24, 0xc6, 0x8f, 0x21, 0x56, 0x75, 0xa5,
+                0xdb, 0xba, 0xcb, 0x5f, 0x08, 0x00, 0x00, 0x00,
+            ])
+        }
+    }
+}
 use std::{rc::Rc, collections::HashMap};
 use fixed::types::I80F48;
 use fixed_macro::types::I80F48;
+use borsh::BorshSerialize;
 
 use marginfi_program::{
     instruction,
@@ -32,10 +57,10 @@ pub mod pyth_local {
 
     // rec5EKMGg6MxZYaMdyBps2bnnCNHi6KCYuQedA7GsAuW
     pub const ID: Pubkey = Pubkey::new_from_array([
-        0x0c, 0x0b, 0xea, 0x79, 0x8f, 0x5d, 0x1a, 0x39,
-        0x4a, 0x89, 0x3f, 0x83, 0x3a, 0x3e, 0x03, 0x9e,
-        0x95, 0x43, 0x2f, 0x13, 0xea, 0xf8, 0x31, 0x79,
-        0x44, 0x10, 0x8f, 0x22, 0xf3, 0x75, 0x03, 0x55,
+        0x02, 0xe1, 0xae, 0xce, 0x70, 0xcc, 0x1b, 0xac,
+        0x7a, 0x72, 0xa9, 0x36, 0x74, 0xe4, 0x5a, 0x7b,
+        0xe1, 0xa8, 0xbd, 0x5a, 0x03, 0xbd, 0x7c, 0x50,
+        0xfd, 0x3f, 0xa2, 0xc5, 0xa4, 0x92, 0x88, 0x28,
     ]);
 
     #[derive(Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -120,7 +145,7 @@ impl MarginfiFixture {
         let mut ctx = TestContext::new();
         let program_id = marginfi_program::ID;
         
-        ctx.add_program(&program_id, "target/deploy/marginfi.so")
+        ctx.add_program(&program_id, "marginfi.so")
             .expect("Failed to load marginfi program");
         
         fixture_helpers::initialize_state(&mut ctx, &program_id)
@@ -280,7 +305,7 @@ impl MarginfiFixture {
                 authority: user.keypair.pubkey(),
                 new_authority: user.keypair.pubkey(),
                 global_fee_wallet: self.global_fee_wallet,
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair, &new_marginfi_account])
             .add_transaction();
@@ -385,7 +410,7 @@ mod fixture_helpers {
         ctx.create_account()
             .pubkey(admin.pubkey())
             .lamports(100_000_000_000)
-            .owner(system_program::id())
+            .owner(system_program::ID)
             .create()
             .unwrap();
 
@@ -467,7 +492,7 @@ mod fixture_helpers {
                 payer: admin.pubkey(),
                 fee_state,
                 rent: sysvar::rent::id(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&**admin])
             .send()
@@ -490,7 +515,7 @@ mod fixture_helpers {
                 marginfi_group: group.pubkey(),
                 admin: admin.pubkey(),
                 fee_state: *fee_state,
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&**admin, &group])
             .send()
@@ -584,7 +609,7 @@ mod fixture_helpers {
                 fee_vault,
                 rent: sysvar::rent::id(),
                 token_program: spl_token::id(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&**admin, &bank])
             .send()
@@ -620,7 +645,7 @@ mod fixture_helpers {
         ctx.create_account()
             .pubkey(keypair.pubkey())
             .lamports(10_000_000_000)
-            .owner(system_program::id())
+            .owner(system_program::ID)
             .create()
             .unwrap();
         
@@ -632,7 +657,7 @@ mod fixture_helpers {
                 marginfi_account: marginfi_account.pubkey(),
                 authority: keypair.pubkey(),
                 fee_payer: keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*keypair, &marginfi_account])
             .send()

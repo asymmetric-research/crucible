@@ -62,6 +62,7 @@ impl GenericAccountBuilder<'_> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
+        self.ctx.track_account(self.address);
         let _ = self.ctx.svm.set_account(self.address, self.account_state);
         Ok(self.address)
     }
@@ -87,7 +88,8 @@ impl MintAccountBuilder<'_> {
 
         let mut account = self.account_state;
         spl_token::state::Mint::pack(self.mint, &mut account.data)?;
-        let _ = self.ctx.svm.set_account(self.address, account); 
+        self.ctx.track_account(self.address);
+        let _ = self.ctx.svm.set_account(self.address, account);
         Ok(self.address)
     }
 
@@ -136,19 +138,20 @@ impl TokenAccountBuilder<'_> {
     pub fn create(self) -> Result<Pubkey> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
-        } 
+        }
 
         if self.token_state.mint == Pubkey::default() {
             return Err(anyhow::anyhow!("Mint must be set with .mint()"));
-        } 
+        }
 
         if self.token_state.owner == Pubkey::default() {
             return Err(anyhow::anyhow!("Owner must be set with .token_owner()"));
-        } 
+        }
 
         let mut account = self.account_state;
         spl_token::state::Account::pack(self.token_state, &mut account.data)?;
-        let _ = self.ctx.svm.set_account(self.address, account); 
+        self.ctx.track_account(self.address);
+        let _ = self.ctx.svm.set_account(self.address, account);
         Ok(self.address)
     }
 

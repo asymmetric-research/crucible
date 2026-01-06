@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{clock::Clock, sysvar::Sysvar};
+use anchor_lang::solana_program::clock::Clock;
+use solana_sysvar::Sysvar;
 use bytemuck::Zeroable;
 use fixed::types::I80F48;
 

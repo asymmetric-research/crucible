@@ -15,22 +15,25 @@ resolver = "2"
 
 [workspace.dependencies]
 anyhow = "1.0"
-litesvm = { git = "https://github.com/procdump/litesvm", branch = "feat/register_tracing2", features = ["register-tracing"] }
-anchor-lang = ">=0.31"
-anchor-spl = ">=0.31"
-# Client-side solana crates - pinned to 3.x to match litesvm
-solana-pubkey = "^3.0"
-solana-keypair = "^3.0"
-solana-signer = "^3.0"
-solana-signature = "^3.0"
-solana-account = "^3.0"
-solana-transaction = "^3.0"
-solana-message = "^3.0"
-solana-hash = "^3.0"
-solana-program-runtime = "^3.0"
-solana-transaction-context = "^3.0"
+litesvm = { version = "0.9.0", features = ["register-tracing"] }
+# Using local anchor with Solana v3.1 support
+anchor-lang = { path = "../../lang" }
+anchor-spl = { path = "../../spl" }
+# Solana crates pinned to match anchor master and litesvm 0.9.0
+solana-pubkey = "3.0"
+solana-keypair = "3.0"
+solana-signer = "3.0"
+solana-signature = "3.0"
+solana-account = "3.0"
+solana-transaction = "3.0"
+solana-message = "3.0"
+solana-hash = "3.0"
+solana-program-runtime = "3.0"
+solana-transaction-context = "3.0"
+solana-clock = "3.0"
+solana-sbpf = "0.13"
 
-spl-token = "^8.0"
+spl-token = "9.0"
 
 [dependencies]
 rand = "0.8"
@@ -39,6 +42,7 @@ anchor-test-context = { path = "./anchor-test-context" }
 anchor-fuzz-macro = { path = "./anchor-fuzz-macro" }
 anchor-invariant-macro = { path = "./anchor-invariant-macro" }
 anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
 
 [workspace.lints]
 rust.missing_debug_implementations = "warn"
@@ -50,4 +54,5 @@ clippy.wildcard_imports = "deny"
 
 [features]
 no-entrypoint = []
+
 

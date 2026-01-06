@@ -19,5 +19,6 @@ solana-message.workspace = true
 solana-hash.workspace = true
 solana-program-runtime.workspace = true
 solana-transaction-context.workspace = true
+solana-sbpf.workspace = true
 
 spl-token.workspace = true

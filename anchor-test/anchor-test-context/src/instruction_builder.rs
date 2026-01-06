@@ -46,20 +46,38 @@ pub fn send_transaction(
     if signers.is_empty() {
         return Err(anyhow::anyhow!("At least one signer (fee payer) is required"));
     }
-    
+
+    let debug = std::env::var("FUZZ_DEBUG").is_ok();
+
     svm.expire_blockhash();
     let blockhash = svm.latest_blockhash();
-    
+
     let message = Message::new_with_blockhash(
         &instructions,
         Some(&signers[0].pubkey()),
         &blockhash,
     );
-    
+
     let tx = VersionedTransaction::try_new(
         VersionedMessage::Legacy(message),
         signers
     )?;
-    
-    Ok(svm.send_transaction(tx))
+
+    let result = svm.send_transaction(tx);
+
+    if debug {
+        match &result {
+            Ok(meta) => {
+                eprintln!("[TX] SUCCESS - compute_units={}", meta.compute_units_consumed);
+            }
+            Err(failed) => {
+                eprintln!("[TX] FAILED - error: {:?}", failed.err);
+                for log in &failed.meta.logs {
+                    eprintln!("[TX]   {}", log);
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }

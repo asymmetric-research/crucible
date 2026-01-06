@@ -36,6 +36,7 @@ use pyth_solana_receiver_sdk::price_update::FeedId;
 use std::fmt::Display;
 use std::fmt::{Debug, Formatter};
 use type_layout::TypeLayout;
+use crate::compat::invoke_transfer_checked_compat;
 
 pub const PROGRAM_FEES_ENABLED: u64 = 1;
 pub const ARENA_GROUP: u64 = 2;
@@ -1040,7 +1041,7 @@ impl Bank {
         );
 
         if let Some(mint) = maybe_mint {
-            spl_token_2022::onchain::invoke_transfer_checked(
+            invoke_transfer_checked_compat(
                 program.key,
                 from,
                 mint.to_account_info(),
@@ -1055,7 +1056,7 @@ impl Bank {
             #[allow(deprecated)]
             transfer(
                 CpiContext::new_with_signer(
-                    program.key(),
+                    *program.key,
                     Transfer {
                         from,
                         to,
@@ -1087,7 +1088,7 @@ impl Bank {
         );
 
         if let Some(mint) = maybe_mint {
-            spl_token_2022::onchain::invoke_transfer_checked(
+            invoke_transfer_checked_compat(
                 program.key,
                 from,
                 mint.to_account_info(),
@@ -1106,7 +1107,7 @@ impl Bank {
             #[allow(deprecated)]
             transfer(
                 CpiContext::new_with_signer(
-                    program.key(),
+                    *program.key,
                     Transfer {
                         from,
                         to,

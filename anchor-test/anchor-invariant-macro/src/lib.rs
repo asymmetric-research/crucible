@@ -216,13 +216,20 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[anchor_fuzz]
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
+            let debug = std::env::var("FUZZ_DEBUG").is_ok();
+            if debug {
+                eprintln!("[FUZZ] Starting iteration with {} actions", actions.len());
+            }
             for (i, mut action) in actions.into_iter().enumerate() {
                 action.constrain_in_place();
+                if debug {
+                    eprintln!("[FUZZ] Action {}: {:?}", i, action);
+                }
                 fixture.__dispatch_action(action);
 
                 #fn_body
             }
-        fixture.__auto_flush();
+            fixture.__auto_flush();
         }
     };
 

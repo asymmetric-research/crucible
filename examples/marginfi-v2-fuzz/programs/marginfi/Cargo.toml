@@ -26,13 +26,22 @@ staging = []
 [dependencies]
 spl-transfer-hook-interface = "0.9.0"
 
-anchor-lang = ">=0.31"
-anchor-spl = { version = ">=0.31", features = ["token_2022"] }
+anchor-lang = { path = "../../../../../lang" }
+anchor-spl = { path = "../../../../../spl", features = ["token_2022"] }
+# Pyth SDK's anchor-lang for AccountDeserialize trait compatibility
+anchor-lang-pyth = { package = "anchor-lang", version = "0.32.1" }
+spl-token = { version = "9.0", features = ["no-entrypoint"] }
+spl-token-2022 = { version = "8.0", features = ["no-entrypoint"] }
 
 pyth-solana-receiver-sdk = { version = "1.1.0", default-features = false }
 switchboard-on-demand = { version = "0.11.3", default-features = false, features = ["solana-v3"] }
 solana-stake-interface = "*"
+solana-sysvar = "*"
+solana-instructions-sysvar = "*"
+# Legacy solana-clock for pyth SDK compatibility (uses v2.2.2)
+solana-clock-legacy = { package = "solana-clock", version = "2.2.2" }
 
+bincode = "1.3"
 borsh = "1.5.7"
 bytemuck = "1.22.0"
 fixed = "=1.28.0"

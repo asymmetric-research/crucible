@@ -7,7 +7,7 @@ edition = "2021"
 anchor-test = { path = "../../../../anchor-test" }
 anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
 arbitrary = { version = "1", features = ["derive"] }
-libafl = { version = "0.15.1", features = ["std", "cli", "prelude", "tui_monitor"] }
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
 solana-message = "3.0"
 solana-program = "3.0"
@@ -25,7 +25,8 @@ anyhow = "1.0"
 fixed = "1.28"
 fixed-macro = "1.2"
 bytemuck = "1.14"
-litesvm = { git = "https://github.com/procdump/litesvm", branch = "feat/register_tracing2", features = ["register-tracing"] }
+borsh = "1.5"
+litesvm = { version = "0.9.0", features = ["register-tracing"] }
 
 
 [features]

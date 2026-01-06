@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-marginfi_v2_fuzz = "63cphKkRNgfqSsoBhuFkeZMQKxjCF4fZjdmvvbupVodA"
+marginfi = "63cphKkRNgfqSsoBhuFkeZMQKxjCF4fZjdmvvbupVodA"
 
 [registry]
 url = "https://api.apr.dev"

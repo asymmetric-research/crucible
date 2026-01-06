@@ -1,6 +1,9 @@
 use anchor_counter::*;
 use anchor_test::*;
-use solana_sdk::{signature::Keypair, system_program, pubkey::Pubkey, signature::Signer};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use anchor_test::anchor_lang::system_program;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -26,7 +29,7 @@ impl CounterFixture {
         ctx.create_account()
             .pubkey(payer.pubkey())
             .lamports(10_000_000_000)
-            .owner(system_program::id())
+            .owner(system_program::ID)
             .create()
             .unwrap();
         
@@ -39,7 +42,7 @@ impl CounterFixture {
             .accounts(accounts::Initialize {
                 counter: counter_pda,
                 payer: payer.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*payer])
             .send()

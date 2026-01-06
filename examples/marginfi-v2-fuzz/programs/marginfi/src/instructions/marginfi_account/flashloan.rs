@@ -6,10 +6,8 @@ use crate::{
     },
 };
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{
-    instruction::{get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
-    sysvar::{self, instructions},
-};
+use anchor_lang::solana_program::instruction::{get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT};
+use solana_instructions_sysvar as instructions_sysvar;
 
 pub fn lending_account_start_flashloan(
     ctx: Context<LendingAccountStartFlashloan>,
@@ -38,7 +36,7 @@ pub struct LendingAccountStartFlashloan<'info> {
     pub authority: Signer<'info>,
 
     /// CHECK: Instructions sysvar
-    #[account(address = sysvar::instructions::ID)]
+    #[account(address = instructions_sysvar::ID)]
     pub ixs_sysvar: AccountInfo<'info>,
 }
 
@@ -59,12 +57,12 @@ pub fn check_flashloan_can_start(
     end_fl_idx: usize,
 ) -> MarginfiResult<()> {
     // Note: FLASHLOAN_ENABLED_FLAG is now deprecated, any non-disabled account can initiate a flash loan.
-    let current_ix_idx: usize = instructions::load_current_index_checked(sysvar_ixs)?.into();
+    let current_ix_idx: usize = instructions_sysvar::load_current_index_checked(sysvar_ixs)?.into();
 
     check!(current_ix_idx < end_fl_idx, MarginfiError::IllegalFlashloan);
 
     // Check current ix is not a CPI
-    let current_ix = instructions::load_instruction_at_checked(current_ix_idx, sysvar_ixs)?;
+    let current_ix = instructions_sysvar::load_instruction_at_checked(current_ix_idx, sysvar_ixs)?;
 
     check!(
         get_stack_height() == TRANSACTION_LEVEL_STACK_HEIGHT,
@@ -79,7 +77,7 @@ pub fn check_flashloan_can_start(
     );
 
     // Will error if ix doesn't exist
-    let unchecked_end_fl_ix = instructions::load_instruction_at_checked(end_fl_idx, sysvar_ixs)?;
+    let unchecked_end_fl_ix = instructions_sysvar::load_instruction_at_checked(end_fl_idx, sysvar_ixs)?;
 
     let discrim = &unchecked_end_fl_ix.data[..8];
     // TODO figure out anchor's fancy new discrim syntax to avoid hard coding this.

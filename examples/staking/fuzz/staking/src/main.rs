@@ -1,6 +1,9 @@
 use staking::*;
 use anchor_test::*;
-use solana_sdk::{signature::{Keypair, keypair_from_seed}, system_program, pubkey::Pubkey, signature::Signer};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use anchor_test::anchor_lang::system_program;
 use std::rc::Rc;
 
 const INITIAL_BALANCE: u64 = 100_000_000_000;
@@ -45,7 +48,7 @@ impl StakingFixture {
             ctx.create_account()
                 .pubkey(keypair.pubkey())
                 .lamports(INITIAL_BALANCE)
-                .owner(system_program::id())
+                .owner(system_program::ID)
                 .create()
                 .unwrap();
             
@@ -64,7 +67,7 @@ impl StakingFixture {
         ctx.create_account()
             .pubkey(funder.pubkey())
             .lamports(1_000_000_000_000)
-            .owner(system_program::id())
+            .owner(system_program::ID)
             .create()
             .unwrap();
         
@@ -74,7 +77,7 @@ impl StakingFixture {
             .accounts(accounts::InitializePool {
                 pool: pool_pda,
                 payer: users[0].keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*users[0].keypair])
             .send()
@@ -87,7 +90,7 @@ impl StakingFixture {
                 .accounts(accounts::InitializeUser {
                     user_account: user.user_pda,
                     staker: user.keypair.pubkey(),
-                    system_program: system_program::id(),
+                    system_program: system_program::ID,
                 })
                 .signers(&[&*user.keypair])
                 .send()
@@ -134,7 +137,7 @@ impl StakingFixture {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
             .send();
@@ -156,7 +159,7 @@ impl StakingFixture {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
             .send()
@@ -297,7 +300,7 @@ impl StakingFixtureSingleTransaction {
             ctx.create_account()
                 .pubkey(keypair.pubkey())
                 .lamports(INITIAL_BALANCE)
-                .owner(system_program::id())
+                .owner(system_program::ID)
                 .create()
                 .unwrap();
 
@@ -316,7 +319,7 @@ impl StakingFixtureSingleTransaction {
         ctx.create_account()
             .pubkey(funder.pubkey())
             .lamports(1_000_000_000_000)
-            .owner(system_program::id())
+            .owner(system_program::ID)
             .create()
             .unwrap();
 
@@ -326,7 +329,7 @@ impl StakingFixtureSingleTransaction {
             .accounts(accounts::InitializePool {
                 pool: pool_pda,
                 payer: users[0].keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*users[0].keypair])
             .send()
@@ -339,7 +342,7 @@ impl StakingFixtureSingleTransaction {
                 .accounts(accounts::InitializeUser {
                     user_account: user.user_pda,
                     staker: user.keypair.pubkey(),
-                    system_program: system_program::id(),
+                    system_program: system_program::ID,
                 })
                 .signers(&[&*user.keypair])
                 .send()
@@ -385,7 +388,7 @@ impl StakingFixtureSingleTransaction {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
             .add_transaction();
@@ -406,7 +409,7 @@ impl StakingFixtureSingleTransaction {
                 pool: self.pool_pda,
                 user_account: user.user_pda,
                 staker: user.keypair.pubkey(),
-                system_program: system_program::id(),
+                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
             .add_transaction();
