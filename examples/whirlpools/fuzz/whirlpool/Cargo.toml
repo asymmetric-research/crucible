@@ -1,0 +1,38 @@
+[package]
+name = "whirlpool_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+# Standalone workspace - isolated from parent project to avoid Solana version conflicts
+
+[dependencies]
+# Fuzzing framework
+anchor-test = { path = "../../../../anchor-test" }
+anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
+anchor-fuzz-gen = { path = "../../../../anchor-test/anchor-fuzz-gen" }
+
+# Anchor (local v3-compatible)
+anchor-lang = { path = "../../../../../lang" }
+
+# Solana v3.x (required for litesvm 0.9.0)
+solana-pubkey = "3.0"
+solana-keypair = "3.1"
+solana-signer = "3.0"
+solana-program = "3.0"
+solana-message = "3.0"
+solana-signature = "3.1"
+solana-instruction = "3.1"
+
+# Fuzzing
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+arbitrary = { version = "1", features = ["derive"] }
+
+# Utilities
+anyhow = "1.0"
+bytemuck = "1.14"
+
+[features]
+fuzz_single = []
+invariant_test = []

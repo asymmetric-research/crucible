@@ -31,7 +31,6 @@ mod instruction_builder;
 mod program_builder;
 mod transaction_builder;
 mod system_program_builder;
-pub mod trace_collector;
 
 pub use litesvm::InvocationInspectCallback;
 

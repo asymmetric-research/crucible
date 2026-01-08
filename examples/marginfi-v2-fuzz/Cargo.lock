@@ -364,6 +364,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-fuzz-gen"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang-idl 0.1.2",
+ "anyhow",
+ "bs58",
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "anchor-fuzz-macro"
 version = "0.1.0"
 dependencies = [
@@ -2710,6 +2725,8 @@ dependencies = [
 name = "marginfi-v2-fuzz_fuzz"
 version = "0.1.0"
 dependencies = [
+ "anchor-fuzz-gen",
+ "anchor-lang 0.32.1",
  "anchor-test",
  "anchor-test-context",
  "anyhow",
@@ -2721,7 +2738,6 @@ dependencies = [
  "libafl",
  "libafl_bolts",
  "litesvm",
- "marginfi",
  "solana-instruction 3.1.0",
  "solana-keypair",
  "solana-message 3.0.1",

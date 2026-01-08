@@ -1,9 +1,23 @@
 use anchor_test::*;
-use anchor_test::anchor_lang::prelude::*;
+use anchor_lang::prelude::*;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_pubkey::Pubkey;
-use anchor_test::anchor_lang::system_program;
+use anchor_lang::system_program;
+
+// Generate complete types from IDL (including state types for deserialization)
+anchor_fuzz_gen::declare_fuzz_program!("idls/marginfi.json");
+
+use marginfi::instruction;
+use marginfi::accounts;
+use marginfi::types::{
+    BankConfigCompact, WrappedI80F48,
+    BankOperationalState, RiskTier, InterestRateConfigCompact,
+};
+use marginfi::state::MarginfiAccount;
+
+// ACCOUNT_DISABLED constant - may need to be defined locally if not in IDL
+const ACCOUNT_DISABLED: u64 = 1;
 
 // Sysvar IDs for Solana v3
 mod sysvar {
@@ -35,15 +49,6 @@ use fixed::types::I80F48;
 use fixed_macro::types::I80F48;
 use borsh::BorshSerialize;
 
-use marginfi_program::{
-    instruction,
-    accounts,
-    state::marginfi_group::{
-        BankConfigCompact, WrappedI80F48,
-        BankOperationalState, RiskTier, InterestRateConfigCompact,
-    },
-    state::marginfi_account::{MarginfiAccount, ACCOUNT_DISABLED},
-};
 use anchor_test::anchor_spl::token::spl_token;
 
 // ============================================================================
@@ -143,9 +148,9 @@ struct MarginfiFixture {
 impl MarginfiFixture {
     pub fn setup() -> Self {
         let mut ctx = TestContext::new();
-        let program_id = marginfi_program::ID;
+        let program_id = marginfi::ID;
         
-        ctx.add_program(&program_id, "marginfi.so")
+        ctx.add_program(&program_id, "../../marginfi.so")
             .expect("Failed to load marginfi program");
         
         fixture_helpers::initialize_state(&mut ctx, &program_id)
@@ -488,7 +493,7 @@ mod fixture_helpers {
                 program_fee_fixed: WrappedI80F48::from(I80F48::ZERO),
                 program_fee_rate: WrappedI80F48::from(I80F48::ZERO),
             })
-            .accounts(accounts::InitFeeState {
+            .accounts(accounts::InitGlobalFeeState {
                 payer: admin.pubkey(),
                 fee_state,
                 rent: sysvar::rent::id(),
@@ -750,7 +755,8 @@ fn bad_debt_check(fixture: &mut MarginfiFixture) {
         let Ok(account_data) = fixture.ctx.get_account(&account_pubkey) else { continue };
         let account: &MarginfiAccount = bytemuck::from_bytes(&account_data.data[8..]);
         
-        if account.get_flag(ACCOUNT_DISABLED) { continue }
+        // Check if account is disabled by checking bit flag
+        if (account.account_flags & ACCOUNT_DISABLED) != 0 { continue }
         
         let mut assets_usd = I80F48::ZERO;
         let mut liabs_usd = I80F48::ZERO;
