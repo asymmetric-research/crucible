@@ -101,6 +101,69 @@ ctx.program(program_id)
     .send()?;
 ```
 
+### Transaction Results (`TxOutcome`)
+
+The `.send()` method returns `Result<TxOutcome>`, a parsed transaction result:
+
+```rust
+use anchor_test_context::TxOutcome;
+
+let result = ctx.program(program_id)
+    .call(instruction::DoSomething { amount })
+    .accounts(accounts::DoSomething { /* ... */ })
+    .signers(&[&*user])
+    .send()?;
+
+match result {
+    TxOutcome::Success { compute_units, logs } => {
+        // Transaction succeeded
+        println!("Used {} CU", compute_units);
+    }
+    TxOutcome::ProgramError { error, error_code, logs, .. } => {
+        // Transaction failed (e.g., program error, constraint violation)
+        if let Some(code) = error_code {
+            println!("Failed with error code: {}", code);
+        }
+        for log in &logs {
+            eprintln!("  {}", log);
+        }
+    }
+}
+```
+
+**TxOutcome variants:**
+- `Success { compute_units, logs }` - Transaction executed successfully
+- `ProgramError { error, error_code, instruction_index, logs }` - Transaction failed
+
+**Helper methods:**
+- `is_success()` - Returns true if transaction succeeded
+- `is_error()` - Returns true if transaction failed
+- `error_code()` - Extracts `Custom(N)` error codes (e.g., Anchor error codes)
+- `logs()` - Returns program logs
+- `unwrap()` - Panics with detailed error message if failed
+- `expect(msg)` - Panics with custom message if failed
+- `into_result()` - Converts to `Result<(), TxError>` for `?` operator
+
+**Common patterns:**
+
+```rust
+// Expect success or panic with logs
+result.unwrap();
+
+// Check for specific error code
+if result.error_code() == Some(6051) {
+    // Handle specific Anchor error
+}
+
+// Ignore expected failures
+let success = matches!(&result, Ok(TxOutcome::Success { .. }));
+if !success {
+    // Transaction failed - may be expected in fuzzing
+}
+```
+
+---
+
 ### Raw Instruction Calls
 
 For non-Anchor programs or custom instructions:
@@ -460,16 +523,33 @@ pub fn action_unstake(&mut self, user_idx: usize, amount: u64) {
 }
 ```
 
-### Ignoring expected errors
+### Handling expected errors
 
 ```rust
+use anchor_test_context::TxOutcome;
+
 pub fn action_claim(&mut self, user_idx: usize) {
-    // Use let _ to ignore result - some actions may fail legitimately
-    let _ = self.ctx.program(self.program_id)
+    let result = self.ctx.program(self.program_id)
         .call(instruction::Claim {})
         .accounts(/* ... */)
         .signers(&[&*self.users[user_idx].keypair])
-        .send();  // Don't unwrap - let it fail gracefully
+        .send();
+
+    // Option 1: Ignore all errors (simplest)
+    let _ = result;
+
+    // Option 2: Track success/failure
+    if let Ok(TxOutcome::Success { .. }) = &result {
+        self.stats.claims += 1;
+    }
+
+    // Option 3: Log program errors for debugging
+    if let Ok(TxOutcome::ProgramError { error, logs, .. }) = &result {
+        if std::env::var("FUZZ_DEBUG").is_ok() {
+            eprintln!("Claim failed: {:?}", error);
+            for log in logs { eprintln!("  {}", log); }
+        }
+    }
 }
 ```
 

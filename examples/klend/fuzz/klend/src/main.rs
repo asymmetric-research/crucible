@@ -1,4 +1,5 @@
 use anchor_test::*;
+use anchor_test_context::TxOutcome;
 #[allow(unused_imports)]
 use anchor_lang::prelude::*;
 use solana_keypair::Keypair;
@@ -22,7 +23,7 @@ use kamino_lending::types::{InitObligationArgs, UpdateConfigMode};
 // ============================================================================
 
 // Set to true to enable debug output
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 // Diagnostic module - tracks early returns, program errors, and successes
 mod action_stats {
@@ -92,9 +93,15 @@ mod action_stats {
         if log_counter.load(Ordering::Relaxed) < 4 && super::DEBUG {
             log_counter.fetch_add(1, Ordering::Relaxed);
             eprintln!("[PROG_ERR] {}: {}", action, err);
-            for log in logs.iter().take(3) {
+            for log in logs.iter().take(10) {
                 eprintln!("  {}", log);
             }
+        }
+    }
+
+    pub fn log_success(action: &str, compute_units: u64) {
+        if super::DEBUG {
+            eprintln!("[SUCCESS] {}: compute_units={}", action, compute_units);
         }
     }
 
@@ -258,9 +265,51 @@ impl KlendFixture {
         self.patch_obligation_freshness(user_idx);
     }
 
-    // Legacy helpers for compatibility
+    // Queue RefreshReserve instruction for batched transaction
+    fn queue_refresh_reserve(&mut self, reserve_idx: usize) -> anyhow::Result<()> {
+        let reserve_addr = self.reserves[reserve_idx].reserve;
+
+        // Use program ID as placeholder for optional oracle accounts
+        self.ctx.program(self.program_id)
+            .call(instruction::RefreshReserve {})
+            .accounts(accounts::RefreshReserve {
+                reserve: reserve_addr,
+                lending_market: self.lending_market,
+                pyth_oracle: Some(self.program_id),
+                switchboard_price_oracle: Some(self.program_id),
+                switchboard_twap_oracle: Some(self.program_id),
+                scope_prices: Some(self.program_id),
+            })
+            .add_transaction()
+    }
+
+    // Queue RefreshObligation instruction for batched transaction
+    fn queue_refresh_obligation(&mut self, user_idx: usize) -> anyhow::Result<()> {
+        let user_obligation = self.users[user_idx].obligation;
+
+        self.ctx.program(self.program_id)
+            .call(instruction::RefreshObligation {})
+            .accounts(accounts::RefreshObligation {
+                lending_market: self.lending_market,
+                obligation: user_obligation,
+            })
+            .add_transaction()
+    }
+
+    // Queue all refresh instructions needed for an action: RefreshReserve(s) + RefreshObligation
+    fn queue_all_refreshes(&mut self, user_idx: usize, reserve_indices: &[usize]) -> anyhow::Result<()> {
+        // First queue RefreshReserve for each involved reserve
+        for &reserve_idx in reserve_indices {
+            self.queue_refresh_reserve(reserve_idx)?;
+        }
+        // Then queue RefreshObligation
+        self.queue_refresh_obligation(user_idx)?;
+        Ok(())
+    }
+
+    // Legacy helpers for compatibility - still patch freshness for reserve staleness
     fn queue_refresh_all(&mut self, user_idx: usize) {
-        // Now just patches accounts directly instead of queueing RefreshReserve calls
+        // Patch account data for timestamp-based staleness checks
         self.patch_freshness_all(user_idx);
     }
 
@@ -335,12 +384,21 @@ impl KlendFixture {
             .signers(&[&**user_keypair])
             .send();
 
-        // Track result and log errors
-        let success = matches!(result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = result {
-            action_stats::log_program_error("deposit", &format!("{:?}", failed.err), &failed.meta.logs);
+        // Track result and log
+        match &result {
+            Ok(TxOutcome::Success { compute_units, .. }) => {
+                action_stats::log_success("deposit", *compute_units);
+                action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, true);
+            }
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                action_stats::log_program_error("deposit", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] deposit: {:?}", e); }
+                action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, false);
+            }
         }
-        action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, success);
     }
 
     // ========================================================================
@@ -388,10 +446,18 @@ impl KlendFixture {
         let reserve_addr = self.reserves[reserve_idx].reserve;
         let collateral_supply = self.reserves[reserve_idx].collateral_supply;
 
-        // Patch freshness to bypass staleness checks
+        // Patch freshness for timestamp-based staleness checks
         self.queue_refresh_all(user_idx);
 
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve + RefreshObligation (required by klend's check_refresh)
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit_coll refresh: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, false);
+            return;
+        }
+
+        // Queue the actual instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::DepositObligationCollateral {
                 collateral_amount: amount,
             })
@@ -406,13 +472,34 @@ impl KlendFixture {
                 instruction_sysvar_account: sysvar_ids::instructions_id(),
             })
             .signers(&[&*user_keypair])
-            .send();
-
-        let success = matches!(&result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = &result {
-            action_stats::log_program_error("deposit_coll", &format!("{:?}", failed.err), &failed.meta.logs);
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit_coll: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, false);
+            return;
         }
-        action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, success);
+
+        // Send batch with RefreshReserve + RefreshObligation + DepositObligationCollateral
+        let result = self.ctx.send_batch();
+
+        match &result {
+            Ok(Some(TxOutcome::Success { compute_units, .. })) => {
+                action_stats::log_success("deposit_coll", *compute_units);
+                action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, true);
+            }
+            Ok(Some(TxOutcome::ProgramError { error, logs, .. })) => {
+                action_stats::log_program_error("deposit_coll", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, false);
+            }
+            Ok(None) => {
+                if DEBUG { eprintln!("[BATCH_ERR] deposit_coll: empty batch"); }
+                action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] deposit_coll: {:?}", e); }
+                action_stats::record(&action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL, false);
+            }
+        }
     }
 
     // ========================================================================
@@ -452,10 +539,18 @@ impl KlendFixture {
             .map(|r| r.reserve)
             .collect();
 
-        // Patch freshness to bypass staleness checks
+        // Patch freshness for timestamp-based staleness checks
         self.queue_refresh_all(user_idx);
 
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve + RefreshObligation (required by klend's check_refresh)
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] borrow refresh: {:?}", e); }
+            action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, false);
+            return;
+        }
+
+        // Queue the actual instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::BorrowObligationLiquidity {
                 liquidity_amount: amount,
             })
@@ -475,13 +570,34 @@ impl KlendFixture {
             })
             .remaining_accounts(remaining_accounts)
             .signers(&[&*user_keypair])
-            .send();
-
-        let success = matches!(&result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = &result {
-            action_stats::log_program_error("borrow", &format!("{:?}", failed.err), &failed.meta.logs);
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] borrow: {:?}", e); }
+            action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, false);
+            return;
         }
-        action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, success);
+
+        // Send batch with RefreshReserve + RefreshObligation + BorrowObligationLiquidity
+        let result = self.ctx.send_batch();
+
+        match &result {
+            Ok(Some(TxOutcome::Success { compute_units, .. })) => {
+                action_stats::log_success("borrow", *compute_units);
+                action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, true);
+            }
+            Ok(Some(TxOutcome::ProgramError { error, logs, .. })) => {
+                action_stats::log_program_error("borrow", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, false);
+            }
+            Ok(None) => {
+                if DEBUG { eprintln!("[BATCH_ERR] borrow: empty batch"); }
+                action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] borrow: {:?}", e); }
+                action_stats::record(&action_stats::BORROW_OK, &action_stats::BORROW_FAIL, false);
+            }
+        }
     }
 
     // ========================================================================
@@ -522,10 +638,18 @@ impl KlendFixture {
             .map(|r| r.reserve)
             .collect();
 
-        // Patch freshness to bypass staleness checks
+        // Patch freshness for timestamp-based staleness checks
         self.queue_refresh_all(user_idx);
 
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve + RefreshObligation (required by klend's check_refresh)
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] repay refresh: {:?}", e); }
+            action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, false);
+            return;
+        }
+
+        // Queue the actual instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::RepayObligationLiquidity {
                 liquidity_amount: amount,
             })
@@ -542,13 +666,34 @@ impl KlendFixture {
             })
             .remaining_accounts(remaining_accounts)
             .signers(&[&*user_keypair])
-            .send();
-
-        let success = matches!(&result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = &result {
-            action_stats::log_program_error("repay", &format!("{:?}", failed.err), &failed.meta.logs);
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] repay: {:?}", e); }
+            action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, false);
+            return;
         }
-        action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, success);
+
+        // Send batch with RefreshReserve + RefreshObligation + RepayObligationLiquidity
+        let result = self.ctx.send_batch();
+
+        match &result {
+            Ok(Some(TxOutcome::Success { compute_units, .. })) => {
+                action_stats::log_success("repay", *compute_units);
+                action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, true);
+            }
+            Ok(Some(TxOutcome::ProgramError { error, logs, .. })) => {
+                action_stats::log_program_error("repay", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, false);
+            }
+            Ok(None) => {
+                if DEBUG { eprintln!("[BATCH_ERR] repay: empty batch"); }
+                action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] repay: {:?}", e); }
+                action_stats::record(&action_stats::REPAY_OK, &action_stats::REPAY_FAIL, false);
+            }
+        }
     }
 
     // ========================================================================
@@ -584,10 +729,18 @@ impl KlendFixture {
         let reserve_liquidity_supply = self.reserves[reserve_idx].liquidity_supply;
         let reserve_collateral_supply = self.reserves[reserve_idx].collateral_supply;
 
-        // Queue refreshes and action in same batch to avoid staleness
+        // Patch freshness for timestamp-based staleness checks
         self.queue_refresh_all(user_idx);
 
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve + RefreshObligation (required by klend's check_refresh)
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] withdraw refresh: {:?}", e); }
+            action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, false);
+            return;
+        }
+
+        // Queue the actual instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::WithdrawObligationCollateralAndRedeemReserveCollateral {
                 collateral_amount,
             })
@@ -608,13 +761,34 @@ impl KlendFixture {
                 instruction_sysvar_account: sysvar_ids::instructions_id(),
             })
             .signers(&[&*user_keypair])
-            .send();
-
-        let success = matches!(&result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = &result {
-            action_stats::log_program_error("withdraw", &format!("{:?}", failed.err), &failed.meta.logs);
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] withdraw: {:?}", e); }
+            action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, false);
+            return;
         }
-        action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, success);
+
+        // Send batch with RefreshReserve + RefreshObligation + WithdrawObligationCollateralAndRedeemReserveCollateral
+        let result = self.ctx.send_batch();
+
+        match &result {
+            Ok(Some(TxOutcome::Success { compute_units, .. })) => {
+                action_stats::log_success("withdraw", *compute_units);
+                action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, true);
+            }
+            Ok(Some(TxOutcome::ProgramError { error, logs, .. })) => {
+                action_stats::log_program_error("withdraw", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, false);
+            }
+            Ok(None) => {
+                if DEBUG { eprintln!("[BATCH_ERR] withdraw: empty batch"); }
+                action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] withdraw: {:?}", e); }
+                action_stats::record(&action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL, false);
+            }
+        }
     }
 
     // ========================================================================
@@ -714,7 +888,35 @@ impl KlendFixture {
         self.queue_refresh_all(liquidator_idx);
         self.patch_obligation_freshness(target_idx);
 
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve for both reserves + RefreshObligation for target
+        // Note: For liquidation, we refresh the TARGET obligation, not the liquidator's
+        if let Err(e) = self.queue_refresh_reserve(repay_reserve_idx) {
+            if DEBUG { eprintln!("[QUEUE_ERR] liquidate refresh repay reserve: {:?}", e); }
+            action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            return;
+        }
+        if repay_reserve_idx != withdraw_reserve_idx {
+            if let Err(e) = self.queue_refresh_reserve(withdraw_reserve_idx) {
+                if DEBUG { eprintln!("[QUEUE_ERR] liquidate refresh withdraw reserve: {:?}", e); }
+                action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+                return;
+            }
+        }
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::RefreshObligation {})
+            .accounts(accounts::RefreshObligation {
+                lending_market: self.lending_market,
+                obligation: target_obligation,
+            })
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] liquidate refresh obligation: {:?}", e); }
+            action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            return;
+        }
+
+        // Queue the actual instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::LiquidateObligationAndRedeemReserveCollateral {
                 liquidity_amount: amount,
                 min_acceptable_received_liquidity_amount: 0, // Accept any amount
@@ -743,13 +945,34 @@ impl KlendFixture {
                 instruction_sysvar_account: sysvar_ids::instructions_id(),
             })
             .signers(&[&*liquidator_keypair])
-            .send();
-
-        let success = matches!(&result, Ok(Ok(_)));
-        if let Ok(Err(ref failed)) = &result {
-            action_stats::log_program_error("liquidate", &format!("{:?}", failed.err), &failed.meta.logs);
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] liquidate: {:?}", e); }
+            action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            return;
         }
-        action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, success);
+
+        // Send batch with RefreshObligation + LiquidateObligationAndRedeemReserveCollateral
+        let result = self.ctx.send_batch();
+
+        match &result {
+            Ok(Some(TxOutcome::Success { compute_units, .. })) => {
+                action_stats::log_success("liquidate", *compute_units);
+                action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, true);
+            }
+            Ok(Some(TxOutcome::ProgramError { error, logs, .. })) => {
+                action_stats::log_program_error("liquidate", &format!("{:?}", error), logs);
+                action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            }
+            Ok(None) => {
+                if DEBUG { eprintln!("[BATCH_ERR] liquidate: empty batch"); }
+                action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            }
+            Err(e) => {
+                if DEBUG { eprintln!("[SEND_ERR] liquidate: {:?}", e); }
+                action_stats::record(&action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL, false);
+            }
+        }
     }
 }
 
@@ -811,11 +1034,11 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => if DEBUG { eprintln!("[SETUP] InitLendingMarket SUCCESS"); },
-            Ok(Err(failed)) => {
+            Ok(TxOutcome::Success { .. }) => if DEBUG { eprintln!("[SETUP] InitLendingMarket SUCCESS"); },
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
                 if DEBUG {
-                    eprintln!("[SETUP] InitLendingMarket TX_FAILED: {:?}", failed.err);
-                    for log in &failed.meta.logs { eprintln!("  {}", log); }
+                    eprintln!("[SETUP] InitLendingMarket TX_FAILED: {:?}", error);
+                    for log in &logs { eprintln!("  {}", log); }
                 }
                 panic!("Setup failed: InitLendingMarket");
             }
@@ -978,10 +1201,10 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => eprintln!("[SETUP] InitReserve SUCCESS for mint {}", mint),
-            Ok(Err(failed)) => {
-                eprintln!("[SETUP] InitReserve TX_FAILED: {:?}", failed.err);
-                for log in &failed.meta.logs { eprintln!("  {}", log); }
+            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitReserve SUCCESS for mint {}", mint),
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                eprintln!("[SETUP] InitReserve TX_FAILED: {:?}", error);
+                for log in &logs { eprintln!("  {}", log); }
                 panic!("Setup failed: InitReserve");
             }
             Err(e) => {
@@ -1035,8 +1258,8 @@ mod fixture_helpers {
                 })
                 .signers(&[&**admin])
                 .send();
-            if let Ok(Err(e)) = &result {
-                eprintln!("[DEBUG] UpdateReserveConfig (deposit_limit) failed: {:?}", e.err);
+            if let Ok(TxOutcome::ProgramError { error, .. }) = &result {
+                eprintln!("[DEBUG] UpdateReserveConfig (deposit_limit) failed: {:?}", error);
             }
 
             // Set borrow limit to u64::MAX
@@ -1054,8 +1277,8 @@ mod fixture_helpers {
                 })
                 .signers(&[&**admin])
                 .send();
-            if let Ok(Err(e)) = &result {
-                eprintln!("[DEBUG] UpdateReserveConfig (borrow_limit) failed: {:?}", e.err);
+            if let Ok(TxOutcome::ProgramError { error, .. }) = &result {
+                eprintln!("[DEBUG] UpdateReserveConfig (borrow_limit) failed: {:?}", error);
             }
         }
 
@@ -1285,10 +1508,10 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => eprintln!("[SETUP] InitObligation SUCCESS for user {}", keypair.pubkey()),
-            Ok(Err(failed)) => {
-                eprintln!("[SETUP] InitObligation TX_FAILED: {:?}", failed.err);
-                for log in &failed.meta.logs { eprintln!("  {}", log); }
+            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitObligation SUCCESS for user {}", keypair.pubkey()),
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                eprintln!("[SETUP] InitObligation TX_FAILED: {:?}", error);
+                for log in &logs { eprintln!("  {}", log); }
                 panic!("Setup failed: InitObligation");
             }
             Err(e) => {

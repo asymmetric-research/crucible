@@ -407,6 +407,7 @@ dependencies = [
  "solana-signer",
  "solana-transaction",
  "solana-transaction-context",
+ "solana-transaction-error",
  "spl-token",
 ]
 
