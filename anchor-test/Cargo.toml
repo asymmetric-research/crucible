@@ -5,10 +5,11 @@ edition = "2021"
 
 [workspace]
 members = [
-    "anchor-test-context", 
+    "anchor-test-context",
     "anchor-fuzz-macro",
-    "anchor-invariant-macro", 
+    "anchor-invariant-macro",
     "anchor-macro-utils",
+    "anchor-fuzz-gen",
 ]
 resolver = "2"
 

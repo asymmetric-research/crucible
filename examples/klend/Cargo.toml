@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = ["programs/*"]
+# fuzz/* excluded - uses different Solana version
+
+[profile.release]
+overflow-checks = true
+lto = 'thin'
+
+# Enable debug assert for the fixed crate in release mode
+[profile.release.package.fixed]
+debug-assertions = true
+overflow-checks = true
+
+[workspace.dependencies]
+# Anchor
+anchor-lang = { version = "0.29.0" }
+anchor-client = { version = "0.29.0" }
+anchor-spl = { version = "0.29.0", features = ["dex", "token", "token_2022"] }
+
+# Solana
+solana-program = "~1.17.18"
+solana-sdk = "~1.17.18"
+solana-banks-client = "~1.17.18"
+solana-banks-interface = "~1.17.18"
+solana-address-lookup-table-program = "~1.17.18"
+solana-account-decoder = "~1.17.18"
+spl-token = { version = "3.5.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "1.1.3", features = ["no-entrypoint"] }
+
+# Serialization/Deserialization
+# Override anchor to use borsh with the const-generics feature
+# Allows to borsh serialize arrays of any length
+borsh = { version = "0.10.3", features = ["const-generics"] }
+bytemuck = { version = "1.4.0", features = ["min_const_generics", "derive"] }
+
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1.0.79"
+
+[patch.crates-io]
+pythnet-sdk = { git = "https://github.com/Kamino-Finance/pyth-crosschain.git", branch = "fix/anchor_idl-build_compat" }
+spl-token-2022 = { git = "https://github.com/Kamino-Finance/solana-program-library.git", branch = "spl-token-2022-v0.9.0-patched" }

@@ -1,0 +1,341 @@
+name: whirlpools
+
+# Profile Usage:
+#   build-program           - Builds only the Solana program (outputs to target/)
+#   build-packages          - Builds all packages (requires program artifacts in target/)
+#   build                   - Builds everything (program + packages)
+#   test-sdks               - Runs SDK tests (requires program artifacts in target/)
+#   test-whirlpools-program - Runs program tests (requires program artifacts in target/)
+#   lint                    - Runs linters
+#
+# For local development, use: docker compose --profile build up
+# For CI/package-only builds: docker compose --profile build-packages up
+#   (Note: build-packages assumes program artifacts already exist in target/)
+
+services:
+  build-solana-program:
+    platform: linux/amd64
+    image: solanafoundation/anchor:v0.32.1
+    working_dir: /usr/src/whirlpools
+    command: >
+      anchor build
+    profiles: [build-program, build]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  yarn-install:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn install --mode=skip-build"
+    profiles: [build-packages, build, test-sdks, lint]
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache
+
+  build-ts-sdk:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && rustup target add wasm32-unknown-unknown
+      && yarn workspace @orca-so/whirlpools-client build
+      && yarn workspace @orca-so/whirlpools-core build
+      && yarn workspace @orca-so/tx-sender build
+      && yarn workspace @orca-so/whirlpools build
+      && yarn workspace @orca-so/whirlpools-lint format"
+    profiles: [build-packages, build, test-sdks]
+    depends_on:
+      yarn-install:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  build-legacy-sdk:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn workspace @orca-so/common-sdk build
+      && yarn workspace @orca-so/whirlpools-sdk build
+      && yarn workspace @orca-so/whirlpools-sdk-cli build"
+    profiles: [build-packages, build]
+    depends_on:
+      yarn-install:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  build-rust-sdk:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "rustup component add clippy rustfmt
+      && cargo build --quiet --manifest-path rust-sdk/macros/Cargo.toml
+      && cargo build --quiet --manifest-path rust-sdk/core/Cargo.toml
+      && cargo build --quiet --manifest-path rust-sdk/client/Cargo.toml
+      && cargo build --quiet --manifest-path rust-sdk/whirlpool/Cargo.toml
+      && cargo build --quiet --manifest-path rust-sdk/tx-sender/Cargo.toml
+      && cargo clippy --fix --allow-dirty --allow-staged
+      && cargo fmt"
+    profiles: [build-packages, build]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  build-integration:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn workspace @orca-so/whirlpools-integration build"
+    profiles: [build-packages, build]
+    depends_on:
+      build-rust-sdk:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  build-docs:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate      
+      && yarn workspace @orca-so/whirlpools-docs-ts build
+      && yarn workspace @orca-so/whirlpools-docs-rust build
+      && yarn workspace @orca-so/whirlpools-docs-legacy build
+      && yarn workspace @orca-so/whirlpools-docs build"
+    profiles: [build-packages, build]
+    depends_on:
+      build-rust-sdk:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+      build-legacy-sdk:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  build-examples:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn workspace @orca-so/whirlpools-example-ts-next build
+      && cargo build --manifest-path examples/rust-sdk/whirlpool_repositioning_bot/Cargo.toml"
+    profiles: [build-packages, build]
+    depends_on:
+      build-rust-sdk:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  build-packages:
+    image: alpine:3
+    working_dir: /usr/src/whirlpools
+    command: >
+      echo "Build Packages Completed"
+    depends_on:
+      yarn-install:
+        condition: service_completed_successfully
+      build-rust-sdk:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+      build-legacy-sdk:
+        condition: service_completed_successfully
+      build-integration:
+        condition: service_completed_successfully
+      build-docs:
+        condition: service_completed_successfully
+      build-examples:
+        condition: service_completed_successfully
+    profiles: [build-packages, build]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  build:
+    image: alpine:3
+    working_dir: /usr/src/whirlpools
+    command: >
+      echo "Build Completed"
+    depends_on:
+      build-solana-program:
+        condition: service_completed_successfully
+      build-packages:
+        condition: service_completed_successfully
+    profiles: [build]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  test-program:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      cargo test -p whirlpool
+    profiles: [test-whirlpools-program]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  test-program-integration:
+    image: ubuntu:24.04
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "apt-get update && apt-get install -y curl ca-certificates
+      && curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get install -y nodejs
+      && node --version
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn install
+      && yarn workspace @orca-so/common-sdk build
+      && yarn workspace @orca-so/whirlpools-sdk build
+      && yarn workspace @orca-so/whirlpools-sdk-integration test"
+    profiles: [test-whirlpools-program]
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  test-ts-sdk:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn workspace @orca-so/whirlpools-client test
+      && yarn workspace @orca-so/whirlpools-core test
+      && yarn workspace @orca-so/tx-sender test
+      && yarn workspace @orca-so/whirlpools test"
+    profiles: [test-sdks]
+    depends_on:
+      yarn-install:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  test-rust-sdk:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "apt-get update
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config libudev-dev
+      && rm -rf /var/lib/apt/lists/*
+      && cp legacy-sdk/whirlpool/tests/external_program/token_2022.20250510.so target/deploy/
+      && cargo test --quiet --manifest-path rust-sdk/macros/Cargo.toml --lib
+      && cargo test --quiet --manifest-path rust-sdk/core/Cargo.toml --lib
+      && cargo test --quiet --manifest-path rust-sdk/client/Cargo.toml --lib
+      && cargo test --quiet --manifest-path rust-sdk/whirlpool/Cargo.toml --lib
+      && cargo test --quiet --manifest-path rust-sdk/tx-sender/Cargo.toml --lib"
+    profiles: [test-sdks]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  test-integration:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && yarn workspace @orca-so/whirlpools-integration test"
+    profiles: [test-integration]
+    depends_on:
+      build-rust-sdk:
+        condition: service_completed_successfully
+      build-ts-sdk:
+        condition: service_completed_successfully
+      build-integration:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+  test-whirlpools-program:
+    image: alpine:3
+    working_dir: /usr/src/whirlpools
+    command: >
+      echo "Tests Completed"
+    profiles: [test-whirlpools-program]
+    depends_on:
+      test-program:
+        condition: service_completed_successfully
+      test-program-integration:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  test-sdks:
+    image: alpine:3
+    working_dir: /usr/src/whirlpools
+    command: >
+      echo "Tests Completed"
+    depends_on:
+      test-ts-sdk:
+        condition: service_completed_successfully
+      test-rust-sdk:
+        condition: service_completed_successfully
+    profiles: [test-sdks]
+    volumes:
+      - ./:/usr/src/whirlpools
+
+  lint:
+    image: rust:1.86.0
+    working_dir: /usr/src/whirlpools
+    command: >
+      sh -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      && apt-get update && apt-get install -y nodejs
+      && corepack enable && corepack prepare yarn@4.6.0 --activate
+      && rustup component add clippy rustfmt
+      && yarn workspace @orca-so/whirlpools-lint lint
+      && cargo clippy -p whirlpool && cargo fmt --check -p whirlpool
+      && cargo clippy --manifest-path rust-sdk/macros/Cargo.toml && cargo fmt --check --manifest-path rust-sdk/macros/Cargo.toml
+      && cargo clippy --manifest-path rust-sdk/core/Cargo.toml && cargo fmt --check --manifest-path rust-sdk/core/Cargo.toml
+      && cargo clippy --manifest-path rust-sdk/client/Cargo.toml && cargo fmt --check --manifest-path rust-sdk/client/Cargo.toml
+      && cargo clippy --manifest-path rust-sdk/whirlpool/Cargo.toml && cargo fmt --check --manifest-path rust-sdk/whirlpool/Cargo.toml
+      && cargo clippy --manifest-path rust-sdk/tx-sender/Cargo.toml && cargo fmt --check --manifest-path rust-sdk/tx-sender/Cargo.toml
+      && cargo clippy --manifest-path examples/rust-sdk/whirlpool_repositioning_bot/Cargo.toml && cargo fmt --check --manifest-path examples/rust-sdk/whirlpool_repositioning_bot/Cargo.toml"
+    profiles: [lint]
+    depends_on:
+      yarn-install:
+        condition: service_completed_successfully
+    volumes:
+      - ./:/usr/src/whirlpools
+      - node_modules:/usr/src/whirlpools/node_modules:ro
+      - yarn_cache:/usr/src/whirlpools/.yarn/cache:ro
+
+volumes:
+  node_modules:
+  yarn_cache:

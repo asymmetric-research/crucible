@@ -1,0 +1,3 @@
+[toolchain]
+channel = "stable"
+# Fuzz harnesses require stable Rust for libafl compatibility
