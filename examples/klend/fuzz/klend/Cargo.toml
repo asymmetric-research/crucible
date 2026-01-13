@@ -6,10 +6,10 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-anchor-test = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test" }
-anchor-test-context = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test/anchor-test-context" }
-anchor-lang = { path = "/Users/kai/Desktop/work/anchor-fuzzing/lang" }
-anchor-fuzz-gen = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test/anchor-fuzz-gen" }
+anchor-test = { path = "../../../../anchor-test" }
+anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
+anchor-lang = { path = "../../../../../lang" }
+anchor-fuzz-gen = { path = "../../../../anchor-test/anchor-fuzz-gen" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
@@ -23,6 +23,7 @@ solana-instruction = "3.1"
 anyhow = "1.0"
 bytemuck = "1.14"
 borsh = "1.5"
+ctrlc = "3.4"
 
 [features]
 fuzz_single = []

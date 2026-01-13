@@ -83,6 +83,20 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
+    // Generate arms to get action name as string
+    let action_name_arms = actions.iter().map(|(action_name, _, params)| {
+        let action_str = to_snake_case(&action_name.to_string());
+        if params.is_empty() {
+            quote! {
+                #enum_name::#action_name => #action_str,
+            }
+        } else {
+            quote! {
+                #enum_name::#action_name { .. } => #action_str,
+            }
+        }
+    });
+
     let dispatch_arms = actions.iter().map(|(action_name, method_name, params)| {
         if params.is_empty() {
             quote! {
@@ -140,14 +154,28 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                         #(#constrain_arms)*
                     }
                 }
+
+                /// Get the action name as a string (for coverage tracking)
+                pub fn action_name(&self) -> &'static str {
+                    match self {
+                        #(#action_name_arms)*
+                    }
+                }
             }
 
             impl #fixture_type {
                 #[doc(hidden)]
                 pub fn __dispatch_action(&mut self, action: #enum_name) {
+                    // Set current instruction name for coverage tracking
+                    anchor_test_context::set_current_instruction(Some(action.action_name().to_string()));
+
+                    // Dispatch the action
                     match action {
                         #(#dispatch_arms)*
                     }
+
+                    // Clear after action
+                    anchor_test_context::set_current_instruction(None);
                 }
                 #[doc(hidden)]
                 pub fn __auto_flush(&mut self) {

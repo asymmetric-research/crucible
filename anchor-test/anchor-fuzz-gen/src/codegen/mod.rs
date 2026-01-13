@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod discriminators;
 pub mod instructions;
 pub mod state;
 pub mod types;

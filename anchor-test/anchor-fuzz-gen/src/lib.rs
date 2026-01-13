@@ -85,6 +85,7 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
     let accounts = codegen::accounts::generate(&idl);
     let state = codegen::state::generate(&idl);
     let types = codegen::types::generate(&idl);
+    let discriminators = codegen::discriminators::generate(&idl);
 
     Ok(quote! {
         /// Generated from IDL for fuzzing purposes.
@@ -97,6 +98,7 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
             #accounts
             #state
             #types
+            #discriminators
         }
     })
 }

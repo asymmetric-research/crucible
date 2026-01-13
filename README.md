@@ -473,6 +473,76 @@ pub fn action_claim(&mut self, user_idx: usize) {
 }
 ```
 
+---
+
+## Assertion Macros
+
+Use `fuzz_assert_*` macros instead of `assert!` in invariant checks. These record violations without panicking, allowing the fuzzer to continue and properly track crashes.
+
+### Available Macros
+
+| Macro | Description | Example |
+|-------|-------------|---------|
+| `fuzz_assert!(cond)` | Assert condition is true | `fuzz_assert!(balance >= 0)` |
+| `fuzz_assert_eq!(a, b)` | Assert `a == b` | `fuzz_assert_eq!(total, expected)` |
+| `fuzz_assert_ne!(a, b)` | Assert `a != b` | `fuzz_assert_ne!(state, INVALID)` |
+| `fuzz_assert_lt!(a, b)` | Assert `a < b` | `fuzz_assert_lt!(debt, collateral)` |
+| `fuzz_assert_le!(a, b)` | Assert `a <= b` | `fuzz_assert_le!(used, capacity)` |
+| `fuzz_assert_gt!(a, b)` | Assert `a > b` | `fuzz_assert_gt!(supply, 0)` |
+| `fuzz_assert_ge!(a, b)` | Assert `a >= b` | `fuzz_assert_ge!(balance, 0)` |
+| `fuzz_assert_approx_eq!(a, b, delta)` | Assert `|a - b| <= delta` | `fuzz_assert_approx_eq!(price, oracle_price, 100)` |
+
+### Usage
+
+```rust
+use anchor_test_context::{fuzz_assert, fuzz_assert_le, fuzz_assert_eq};
+
+#[invariant_test]
+fn check_invariants(fixture: &mut MyFixture) {
+    let pool = fixture.ctx.read_anchor_account::<Pool>(&fixture.pool_pda).unwrap();
+
+    // Basic assertion
+    fuzz_assert!(pool.total_staked >= 0);
+
+    // Comparison with custom message
+    fuzz_assert_le!(
+        pool.total_borrowed,
+        pool.total_deposited,
+        "Bad debt: borrowed {} > deposited {}",
+        pool.total_borrowed,
+        pool.total_deposited
+    );
+
+    // Equality check
+    fuzz_assert_eq!(
+        pool.total_shares,
+        fixture.expected_shares,
+        "Share mismatch"
+    );
+
+    // Approximate equality (for floating point or fixed-point)
+    fuzz_assert_approx_eq!(
+        calculated_interest,
+        expected_interest,
+        1000,  // max delta
+        "Interest calculation off by more than 1000"
+    );
+}
+```
+
+### Why Not `assert!`?
+
+Standard `assert!` panics crash the entire fuzzer process. The `fuzz_assert_*` macros instead:
+
+1. Record the violation message
+2. Return control to the harness
+3. Report the violation as a crash/objective to LibAFL
+4. Continue fuzzing with the next input
+
+This enables proper crash tracking and corpus management.
+
+---
+
 ### Shadow state for invariants
 
 ```rust
@@ -488,8 +558,184 @@ struct User {
 pub fn action_stake(&mut self, user_idx: usize, amount: u64) {
     // Update shadow state
     self.users[user_idx].expected_balance -= amount;
-    
+
     // Execute on-chain action
     // ...
 }
+```
+
+---
+
+## Coverage Reporting
+
+The fuzzer automatically generates LCOV coverage data, enabling visualization of which parts of your program were exercised.
+
+### Output Files
+
+- **`coverage.lcov`** - LCOV format coverage data, written every 5 seconds and on exit (Ctrl+C or panic)
+
+### Real-time Coverage Stats
+
+During fuzzing, coverage stats are printed every 5 seconds:
+
+```
+[COVERAGE] ==========================================
+[COVERAGE] Global:
+[COVERAGE]   Instructions: 21173/158871 ( 13.3%)
+[COVERAGE]   Branches:      2080/12029 ( 17.3%)
+[COVERAGE]   Edges:         2399/24058 ( 10.0%)
+[COVERAGE] ==========================================
+```
+
+### Visualization Options
+
+#### 1. Terminal Summary (Recommended)
+
+Get a quick coverage summary from the command line:
+
+```bash
+# Install lcov tools (macOS)
+brew install lcov
+
+# Summary stats (--ignore-errors format required for bytecode LCOV)
+lcov --summary coverage.lcov --ignore-errors format
+
+# Example output:
+# Summary coverage rate:
+#   source files: 1
+#   lines.......: 100.0% (18852 of 18852 lines)  # Only hit lines are reported
+#   functions...: 24.5% (323 of 1316 functions)  # This is the useful metric!
+```
+
+**Note:** For bytecode LCOV, the "functions" percentage is the most meaningful metric. The "lines" percentage shows 100% because we only write data for PCs that were actually executed (not all possible PCs).
+
+#### 2. HTML Report (Future)
+
+HTML report generation via `genhtml` requires source files to display. For bytecode-level coverage, source files don't exist. This will be supported when source-level LCOV (with DWARF debug info) is implemented.
+
+For now, use the terminal summary and real-time stats during fuzzing.
+
+#### 3. CI Integration
+
+```yaml
+# .github/workflows/fuzz.yml
+- name: Run fuzzer
+  run: timeout 60 cargo run --release --features invariant_test || true
+
+- name: Coverage summary
+  run: |
+    lcov --summary coverage.lcov --ignore-errors format > coverage_summary.txt
+    cat coverage_summary.txt
+
+- name: Upload coverage artifacts
+  uses: actions/upload-artifact@v3
+  with:
+    name: coverage-report
+    path: |
+      coverage.lcov
+      coverage_summary.txt
+```
+
+#### 4. Coverage Report Script
+
+A Python script is provided for detailed per-function analysis:
+
+```bash
+# Show named functions with branch coverage
+python3 anchor-test/scripts/coverage_report.py coverage.lcov
+
+# Show all functions (including auto-named fn_xxx)
+python3 anchor-test/scripts/coverage_report.py coverage.lcov --all
+
+# Show only never-hit functions
+python3 anchor-test/scripts/coverage_report.py coverage.lcov --cold
+```
+
+Example output:
+```
+=== NAMED FUNCTION COVERAGE ===
+
+Function                                             Hits     Branches Missing PCs
+-----------------------------------------------------------------------------------------------
+entrypoint                                          25542          3/6 36850,36861,36870
+function_76431                                      12585         7/14 76432,76435,76440... +4
+function_143708                                     10955            -
+-----------------------------------------------------------------------------------------------
+
+Summary: 12/204 functions hit (5.9%)
+         2052/4088 branches taken (50.2%)
+
+=== NEVER HIT (192) ===
+  function_117380 (PC: 117380)
+  function_117385 (PC: 117385)
+  ...
+```
+
+The "Missing PCs" column shows which branch instruction addresses were never taken, helping identify unexplored code paths.
+
+#### 5. CFG Visualization (Graphviz)
+
+Generate a Control Flow Graph with coverage overlay:
+
+```bash
+# Build the cfg_viz tool (from anchor-test directory)
+cargo build --release -p anchor-test-context --bin cfg_viz
+
+# Generate DOT file for a specific function
+./target/release/cfg_viz program.so coverage.lcov entrypoint > cfg.dot
+
+# Convert to image (requires: brew install graphviz)
+dot -Tpng cfg.dot -o cfg.png   # PNG
+dot -Tsvg cfg.dot -o cfg.svg   # SVG (scalable, recommended)
+
+# Interactive viewer (requires: brew install xdot)
+xdot cfg.dot
+```
+
+The visualization shows:
+- **Green blocks**: 100% of instructions hit
+- **Yellow blocks**: Partially covered
+- **Red blocks**: Never executed
+- **Green edges**: Branch was taken
+- **Red dashed edges**: Branch was never taken
+
+Example output:
+```
+┌──────────────────────────────┐
+│ Block 36846 (4/4 = 100%)     │ ← Green: fully covered
+│ + 08fee: mov64               │
+│ + 08fef: lddw                │
+│ + 08ff1: ldxdw               │
+│ + 08ff2: jeq                 │
+└──────────────────────────────┘
+         │              │
+         ▼              ▼
+    [taken]         [not taken]
+```
+
+### Understanding Bytecode LCOV
+
+Since the coverage maps PC (Program Counter) offsets rather than source lines:
+
+- **DA:36989,1234** - PC offset 36989 was executed 1234 times
+- **FN:36989,lending_account_deposit** - Function `lending_account_deposit` starts at PC 36989
+- **BRDA:148,0,0,500** - Branch at PC 148, taken 500 times
+
+To map PCs to source code manually:
+
+```bash
+# Disassemble the BPF binary
+llvm-objdump -d target/deploy/program.so > program.asm
+
+# Find function at PC 36989
+grep -n "36989:" program.asm
+```
+
+### Required Dependencies
+
+Add `ctrlc` to your fuzz harness `Cargo.toml` for the exit handler:
+
+```toml
+[dependencies]
+ctrlc = "3.4"
 ```

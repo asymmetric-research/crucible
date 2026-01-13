@@ -22,3 +22,5 @@ solana-transaction-context.workspace = true
 solana-sbpf.workspace = true
 
 spl-token.workspace = true
+bytemuck.workspace = true
+once_cell.workspace = true

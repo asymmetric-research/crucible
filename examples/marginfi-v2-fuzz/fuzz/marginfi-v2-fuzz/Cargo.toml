@@ -32,6 +32,7 @@ fixed-macro = "1.2"
 bytemuck = "1.14"
 borsh = "1.5"
 litesvm = { version = "0.9.0", features = ["register-tracing"] }
+ctrlc = "3.4"
 
 
 [features]

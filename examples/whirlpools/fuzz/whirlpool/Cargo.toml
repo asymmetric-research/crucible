@@ -8,12 +8,12 @@ edition = "2021"
 
 [dependencies]
 # Fuzzing framework
-anchor-test = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test" }
-anchor-test-context = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test/anchor-test-context" }
-anchor-fuzz-gen = { path = "/Users/kai/Desktop/work/anchor-fuzzing/fuzz/anchor-test/anchor-fuzz-gen" }
+anchor-test = { path = "../../../../anchor-test" }
+anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
+anchor-fuzz-gen = { path = "../../../../anchor-test/anchor-fuzz-gen" }
 
 # Anchor (local v3-compatible)
-anchor-lang = { path = "/Users/kai/Desktop/work/anchor-fuzzing/lang" }
+anchor-lang = { path = "../../../../../lang" }
 
 # Solana v3.x (required for litesvm 0.9.0)
 solana-pubkey = "3.0"

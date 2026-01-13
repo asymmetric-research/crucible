@@ -395,6 +395,7 @@ version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anyhow",
+ "bytemuck",
  "litesvm",
  "solana-account",
  "solana-hash 3.1.0",

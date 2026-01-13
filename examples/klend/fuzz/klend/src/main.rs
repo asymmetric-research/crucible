@@ -10,6 +10,9 @@ use std::{rc::Rc, collections::HashMap};
 use anchor_test::anchor_spl::token::spl_token;
 use anchor_test::anchor_spl::token_2022::spl_token_2022;
 
+// Local types module with klend account structs for zero-copy access
+mod types;
+
 // Generate types from IDL
 anchor_fuzz_gen::declare_fuzz_program!("idls/klend.json");
 
@@ -128,10 +131,10 @@ mod action_stats {
 }
 
 const LENDING_MARKET_SIZE: usize = 4656;
-const RESERVE_SIZE: usize = 8616;
-const OBLIGATION_SIZE: usize = 3336;
-const USER_METADATA_SIZE: usize = 1024;
-const GLOBAL_CONFIG_SIZE: usize = 1024;
+const RESERVE_SIZE: usize = types::RESERVE_SIZE;
+const OBLIGATION_SIZE: usize = types::OBLIGATION_SIZE;
+const USER_METADATA_SIZE: usize = types::USER_METADATA_SIZE;
+const GLOBAL_CONFIG_SIZE: usize = types::GLOBAL_CONFIG_SIZE;
 
 // Default min deposit for reserves
 const MIN_INITIAL_DEPOSIT: u64 = 100_000;
@@ -219,34 +222,20 @@ impl KlendFixture {
     // This avoids needing to call RefreshReserve (which requires valid oracles)
     fn patch_reserve_freshness(&mut self, reserve_idx: usize) {
         let reserve_pubkey = self.reserves[reserve_idx].reserve;
-        if let Ok(mut account) = self.ctx.get_account(&reserve_pubkey) {
+        if let Ok(mut reserve) = self.ctx.read_zero_copy_account::<types::Reserve>(&reserve_pubkey) {
             let current_slot = self.ctx.slot();
-
-            // last_update struct is at offset 16-32 in reserve:
-            // - slot (u64) at offset 16
-            // - stale (u8) at offset 24
-            // - price_status (u8) at offset 25
-            account.data[16..24].copy_from_slice(&current_slot.to_le_bytes());
-            account.data[24] = 0; // not stale
-            account.data[25] = 0x3F; // all price status flags set
-
-            let _ = self.ctx.svm.set_account(reserve_pubkey, account);
+            reserve.last_update.mark_fresh(current_slot);
+            let _ = self.ctx.write_zero_copy_account(&reserve_pubkey, &reserve);
         }
     }
 
     // Patch obligation's last_update to bypass staleness checks
     fn patch_obligation_freshness(&mut self, user_idx: usize) {
         let obligation_pubkey = self.users[user_idx].obligation;
-        if let Ok(mut account) = self.ctx.get_account(&obligation_pubkey) {
+        if let Ok(mut obligation) = self.ctx.read_zero_copy_account::<types::Obligation>(&obligation_pubkey) {
             let current_slot = self.ctx.slot();
-
-            // Obligation struct layout (from IDL):
-            // discriminator (8) + tag (8) + last_update (16) ...
-            // last_update.slot is at offset 16
-            account.data[16..24].copy_from_slice(&current_slot.to_le_bytes());
-            account.data[24] = 0; // not stale
-
-            let _ = self.ctx.svm.set_account(obligation_pubkey, account);
+            obligation.last_update.mark_fresh(current_slot);
+            let _ = self.ctx.write_zero_copy_account(&obligation_pubkey, &obligation);
         }
     }
 
@@ -886,15 +875,18 @@ mod fixture_helpers {
         admin: &Pubkey,
         program_id: &Pubkey,
     ) {
-        // Create account with GlobalConfig discriminator and admin set
-        let mut data = vec![0u8; 8 + GLOBAL_CONFIG_SIZE];
+        // Create GlobalConfig using typed struct
+        let global_config = types::GlobalConfig {
+            global_admin: admin.to_bytes(),
+            ..Default::default()
+        };
 
-        // GlobalConfig discriminator (first 8 bytes)
+        // Build account data with discriminator + struct bytes
         let discriminator: [u8; 8] = [149, 8, 156, 75, 31, 54, 147, 229];
-        data[..8].copy_from_slice(&discriminator);
-
-        // global_admin is first field after discriminator (32 bytes)
-        data[8..40].copy_from_slice(admin.as_ref());
+        let struct_bytes = bytemuck::bytes_of(&global_config);
+        let mut data = Vec::with_capacity(8 + struct_bytes.len());
+        data.extend_from_slice(&discriminator);
+        data.extend_from_slice(struct_bytes);
 
         ctx.create_account()
             .pubkey(*pubkey)
@@ -991,25 +983,11 @@ mod fixture_helpers {
         }
 
         // Debug: print token_program from reserve before patching
-        {
-            let account = ctx.get_account(&reserve_kp.pubkey()).unwrap();
-            let token_prog_offset = 128 + 280;  // liquidity_offset + token_program offset
-            if token_prog_offset + 32 <= account.data.len() {
-                let token_prog = solana_pubkey::Pubkey::new_from_array(
-                    account.data[token_prog_offset..token_prog_offset + 32].try_into().unwrap()
-                );
-                eprintln!("[DEBUG] Reserve token_program BEFORE patch at offset {}: {}", token_prog_offset, token_prog);
+        if DEBUG {
+            if let Ok(reserve_data) = ctx.read_zero_copy_account::<types::Reserve>(&reserve_kp.pubkey()) {
+                let token_prog = solana_pubkey::Pubkey::new_from_array(reserve_data.liquidity.token_program);
+                eprintln!("[DEBUG] Reserve token_program BEFORE patch: {}", token_prog);
                 eprintln!("[DEBUG] Expected spl_token::id(): {}", spl_token::id());
-                // Dump first 512 bytes of reserve in chunks to find token_program
-                eprintln!("[DEBUG] Looking for SPL Token ID in reserve data...");
-                let spl_bytes = spl_token::id().to_bytes();
-                for i in 0..1000 {
-                    if i + 32 <= account.data.len() {
-                        if account.data[i..i+32] == spl_bytes {
-                            eprintln!("[DEBUG] Found SPL Token ID at offset {}", i);
-                        }
-                    }
-                }
             }
         }
 
@@ -1060,31 +1038,14 @@ mod fixture_helpers {
         }
 
         // Debug: print token_program and deposit_limit from reserve after patching
-        {
-            let account = ctx.get_account(&reserve_kp.pubkey()).unwrap();
-            let token_prog_offset = 128 + 280;  // liquidity_offset + token_program offset
-            if token_prog_offset + 32 <= account.data.len() {
-                let token_prog = solana_pubkey::Pubkey::new_from_array(
-                    account.data[token_prog_offset..token_prog_offset + 32].try_into().unwrap()
-                );
+        if DEBUG {
+            if let Ok(reserve_data) = ctx.read_zero_copy_account::<types::Reserve>(&reserve_kp.pubkey()) {
+                let token_prog = solana_pubkey::Pubkey::new_from_array(reserve_data.liquidity.token_program);
                 eprintln!("[DEBUG] Reserve token_program AFTER patch: {}", token_prog);
-            }
-            // Search for u64::MAX in the account data to find where deposit_limit actually is
-            if DEBUG {
-                eprintln!("[DEBUG] Searching for u64::MAX in reserve data...");
-                let max_bytes = u64::MAX.to_le_bytes();
-                let mut found_count = 0;
-                for i in 0..account.data.len().saturating_sub(7) {
-                    if account.data[i..i+8] == max_bytes {
-                        if found_count < 5 {
-                            eprintln!("[DEBUG] Found u64::MAX at absolute offset {}", i);
-                        }
-                        found_count += 1;
-                    }
-                }
-                if found_count > 5 {
-                    eprintln!("[DEBUG] ... and {} more u64::MAX values", found_count - 5);
-                }
+                eprintln!("[DEBUG] Reserve deposit_limit: {}", reserve_data.config.deposit_limit);
+                eprintln!("[DEBUG] Reserve borrow_limit: {}", reserve_data.config.borrow_limit);
+                eprintln!("[DEBUG] Reserve status: {}", reserve_data.config.status);
+                eprintln!("[DEBUG] Reserve loan_to_value_pct: {}", reserve_data.config.loan_to_value_pct);
             }
         }
 
@@ -1101,123 +1062,45 @@ mod fixture_helpers {
 
     fn configure_reserve_manually(
         ctx: &mut TestContext,
-        program_id: &Pubkey,
+        _program_id: &Pubkey,
         reserve: &Pubkey,
         current_slot: u64,
     ) {
-        // Read the reserve account and patch config fields
-        let account = ctx.get_account(reserve).unwrap();
-        let mut data = account.data.clone();
+        // Read the reserve account using typed zero-copy access
+        let Ok(mut reserve_data) = ctx.read_zero_copy_account::<types::Reserve>(reserve) else {
+            eprintln!("[WARN] configure_reserve_manually: could not read reserve");
+            return;
+        };
 
-        // Reserve struct layout (zero_copy) - all offsets include 8-byte discriminator:
-        // 0-8: discriminator
-        // 8-16: version (u64)
-        // 16-32: last_update (LastUpdate: slot u64 + stale u8 + price_status u8 + placeholder [u8;6])
-        // 32-64: lending_market (Pubkey)
-        // 64-96: farm_collateral (Pubkey)
-        // 96-128: farm_debt (Pubkey)
-        // 128+: liquidity (ReserveLiquidity - 872 bytes)
-        // Then: reserve_liquidity_padding [u64;150] = 1200 bytes
-        // Then: collateral (ReserveCollateral - 1096 bytes)
-        // Then: reserve_collateral_padding [u64;150] = 1200 bytes
-        // Then: config (ReserveConfig)
+        // === Fix last_update ===
+        reserve_data.last_update.mark_fresh(current_slot);
 
-        // === Fix last_update (offset 16-32) ===
-        // Set slot to current slot so it's not stale
-        let slot: u64 = current_slot;
-        data[16..24].copy_from_slice(&slot.to_le_bytes());
-        // Set stale to 0 (false = not stale)
-        data[24] = 0;
-        // Set price_status flags - need PRICE_LOADED (0x01) and PRICE_USAGE_ALLOWED (0x20)
-        // For deposits, we need at least PRICE_LOADED. Let's set all useful flags.
-        data[25] = 0x3F;  // All basic flags set
-
-        // === Fix liquidity.market_price_sf (offset 248) ===
-        let liquidity_offset = 128;
-        // ReserveLiquidity layout: mint(32) + supply_vault(32) + fee_vault(32) +
-        // available_amount(8) + borrowed_amount_sf(16) + market_price_sf(16)
-        let market_price_sf_offset = liquidity_offset + 32 + 32 + 32 + 8 + 16;  // 248
-
-        // Set price: $100 with 18 decimal scale (Fraction uses 60-bit precision)
-        let price_sf: u128 = 100 * 10_u128.pow(18);
-        data[market_price_sf_offset..market_price_sf_offset + 16]
-            .copy_from_slice(&price_sf.to_le_bytes());
+        // === Fix liquidity.market_price_sf ===
+        // Set price: $100 with 60-bit precision (klend Fraction uses 2^60 scale)
+        let price_sf: u128 = 100 * (1u128 << 60);
+        reserve_data.liquidity.market_price_sf = types::u128_to_u64_pair(price_sf);
 
         // === Fix liquidity.cumulative_borrow_rate_bsf ===
-        // This needs to be set to 1.0 (not 0) for interest calculations
-        // Offset: liquidity + 32+32+32+8+16+16+8+8+8+8 = liquidity + 168
-        let cumulative_borrow_rate_offset = liquidity_offset + 32 + 32 + 32 + 8 + 16 + 16 + 8 + 8 + 8 + 8;
-        // BigFractionBytes is [u64; 4] + [u64; 2], set first u64 to represent 1.0
-        // Actually BigFraction uses U256 internally, 1.0 = 2^60
-        let one_sf: u64 = 1u64 << 60;  // 1.0 in scaled fraction
-        data[cumulative_borrow_rate_offset..cumulative_borrow_rate_offset + 8]
-            .copy_from_slice(&one_sf.to_le_bytes());
+        // Set to 1.0 (2^60) for interest calculations
+        reserve_data.liquidity.cumulative_borrow_rate_bsf.value[0] = 1u64 << 60;
 
         // === Fix liquidity.token_program ===
-        // ReserveLiquidity layout: mint(32) + supply_vault(32) + fee_vault(32) +
-        // available_amount(8) + borrowed_amount_sf(16) + market_price_sf(16) +
-        // market_price_last_updated_ts(8) + mint_decimals(8) +
-        // deposit_limit_crossed_timestamp(8) + borrow_limit_crossed_timestamp(8) +
-        // cumulative_borrow_rate_bsf(48) + accumulated_protocol_fees_sf(16) +
-        // accumulated_referrer_fees_sf(16) + pending_referrer_fees_sf(16) +
-        // absolute_referral_rate_sf(16) = 280, then token_program(32)
-        let token_program_offset = liquidity_offset + 280;  // = 408
-        let spl_token_program = spl_token::id();
-        data[token_program_offset..token_program_offset + 32]
-            .copy_from_slice(spl_token_program.as_ref());
+        reserve_data.liquidity.token_program = spl_token::id().to_bytes();
 
         // === Fix config ===
-        // Based on GitHub source - ReserveLiquidity has much larger padding arrays
-        // than IDL suggests. Actual config starts around offset 5000.
-        // discriminator(8) + version(8) + last_update(16) + lending_market(32) +
-        // farm_collateral(32) + farm_debt(32) + liquidity(~1376) + liq_padding(1200) +
-        // collateral(~1096) + coll_padding(1200) ≈ 5000 bytes before config
-        let config_offset = 5000;
-
-        // config.status (offset 0) = 0 (Active)
-        data[config_offset] = 0;
-
-        // config.loan_to_value_pct (offset 12) = 80
-        data[config_offset + 12] = 80;
-
-        // config.liquidation_threshold_pct (offset 13) = 85
-        data[config_offset + 13] = 85;
-
-        // config.min_liquidation_bonus_bps (offset 14-16) = 500
-        data[config_offset + 14..config_offset + 16].copy_from_slice(&500u16.to_le_bytes());
-
-        // NOTE: We discovered deposit_limit is at offset 16 in the actual binary, not 160!
-        // The program reads limit as 1000 when we write 1000u16 at offset 16.
-        // So we skip writing max_liquidation_bonus_bps here to avoid clobbering deposit_limit.
-        // config.max_liquidation_bonus_bps would be at some other offset.
-
-        // DISCOVERED: deposit_limit is at offset 16 in the actual binary!
-        // When we wrote 1000u16 at offset 16, the program read deposit_limit as 1000.
-        // So deposit_limit (u64) is at config_offset + 16, borrow_limit at +24.
-        let deposit_limit_offset = config_offset + 16;
-        let borrow_limit_offset = config_offset + 24;
-
-        // Set deposit_limit and borrow_limit to u64::MAX
-        data[deposit_limit_offset..deposit_limit_offset + 8]
-            .copy_from_slice(&u64::MAX.to_le_bytes());
-        data[borrow_limit_offset..borrow_limit_offset + 8]
-            .copy_from_slice(&u64::MAX.to_le_bytes());
-
-        // Ensure config.status remains 0 (Active) - it's at config_offset
-        data[config_offset] = 0;
+        reserve_data.config.status = 0;  // Active
+        reserve_data.config.loan_to_value_pct = 80;
+        reserve_data.config.liquidation_threshold_pct = 85;
+        reserve_data.config.min_liquidation_bonus_bps = 500;
+        reserve_data.config.deposit_limit = u64::MAX;
+        reserve_data.config.borrow_limit = u64::MAX;
 
         if DEBUG {
-            eprintln!("[DEBUG] Set deposit_limit at offset {}, borrow_limit at offset {}", deposit_limit_offset, borrow_limit_offset);
+            eprintln!("[DEBUG] configure_reserve_manually: set config via typed access");
         }
 
-        // Update the account
-        ctx.create_account()
-            .pubkey(*reserve)
-            .lamports(account.lamports)
-            .owner(*program_id)
-            .data(&data)
-            .create()
-            .unwrap();
+        // Write the modified reserve back
+        let _ = ctx.write_zero_copy_account(reserve, &reserve_data);
     }
 
     fn create_user(
@@ -1329,32 +1212,21 @@ mod fixture_helpers {
         owner: &Pubkey,
         bump: u8,
     ) {
-        // Create UserMetadata with correct discriminator
-        let mut data = vec![0u8; 8 + USER_METADATA_SIZE];
+        // Create UserMetadata using typed struct
+        let user_metadata = types::UserMetadata {
+            referrer: [0u8; 32],
+            bump: bump as u64,
+            user_lookup_table: [0u8; 32],
+            owner: owner.to_bytes(),
+            ..Default::default()
+        };
 
-        // UserMetadata discriminator (from IDL)
+        // Build account data with discriminator + struct bytes
         let discriminator: [u8; 8] = [157, 214, 220, 235, 98, 135, 171, 28];
-        data[..8].copy_from_slice(&discriminator);
-
-        // UserMetadata layout:
-        // - referrer: Pubkey (32)
-        // - bump: u64 (8)
-        // - user_lookup_table: Pubkey (32)
-        // - owner: Pubkey (32)
-        // - padding_1: [u8; 51]
-        // - padding_2: [u64; 64]
-
-        // Set referrer (default/none)
-        data[8..40].copy_from_slice(Pubkey::default().as_ref());
-
-        // Set bump
-        data[40..48].copy_from_slice(&(bump as u64).to_le_bytes());
-
-        // Set user_lookup_table (default)
-        data[48..80].copy_from_slice(Pubkey::default().as_ref());
-
-        // Set owner
-        data[80..112].copy_from_slice(owner.as_ref());
+        let struct_bytes = bytemuck::bytes_of(&user_metadata);
+        let mut data = Vec::with_capacity(8 + struct_bytes.len());
+        data.extend_from_slice(&discriminator);
+        data.extend_from_slice(struct_bytes);
 
         ctx.create_account()
             .pubkey(*pubkey)
@@ -1378,64 +1250,27 @@ fn invariant_test(fixture: &mut KlendFixture) {
 fn solvency_check(fixture: &mut KlendFixture) {
     // Check each user's obligation for bad debt
     for user in &fixture.users {
-        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
-
-        // Skip if account is too small
-        if account.data.len() < 8 + OBLIGATION_SIZE {
+        // Read obligation using typed zero-copy access
+        let Ok(obligation) = fixture.ctx.read_zero_copy_account::<types::Obligation>(&user.obligation) else {
             continue;
-        }
+        };
 
-        // Read deposited_value_sf and borrowed_assets_market_value_sf from raw bytes
-        // Obligation struct layout (after 8-byte discriminator):
-        // - tag: u64 (8)
-        // - last_update: LastUpdate (16)
-        // - lending_market: Pubkey (32)
-        // - owner: Pubkey (32)
-        // - deposits: [ObligationCollateral; 8] (variable)
-        // - borrows: [ObligationLiquidity; 5] (variable)
-        // - deposited_value_sf: u128 (at some offset)
-        // - borrowed_assets_market_value_sf: u128
+        // Convert [u64; 2] fields to u128 for comparison
+        let deposited_value = types::u64_pair_to_u128(obligation.deposited_value_sf);
+        let borrowed_value = types::u64_pair_to_u128(obligation.borrowed_assets_market_value_sf);
 
-        // For simplicity, we'll read from known offsets (this should be verified)
-        // These offsets depend on the exact struct layout
-
-        // ObligationCollateral is ~176 bytes each (8 * 176 = 1408)
-        // ObligationLiquidity is ~144 bytes each (5 * 144 = 720)
-        // Deposited value is after deposits + borrows + some fields
-
-        // Approximate offset for deposited_value_sf (this needs verification)
-        let deposits_offset = 8 + 8 + 16 + 32 + 32;  // After header fields
-        let deposits_size = 8 * 176;  // 8 ObligationCollateral
-        let borrows_size = 5 * 144;   // 5 ObligationLiquidity
-
-        let deposited_value_offset = deposits_offset + deposits_size + borrows_size;
-        let borrowed_value_offset = deposited_value_offset + 16;
-
-        if borrowed_value_offset + 16 <= account.data.len() {
-            let deposited_value = u128::from_le_bytes(
-                account.data[deposited_value_offset..deposited_value_offset + 16]
-                    .try_into()
-                    .unwrap_or([0u8; 16])
+        // Solvency check: borrowed should not exceed deposited significantly
+        if borrowed_value > 0 && deposited_value > 0 {
+            // Allow 10% margin for rounding, fees, and interest
+            let margin = deposited_value / 10;
+            assert!(
+                borrowed_value <= deposited_value + margin,
+                "SOLVENCY VIOLATION: user {} has borrowed {} > deposited {} + margin {}",
+                user.keypair.pubkey(),
+                borrowed_value,
+                deposited_value,
+                margin
             );
-            let borrowed_value = u128::from_le_bytes(
-                account.data[borrowed_value_offset..borrowed_value_offset + 16]
-                    .try_into()
-                    .unwrap_or([0u8; 16])
-            );
-
-            // Solvency check: borrowed should not exceed deposited significantly
-            if borrowed_value > 0 && deposited_value > 0 {
-                // Allow 10% margin for rounding, fees, and interest
-                let margin = deposited_value / 10;
-                assert!(
-                    borrowed_value <= deposited_value + margin,
-                    "SOLVENCY VIOLATION: user {} has borrowed {} > deposited {} + margin {}",
-                    user.keypair.pubkey(),
-                    borrowed_value,
-                    deposited_value,
-                    margin
-                );
-            }
         }
     }
 }

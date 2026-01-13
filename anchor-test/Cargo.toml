@@ -35,6 +35,8 @@ solana-clock = "3.0"
 solana-sbpf = "0.13"
 
 spl-token = "9.0"
+bytemuck = { version = "1.14", features = ["derive"] }
+once_cell = "1.19"
 
 [dependencies]
 rand = "0.8"
