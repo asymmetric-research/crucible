@@ -590,3 +590,420 @@ When developing a harness, follow this iterative loop:
 ---
 
 **Key insight**: The IDL provides the interface, but the **program source code** reveals the actual constraints, whitelists, encoding details, and state transitions that determine whether your harness will work and your invariants will catch real bugs.
+
+---
+
+# Advanced: Bytemuck Struct Access
+
+When manual byte offset patching becomes unwieldy, use **bytemuck** with `#[repr(C)]` structs for type-safe account access.
+
+## 22. Creating types.rs with Bytemuck Structs
+
+Instead of manual offset calculations:
+
+```rust
+// BAD: Fragile, error-prone, no type safety
+let ltv_offset = 8 + 264 + 12;  // Where does 12 come from?
+data[ltv_offset] = 80;
+```
+
+Create structs that mirror the program's account layout:
+
+```rust
+// types.rs
+use bytemuck::{Pod, Zeroable};
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Reserve {
+    pub last_update: LastUpdate,
+    pub lending_market: [u8; 32],
+    pub liquidity: ReserveLiquidity,
+    pub config: ReserveConfig,
+    pub padding: [u8; 150],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ReserveConfig {
+    pub status: u8,
+    pub _padding1: [u8; 7],
+    pub asset_tier: u8,
+    pub _padding2: [u8; 7],
+    pub loan_to_value_pct: u8,           // Now you know exactly where LTV is!
+    pub liquidation_threshold_pct: u8,
+    // ... other fields
+}
+
+pub const RESERVE_SIZE: usize = std::mem::size_of::<Reserve>();
+```
+
+### Steps to Create types.rs
+
+1. **Find program's account structs** in source code (e.g., `src/state/reserve.rs`)
+2. **Copy struct definitions** preserving exact field order
+3. **Add bytemuck derives**: `#[repr(C)]`, `Pod`, `Zeroable`
+4. **Convert non-Pod types**:
+   - `Pubkey` → `[u8; 32]`
+   - `bool` → `u8`
+   - Nested structs → also make `#[repr(C)]` Pod
+5. **Handle u128 stored as [u64; 2]** (common in DeFi for fixed-point math):
+
+```rust
+pub fn u64_pair_to_u128(pair: [u64; 2]) -> u128 {
+    (pair[0] as u128) | ((pair[1] as u128) << 64)
+}
+
+pub fn u128_to_u64_pair(value: u128) -> [u64; 2] {
+    [value as u64, (value >> 64) as u64]
+}
+```
+
+## 23. Reading Account Data with Bytemuck
+
+```rust
+use types::{Reserve, RESERVE_SIZE};
+
+fn read_reserve(ctx: &TestContext, pubkey: &Pubkey) -> Reserve {
+    let account = ctx.get_account(pubkey).unwrap();
+    // Skip 8-byte Anchor discriminator
+    let reserve: &Reserve = bytemuck::from_bytes(&account.data[8..8 + RESERVE_SIZE]);
+    *reserve
+}
+
+// Example: Check if LTV is configured correctly
+let reserve = read_reserve(&ctx, &sol_reserve);
+assert_eq!(reserve.config.loan_to_value_pct, 80, "LTV should be 80%");
+```
+
+## 24. Writing Account Data with Bytemuck
+
+```rust
+fn configure_reserve_manually(
+    ctx: &mut TestContext,
+    reserve_pubkey: &Pubkey,
+    program_id: &Pubkey,
+    current_slot: u64,
+) {
+    let account = ctx.get_account(reserve_pubkey).unwrap();
+    let mut data = account.data.clone();
+
+    // Get mutable reference via bytemuck
+    let reserve: &mut Reserve = bytemuck::from_bytes_mut(&mut data[8..8 + RESERVE_SIZE]);
+
+    // Now you can access fields directly - no offset math!
+    reserve.last_update.slot = current_slot;
+    reserve.last_update.stale = 0;
+
+    reserve.config.loan_to_value_pct = 80;
+    reserve.config.liquidation_threshold_pct = 85;
+    reserve.config.deposit_limit = u64::MAX;
+    reserve.config.borrow_limit = u64::MAX;
+
+    // Set oracle price (u128 stored as [u64; 2])
+    let price_sf: u128 = 100 * 10_u128.pow(18);
+    reserve.liquidity.market_price_sf = u128_to_u64_pair(price_sf);
+
+    // Write back
+    ctx.set_account(reserve_pubkey, Account {
+        lamports: account.lamports,
+        data,
+        owner: *program_id,
+        ..Default::default()
+    });
+}
+```
+
+## 25. Benefits of Bytemuck Approach
+
+| Manual Offsets | Bytemuck Structs |
+|---------------|------------------|
+| `data[8 + 264 + 12] = 80` | `reserve.config.loan_to_value_pct = 80` |
+| Silent failures if offset wrong | Compile-time type checking |
+| Must recalculate on struct changes | Just update struct definition |
+| Hard to debug | Self-documenting code |
+| Easy to miss padding | Explicit padding fields |
+
+---
+
+# Advanced: Dynamic remaining_accounts
+
+## 26. When Instructions Need remaining_accounts
+
+Many DeFi instructions require **dynamic accounts** based on on-chain state:
+
+| Instruction | remaining_accounts Needed |
+|-------------|---------------------------|
+| RefreshObligation | All deposit/borrow reserve pubkeys |
+| Liquidate | Collateral reserve + debt reserve |
+| FlashLoan | All affected pool/reserve accounts |
+| MultiHop Swap | Intermediate pool accounts |
+
+The fuzzer can't know these statically - must read state to discover them.
+
+## 27. Pattern: Read State to Build remaining_accounts
+
+```rust
+fn queue_refresh_obligation(&mut self, user_idx: usize) -> anyhow::Result<()> {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    let user_obligation = self.users[user_idx].obligation;
+    let mut remaining_accounts = Vec::new();
+
+    // Read the obligation to discover which reserves it references
+    if let Ok(account) = self.ctx.get_account(&user_obligation) {
+        if account.data.len() >= 8 + OBLIGATION_SIZE {
+            let obligation: &Obligation = bytemuck::from_bytes(
+                &account.data[8..8 + OBLIGATION_SIZE]
+            );
+
+            // Collect deposit reserves
+            for deposit in &obligation.deposits {
+                if deposit.deposit_reserve != [0u8; 32] {
+                    remaining_accounts.push(Pubkey::new_from_array(deposit.deposit_reserve));
+                }
+            }
+
+            // Collect borrow reserves (avoid duplicates)
+            for borrow in &obligation.borrows {
+                if borrow.borrow_reserve != [0u8; 32] {
+                    let pubkey = Pubkey::new_from_array(borrow.borrow_reserve);
+                    if !remaining_accounts.contains(&pubkey) {
+                        remaining_accounts.push(pubkey);
+                    }
+                }
+            }
+        }
+    }
+
+    // Now call with discovered accounts
+    self.ctx.program(self.program_id)
+        .call(instruction::RefreshObligation {})
+        .accounts(accounts::RefreshObligation {
+            lending_market: self.lending_market,
+            obligation: user_obligation,
+        })
+        .remaining_accounts(remaining_accounts)  // Dynamic!
+        .add_transaction()
+}
+```
+
+## 28. Error: InvalidAccountInput (6006)
+
+If you see `Custom(6006)` InvalidAccountInput, the program expected accounts that weren't provided. Check:
+
+1. Is the instruction expecting remaining_accounts?
+2. Does the on-chain state (obligation, pool, etc.) reference other accounts?
+3. Are you passing accounts in the correct order?
+
+---
+
+# Advanced: State Dependency Chains
+
+## 29. Understanding Action Dependencies
+
+Most DeFi protocols have **state dependencies** where later actions require earlier actions to succeed:
+
+```
+Lending Protocol Chain:
+  deposit_reserve_liquidity  →  get cTokens (receipt tokens)
+  deposit_obligation_collateral  →  cTokens become collateral
+  borrow_obligation_liquidity  →  borrow against collateral
+  repay_obligation_liquidity  →  repay debt
+  withdraw_obligation_collateral  →  reclaim cTokens
+```
+
+**Problem**: Random fuzzing rarely discovers these chains because:
+- Each action picks random parameters (different users)
+- State from one action doesn't influence the next
+- Probability of valid sequence = `1/num_actions^chain_length`
+
+## 30. Solution: Early Return Checks
+
+Check prerequisites before attempting actions that depend on prior state:
+
+```rust
+pub fn action_borrow(&mut self, user_idx: usize, amount: u64) {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    // EARLY RETURN: Check if user has collateral deposited
+    if let Ok(account) = self.ctx.get_account(&self.users[user_idx].obligation) {
+        if account.data.len() >= 8 + OBLIGATION_SIZE {
+            let obligation: &Obligation = bytemuck::from_bytes(
+                &account.data[8..8 + OBLIGATION_SIZE]
+            );
+
+            // Check for NON-EMPTY deposit slots
+            let has_collateral = obligation.deposits.iter()
+                .any(|d| d.deposit_reserve != [0u8; 32]);
+
+            if !has_collateral {
+                // Log and skip - don't waste cycles on guaranteed failure
+                eprintln!("[SKIP] borrow: user {} has no collateral", user_idx);
+                return;
+            }
+        }
+    }
+
+    // Proceed with borrow...
+}
+```
+
+## 31. Checking the Right Field
+
+**Critical**: Check fields that are set **immediately**, not computed fields.
+
+```rust
+// WRONG: deposited_value_sf is COMPUTED by RefreshObligation
+// It's 0 until RefreshObligation runs, even if user deposited collateral
+let has_collateral = obligation.deposited_value_sf != [0, 0];
+
+// RIGHT: deposit_reserve is SET by DepositObligationCollateral
+// It's populated immediately when collateral is deposited
+let has_collateral = obligation.deposits.iter()
+    .any(|d| d.deposit_reserve != [0u8; 32]);
+```
+
+### Common Field Types
+
+| Field Type | When Set | When to Check |
+|-----------|----------|---------------|
+| Reserve pubkey in slot | By deposit/borrow action | Before dependent actions |
+| Value/amount fields (sf) | By refresh/compound action | After refresh |
+| Status flags | By admin/init action | Anytime |
+| Timestamps | By action execution | For staleness checks |
+
+## 32. Alternative: Smart Actions
+
+Make actions automatically set up prerequisites:
+
+```rust
+pub fn action_borrow(&mut self, user_idx: usize, amount: u64) {
+    // Check if user has collateral
+    let has_collateral = self.user_has_collateral(user_idx);
+
+    if !has_collateral {
+        // Auto-setup: deposit collateral first
+        let collateral_amount = amount * 2;  // Over-collateralize
+        self.action_deposit(user_idx, collateral_amount);
+        self.action_deposit_collateral(user_idx, collateral_amount);
+    }
+
+    // Now borrow
+    self.do_borrow(user_idx, amount);
+}
+```
+
+## 33. Alternative: Compound Actions
+
+Create high-level actions that combine multiple operations:
+
+```rust
+pub fn action_full_borrow_flow(&mut self, user_idx: usize, collateral: u64, borrow: u64) {
+    // Always execute full sequence
+    self.action_deposit(user_idx, collateral);
+    self.action_deposit_collateral(user_idx, collateral);
+    self.action_borrow(user_idx, borrow);
+}
+```
+
+---
+
+# Diagnostic Logging Patterns
+
+## 34. Action Statistics Tracking
+
+Track per-action success/failure rates to identify blockers:
+
+```rust
+use std::sync::atomic::{AtomicU32, Ordering};
+
+struct ActionStats {
+    attempts: AtomicU32,
+    success: AtomicU32,
+    early_return: AtomicU32,
+    program_error: AtomicU32,
+}
+
+static BORROW_STATS: ActionStats = ActionStats {
+    attempts: AtomicU32::new(0),
+    success: AtomicU32::new(0),
+    early_return: AtomicU32::new(0),
+    program_error: AtomicU32::new(0),
+};
+
+pub fn action_borrow(&mut self, user_idx: usize, amount: u64) {
+    BORROW_STATS.attempts.fetch_add(1, Ordering::Relaxed);
+
+    // Early return case
+    if !self.user_has_collateral(user_idx) {
+        BORROW_STATS.early_return.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let result = self.do_borrow(user_idx, amount);
+
+    match &result {
+        Ok(TxOutcome::Success { compute_units, .. }) => {
+            BORROW_STATS.success.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[SUCCESS] borrow: CU={}", compute_units);
+        }
+        Ok(TxOutcome::ProgramError { error_code, .. }) => {
+            BORROW_STATS.program_error.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[ERROR] borrow: code={:?}", error_code);
+        }
+        _ => {}
+    }
+}
+```
+
+## 35. Periodic Summary Output
+
+Print statistics periodically to track progress:
+
+```rust
+fn print_action_stats() {
+    eprintln!("=== Action Statistics ===");
+    eprintln!("deposit:      {}/{} success",
+        DEPOSIT_STATS.success.load(Ordering::Relaxed),
+        DEPOSIT_STATS.attempts.load(Ordering::Relaxed));
+    eprintln!("deposit_coll: {}/{} success",
+        DEPOSIT_COLL_STATS.success.load(Ordering::Relaxed),
+        DEPOSIT_COLL_STATS.attempts.load(Ordering::Relaxed));
+    eprintln!("borrow:       {}/{} success ({} early return)",
+        BORROW_STATS.success.load(Ordering::Relaxed),
+        BORROW_STATS.attempts.load(Ordering::Relaxed),
+        BORROW_STATS.early_return.load(Ordering::Relaxed));
+}
+```
+
+---
+
+# Common Lending Protocol Errors
+
+## 36. Error Reference
+
+| Code | Name | Cause | Fix |
+|------|------|-------|-----|
+| 6006 | InvalidAccountInput | Wrong remaining_accounts | Read state to discover required accounts |
+| 6007 | MathOverflow | last_update.slot = 0 | Set to current slot |
+| 6020 | ObligationDepositsEmpty | Borrow without collateral | Early return check for deposits |
+| 6051 | ReserveStale | Reserve not refreshed | Call RefreshReserve or patch last_update |
+| 6087 | CollateralNonLiquidatable | LTV = 0% | Set loan_to_value_pct > 0 |
+| 6090 | DepositLimitExceeded | deposit_limit too low | Set deposit_limit = u64::MAX |
+| 6091 | BorrowLimitExceeded | borrow_limit too low | Set borrow_limit = u64::MAX |
+
+---
+
+# Checklist for New Harnesses
+
+- [ ] Create `types.rs` with bytemuck structs matching program accounts
+- [ ] Set up mock oracles for any price feeds
+- [ ] Configure reserves/pools with reasonable limits (u64::MAX)
+- [ ] Patch freshness/staleness fields (last_update.slot)
+- [ ] Add remaining_accounts logic for instructions that need them
+- [ ] Add early return checks for state prerequisites
+- [ ] Add diagnostic logging to all actions
+- [ ] Consider smart actions or compound actions for state chains
+- [ ] Run initial fuzzing and analyze error patterns
+- [ ] Iterate on fixes until major actions succeed

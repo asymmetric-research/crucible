@@ -47,59 +47,7 @@ mod sysvar {
 use std::{rc::Rc, collections::HashMap};
 use fixed::types::I80F48;
 use fixed_macro::types::I80F48;
-use borsh::BorshSerialize;
-
 use anchor_test::anchor_spl::token::spl_token;
-
-// ============================================================================
-// Local Pyth Type Definitions (to avoid dependency conflicts)
-// ============================================================================
-
-/// Pyth Solana Receiver program ID
-pub mod pyth_local {
-    use super::*;
-    use borsh::{BorshSerialize, BorshDeserialize};
-
-    // rec5EKMGg6MxZYaMdyBps2bnnCNHi6KCYuQedA7GsAuW
-    pub const ID: Pubkey = Pubkey::new_from_array([
-        0x02, 0xe1, 0xae, 0xce, 0x70, 0xcc, 0x1b, 0xac,
-        0x7a, 0x72, 0xa9, 0x36, 0x74, 0xe4, 0x5a, 0x7b,
-        0xe1, 0xa8, 0xbd, 0x5a, 0x03, 0xbd, 0x7c, 0x50,
-        0xfd, 0x3f, 0xa2, 0xc5, 0xa4, 0x92, 0x88, 0x28,
-    ]);
-
-    #[derive(Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-    #[repr(u8)]
-    pub enum VerificationLevel {
-        Partial { num_signatures: u8 },
-        Full,
-    }
-
-    #[derive(Clone, Copy, BorshSerialize, BorshDeserialize)]
-    #[repr(C)]
-    pub struct PriceFeedMessage {
-        pub feed_id: [u8; 32],
-        pub price: i64,
-        pub conf: u64,
-        pub exponent: i32,
-        pub publish_time: i64,
-        pub prev_publish_time: i64,
-        pub ema_price: i64,
-        pub ema_conf: u64,
-    }
-
-    #[derive(Clone, Copy, BorshSerialize, BorshDeserialize)]
-    #[repr(C)]
-    pub struct PriceUpdateV2 {
-        pub write_authority: Pubkey,
-        pub verification_level: VerificationLevel,
-        pub price_message: PriceFeedMessage,
-        pub posted_slot: u64,
-    }
-}
-
-use pyth_local::{PriceUpdateV2, PriceFeedMessage, VerificationLevel};
-use bytemuck;
 use anchor_test::anchor_lang::InstructionData;
 
 // ============================================================================
@@ -530,38 +478,14 @@ mod fixture_helpers {
     }
     
     fn create_oracle(ctx: &mut TestContext, price: I80F48, decimals: u8) -> Pubkey {
-        let oracle = Keypair::new();
         let native_price = (price * I80F48::from_num(10_i64.pow(decimals as u32))).to_num::<i64>();
-        
-        let price_update = PriceUpdateV2 {
-            write_authority: Pubkey::default(),
-            verification_level: VerificationLevel::Full,
-            price_message: PriceFeedMessage {
-                feed_id: oracle.pubkey().to_bytes(),
-                price: native_price,
-                conf: 100_000,
-                exponent: -(decimals as i32),
-                publish_time: 0,
-                prev_publish_time: 0,
-                ema_price: native_price,
-                ema_conf: 100_000,
-            },
-            posted_slot: 1,
-        };
-        
-        let discriminator: [u8; 8] = [34, 241, 35, 99, 157, 126, 244, 205];
-        let mut data = discriminator.to_vec();
-        price_update.serialize(&mut data).unwrap();
-        
-        ctx.create_account()
-            .pubkey(oracle.pubkey())
-            .owner(pyth_local::ID)
-            .lamports(10_000_000)
-            .data(&data)
-            .create()
-            .unwrap();
-        
-        oracle.pubkey()
+
+        ctx.create_mock_pyth_oracle()
+            .price(native_price)
+            .exponent(-(decimals as i32))
+            .confidence(100_000)
+            .build()
+            .unwrap()
     }
     
     fn create_bank(

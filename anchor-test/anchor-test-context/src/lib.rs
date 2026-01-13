@@ -26,12 +26,21 @@ pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::account_builders::AccountBuilderBase;
+pub use crate::mock_oracles::{
+    MockPythOracleBuilder,
+    PriceUpdateV2,
+    PriceFeedMessage,
+    VerificationLevel,
+    DEFAULT_PYTH_RECEIVER_ID,
+    PYTH_DISCRIMINATOR,
+};
 
 mod account_builders;
 mod instruction_builder;
 mod program_builder;
 mod transaction_builder;
 mod system_program_builder;
+mod mock_oracles;
 
 pub use litesvm::InvocationInspectCallback;
 
@@ -474,6 +483,18 @@ impl TestContext {
         self.svm.get_sysvar::<Clock>().slot
     }
 
+    /// Returns the slot that the next transaction will likely see (current + 1)
+    pub fn next_slot(&self) -> u64 {
+        self.slot() + 1
+    }
+
+    /// Check if account exists AND has at least `min_size` bytes of data
+    pub fn account_has_data(&self, pubkey: &Pubkey, min_size: usize) -> bool {
+        self.svm.get_account(pubkey)
+            .map(|acc| acc.data.len() >= min_size)
+            .unwrap_or(false)
+    }
+
     pub fn get_account(&self, address: &Pubkey) -> Result<Account> {
         self.read_account(address)
     }
@@ -518,22 +539,41 @@ impl TestContext {
     
     // Serialize with discriminator, write to SVM
     pub fn write_anchor_account<T: AnchorSerialize + Discriminator>(
-        &mut self, 
-        address: &Pubkey, 
+        &mut self,
+        address: &Pubkey,
         data: &T
     ) -> Result<()> {
         // Read existing account to preserve lamports, owner, etc.
         let mut account = self.read_account(address)?;
-        
+
         // Build new data: discriminator + serialized T
         let mut account_data = T::DISCRIMINATOR.to_vec();
         data.serialize(&mut account_data)?;
-        
+
         // Update account data and write back
         account.data = account_data;
         let _ = self.svm.set_account(*address, account);
-        
+
         Ok(())
+    }
+
+    /// Update account data using a closure. Enables atomic read-modify-write pattern.
+    ///
+    /// # Example
+    /// ```ignore
+    /// ctx.update_account(&reserve_pubkey, |data| {
+    ///     // Modify data in place (e.g., using bytemuck)
+    ///     let reserve: &mut Reserve = bytemuck::from_bytes_mut(&mut data[8..]);
+    ///     reserve.config.loan_to_value_pct = 80;
+    /// })?;
+    /// ```
+    pub fn update_account<F>(&mut self, pubkey: &Pubkey, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Vec<u8>),
+    {
+        let mut account = self.read_account(pubkey)?;
+        f(&mut account.data);
+        self.write_account(pubkey, account)
     }
 
     /// Callers - each returns a builder
