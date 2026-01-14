@@ -17,12 +17,14 @@ pub type Pubkey = [u8; 32];
 
 /// Convert [u64; 2] to u128 (little-endian)
 #[inline]
+#[allow(dead_code)]
 pub fn u64_pair_to_u128(pair: [u64; 2]) -> u128 {
     (pair[1] as u128) << 64 | (pair[0] as u128)
 }
 
 /// Convert u128 to [u64; 2] (little-endian)
 #[inline]
+#[allow(dead_code)]
 pub fn u128_to_u64_pair(val: u128) -> [u64; 2] {
     [val as u64, (val >> 64) as u64]
 }
@@ -69,6 +71,7 @@ impl LastUpdate {
     }
 
     /// Mark as stale
+    #[allow(dead_code)]
     pub fn mark_stale(&mut self) {
         self.stale = 1;
     }
@@ -389,6 +392,7 @@ unsafe impl Pod for ObligationCollateral {}
 unsafe impl Zeroable for ObligationCollateral {}
 
 impl ObligationCollateral {
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.deposit_reserve != [0u8; 32]
     }
@@ -414,6 +418,7 @@ unsafe impl Pod for ObligationLiquidity {}
 unsafe impl Zeroable for ObligationLiquidity {}
 
 impl ObligationLiquidity {
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.borrow_reserve != [0u8; 32]
     }

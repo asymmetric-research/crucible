@@ -31,6 +31,7 @@ solana-message = "3.0"
 solana-hash = "3.0"
 solana-program-runtime = "3.0"
 solana-transaction-context = "3.0"
+solana-transaction-error = "3.0"
 solana-clock = "3.0"
 solana-sbpf = "0.13"
 

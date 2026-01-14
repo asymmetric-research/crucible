@@ -7,6 +7,7 @@ edition = "2021"
 litesvm.workspace = true
 anchor-lang.workspace = true
 anyhow.workspace = true
+borsh = "1.5"
 
 # Client-side crates - versions resolved by cargo
 solana-pubkey.workspace = true
@@ -19,6 +20,7 @@ solana-message.workspace = true
 solana-hash.workspace = true
 solana-program-runtime.workspace = true
 solana-transaction-context.workspace = true
+solana-transaction-error.workspace = true
 solana-sbpf.workspace = true
 
 spl-token.workspace = true

@@ -6,6 +6,7 @@ use solana_account::Account;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_pubkey::Pubkey;
+use solana_transaction_error::TransactionError;
 
 // Re-export types from anchor-lang for anchor program interactions
 use anchor_lang::prelude::{Clock, Rent};
@@ -26,6 +27,14 @@ pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::account_builders::AccountBuilderBase;
+pub use crate::mock_oracles::{
+    MockPythOracleBuilder,
+    PriceUpdateV2,
+    PriceFeedMessage,
+    VerificationLevel,
+    DEFAULT_PYTH_RECEIVER_ID,
+    PYTH_DISCRIMINATOR,
+};
 
 mod account_builders;
 mod instruction_builder;
@@ -305,6 +314,168 @@ macro_rules! fuzz_assert_approx_eq {
             $crate::record_violation(format!($($arg)+));
         }
     }};
+}
+
+// Mock oracles for testing
+mod mock_oracles;
+
+/// Parsed transaction outcome from litesvm execution
+#[derive(Debug, Clone)]
+pub enum TxOutcome {
+    /// Transaction executed successfully
+    Success {
+        compute_units: u64,
+        logs: Vec<String>,
+    },
+    /// Transaction failed with program error
+    ProgramError {
+        /// Raw error from SVM
+        error: TransactionError,
+        /// Parsed error code (e.g., 6051 from Custom(6051))
+        error_code: Option<u32>,
+        /// Instruction index that failed
+        instruction_index: Option<u8>,
+        /// Program logs up to failure
+        logs: Vec<String>,
+    },
+}
+
+/// Error type for TxOutcome::into_result()
+#[derive(Debug, Clone)]
+pub struct TxError {
+    pub error: TransactionError,
+    pub error_code: Option<u32>,
+    pub instruction_index: Option<u8>,
+    pub logs: Vec<String>,
+}
+
+impl std::error::Error for TxError {}
+
+impl std::fmt::Display for TxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Transaction failed")?;
+        if let Some(code) = self.error_code {
+            write!(f, " (error code: {})", code)?;
+        }
+        if let Some(idx) = self.instruction_index {
+            write!(f, " at instruction {}", idx)?;
+        }
+        Ok(())
+    }
+}
+
+impl TxOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, TxOutcome::Success { .. })
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, TxOutcome::ProgramError { .. })
+    }
+
+    pub fn error_code(&self) -> Option<u32> {
+        match self {
+            TxOutcome::ProgramError { error_code, .. } => *error_code,
+            _ => None,
+        }
+    }
+
+    pub fn logs(&self) -> &[String] {
+        match self {
+            TxOutcome::Success { logs, .. } => logs,
+            TxOutcome::ProgramError { logs, .. } => logs,
+        }
+    }
+
+    pub fn compute_units(&self) -> Option<u64> {
+        match self {
+            TxOutcome::Success { compute_units, .. } => Some(*compute_units),
+            _ => None,
+        }
+    }
+
+    /// Unwrap success or panic with detailed error message including logs
+    pub fn unwrap(self) {
+        match self {
+            TxOutcome::Success { .. } => {}
+            TxOutcome::ProgramError { error, error_code, logs, .. } => {
+                let mut msg = format!("Transaction failed: {:?}", error);
+                if let Some(code) = error_code {
+                    msg.push_str(&format!(" (code: {})", code));
+                }
+                msg.push_str("\nLogs:\n");
+                for log in &logs {
+                    msg.push_str(&format!("  {}\n", log));
+                }
+                panic!("{}", msg);
+            }
+        }
+    }
+
+    /// Expect success or panic with custom message
+    pub fn expect(self, msg: &str) {
+        match self {
+            TxOutcome::Success { .. } => {}
+            TxOutcome::ProgramError { logs, .. } => {
+                let mut full_msg = format!("{}\nLogs:\n", msg);
+                for log in &logs {
+                    full_msg.push_str(&format!("  {}\n", log));
+                }
+                panic!("{}", full_msg);
+            }
+        }
+    }
+
+    /// Convert to Result for ? operator compatibility
+    pub fn into_result(self) -> std::result::Result<(), TxError> {
+        match self {
+            TxOutcome::Success { .. } => Ok(()),
+            TxOutcome::ProgramError { error, error_code, instruction_index, logs } => {
+                Err(TxError { error, error_code, instruction_index, logs })
+            }
+        }
+    }
+}
+
+/// Parse litesvm TransactionError to extract error code
+/// Extracts Custom(N) error codes from InstructionError variants
+pub fn parse_error_code(err: &TransactionError) -> Option<u32> {
+    let debug_str = format!("{:?}", err);
+    if let Some(custom_start) = debug_str.find("Custom(") {
+        let after_custom = &debug_str[custom_start + 7..];
+        if let Some(end) = after_custom.find(')') {
+            return after_custom[..end].parse().ok();
+        }
+    }
+    None
+}
+
+/// Parse litesvm TransactionError to extract instruction index
+pub fn parse_instruction_index(err: &TransactionError) -> Option<u8> {
+    let debug_str = format!("{:?}", err);
+    if let Some(start) = debug_str.find("InstructionError(") {
+        let after_prefix = &debug_str[start + 17..];
+        if let Some(comma) = after_prefix.find(',') {
+            return after_prefix[..comma].trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// Convert litesvm transaction result to TxOutcome
+pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutcome {
+    match result {
+        Ok(meta) => TxOutcome::Success {
+            compute_units: meta.compute_units_consumed,
+            logs: meta.logs,
+        },
+        Err(failed) => TxOutcome::ProgramError {
+            error: failed.err.clone(),
+            error_code: parse_error_code(&failed.err),
+            instruction_index: parse_instruction_index(&failed.err),
+            logs: failed.meta.logs,
+        },
+    }
 }
 
 // Re-export types needed by generated code
@@ -1005,6 +1176,18 @@ impl TestContext {
         self.svm.get_sysvar::<Clock>().slot
     }
 
+    /// Returns the slot that the next transaction will likely see (current + 1)
+    pub fn next_slot(&self) -> u64 {
+        self.slot() + 1
+    }
+
+    /// Check if account exists AND has at least `min_size` bytes of data
+    pub fn account_has_data(&self, pubkey: &Pubkey, min_size: usize) -> bool {
+        self.svm.get_account(pubkey)
+            .map(|acc| acc.data.len() >= min_size)
+            .unwrap_or(false)
+    }
+
     pub fn get_account(&self, address: &Pubkey) -> Result<Account> {
         self.read_account(address)
     }
@@ -1120,6 +1303,25 @@ impl TestContext {
         Ok(())
     }
 
+    /// Update account data using a closure. Enables atomic read-modify-write pattern.
+    ///
+    /// # Example
+    /// ```ignore
+    /// ctx.update_account(&reserve_pubkey, |data| {
+    ///     // Modify data in place (e.g., using bytemuck)
+    ///     let reserve: &mut Reserve = bytemuck::from_bytes_mut(&mut data[8..]);
+    ///     reserve.config.loan_to_value_pct = 80;
+    /// })?;
+    /// ```
+    pub fn update_account<F>(&mut self, pubkey: &Pubkey, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Vec<u8>),
+    {
+        let mut account = self.read_account(pubkey)?;
+        f(&mut account.data);
+        self.write_account(pubkey, account)
+    }
+
     /// Callers - each returns a builder
 
     // Escape hatch for raw instructions
@@ -1153,7 +1355,7 @@ impl TestContext {
         }
     }
 
-    pub fn send_batch(&mut self) -> Result<Option<litesvm::types::TransactionResult>> {
+    pub fn send_batch(&mut self) -> Result<Option<TxOutcome>> {
         // Empty queue is a noop
         if self.pending_instructions.is_empty() {
             return Ok(None);
@@ -1189,18 +1391,23 @@ impl TestContext {
         // Clear batch names after transaction completes
         clear_pending_batch_names();
 
+        let outcome = tx_result_to_outcome(result);
+
         if debug {
-            match &result {
-                Ok(meta) => {
-                    eprintln!("[TX] SUCCESS - compute_units={}, logs:", meta.compute_units_consumed);
-                    for log in &meta.logs {
+            match &outcome {
+                TxOutcome::Success { compute_units, logs } => {
+                    eprintln!("[TX] SUCCESS - compute_units={}, logs:", compute_units);
+                    for log in logs {
                         eprintln!("[TX]   {}", log);
                     }
                 }
-                Err(failed) => {
-                    eprintln!("[TX] FAILED - error: {:?}", failed.err);
+                TxOutcome::ProgramError { error, error_code, logs, .. } => {
+                    eprintln!("[TX] FAILED - error: {:?}", error);
+                    if let Some(code) = error_code {
+                        eprintln!("[TX]   error code: {}", code);
+                    }
                     eprintln!("[TX]   logs:");
-                    for log in &failed.meta.logs {
+                    for log in logs {
                         eprintln!("[TX]   {}", log);
                     }
                 }
@@ -1211,7 +1418,7 @@ impl TestContext {
         self.pending_instructions.clear();
         self.pending_signers.clear();
 
-        Ok(Some(result))
+        Ok(Some(outcome))
     }
 }
 

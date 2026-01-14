@@ -1,4 +1,4 @@
-use crate::TestContext;
+use crate::{TestContext, TxOutcome, tx_result_to_outcome};
 use anchor_lang::solana_program::instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -18,8 +18,9 @@ impl InstructionBuilder<'_> {
         self
     }
 
-    pub fn send(self) -> Result<litesvm::types::TransactionResult> {  
-        send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)
+    pub fn send(self) -> Result<TxOutcome> {
+        let result = send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)?;
+        Ok(tx_result_to_outcome(result))
     }
 
     pub fn add_transaction(self) -> Result<()> {

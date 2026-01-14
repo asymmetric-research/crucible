@@ -51,6 +51,64 @@ myproject/
 
 ---
 
+## Using anchor-fuzz-gen (Standalone Harnesses)
+
+For programs using different Solana versions than the fuzzer, `anchor-fuzz-gen` generates types from IDL without a crate dependency.
+
+### Setup
+
+1. **Convert your IDL to JSON format:**
+   ```bash
+   anchor idl convert target/idl/my_program.json -o fuzz/my_fuzz/idls/my_program.json
+   ```
+
+2. **Add anchor-fuzz-gen to your fuzz Cargo.toml:**
+   ```toml
+   [dependencies]
+   anchor-fuzz-gen = { path = "path/to/anchor-fuzz-gen" }
+   ```
+
+3. **Generate types in main.rs:**
+   ```rust
+   // Generate module from IDL
+   anchor_fuzz_gen::declare_fuzz_program!("idls/my_program.json");
+
+   // Or with explicit module name
+   anchor_fuzz_gen::declare_fuzz_program!(my_program = "idls/my_program.json");
+
+   // Now use generated types
+   use my_program::{instruction, accounts, ID};
+   ```
+
+### Generated Code
+
+The macro generates:
+- `instruction::*` - Instruction structs with `InstructionData` impl
+- `accounts::*` - Account context structs with `ToAccountMetas` impl
+- `state::*` - Account state types for deserialization
+- `types::*` - Custom type definitions
+- `ID` - Program ID constant
+
+### Example Usage
+
+```rust
+anchor_fuzz_gen::declare_fuzz_program!("idls/lending.json");
+
+fn setup() -> Self {
+    ctx.program(lending::ID)
+        .call(lending::instruction::Deposit { amount })
+        .accounts(lending::accounts::Deposit {
+            user: user_pubkey,
+            reserve: reserve_pda,
+            // ...
+        })
+        .signers(&[&user])
+        .send()?;
+}
+```
+
+---
+
 ## TestContext API
 
 ### Program Loading
@@ -100,6 +158,69 @@ ctx.program(program_id)
     .signers(&[&*user])
     .send()?;
 ```
+
+### Transaction Results (`TxOutcome`)
+
+The `.send()` method returns `Result<TxOutcome>`, a parsed transaction result:
+
+```rust
+use anchor_test_context::TxOutcome;
+
+let result = ctx.program(program_id)
+    .call(instruction::DoSomething { amount })
+    .accounts(accounts::DoSomething { /* ... */ })
+    .signers(&[&*user])
+    .send()?;
+
+match result {
+    TxOutcome::Success { compute_units, logs } => {
+        // Transaction succeeded
+        println!("Used {} CU", compute_units);
+    }
+    TxOutcome::ProgramError { error, error_code, logs, .. } => {
+        // Transaction failed (e.g., program error, constraint violation)
+        if let Some(code) = error_code {
+            println!("Failed with error code: {}", code);
+        }
+        for log in &logs {
+            eprintln!("  {}", log);
+        }
+    }
+}
+```
+
+**TxOutcome variants:**
+- `Success { compute_units, logs }` - Transaction executed successfully
+- `ProgramError { error, error_code, instruction_index, logs }` - Transaction failed
+
+**Helper methods:**
+- `is_success()` - Returns true if transaction succeeded
+- `is_error()` - Returns true if transaction failed
+- `error_code()` - Extracts `Custom(N)` error codes (e.g., Anchor error codes)
+- `logs()` - Returns program logs
+- `unwrap()` - Panics with detailed error message if failed
+- `expect(msg)` - Panics with custom message if failed
+- `into_result()` - Converts to `Result<(), TxError>` for `?` operator
+
+**Common patterns:**
+
+```rust
+// Expect success or panic with logs
+result.unwrap();
+
+// Check for specific error code
+if result.error_code() == Some(6051) {
+    // Handle specific Anchor error
+}
+
+// Ignore expected failures
+let success = matches!(&result, Ok(TxOutcome::Success { .. }));
+if !success {
+    // Transaction failed - may be expected in fuzzing
+}
+```
+
+---
 
 ### Raw Instruction Calls
 
@@ -184,6 +305,33 @@ let current = ctx.slot();
 ctx.warp_to_slot(current + 1000);
 ctx.advance_slots(100);
 ```
+
+### Mock Pyth Oracles
+
+Create mock Pyth price feed accounts for testing DeFi protocols:
+
+```rust
+// Create a mock Pyth oracle with $100 price
+let oracle = ctx.create_mock_pyth_oracle()
+    .price(100_00000000)  // $100 with 8 decimals
+    .exponent(-8)
+    .confidence(100_000)
+    .build()?;
+
+// Update the price
+ctx.update_pyth_price(&oracle, 95_00000000, -8)?;  // $95
+
+// Refresh oracle timestamp to avoid staleness checks
+ctx.refresh_pyth_oracle(&oracle)?;
+```
+
+**Builder methods:**
+- `.price(i64)` - Price value in smallest units (e.g., $100 with exp=-8 → 100_00000000)
+- `.exponent(i32)` - Price exponent (typically -8 for USD)
+- `.confidence(u64)` - Confidence interval
+- `.publish_time(i64)` - Override publish time (defaults to current time)
+- `.feed_id([u8; 32])` - Custom feed ID (defaults to oracle pubkey)
+- `.program_id(Pubkey)` - Override Pyth program ID
 
 ---
 
@@ -460,16 +608,33 @@ pub fn action_unstake(&mut self, user_idx: usize, amount: u64) {
 }
 ```
 
-### Ignoring expected errors
+### Handling expected errors
 
 ```rust
+use anchor_test_context::TxOutcome;
+
 pub fn action_claim(&mut self, user_idx: usize) {
-    // Use let _ to ignore result - some actions may fail legitimately
-    let _ = self.ctx.program(self.program_id)
+    let result = self.ctx.program(self.program_id)
         .call(instruction::Claim {})
         .accounts(/* ... */)
         .signers(&[&*self.users[user_idx].keypair])
-        .send();  // Don't unwrap - let it fail gracefully
+        .send();
+
+    // Option 1: Ignore all errors (simplest)
+    let _ = result;
+
+    // Option 2: Track success/failure
+    if let Ok(TxOutcome::Success { .. }) = &result {
+        self.stats.claims += 1;
+    }
+
+    // Option 3: Log program errors for debugging
+    if let Ok(TxOutcome::ProgramError { error, logs, .. }) = &result {
+        if std::env::var("FUZZ_DEBUG").is_ok() {
+            eprintln!("Claim failed: {:?}", error);
+            for log in logs { eprintln!("  {}", log); }
+        }
+    }
 }
 ```
 
@@ -568,24 +733,28 @@ pub fn action_stake(&mut self, user_idx: usize, amount: u64) {
 
 ## Coverage Reporting
 
-The fuzzer automatically generates LCOV coverage data, enabling visualization of which parts of your program were exercised.
+The fuzzer supports detailed coverage tracking with the `--coverage` flag, generating both LCOV and HTML outputs.
+
+### Enabling Coverage
+
+Coverage is disabled by default for maximum performance. Enable it with the `--coverage` flag:
+
+```bash
+# Run with coverage tracking enabled
+./target/release/my_fuzz -- --coverage
+
+# Or via cargo
+cargo run --release --features invariant_test -- --coverage
+```
+
+**Performance note:** With coverage enabled, expect ~500-800 exec/s. Without coverage, expect ~1500+ exec/s.
 
 ### Output Files
 
-- **`coverage.lcov`** - LCOV format coverage data, written every 5 seconds and on exit (Ctrl+C or panic)
+- **`coverage.lcov`** - LCOV format coverage data for CI integration
+- **`coverage.html`** - Interactive HTML visualization with syntax highlighting
 
-### Real-time Coverage Stats
-
-During fuzzing, coverage stats are printed every 5 seconds:
-
-```
-[COVERAGE] ==========================================
-[COVERAGE] Global:
-[COVERAGE]   Instructions: 21173/158871 ( 13.3%)
-[COVERAGE]   Branches:      2080/12029 ( 17.3%)
-[COVERAGE]   Edges:         2399/24058 ( 10.0%)
-[COVERAGE] ==========================================
-```
+Files are written every 5000 iterations when new coverage is discovered.
 
 ### Visualization Options
 

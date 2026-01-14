@@ -256,32 +256,34 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         #[cfg(feature = #feature_name)]
         mod #mod_name {
             use super::*;
-            use std::cell::RefCell;
             use std::collections::{HashMap, HashSet};
+            use std::sync::{Mutex, LazyLock};
 
             pub const MAP_SIZE: usize = 1 << 16;
 
-            // Thread-local coverage tracking for accurate reporting
-            thread_local! {
-                pub static COVERAGE: RefCell<HashMap<u64, HashSet<u64>>> = RefCell::new(HashMap::new()); // unique (pc<<32|target) edges
-                pub static BRANCH_PCS: RefCell<HashMap<u64, HashSet<usize>>> = RefCell::new(HashMap::new()); // unique branch PCs per program
-                pub static INSTRUCTION_PCS: RefCell<HashMap<u64, HashSet<usize>>> = RefCell::new(HashMap::new()); // ALL executed instruction PCs per program
-                // LCOV coverage data: PC hit counts and branch outcomes
-                pub static PC_HIT_COUNTS: RefCell<HashMap<u64, HashMap<usize, u64>>> = RefCell::new(HashMap::new()); // program -> (pc -> hit count)
-                pub static BRANCH_OUTCOMES: RefCell<HashMap<u64, HashMap<(usize, bool), u64>>> = RefCell::new(HashMap::new()); // program -> ((branch_pc, taken) -> count)
-                pub static LAST_COVERAGE_WRITE: RefCell<u64> = RefCell::new(0);
-                pub static LAST_COVERAGE_COUNT: RefCell<usize> = RefCell::new(0);  // For smart batching
+            /// Consolidated coverage state - uses Mutex instead of TLS.
+            /// Single-threaded fuzzer means no contention, ~20ns lock overhead.
+            #[derive(Default)]
+            pub struct CoverageState {
+                pub edges: HashMap<u64, HashSet<u64>>,           // unique (pc<<32|target) edges
+                pub branch_pcs: HashMap<u64, HashSet<usize>>,    // unique branch PCs per program
+                pub instruction_pcs: HashMap<u64, HashSet<usize>>, // ALL executed instruction PCs
+                pub pc_hit_counts: HashMap<u64, HashMap<usize, u64>>, // program -> (pc -> hit count)
+                pub branch_outcomes: HashMap<u64, HashMap<(usize, bool), u64>>, // program -> ((branch_pc, taken) -> count)
+                pub last_write_iteration: u64,   // Iteration-based throttling (not time-based)
+                pub last_coverage_count: usize,  // For smart batching
+                // Cached totals for SimpleMonitor (avoid iterating all data)
+                pub total_edges: usize,
+                pub total_branches: usize,
+                pub total_instructions: usize,
             }
 
-            thread_local! {
-                pub static LAST_REPORT: RefCell<u64> = RefCell::new(0);
-            }
+            pub static COVERAGE_STATE: LazyLock<Mutex<CoverageState>> = LazyLock::new(|| {
+                Mutex::new(CoverageState::default())
+            });
 
             // Coverage enabled flag (set by --coverage arg)
             pub static COVERAGE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-            // Incremental counter for unique PCs discovered (for smart batching without map scan)
-            pub static TOTAL_UNIQUE_PCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
             // Runtime stats tracking
             pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -345,11 +347,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     let detailed_tracking = COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
 
                     // Collect data locally only if detailed tracking is enabled
-                    let mut local_instruction_pcs: HashSet<usize> = if detailed_tracking {
-                        HashSet::new()
-                    } else {
-                        HashSet::new() // Empty, won't be used
-                    };
+                    let mut local_instruction_pcs: HashSet<usize> = HashSet::new();
                     let mut local_branch_pcs: HashSet<usize> = HashSet::new();
                     let mut local_edges: HashSet<u64> = HashSet::new();
 
@@ -393,72 +391,53 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             buf[edge] = buf[edge].wrapping_add(1);
                         }
 
-                        // Collect edges and branches locally (only for detailed tracking)
-                        if detailed_tracking {
-                            let unique_edge = ((pc as u64) << 32) | (target_pc as u64);
-                            local_edges.insert(unique_edge);
-                            local_branch_pcs.insert(pc);
-                        }
+                        // Always collect edges and branches (for SimpleMonitor display)
+                        let unique_edge = ((pc as u64) << 32) | (target_pc as u64);
+                        local_edges.insert(unique_edge);
+                        local_branch_pcs.insert(pc);
                     }
 
-                    // Skip detailed tracking if not enabled (fast path for normal fuzzing)
+                    // Always update edges/branches in state (for SimpleMonitor)
+                    let mut state = COVERAGE_STATE.lock().unwrap();
+
+                    // Track edges and update cached total
+                    let edge_set = state.edges.entry(program_hash).or_default();
+                    let old_edge_count = edge_set.len();
+                    edge_set.extend(&local_edges);
+                    state.total_edges += edge_set.len() - old_edge_count;
+
+                    // Track branch PCs and update cached total
+                    let branch_set = state.branch_pcs.entry(program_hash).or_default();
+                    let old_branch_count = branch_set.len();
+                    branch_set.extend(&local_branch_pcs);
+                    state.total_branches += branch_set.len() - old_branch_count;
+
+                    // Skip LCOV tracking if --coverage not enabled
                     if !detailed_tracking {
                         return;
                     }
 
-                    // Batch insert into global coverage tracking (single thread-local access each)
-                    INSTRUCTION_PCS.with(|pcs| {
-                        pcs.borrow_mut()
-                            .entry(program_hash)
-                            .or_default()
-                            .extend(&local_instruction_pcs);
-                    });
-
-                    COVERAGE.with(|cov| {
-                        cov.borrow_mut()
-                            .entry(program_hash)
-                            .or_default()
-                            .extend(&local_edges);
-                    });
-
-                    BRANCH_PCS.with(|pcs| {
-                        pcs.borrow_mut()
-                            .entry(program_hash)
-                            .or_default()
-                            .extend(&local_branch_pcs);
-                    });
+                    // Track instruction PCs and update cached total (LCOV only)
+                    let instr_set = state.instruction_pcs.entry(program_hash).or_default();
+                    let old_instr_count = instr_set.len();
+                    instr_set.extend(&local_instruction_pcs);
+                    state.total_instructions += instr_set.len() - old_instr_count;
 
                     // LCOV: Track PC hit counts (increment for each occurrence)
-                    // Also increment TOTAL_UNIQUE_PCS when a new PC is discovered
-                    PC_HIT_COUNTS.with(|counts| {
-                        let mut counts = counts.borrow_mut();
-                        let program_counts = counts.entry(program_hash).or_default();
-                        for pc in &local_instruction_pcs {
-                            use std::collections::hash_map::Entry;
-                            match program_counts.entry(*pc) {
-                                Entry::Vacant(e) => {
-                                    e.insert(1);
-                                    TOTAL_UNIQUE_PCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                Entry::Occupied(mut e) => {
-                                    *e.get_mut() += 1;
-                                }
-                            }
-                        }
-                    });
+                    let program_counts = state.pc_hit_counts.entry(program_hash).or_default();
+                    for pc in &local_instruction_pcs {
+                        *program_counts.entry(*pc).or_insert(0) += 1;
+                    }
 
                     // LCOV: Track branch outcomes (taken vs not-taken separately)
-                    BRANCH_OUTCOMES.with(|outcomes| {
-                        let mut outcomes = outcomes.borrow_mut();
-                        let program_outcomes = outcomes.entry(program_hash).or_default();
-                        for &edge in &local_edges {
-                            let pc = (edge >> 32) as usize;
-                            let target_pc = (edge & 0xFFFFFFFF) as usize;
-                            // taken = jump target is not the fall-through (pc + 8)
-                            let taken = target_pc != pc + 8;
-                            *program_outcomes.entry((pc, taken)).or_insert(0) += 1;
-                        }
-                    });
+                    let program_outcomes = state.branch_outcomes.entry(program_hash).or_default();
+                    for &edge in &local_edges {
+                        let pc = (edge >> 32) as usize;
+                        let target_pc = (edge & 0xFFFFFFFF) as usize;
+                        // taken = jump target is not the fall-through (pc + 8)
+                        let taken = target_pc != pc + 8;
+                        *program_outcomes.entry((pc, taken)).or_insert(0) += 1;
+                    }
                 }
             }
 
@@ -509,70 +488,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            // Coverage reporting function - call periodically from harness
-            pub fn maybe_print_coverage_report(now_secs: u64) {
-                // Skip if coverage not enabled
-                if !COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-
-                let should_report = LAST_REPORT.with(|last| {
-                    let last_val = *last.borrow();
-                    if now_secs.saturating_sub(last_val) >= 5 {
-                        *last.borrow_mut() = now_secs;
-                        true
-                    } else {
-                        false
-                    }
-                });
-
-                if !should_report {
-                    return;
-                }
-
-                eprintln!("\n[COVERAGE] ==========================================");
-
-                // Global coverage
-                COVERAGE.with(|cov| {
-                    let coverage = cov.borrow();
-                    if coverage.is_empty() {
-                        return;
-                    }
-
-                    let edge_totals = PROGRAM_TOTALS.get();
-                    let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
-
-                    eprintln!("[COVERAGE] Global:");
-                    for (prog_hash, edges) in coverage.iter() {
-                        let edge_count = edges.len();
-                        let branch_count = BRANCH_PCS.with(|pcs| {
-                            pcs.borrow().get(prog_hash).map(|s| s.len()).unwrap_or(0)
-                        });
-                        let instr_count = INSTRUCTION_PCS.with(|pcs| {
-                            pcs.borrow().get(prog_hash).map(|s| s.len()).unwrap_or(0)
-                        });
-
-                        let total_edges = edge_totals.and_then(|t| t.get(prog_hash).copied()).unwrap_or(0);
-                        let total_branches = total_edges / 2;
-                        let total_instructions = instr_totals.and_then(|t| t.get(prog_hash).copied()).unwrap_or(0);
-
-                        if total_edges > 0 {
-                            let edge_pct = (edge_count as f64 / total_edges as f64) * 100.0;
-                            let branch_pct = if total_branches > 0 { (branch_count as f64 / total_branches as f64) * 100.0 } else { 0.0 };
-                            let instr_pct = if total_instructions > 0 { (instr_count as f64 / total_instructions as f64) * 100.0 } else { 0.0 };
-
-                            eprintln!("[COVERAGE]   Instructions: {:5}/{:5} ({:5.1}%)", instr_count, total_instructions, instr_pct);
-                            eprintln!("[COVERAGE]   Branches:     {:5}/{:5} ({:5.1}%)", branch_count, total_branches, branch_pct);
-                            eprintln!("[COVERAGE]   Edges:        {:5}/{:5} ({:5.1}%)", edge_count, total_edges, edge_pct);
-                        } else {
-                            eprintln!("[COVERAGE]   Instructions: {}, Branches: {}, Edges: {}", instr_count, branch_count, edge_count);
-                        }
-                    }
-                });
-
-                eprintln!("[COVERAGE] ==========================================");
-            }
-
             /// Write LCOV coverage file to disk
             pub fn write_lcov_coverage(output_path: &str) {
                 use std::fs::File;
@@ -587,12 +502,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 let mut writer = BufWriter::new(file);
 
-                // Get coverage data from thread-locals
-                let pc_hits = PC_HIT_COUNTS.with(|c| c.borrow().clone());
-                let branch_outcomes = BRANCH_OUTCOMES.with(|b| b.borrow().clone());
+                // Get coverage data from state
+                let state = COVERAGE_STATE.lock().unwrap();
+                let pc_hits = state.pc_hit_counts.clone();
+                let branch_outcomes = state.branch_outcomes.clone();
+                drop(state); // Release lock before file I/O
 
                 if pc_hits.is_empty() {
-                    eprintln!("[LCOV] No coverage data to write (thread-local empty)");
+                    eprintln!("[LCOV] No coverage data to write");
                     return;
                 }
 
@@ -638,36 +555,29 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     output_path, programs_written, pc_hits.values().map(|h| h.len()).sum::<usize>());
             }
 
-            /// Write coverage files every 5 seconds
-            /// HTML is always written (for stats like runtime, executions)
-            /// LCOV is only written when new coverage is discovered
+            /// Write coverage files every 5000 iterations when new coverage is discovered.
+            /// Uses iteration-based throttling (no syscalls) instead of wall-clock time.
             /// Note: Caller should check COVERAGE_ENABLED before calling this function
-            pub fn maybe_write_coverage(now_secs: u64) {
-                // Check time elapsed (5 second throttle)
-                let elapsed_ok = LAST_COVERAGE_WRITE.with(|last| {
-                    now_secs.saturating_sub(*last.borrow()) >= 5
-                });
-                if !elapsed_ok {
+            pub fn maybe_write_coverage(exec_count: u64) {
+                // Iteration-based throttling: only check every 5000 iterations
+                if exec_count % 5000 != 0 {
                     return;
                 }
 
-                // Update write timestamp
-                LAST_COVERAGE_WRITE.with(|t| *t.borrow_mut() = now_secs);
-
-                // Check if new coverage was discovered
-                let current_coverage_count = TOTAL_UNIQUE_PCS.load(std::sync::atomic::Ordering::Relaxed);
-                let last_count = LAST_COVERAGE_COUNT.with(|c| *c.borrow());
-                let has_new_coverage = current_coverage_count > last_count;
+                // Check if new coverage was discovered (use cached totals)
+                let mut state = COVERAGE_STATE.lock().unwrap();
+                let current_coverage_count = state.total_instructions;
+                let has_new_coverage = current_coverage_count > state.last_coverage_count;
 
                 if has_new_coverage {
                     // Update coverage count
-                    LAST_COVERAGE_COUNT.with(|c| *c.borrow_mut() = current_coverage_count);
-                    // Write LCOV only when new coverage is found
-                    write_lcov_coverage("coverage.lcov");
-                }
+                    state.last_coverage_count = current_coverage_count;
+                    drop(state); // Release lock before file I/O
 
-                // Always write HTML (stats like runtime, executions update continuously)
-                write_html_coverage("coverage.html");
+                    // Write both LCOV and HTML when new coverage is found
+                    write_lcov_coverage("coverage.lcov");
+                    write_html_coverage("coverage.html");
+                }
             }
 
             /// Write HTML coverage visualization
@@ -683,8 +593,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 let mut writer = std::io::BufWriter::new(file);
 
-                // Get coverage data
-                let pc_hits = PC_HIT_COUNTS.with(|c| c.borrow().clone());
+                // Get coverage data from state
+                let state = COVERAGE_STATE.lock().unwrap();
+                let pc_hits = state.pc_hit_counts.clone();
+                // Get per-program stats from state
+                let edges_map = state.edges.clone();
+                let branches_map = state.branch_pcs.clone();
+                let instructions_map = state.instruction_pcs.clone();
+                drop(state); // Release lock before file I/O
 
                 // Get program binaries
                 let Some(binaries) = PROGRAM_BINARIES.get() else {
@@ -704,9 +620,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         .unwrap_or_default();
 
                     // Build stats from coverage data
-                    let edges_hit = COVERAGE.with(|c| c.borrow().get(prog_hash).map(|s| s.len()).unwrap_or(0));
-                    let branches_hit = BRANCH_PCS.with(|p| p.borrow().get(prog_hash).map(|s| s.len()).unwrap_or(0));
-                    let instructions_hit = INSTRUCTION_PCS.with(|p| p.borrow().get(prog_hash).map(|s| s.len()).unwrap_or(0));
+                    let edges_hit = edges_map.get(prog_hash).map(|s| s.len()).unwrap_or(0);
+                    let branches_hit = branches_map.get(prog_hash).map(|s| s.len()).unwrap_or(0);
+                    let instructions_hit = instructions_map.get(prog_hash).map(|s| s.len()).unwrap_or(0);
 
                     let edges_total = edge_totals.and_then(|t| t.get(prog_hash).copied()).unwrap_or(0);
                     let branches_total = edges_total / 2;
@@ -825,19 +741,16 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Replace "objectives" with "crashes" for clarity
                 let s = s.replace("objectives", "crashes");
 
-                // Get our true coverage stats and totals
-                let (true_edges, total_edges, branches, total_branches) = #mod_name::COVERAGE.with(|cov| {
-                    let coverage = cov.borrow();
-                    let edges: usize = coverage.values().map(|s| s.len()).sum();
-                    let branches: usize = #mod_name::BRANCH_PCS.with(|pcs| {
-                        pcs.borrow().values().map(|s| s.len()).sum()
-                    });
-                    let total_edges: usize = #mod_name::PROGRAM_TOTALS.get()
-                        .map(|t| t.values().sum())
-                        .unwrap_or(0);
-                    let total_branches = total_edges / 2;
-                    (edges, total_edges, branches, total_branches)
-                });
+                // Get cached coverage stats (no iteration over maps)
+                let state = #mod_name::COVERAGE_STATE.lock().unwrap();
+                let true_edges = state.total_edges;
+                let branches = state.total_branches;
+                drop(state);
+
+                let total_edges: usize = #mod_name::PROGRAM_TOTALS.get()
+                    .map(|t| t.values().sum())
+                    .unwrap_or(0);
+                let total_branches = total_edges / 2;
 
                 // Replace "edges: X/65536 (Y%)" with our format
                 // LibAFL format: "[Type #N] ..., edges: X/65536 (Y%)"
@@ -881,12 +794,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             let corpus = InMemoryCorpus::<BytesInput>::new();
             let crash_dir = format!("crashes/{}", #feature_name);
             std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
-            // Ensure directory is writable (fix for permission denied on crash save)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&crash_dir, std::fs::Permissions::from_mode(0o755));
-            }
+
             let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
             let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
                 .expect("failed to create StdState");
@@ -922,19 +830,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 // Coverage tracking (only when --coverage flag passed)
                 if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    // Increment execution counter
-                    #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Increment execution counter and get current count for iteration-based throttling
+                    let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    // Get current time once for both reporting functions (avoid double syscalls)
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-
-                    // Print coverage report periodically
-                    #mod_name::maybe_print_coverage_report(now_secs);
-                    // Write coverage files (LCOV + HTML) if --coverage flag was passed
-                    #mod_name::maybe_write_coverage(now_secs);
+                    // Write coverage files every 5000 iterations when new coverage found (no syscall)
+                    #mod_name::maybe_write_coverage(exec_count);
                 }
 
                 // Check if an invariant was violated (via fuzz_assert! macros)
