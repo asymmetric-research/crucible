@@ -26,3 +26,4 @@ solana-sbpf.workspace = true
 spl-token.workspace = true
 bytemuck.workspace = true
 once_cell.workspace = true
+rustc-hash = "2.0"
