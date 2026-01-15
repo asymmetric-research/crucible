@@ -1,63 +1,9 @@
 use anchor_test::*;
-use anchor_test_context::TxOutcome;
 use anchor_lang::prelude::*;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
-
-// ============================================================================
-// Action Statistics Tracking
-// ============================================================================
-
-mod action_stats {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    macro_rules! define_action_stats {
-        ($($name:ident),+ $(,)?) => {
-            $(
-                pub static $name: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));
-            )+
-
-            pub fn record(name: &str, success: bool) {
-                let (ok, fail) = match name {
-                    $(stringify!($name) => &$name,)+
-                    _ => return,
-                };
-                if success {
-                    ok.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    fail.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-
-            pub fn print_summary() {
-                eprintln!("\n[ACTION STATS] ==========================================");
-                $(
-                    let ok = $name.0.load(Ordering::Relaxed);
-                    let fail = $name.1.load(Ordering::Relaxed);
-                    if ok > 0 || fail > 0 {
-                        let total = ok + fail;
-                        let pct = if total > 0 { (ok as f64 / total as f64) * 100.0 } else { 0.0 };
-                        eprintln!("[ACTION STATS] {}: {}/{} ({:.1}%)", stringify!($name), ok, total, pct);
-                    }
-                )+
-                eprintln!("[ACTION STATS] ==========================================");
-            }
-        }
-    }
-
-    define_action_stats!(
-        deposit,
-        borrow,
-        repay,
-        withdraw,
-        liquidate,
-        transfer_account,
-        flashloan_end,
-        send_batch,
-    );
-}
 
 // Generate complete types from IDL (including state types for deserialization)
 anchor_fuzz_gen::declare_fuzz_program!("idls/marginfi.json");
@@ -101,8 +47,6 @@ mod sysvar {
 use std::{rc::Rc, collections::HashMap};
 use fixed::types::I80F48;
 use fixed_macro::types::I80F48;
-use borsh::BorshSerialize;
-
 use anchor_test::anchor_spl::token::spl_token;
 use anchor_test::anchor_lang::InstructionData;
 
@@ -153,13 +97,10 @@ impl MarginfiFixture {
     pub fn setup() -> Self {
         let mut ctx = TestContext::new();
         let program_id = marginfi::ID;
-
-        // Register all instruction discriminators from IDL for per-instruction coverage tracking
-        marginfi::register_discriminators();
-
+        
         ctx.add_program(&program_id, "../../marginfi.so")
             .expect("Failed to load marginfi program");
-
+        
         fixture_helpers::initialize_state(&mut ctx, &program_id)
     }
 
@@ -216,58 +157,32 @@ impl MarginfiFixture {
             .remaining_accounts(remaining)
             .signers(&[&*user.keypair])
             .add_transaction();
-
-        if let Ok(outcomes) = self.ctx.send_batch() {
-            let success = outcomes.iter().all(|o| o.is_success());
-            action_stats::record("flashloan_end", success);
-        }
+        
+        let _ = self.ctx.send_batch();
     }
 
     // ========================================================================
-    // Batch Control
+    // Actions
     // ========================================================================
-
-    /// Send all pending batched instructions (no-op during flashloan)
-    pub fn action_send_batch(&mut self) {
-        // Don't send if flashloan is active (wait for flashloan_end)
-        if self.flashloan_state.is_some() { return; }
-
-        // Send all pending instructions
-        if !self.ctx.pending_instructions.is_empty() {
-            if let Ok(outcomes) = self.ctx.send_batch() {
-                let success = outcomes.iter().all(|o| o.is_success());
-                action_stats::record("send_batch", success);
-            }
-        }
-    }
-
-    // ========================================================================
-    // Actions (dual-mode: immediate or batched)
-    // ========================================================================
-
+    
     pub fn action_deposit(
         &mut self,
         #[range(0..2)] user_idx: usize,
         #[range(0..1)] bank_idx: usize,
         #[range(1..100_000_000)] amount: u64,
-        batch: bool,
     ) {
-        // If in flashloan, always batch (use flashloan user)
-        let should_batch = batch || self.flashloan_state.is_some();
-        let effective_user_idx = self.flashloan_state.as_ref().map(|s| s.user_idx).unwrap_or(user_idx);
-
-        let user = &self.users[effective_user_idx];
+        let user = &self.users[user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let balance = self.ctx.token_balance(&token_account);
         let amount = amount.min(balance);
         if amount == 0 { return; }
-
-        let builder = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountDeposit {
-                amount,
-                deposit_up_to_limit: None
+        
+        let _ = self.ctx.program(self.program_id)
+            .call(instruction::LendingAccountDeposit { 
+                amount, 
+                deposit_up_to_limit: None 
             })
             .accounts(accounts::LendingAccountDeposit {
                 group: self.group,
@@ -278,13 +193,8 @@ impl MarginfiFixture {
                 liquidity_vault: bank.liquidity_vault,
                 token_program: spl_token::id(),
             })
-            .signers(&[&*user.keypair]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("deposit", outcome.is_success());
-        }
+            .signers(&[&*user.keypair])
+            .add_transaction();
     }
 
     pub fn action_borrow(
@@ -292,34 +202,32 @@ impl MarginfiFixture {
         #[range(0..2)] user_idx: usize,
         #[range(0..1)] bank_idx: usize,
         #[range(1..100_000_000)] amount: u64,
-        batch: bool,
     ) {
+        // Noop if not in flashloan
+        let Some(ref state) = self.flashloan_state else { return };
+        
         if amount == 0 { return; }
-
-        // If in flashloan, always batch (use flashloan user)
-        let should_batch = batch || self.flashloan_state.is_some();
-        let effective_user_idx = self.flashloan_state.as_ref().map(|s| s.user_idx).unwrap_or(user_idx);
-
-        let user = &self.users[effective_user_idx];
+        
+        let user = &self.users[state.user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let (liquidity_vault_authority, _) = Pubkey::find_program_address(
             &[b"liquidity_vault_auth", bank.bank.as_ref()],
             &self.program_id,
         );
-
+        
         let mut remaining = Vec::new();
         for b in &self.banks {
             remaining.push(b.bank);
             remaining.push(b.oracle);
         }
-
-        let builder = self.ctx.program(self.program_id)
+        
+        let _ = self.ctx.program(self.program_id)
             .call(instruction::LendingAccountBorrow { amount })
             .accounts(accounts::LendingAccountBorrow {
                 group: self.group,
-                marginfi_account: user.marginfi_account,
+                marginfi_account: state.marginfi_account,
                 authority: user.keypair.pubkey(),
                 bank: bank.bank,
                 destination_token_account: token_account,
@@ -328,44 +236,33 @@ impl MarginfiFixture {
                 token_program: spl_token::id(),
             })
             .remaining_accounts(remaining)
-            .signers(&[&*user.keypair]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("borrow", outcome.is_success());
-        }
+            .signers(&[&*user.keypair])
+            .add_transaction();
     }
 
-    pub fn action_transfer_account(&mut self, #[range(0..2)] _from_user_idx: usize, batch: bool) {
-        // If in flashloan, always batch (use flashloan user)
-        let should_batch = batch || self.flashloan_state.is_some();
-        let effective_user_idx = self.flashloan_state.as_ref().map(|s| s.user_idx).unwrap_or(0);
-
+    pub fn action_transfer_account(&mut self, #[range(0..2)] _from_user_idx: usize) {
+        // Noop if not in flashloan
+        let Some(ref state) = self.flashloan_state else { return };
+        
         let new_marginfi_account = Keypair::new();
         let new_account_pubkey = new_marginfi_account.pubkey();
-
-        let user = &self.users[effective_user_idx];
-
-        let builder = self.ctx.program(self.program_id)
+        
+        let user = &self.users[state.user_idx];
+        
+        let _ = self.ctx.program(self.program_id)
             .call(instruction::TransferToNewAccount {})
             .accounts(accounts::TransferToNewAccount {
                 group: self.group,
-                old_marginfi_account: user.marginfi_account,
-                new_marginfi_account: new_account_pubkey,
+                old_marginfi_account: state.marginfi_account,
+                new_marginfi_account: new_account_pubkey, 
                 authority: user.keypair.pubkey(),
                 new_authority: user.keypair.pubkey(),
                 global_fee_wallet: self.global_fee_wallet,
                 system_program: system_program::ID,
             })
-            .signers(&[&*user.keypair, &new_marginfi_account]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("transfer_account", outcome.is_success());
-        }
-
+            .signers(&[&*user.keypair, &new_marginfi_account])
+            .add_transaction();
+        
         self.all_marginfi_accounts.push(new_account_pubkey);
     }
 
@@ -375,41 +272,33 @@ impl MarginfiFixture {
         #[range(0..2)] bank_idx: usize,
         #[range(1..100_000_000)] amount: u64,
         repay_all: bool,
-        batch: bool,
     ) {
-        // If in flashloan, always batch (use flashloan user)
-        let should_batch = batch || self.flashloan_state.is_some();
-        let effective_user_idx = self.flashloan_state.as_ref().map(|s| s.user_idx).unwrap_or(user_idx);
-
-        let user = &self.users[effective_user_idx];
+        let Some(ref state) = self.flashloan_state else { return };
+        
+        let user = &self.users[state.user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let balance = self.ctx.token_balance(&token_account);
         let amount = amount.min(balance);
         if amount == 0 && !repay_all { return; }
-
-        let builder = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountRepay {
-                amount,
-                repay_all: Some(repay_all)
+        
+        let _ = self.ctx.program(self.program_id)
+            .call(instruction::LendingAccountRepay { 
+                amount, 
+                repay_all: Some(repay_all) 
             })
             .accounts(accounts::LendingAccountRepay {
                 group: self.group,
-                marginfi_account: user.marginfi_account,
+                marginfi_account: state.marginfi_account,
                 authority: user.keypair.pubkey(),
                 bank: bank.bank,
                 signer_token_account: token_account,
                 liquidity_vault: bank.liquidity_vault,
                 token_program: spl_token::id(),
             })
-            .signers(&[&*user.keypair]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("repay", outcome.is_success());
-        }
+            .signers(&[&*user.keypair])
+            .add_transaction();
     }
 
     pub fn action_withdraw(
@@ -418,37 +307,34 @@ impl MarginfiFixture {
         #[range(0..2)] bank_idx: usize,
         #[range(1..100_000_000)] amount: u64,
         withdraw_all: bool,
-        batch: bool,
     ) {
+        let Some(ref state) = self.flashloan_state else { return };
+        
         if amount == 0 && !withdraw_all { return; }
-
-        // If in flashloan, always batch (use flashloan user)
-        let should_batch = batch || self.flashloan_state.is_some();
-        let effective_user_idx = self.flashloan_state.as_ref().map(|s| s.user_idx).unwrap_or(user_idx);
-
-        let user = &self.users[effective_user_idx];
+        
+        let user = &self.users[state.user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let (liquidity_vault_authority, _) = Pubkey::find_program_address(
             &[b"liquidity_vault_auth", bank.bank.as_ref()],
             &self.program_id,
         );
-
+        
         let mut remaining = Vec::new();
         for b in &self.banks {
             remaining.push(b.bank);
             remaining.push(b.oracle);
         }
-
-        let builder = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountWithdraw {
-                amount,
-                withdraw_all: Some(withdraw_all)
+        
+        let _ = self.ctx.program(self.program_id)
+            .call(instruction::LendingAccountWithdraw { 
+                amount, 
+                withdraw_all: Some(withdraw_all) 
             })
             .accounts(accounts::LendingAccountWithdraw {
                 group: self.group,
-                marginfi_account: user.marginfi_account,
+                marginfi_account: state.marginfi_account,
                 authority: user.keypair.pubkey(),
                 bank: bank.bank,
                 destination_token_account: token_account,
@@ -457,80 +343,8 @@ impl MarginfiFixture {
                 token_program: spl_token::id(),
             })
             .remaining_accounts(remaining)
-            .signers(&[&*user.keypair]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("withdraw", outcome.is_success());
-        }
-    }
-
-    pub fn action_liquidate(
-        &mut self,
-        #[range(0..3)] liquidator_idx: usize,
-        #[range(0..3)] liquidatee_idx: usize,
-        #[range(0..2)] asset_bank_idx: usize,
-        #[range(0..2)] liab_bank_idx: usize,
-        #[range(1..100_000_000)] asset_amount: u64,
-        batch: bool,
-    ) {
-        // Guards: liquidator and liquidatee must be different users
-        if liquidator_idx == liquidatee_idx { return; }
-        // Asset bank (collateral) and liab bank (debt) must be different
-        if asset_bank_idx == liab_bank_idx { return; }
-
-        // If in flashloan, always batch
-        let should_batch = batch || self.flashloan_state.is_some();
-
-        let liquidator = &self.users[liquidator_idx];
-        let liquidatee = &self.users[liquidatee_idx];
-        let asset_bank = &self.banks[asset_bank_idx];
-        let liab_bank = &self.banks[liab_bank_idx];
-
-        // PDAs
-        let (liquidity_vault_authority, _) = Pubkey::find_program_address(
-            &[b"liquidity_vault_auth", liab_bank.bank.as_ref()],
-            &self.program_id,
-        );
-        let (insurance_vault, _) = Pubkey::find_program_address(
-            &[b"insurance_vault", liab_bank.bank.as_ref()],
-            &self.program_id,
-        );
-
-        // Remaining accounts: oracles first, then banks+oracles for both accounts
-        let mut remaining = vec![asset_bank.oracle, liab_bank.oracle];
-        for b in &self.banks {
-            remaining.push(b.bank);
-            remaining.push(b.oracle);
-        }
-        for b in &self.banks {
-            remaining.push(b.bank);
-            remaining.push(b.oracle);
-        }
-
-        let builder = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountLiquidate { asset_amount })
-            .accounts(accounts::LendingAccountLiquidate {
-                group: self.group,
-                asset_bank: asset_bank.bank,
-                liab_bank: liab_bank.bank,
-                liquidator_marginfi_account: liquidator.marginfi_account,
-                authority: liquidator.keypair.pubkey(),
-                liquidatee_marginfi_account: liquidatee.marginfi_account,
-                bank_liquidity_vault_authority: liquidity_vault_authority,
-                bank_liquidity_vault: liab_bank.liquidity_vault,
-                bank_insurance_vault: insurance_vault,
-                token_program: spl_token::id(),
-            })
-            .remaining_accounts(remaining)
-            .signers(&[&*liquidator.keypair]);
-
-        if should_batch {
-            let _ = builder.add_transaction();
-        } else if let Ok(outcome) = builder.send() {
-            action_stats::record("liquidate", outcome.is_success());
-        }
+            .signers(&[&*user.keypair])
+            .add_transaction();
     }
 }
 

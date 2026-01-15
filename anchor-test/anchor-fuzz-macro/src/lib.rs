@@ -311,6 +311,41 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 let _ = CACHED_ANALYSIS.set(cached);
             }
 
+            // Trace processing timing stats for profiling
+            #[derive(Default)]
+            pub struct TraceTimingStats {
+                pub total_traces: u64,
+                pub total_pcs_processed: u64,
+                pub total_branches_found: u64,
+                pub total_time_ns: u64,
+                pub phase1_time_ns: u64,
+                pub phase2_time_ns: u64,
+            }
+
+            pub static TRACE_TIMING: LazyLock<Mutex<TraceTimingStats>> = LazyLock::new(|| {
+                Mutex::new(TraceTimingStats::default())
+            });
+
+            pub fn print_trace_timing_report() {
+                let stats = TRACE_TIMING.lock().unwrap();
+                if stats.total_traces == 0 {
+                    return;
+                }
+                let avg_ns_per_trace = stats.total_time_ns / stats.total_traces;
+                let avg_ns_per_pc = stats.total_time_ns / stats.total_pcs_processed.max(1);
+                let phase1_pct = (stats.phase1_time_ns as f64 / stats.total_time_ns.max(1) as f64) * 100.0;
+                let phase2_pct = (stats.phase2_time_ns as f64 / stats.total_time_ns.max(1) as f64) * 100.0;
+
+                eprintln!("\n=== Trace Processing Timing ===");
+                eprintln!("Total traces: {}", stats.total_traces);
+                eprintln!("Total PCs processed: {}", stats.total_pcs_processed);
+                eprintln!("Total branches found: {}", stats.total_branches_found);
+                eprintln!("Total time: {:.2}ms", stats.total_time_ns as f64 / 1_000_000.0);
+                eprintln!("Avg per trace: {}ns ({:.1}μs)", avg_ns_per_trace, avg_ns_per_trace as f64 / 1000.0);
+                eprintln!("Avg per PC: {}ns", avg_ns_per_pc);
+                eprintln!("Phase 1 (extract): {:.1}% | Phase 2 (process): {:.1}%", phase1_pct, phase2_pct);
+            }
+
             pub struct FuzzCallback {
                 ptr: *mut u8,
                 len: usize,
@@ -337,6 +372,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         return;
                     }
 
+                    let trace_start = std::time::Instant::now();
+
                     let (_vm_addr, program) = executable.get_text_bytes();
                     // Include program ID to distinguish same-PC edges across programs
                     let program_hash = u64::from_le_bytes(
@@ -346,21 +383,23 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     // Check if detailed coverage tracking is enabled (only with --coverage flag)
                     let detailed_tracking = COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
 
-                    // Collect data locally only if detailed tracking is enabled
-                    let mut local_instruction_pcs: HashSet<usize> = HashSet::new();
-                    let mut local_branch_pcs: HashSet<usize> = HashSet::new();
-                    let mut local_edges: HashSet<u64> = HashSet::new();
+                    // === PHASE 1: Filter and extract branch edges ===
+                    // Linear scan through register_trace - good cache locality
+                    let phase1_start = std::time::Instant::now();
 
-                    // AFL-style edge tracking with prev_location state
-                    let mut prev_location: usize = 0;
+                    let mut branch_edges: Vec<(usize, usize)> = Vec::with_capacity(register_trace.len() / 8);
+                    let mut local_instruction_pcs: Vec<usize> = if detailed_tracking {
+                        Vec::with_capacity(register_trace.len())
+                    } else {
+                        Vec::new()
+                    };
 
-                    // Track all executed instruction PCs and conditional branches
                     for i in 0..register_trace.len().saturating_sub(1) {
                         let pc = register_trace[i][11] as usize;
 
                         // Collect instruction PCs locally (only if detailed tracking)
                         if detailed_tracking {
-                            local_instruction_pcs.insert(pc);
+                            local_instruction_pcs.push(pc);
                         }
 
                         let insn = ebpf::get_insn_unchecked(program, pc);
@@ -379,7 +418,22 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                         // The actual target - where did we go?
                         let target_pc = register_trace[i + 1][11] as usize;
+                        branch_edges.push((pc, target_pc));
+                    }
 
+                    let phase1_ns = phase1_start.elapsed().as_nanos() as u64;
+
+                    // === PHASE 2: Process edges (AFL map + state updates) ===
+                    // Work with dense edge vector - better cache utilization
+                    let phase2_start = std::time::Instant::now();
+
+                    let mut local_branch_pcs: HashSet<usize> = HashSet::with_capacity(branch_edges.len());
+                    let mut local_edges: HashSet<u64> = HashSet::with_capacity(branch_edges.len());
+
+                    // AFL-style edge tracking with prev_location state
+                    let mut prev_location: usize = 0;
+
+                    for &(pc, target_pc) in &branch_edges {
                         // AFL-style edge hashing (from QEMU mode)
                         let cur_location = ((target_pc >> 4) ^ (target_pc << 8)) ^ (program_hash as usize);
                         let edge = (cur_location ^ prev_location) % MAP_SIZE;
@@ -411,6 +465,20 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     let old_branch_count = branch_set.len();
                     branch_set.extend(&local_branch_pcs);
                     state.total_branches += branch_set.len() - old_branch_count;
+
+                    let phase2_ns = phase2_start.elapsed().as_nanos() as u64;
+                    let total_ns = trace_start.elapsed().as_nanos() as u64;
+
+                    // Update timing stats
+                    {
+                        let mut timing = TRACE_TIMING.lock().unwrap();
+                        timing.total_traces += 1;
+                        timing.total_pcs_processed += register_trace.len() as u64;
+                        timing.total_branches_found += branch_edges.len() as u64;
+                        timing.total_time_ns += total_ns;
+                        timing.phase1_time_ns += phase1_ns;
+                        timing.phase2_time_ns += phase2_ns;
+                    }
 
                     // Skip LCOV tracking if --coverage not enabled
                     if !detailed_tracking {
@@ -828,11 +896,16 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Run the test
                 #fn_name(#(#call_args),*);
 
+                // Increment execution counter for timing report
+                let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Print timing report every 40000 executions
+                if exec_count > 0 && exec_count % 40000 == 0 {
+                    #mod_name::print_trace_timing_report();
+                }
+
                 // Coverage tracking (only when --coverage flag passed)
                 if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    // Increment execution counter and get current count for iteration-based throttling
-                    let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
                     // Write coverage files every 5000 iterations when new coverage found (no syscall)
                     #mod_name::maybe_write_coverage(exec_count);
                 }
