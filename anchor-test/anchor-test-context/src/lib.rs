@@ -1199,17 +1199,42 @@ impl TestContext {
             .ok_or_else(|| anyhow::anyhow!("Account not found: {}", address))
     }
     
-    // Read anchor account at address and deserialize the data
-    pub fn read_anchor_account<T: AnchorDeserialize>(&self, address: &Pubkey) -> Result<T> {
+    /// Read anchor account at address and deserialize the data.
+    /// Uses the type's DISCRIMINATOR to determine how many bytes to skip.
+    pub fn read_anchor_account<T: AnchorDeserialize + Discriminator>(&self, address: &Pubkey) -> Result<T> {
         let account = self.read_account(address)?;
-        
-        // Anchor accounts have 8-byte discriminator prefix
-        if account.data.len() < 8 {
-            return Err(anyhow::anyhow!("Account data too small for discriminator"));
+        let disc_len = T::DISCRIMINATOR.len();
+
+        if account.data.len() < disc_len {
+            return Err(anyhow::anyhow!(
+                "Account data too small for discriminator (need {} bytes, got {})",
+                disc_len,
+                account.data.len()
+            ));
         }
-        
+
         // Deserialize from bytes after discriminator
-        T::deserialize(&mut &account.data[8..])
+        T::deserialize(&mut &account.data[disc_len..])
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize account: {}", e))
+    }
+
+    /// Read account with explicit discriminator length (for non-standard accounts).
+    pub fn read_account_with_discriminator<T: AnchorDeserialize>(
+        &self,
+        address: &Pubkey,
+        discriminator_len: usize,
+    ) -> Result<T> {
+        let account = self.read_account(address)?;
+
+        if account.data.len() < discriminator_len {
+            return Err(anyhow::anyhow!(
+                "Account data too small for discriminator (need {} bytes, got {})",
+                discriminator_len,
+                account.data.len()
+            ));
+        }
+
+        T::deserialize(&mut &account.data[discriminator_len..])
             .map_err(|e| anyhow::anyhow!("Failed to deserialize account: {}", e))
     }
 
@@ -1252,6 +1277,8 @@ impl TestContext {
 
     /// Read a zero-copy account (skips 8-byte discriminator).
     ///
+    /// Read a zero-copy account with standard 8-byte discriminator.
+    ///
     /// Use this for accounts with `#[account(zero_copy)]` attribute which use
     /// bytemuck for serialization instead of Borsh.
     ///
@@ -1261,17 +1288,34 @@ impl TestContext {
     /// println!("Reserve slot: {}", reserve.last_update.slot);
     /// ```
     pub fn read_zero_copy_account<T: bytemuck::Pod>(&self, address: &Pubkey) -> Result<T> {
+        self.read_zero_copy_account_with_discriminator(address, 8)
+    }
+
+    /// Read a zero-copy account with explicit discriminator length.
+    ///
+    /// Use this for accounts with non-standard discriminator sizes.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // For accounts with 1-byte discriminator
+    /// let vault: StarVault = ctx.read_zero_copy_account_with_discriminator(&vault_addr, 1)?;
+    /// ```
+    pub fn read_zero_copy_account_with_discriminator<T: bytemuck::Pod>(
+        &self,
+        address: &Pubkey,
+        discriminator_len: usize,
+    ) -> Result<T> {
         let account = self.read_account(address)?;
-        const DISCRIMINATOR_SIZE: usize = 8;
-        let required_size = DISCRIMINATOR_SIZE + std::mem::size_of::<T>();
+        let required_size = discriminator_len + std::mem::size_of::<T>();
         if account.data.len() < required_size {
             return Err(anyhow::anyhow!(
-                "Account data too small for zero-copy struct: got {} bytes, need {} bytes",
+                "Account data too small for zero-copy struct: got {} bytes, need {} bytes (discriminator: {})",
                 account.data.len(),
-                required_size
+                required_size,
+                discriminator_len
             ));
         }
-        Ok(*bytemuck::from_bytes::<T>(&account.data[DISCRIMINATOR_SIZE..DISCRIMINATOR_SIZE + std::mem::size_of::<T>()]))
+        Ok(*bytemuck::from_bytes::<T>(&account.data[discriminator_len..discriminator_len + std::mem::size_of::<T>()]))
     }
 
     /// Write a zero-copy account (preserves 8-byte discriminator).
@@ -1286,10 +1330,19 @@ impl TestContext {
     /// ctx.write_zero_copy_account(&reserve_addr, &reserve)?;
     /// ```
     pub fn write_zero_copy_account<T: bytemuck::Pod>(&mut self, address: &Pubkey, data: &T) -> Result<()> {
+        self.write_zero_copy_account_with_discriminator(address, data, 8)
+    }
+
+    /// Write a zero-copy account with explicit discriminator length.
+    pub fn write_zero_copy_account_with_discriminator<T: bytemuck::Pod>(
+        &mut self,
+        address: &Pubkey,
+        data: &T,
+        discriminator_len: usize,
+    ) -> Result<()> {
         let mut account = self.read_account(address)?;
-        const DISCRIMINATOR_SIZE: usize = 8;
         let bytes = bytemuck::bytes_of(data);
-        let required_size = DISCRIMINATOR_SIZE + bytes.len();
+        let required_size = discriminator_len + bytes.len();
         if account.data.len() < required_size {
             return Err(anyhow::anyhow!(
                 "Account data too small for zero-copy struct: got {} bytes, need {} bytes",
@@ -1297,7 +1350,7 @@ impl TestContext {
                 required_size
             ));
         }
-        account.data[DISCRIMINATOR_SIZE..DISCRIMINATOR_SIZE + bytes.len()].copy_from_slice(bytes);
+        account.data[discriminator_len..discriminator_len + bytes.len()].copy_from_slice(bytes);
         self.tracked_accounts.insert(*address);
         let _ = self.svm.set_account(*address, account);
         Ok(())

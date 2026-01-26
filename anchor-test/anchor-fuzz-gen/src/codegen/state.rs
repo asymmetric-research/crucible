@@ -39,6 +39,9 @@ fn generate_account_struct(
         IdlTypeDefTy::Struct { fields } => {
             let fields_tokens = generate_struct_fields(fields);
 
+            // Get actual discriminator length from IDL (not hardcoded 8)
+            let discriminator_len = discriminator.len();
+
             if is_zero_copy {
                 // Zero-copy account
                 quote! {
@@ -50,7 +53,7 @@ fn generate_account_struct(
 
                     impl #name {
                         pub const DISCRIMINATOR: &'static [u8] = &[#(#discriminator),*];
-                        pub const DISCRIMINATOR_LEN: usize = 8;
+                        pub const DISCRIMINATOR_LEN: usize = #discriminator_len;
                     }
 
                     unsafe impl bytemuck::Pod for #name {}
@@ -62,6 +65,11 @@ fn generate_account_struct(
                     #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
                     pub struct #name {
                         #fields_tokens
+                    }
+
+                    impl #name {
+                        pub const DISCRIMINATOR: &'static [u8] = &[#(#discriminator),*];
+                        pub const DISCRIMINATOR_LEN: usize = #discriminator_len;
                     }
 
                     impl anchor_lang::Discriminator for #name {
