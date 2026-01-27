@@ -40,7 +40,6 @@ mod account_builders;
 mod instruction_builder;
 mod program_builder;
 mod transaction_builder;
-mod system_program_builder;
 
 // Coverage analysis and visualization
 pub mod coverage;
@@ -51,15 +50,28 @@ pub use coverage::{extract_functions, generate_bytecode_lcov, generate_coverage_
 
 pub use litesvm::InvocationInspectCallback;
 
-// Invariant violation tracking for fuzz_assert! macros
+// Re-export serde_json for generated code
+pub use serde_json;
+
+// ============================================================================
+// Thread-Local State
+// ============================================================================
+
 use std::cell::RefCell;
+use serde::{Serialize, Deserialize};
 
 thread_local! {
+    // Invariant violation tracking for fuzz_assert! macros
     static VIOLATION: RefCell<Option<String>> = RefCell::new(None);
-    /// Current Anchor instruction name being executed (for per-instruction coverage tracking)
+    // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
+    // Crash metadata
+    static ACTION_HISTORY: RefCell<Vec<ActionRecord>> = RefCell::new(Vec::new());
+    static CURRENT_TEST_NAME: RefCell<Option<String>> = RefCell::new(None);
+    static CURRENT_ITERATION: RefCell<u64> = RefCell::new(0);
 }
 
+#[doc(hidden)]
 /// Set the current Anchor instruction name (for coverage tracking)
 pub fn set_current_instruction(name: Option<String>) {
     CURRENT_INSTRUCTION.with(|c| {
@@ -72,35 +84,233 @@ pub fn get_current_instruction() -> Option<String> {
     CURRENT_INSTRUCTION.with(|c| c.borrow().clone())
 }
 
-// Thread-local for batch instruction names (used during batch execution)
-thread_local! {
-    /// Queue of instruction names for the current batch being executed.
-    /// Set before send_batch(), consumed by after_invocation callback.
-    static PENDING_BATCH_NAMES: RefCell<std::collections::VecDeque<Option<String>>> = RefCell::new(std::collections::VecDeque::new());
+// ============================================================================
+// Action History Tracking (for .meta.json crash metadata)
+// ============================================================================
+
+/// Record of a single action execution for crash metadata
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActionRecord {
+    /// Action name (e.g., "action_deposit")
+    pub name: String,
+    /// Action parameters as JSON object (with constrained/modulo'd values)
+    pub params: serde_json::Value,
+    /// Whether the action succeeded (from Result return value)
+    pub success: bool,
 }
 
-/// Set the pending batch instruction names (called before send_batch executes)
-pub fn set_pending_batch_names(names: Vec<Option<String>>) {
-    PENDING_BATCH_NAMES.with(|q| {
-        let mut queue = q.borrow_mut();
-        queue.clear();
-        queue.extend(names);
+/// Complete crash metadata for .meta.json files
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CrashMetadata {
+    /// Name of the test that was running
+    pub test_name: String,
+    /// Timestamp when crash was detected (ISO 8601)
+    pub timestamp: String,
+    /// Fuzzer iteration number
+    pub iteration: u64,
+    /// Fuzzer seed (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    /// Sequence of actions that led to the crash
+    pub actions: Vec<ActionRecord>,
+}
+
+/// Set the current test name (called at test start)
+pub fn set_current_test_name(name: &str) {
+    CURRENT_TEST_NAME.with(|t| {
+        *t.borrow_mut() = Some(name.to_string());
     });
 }
 
-/// Pop the next instruction name from the batch queue (called by after_invocation)
-pub fn pop_pending_batch_name() -> Option<String> {
-    PENDING_BATCH_NAMES.with(|q| q.borrow_mut().pop_front().flatten())
+/// Get the current test name
+pub fn get_current_test_name() -> Option<String> {
+    CURRENT_TEST_NAME.with(|t| t.borrow().clone())
 }
 
-/// Clear the pending batch names (called after send_batch completes)
-pub fn clear_pending_batch_names() {
-    PENDING_BATCH_NAMES.with(|q| q.borrow_mut().clear());
+/// Set the current iteration number
+pub fn set_current_iteration(iteration: u64) {
+    CURRENT_ITERATION.with(|i| {
+        *i.borrow_mut() = iteration;
+    });
 }
 
-/// Get the current length of the pending batch names queue (for debugging)
-pub fn pending_batch_names_len() -> usize {
-    PENDING_BATCH_NAMES.with(|q| q.borrow().len())
+/// Get the current iteration number
+pub fn get_current_iteration() -> u64 {
+    CURRENT_ITERATION.with(|i| *i.borrow())
+}
+
+/// Push an action record to the history and update cumulative stats.
+pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) {
+    // Record in per-iteration history (for crash metadata)
+    ACTION_HISTORY.with(|h| {
+        h.borrow_mut().push(ActionRecord {
+            name: name.to_string(),
+            params,
+            success,
+        });
+    });
+}
+
+/// Get a copy of the action history
+pub fn get_action_history() -> Vec<ActionRecord> {
+    ACTION_HISTORY.with(|h| h.borrow().clone())
+}
+
+/// Clear the action history (called at start of each iteration)
+pub fn clear_action_history() {
+    ACTION_HISTORY.with(|h| h.borrow_mut().clear());
+}
+
+/// Build crash metadata from current state
+pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
+    let timestamp = chrono_lite_timestamp();
+    CrashMetadata {
+        test_name: get_current_test_name().unwrap_or_else(|| "unknown".to_string()),
+        timestamp,
+        iteration: get_current_iteration(),
+        seed,
+        actions: get_action_history(),
+    }
+}
+
+/// Print the action sequence to stderr (for debugging crashes)
+pub fn print_action_sequence() {
+    let history = get_action_history();
+    if history.is_empty() {
+        return;
+    }
+
+    eprintln!("\n=== FUZZ SEQUENCE ({} actions) ===", history.len());
+    for (i, record) in history.iter().enumerate() {
+        // Format params as key=value pairs
+        let params_str = if let serde_json::Value::Object(map) = &record.params {
+            map.iter()
+                .map(|(k, v)| format!("{}={}", k, format_json_value(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            String::new()
+        };
+
+        let status = if record.success { "OK" } else { "FAIL" };
+        if params_str.is_empty() {
+            eprintln!("  {}. {} -> {}", i + 1, record.name, status);
+        } else {
+            eprintln!("  {}. {}({}) -> {}", i + 1, record.name, params_str, status);
+        }
+    }
+    eprintln!("================================\n");
+}
+
+/// Format a JSON value for display (compact format)
+fn format_json_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("\"{}\"", s),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(format_json_value).collect();
+            format!("[{}]", items.join(", "))
+        }
+        serde_json::Value::Object(obj) => {
+            let items: Vec<String> = obj.iter()
+                .map(|(k, v)| format!("{}: {}", k, format_json_value(v)))
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+    }
+}
+
+/// Write crash metadata to a .meta.json file
+pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>) {
+    let metadata = build_crash_metadata(seed);
+    let filename = format!("{}/crash_{:016x}.meta.json", crash_dir, input_hash);
+
+    match serde_json::to_string_pretty(&metadata) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&filename, json) {
+                eprintln!("[META] Failed to write {}: {}", filename, e);
+            }
+        }
+        Err(e) => {
+            eprintln!("[META] Failed to serialize metadata: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Action Result Trait (for Feature 2: actions return Result)
+// ============================================================================
+
+/// Trait to normalize action return values to success/failure.
+/// Allows actions to return either `()` (always success) or `Result<(), E>` (success/failure).
+pub trait IntoActionSuccess {
+    fn into_success(self) -> bool;
+}
+
+impl IntoActionSuccess for () {
+    fn into_success(self) -> bool {
+        true
+    }
+}
+
+impl<T, E> IntoActionSuccess for Result<T, E> {
+    fn into_success(self) -> bool {
+        self.is_ok()
+    }
+}
+
+impl IntoActionSuccess for bool {
+    fn into_success(self) -> bool {
+        self
+    }
+}
+
+/// Simple timestamp function (avoids chrono dependency)
+fn chrono_lite_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Basic ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ
+    // This is a simplified calculation - not accounting for leap years perfectly
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Approximate year/month/day calculation
+    let mut year = 1970;
+    let mut remaining_days = days_since_epoch as i64;
+    loop {
+        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let days_in_months = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for days_in_month in days_in_months {
+        if remaining_days < days_in_month as i64 {
+            break;
+        }
+        remaining_days -= days_in_month as i64;
+        month += 1;
+    }
+    let day = remaining_days + 1;
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds)
 }
 
 // ============================================================================
@@ -737,9 +947,6 @@ pub struct TestContext {
     pub svm: LiteSVM,
     pub pending_instructions: Vec<Instruction>,
     pending_signers: Vec<Keypair>,
-    /// Instruction names for pending instructions (for per-instruction coverage tracking)
-    /// Captured when instruction is added to pending, used during batch execution
-    pending_instruction_names: Vec<Option<String>>,
     /// Programs loaded into this context (for reloading into debuggable SVMs)
     programs: Vec<ProgramData>,
     /// Account pubkeys that have been set (for copying to debuggable SVMs)
@@ -755,7 +962,6 @@ impl Clone for TestContext {
             svm: self.svm.clone(),
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
-            pending_instruction_names: self.pending_instruction_names.clone(),
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
@@ -801,7 +1007,6 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            pending_instruction_names: Vec::new(),
             programs: Vec::new(),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
@@ -818,7 +1023,6 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            pending_instruction_names: Vec::new(),
             programs: Vec::new(),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
@@ -980,7 +1184,6 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            pending_instruction_names: Vec::new(),
             programs: Vec::new(),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
@@ -1004,7 +1207,6 @@ impl TestContext {
             svm: cloned_svm,
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
-            pending_instruction_names: self.pending_instruction_names.clone(),
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
@@ -1431,18 +1633,12 @@ impl TestContext {
             }
         }
 
-        // Set batch instruction names for coverage callback (before transaction executes)
-        set_pending_batch_names(std::mem::take(&mut self.pending_instruction_names));
-
         // Send transaction with all queued instructions
         let result = instruction_builder::send_transaction(
             &mut self.svm,
             self.pending_instructions.clone(),
             &unique_signers
         )?;
-
-        // Clear batch names after transaction completes
-        clear_pending_batch_names();
 
         let outcome = tx_result_to_outcome(result);
 

@@ -1,9 +1,11 @@
 use anchor_test::*;
+use anchor_test_context::TxOutcome;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use anchor_test::anchor_spl::token::spl_token;
 use anchor_test::anchor_spl::associated_token;
@@ -42,6 +44,44 @@ macro_rules! debug_print {
             eprintln!($($arg)*);
         }
     };
+}
+
+// ============================================================================
+// Action Stats Tracking
+// ============================================================================
+
+mod action_stats {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    macro_rules! define_counters {
+        ($($name:ident),*) => {
+            $(pub static $name: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));)*
+        }
+    }
+
+    define_counters!(
+        SWAP, INCREASE_LIQUIDITY, DECREASE_LIQUIDITY,
+        UPDATE_FEES, COLLECT_FEES, OPEN_POSITION, CLOSE_POSITION
+    );
+
+    pub fn record(counter: &(AtomicU32, AtomicU32), success: bool) {
+        if success {
+            counter.0.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counter.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn print_summary() {
+        eprintln!("=== Action Stats ===");
+        eprintln!("swap:           {:>5} ok / {:>5} fail", SWAP.0.load(Ordering::Relaxed), SWAP.1.load(Ordering::Relaxed));
+        eprintln!("increase_liq:   {:>5} ok / {:>5} fail", INCREASE_LIQUIDITY.0.load(Ordering::Relaxed), INCREASE_LIQUIDITY.1.load(Ordering::Relaxed));
+        eprintln!("decrease_liq:   {:>5} ok / {:>5} fail", DECREASE_LIQUIDITY.0.load(Ordering::Relaxed), DECREASE_LIQUIDITY.1.load(Ordering::Relaxed));
+        eprintln!("update_fees:    {:>5} ok / {:>5} fail", UPDATE_FEES.0.load(Ordering::Relaxed), UPDATE_FEES.1.load(Ordering::Relaxed));
+        eprintln!("collect_fees:   {:>5} ok / {:>5} fail", COLLECT_FEES.0.load(Ordering::Relaxed), COLLECT_FEES.1.load(Ordering::Relaxed));
+        eprintln!("open_position:  {:>5} ok / {:>5} fail", OPEN_POSITION.0.load(Ordering::Relaxed), OPEN_POSITION.1.load(Ordering::Relaxed));
+        eprintln!("close_position: {:>5} ok / {:>5} fail", CLOSE_POSITION.0.load(Ordering::Relaxed), CLOSE_POSITION.1.load(Ordering::Relaxed));
+    }
 }
 
 // ============================================================================
@@ -246,27 +286,31 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])
             .send();
 
-        match result {
-            Ok(Ok(_meta)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 self.successful_swaps += 1;
                 debug_print!("[SWAP] SUCCESS: {} {} (user {})",
                     if a_to_b { "A->B" } else { "B->A" },
                     amount, user_idx);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[SWAP] TX_FAILED: {} amount={} user={}: {:?}",
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[SWAP] TX_FAILED: {} amount={} user={}",
                     if a_to_b { "A->B" } else { "B->A" },
-                    amount, user_idx, failed.err);
-                for log in &failed.meta.logs {
+                    amount, user_idx);
+                for log in logs {
                     debug_print!("[SWAP]   {}", log);
                 }
+                false
             }
             Err(e) => {
                 debug_print!("[SWAP] SEND_FAILED: {} amount={} user={}: {:?}",
                     if a_to_b { "A->B" } else { "B->A" },
                     amount, user_idx, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::SWAP, success);
     }
 
     // ========================================================================
@@ -277,13 +321,13 @@ impl WhirlpoolFixture {
     pub fn action_increase_liquidity(
         &mut self,
         #[range(0..5)] position_idx: usize,
-        liquidity_amount: u128,
+        liquidity_amount: u64,  // Use u64 for arbitrary compatibility
     ) {
         if position_idx >= self.positions.len() {
             return;
         }
 
-        let liquidity_amount = (liquidity_amount % 1_000_000_000) + 1000; // Min 1000
+        let liquidity_amount = ((liquidity_amount % 1_000_000_000) + 1000) as u128; // Min 1000
         self.do_increase_liquidity(position_idx, liquidity_amount);
     }
 
@@ -344,27 +388,31 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 self.total_liquidity_added += liquidity_amount;
                 self.positions[position_idx].has_liquidity = true;
                 debug_print!("[INCREASE_LIQ] SUCCESS: pos={} liq={}", position_idx, liquidity_amount);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[INCREASE_LIQ] TX_FAILED: pos={} liq={}: {:?}", position_idx, liquidity_amount, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[INCREASE_LIQ] TX_FAILED: pos={} liq={}", position_idx, liquidity_amount);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[INCREASE_LIQ] SEND_FAILED: pos={} liq={}: {:?}", position_idx, liquidity_amount, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::INCREASE_LIQUIDITY, success);
     }
 
     /// Decrease liquidity from an existing position
     pub fn action_decrease_liquidity(
         &mut self,
         #[range(0..5)] position_idx: usize,
-        liquidity_amount: u128,
+        liquidity_amount: u64,  // Use u64 for arbitrary compatibility
     ) {
         if position_idx >= self.positions.len() {
             return;
@@ -375,7 +423,7 @@ impl WhirlpoolFixture {
             return;
         }
 
-        let liquidity_amount = (liquidity_amount % 100_000) + 1; // Smaller amounts
+        let liquidity_amount = ((liquidity_amount % 100_000) + 1) as u128; // Smaller amounts
         let position = &self.positions[position_idx];
         let user = &self.users[position.owner_idx];
         let pool = &self.pool;
@@ -405,18 +453,22 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 debug_print!("[DECREASE_LIQ] SUCCESS: pos={} liq={}", position_idx, liquidity_amount);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[DECREASE_LIQ] TX_FAILED: pos={} liq={}: {:?}", position_idx, liquidity_amount, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[DECREASE_LIQ] TX_FAILED: pos={} liq={}", position_idx, liquidity_amount);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[DECREASE_LIQ] SEND_FAILED: pos={} liq={}: {:?}", position_idx, liquidity_amount, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::DECREASE_LIQUIDITY, success);
     }
 
     // ========================================================================
@@ -448,18 +500,22 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])  // Fee payer
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 debug_print!("[UPDATE_FEES] SUCCESS: pos={}", position_idx);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[UPDATE_FEES] TX_FAILED: pos={}: {:?}", position_idx, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[UPDATE_FEES] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[UPDATE_FEES] SEND_FAILED: pos={}: {:?}", position_idx, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::UPDATE_FEES, success);
     }
 
     /// Collect fees from a position
@@ -488,18 +544,22 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 debug_print!("[COLLECT_FEES] SUCCESS: pos={}", position_idx);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[COLLECT_FEES] TX_FAILED: pos={}: {:?}", position_idx, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[COLLECT_FEES] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[COLLECT_FEES] SEND_FAILED: pos={}: {:?}", position_idx, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::COLLECT_FEES, success);
     }
 
     // ========================================================================
@@ -562,8 +622,8 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair, &position_mint])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 self.positions.push(PositionData {
                     position,
                     position_mint: position_mint.pubkey(),
@@ -574,17 +634,21 @@ impl WhirlpoolFixture {
                     has_liquidity: false,
                 });
                 debug_print!("[OPEN_POS] SUCCESS: user={} ticks=[{},{}]", user_idx, tick_lower_index, tick_upper_index);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[OPEN_POS] TX_FAILED: user={} ticks=[{},{}]: {:?}",
-                    user_idx, tick_lower_index, tick_upper_index, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[OPEN_POS] TX_FAILED: user={} ticks=[{},{}]",
+                    user_idx, tick_lower_index, tick_upper_index);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[OPEN_POS] SEND_FAILED: user={} ticks=[{},{}]: {:?}",
                     user_idx, tick_lower_index, tick_upper_index, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::OPEN_POSITION, success);
     }
 
     /// Close an empty position (no liquidity)
@@ -615,19 +679,23 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 debug_print!("[CLOSE_POS] SUCCESS: pos={}", position_idx);
                 self.positions.remove(position_idx);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[CLOSE_POS] TX_FAILED: pos={}: {:?}", position_idx, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[CLOSE_POS] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[CLOSE_POS] SEND_FAILED: pos={}: {:?}", position_idx, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::CLOSE_POSITION, success);
     }
 
     /// Open a full-range position (maximum tick range)
@@ -676,8 +744,8 @@ impl WhirlpoolFixture {
             .signers(&[&*user.keypair, &position_mint])
             .send();
 
-        match result {
-            Ok(Ok(_)) => {
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
                 self.positions.push(PositionData {
                     position,
                     position_mint: position_mint.pubkey(),
@@ -688,15 +756,19 @@ impl WhirlpoolFixture {
                     has_liquidity: false,
                 });
                 debug_print!("[OPEN_FULL_RANGE] SUCCESS: user={} ticks=[{},{}]", user_idx, tick_lower_index, tick_upper_index);
+                true
             }
-            Ok(Err(failed)) => {
-                debug_print!("[OPEN_FULL_RANGE] TX_FAILED: user={}: {:?}", user_idx, failed.err);
-                for log in &failed.meta.logs { debug_print!("  {}", log); }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[OPEN_FULL_RANGE] TX_FAILED: user={}", user_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
             }
             Err(e) => {
                 debug_print!("[OPEN_FULL_RANGE] SEND_FAILED: user={}: {:?}", user_idx, e);
+                false
             }
-        }
+        };
+        action_stats::record(&action_stats::OPEN_POSITION, success);
     }
 
     // ========================================================================
@@ -796,6 +868,26 @@ impl WhirlpoolFixture {
                     sorted_arrays[2.min(len-1)].1,
                 )
             }
+        }
+    }
+
+    // ========================================================================
+    // After-Action Callback
+    // ========================================================================
+
+    pub fn after_action(&self) {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        if count > 0 && count % 1000 == 0 {
+            action_stats::print_summary();
+
+            // State snapshot - show pool stats
+            eprintln!("\n=== State Snapshot (action {}) ===", count);
+            eprintln!("positions: {}", self.positions.len());
+            eprintln!("total_swaps: {} (successful: {})", self.total_swaps, self.successful_swaps);
+            eprintln!("total_liquidity_added: {}", self.total_liquidity_added);
+            eprintln!();
         }
     }
 }
@@ -906,10 +998,10 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => eprintln!("[SETUP] InitializeConfig SUCCESS"),
-            Ok(Err(failed)) => {
-                eprintln!("[SETUP] InitializeConfig TX_FAILED: {:?}", failed.err);
-                for log in &failed.meta.logs { eprintln!("  {}", log); }
+            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeConfig SUCCESS"),
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                eprintln!("[SETUP] InitializeConfig TX_FAILED: {:?}", error);
+                for log in &logs { eprintln!("  {}", log); }
                 panic!("Setup failed: InitializeConfig");
             }
             Err(e) => {
@@ -948,10 +1040,10 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => eprintln!("[SETUP] InitializeFeeTier SUCCESS"),
-            Ok(Err(failed)) => {
-                eprintln!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", failed.err);
-                for log in &failed.meta.logs { eprintln!("  {}", log); }
+            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeFeeTier SUCCESS"),
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                eprintln!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", error);
+                for log in &logs { eprintln!("  {}", log); }
                 panic!("Setup failed: InitializeFeeTier");
             }
             Err(e) => {
@@ -1038,10 +1130,10 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(Ok(_)) => eprintln!("[SETUP] InitializePool SUCCESS"),
-            Ok(Err(failed)) => {
-                eprintln!("[SETUP] InitializePool TX_FAILED: {:?}", failed.err);
-                for log in &failed.meta.logs { eprintln!("  {}", log); }
+            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializePool SUCCESS"),
+            Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                eprintln!("[SETUP] InitializePool TX_FAILED: {:?}", error);
+                for log in &logs { eprintln!("  {}", log); }
                 panic!("Setup failed: InitializePool");
             }
             Err(e) => {
@@ -1101,13 +1193,13 @@ mod fixture_helpers {
                 .send();
 
             match result {
-                Ok(Ok(_)) => {
+                Ok(TxOutcome::Success { .. }) => {
                     tick_arrays.push((start_tick_index, tick_array));
                     eprintln!("[SETUP] TickArray SUCCESS at start_tick={}", start_tick_index);
                 }
-                Ok(Err(failed)) => {
-                    eprintln!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, failed.err);
-                    for log in &failed.meta.logs { eprintln!("  {}", log); }
+                Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                    eprintln!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, error);
+                    for log in &logs { eprintln!("  {}", log); }
                     panic!("Setup failed: InitializeTickArray at start_tick={}", start_tick_index);
                 }
                 Err(e) => {
@@ -1221,7 +1313,7 @@ mod fixture_helpers {
                 .send();
 
             match result {
-                Ok(Ok(_)) => {
+                Ok(TxOutcome::Success { .. }) => {
                     positions.push(PositionData {
                         position,
                         position_mint: position_mint.pubkey(),
@@ -1233,9 +1325,9 @@ mod fixture_helpers {
                     });
                     eprintln!("[SETUP] Position {} created: ticks=[{},{}]", positions.len(), tick_lower_index, tick_upper_index);
                 }
-                Ok(Err(failed)) => {
-                    eprintln!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, failed.err);
-                    for log in &failed.meta.logs { eprintln!("  {}", log); }
+                Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                    eprintln!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, error);
+                    for log in &logs { eprintln!("  {}", log); }
                     panic!("Setup failed: OpenPosition for user {}", user_idx);
                 }
                 Err(e) => {
@@ -1295,13 +1387,13 @@ mod fixture_helpers {
                 .send();
 
             match result {
-                Ok(Ok(_)) => {
+                Ok(TxOutcome::Success { .. }) => {
                     position.has_liquidity = true;
                     eprintln!("[SETUP] Added initial liquidity to position {}", pos_idx);
                 }
-                Ok(Err(failed)) => {
-                    eprintln!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, failed.err);
-                    for log in &failed.meta.logs { eprintln!("  {}", log); }
+                Ok(TxOutcome::ProgramError { error, logs, .. }) => {
+                    eprintln!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, error);
+                    for log in &logs { eprintln!("  {}", log); }
                     panic!("Setup failed: IncreaseLiquidity for position {}", pos_idx);
                 }
                 Err(e) => {

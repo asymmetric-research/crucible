@@ -26,11 +26,17 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
     // Find all action_* methods and their range constraints
     let mut actions = Vec::new();
     let mut constraints: HashMap<(String, String), RangeConstraint> = HashMap::new();
-    
+    let mut has_after_action = false;
+
     for item in &mut input.items {
         // Each function
         if let ImplItem::Fn(method) = item {
             let method_name = method.sig.ident.to_string();
+
+            // Check for after_action callback
+            if method_name == "after_action" {
+                has_after_action = true;
+            }
 
             if method_name.starts_with("action_") {
                 let action_name = &method_name[7..];
@@ -97,17 +103,37 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
+    // Generate arms to convert action to JSON value (for .meta.json)
+    let to_json_arms = actions.iter().map(|(action_name, _, params)| {
+        if params.is_empty() {
+            quote! {
+                #enum_name::#action_name => anchor_test_context::serde_json::json!({}),
+            }
+        } else {
+            let field_names: Vec<_> = params.iter().map(|(name, _)| name).collect();
+            let json_fields = params.iter().map(|(name, _)| {
+                let name_str = name.to_string();
+                quote! { #name_str: #name }
+            });
+            quote! {
+                #enum_name::#action_name { #(#field_names),* } => anchor_test_context::serde_json::json!({
+                    #(#json_fields),*
+                }),
+            }
+        }
+    });
+
     let dispatch_arms = actions.iter().map(|(action_name, method_name, params)| {
         if params.is_empty() {
             quote! {
-                #enum_name::#action_name => self.#method_name(),
+                #enum_name::#action_name => self.#method_name().into_success(),
             }
         } else {
             let param_names = params.iter().map(|(name, _)| name);
             let param_names_in_call = params.iter().map(|(name, _)| name);
             quote! {
                 #enum_name::#action_name { #(#param_names),* } => {
-                    self.#method_name(#(#param_names_in_call),*)
+                    self.#method_name(#(#param_names_in_call),*).into_success()
                 }
             }
         }
@@ -161,22 +187,39 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                         #(#action_name_arms)*
                     }
                 }
+
+                /// Get the action parameters as a JSON value (for .meta.json)
+                pub fn to_json_params(&self) -> anchor_test_context::serde_json::Value {
+                    match self {
+                        #(#to_json_arms)*
+                    }
+                }
             }
 
             impl #fixture_type {
                 #[doc(hidden)]
-                pub fn __dispatch_action(&mut self, action: #enum_name) {
+                /// Dispatch an action and return whether it succeeded.
+                /// Works with actions that return () (always success) or Result<(), E> (success/failure).
+                pub fn __dispatch_action(&mut self, action: #enum_name) -> bool {
+                    use anchor_test_context::IntoActionSuccess;
+
                     // Set current instruction name for coverage tracking
                     anchor_test_context::set_current_instruction(Some(action.action_name().to_string()));
 
-                    // Dispatch the action
-                    match action {
+                    // Dispatch the action and convert result to success bool
+                    let success = match action {
                         #(#dispatch_arms)*
-                    }
+                    };
 
                     // Clear after action
                     anchor_test_context::set_current_instruction(None);
+
+                    // Call after_action callback if defined
+                    self.__maybe_after_action();
+
+                    success
                 }
+
                 #[doc(hidden)]
                 pub fn __auto_flush(&mut self) {
                     let _ = self.ctx.send_batch();
@@ -185,7 +228,35 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(generated)
+    // Add after_action callback if the method exists
+    let after_action_impl = if has_after_action {
+        quote! {
+            impl #fixture_type {
+                #[doc(hidden)]
+                #[inline(always)]
+                fn __maybe_after_action(&self) {
+                    self.after_action();
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl #fixture_type {
+                #[doc(hidden)]
+                #[inline(always)]
+                fn __maybe_after_action(&self) {
+                    // No after_action callback defined
+                }
+            }
+        }
+    };
+
+    let final_output = quote! {
+        #generated
+        #after_action_impl
+    };
+
+    TokenStream::from(final_output)
 }
 
 #[proc_macro_attribute]
@@ -241,6 +312,8 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     let mod_name = format_ident!("__{}_fuzz", to_snake_case(&fixture_name.to_string()));
     let enum_name = format_ident!("{}Actions", fixture_name);
 
+    let test_name_str = fn_name.to_string();
+
     let expanded = quote! {
         #[anchor_fuzz]
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
@@ -248,12 +321,28 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
             if debug {
                 eprintln!("[FUZZ] Starting iteration with {} actions", actions.len());
             }
+
+            // Clear action history at start of iteration
+            anchor_test_context::clear_action_history();
+            // Set test name for metadata
+            anchor_test_context::set_current_test_name(#test_name_str);
+
             for (i, mut action) in actions.into_iter().enumerate() {
                 action.constrain_in_place();
+
+                // Get action info for history (after constraint applied)
+                let action_name = action.action_name().to_string();
+                let action_params = action.to_json_params();
+
                 if debug {
                     eprintln!("[FUZZ] Action {}: {:?}", i, action);
                 }
-                fixture.__dispatch_action(action);
+
+                // Execute the action and get success status
+                let success = fixture.__dispatch_action(action);
+
+                // Record action in history with actual success status
+                anchor_test_context::push_action_record(&action_name, action_params, success);
 
                 #fn_body
             }

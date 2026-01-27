@@ -13,7 +13,11 @@ anchor fuzz init <project_name>
 ```bash
 anchor fuzz run <project_name> <test_name>
 
-anchor fuzz run <project_name> <test_name> --release // Optimized
+anchor fuzz run <project_name> <test_name> --release  # Optimized
+
+anchor fuzz run <project_name> <test_name> --timeout 60  # Stop after 60 seconds
+
+anchor fuzz run <project_name> <test_name> --release --coverage --timeout 120
 ```
 
 ### Feature flags
@@ -43,10 +47,12 @@ myproject/
 ├── fuzz/
 │   └── myproject-fuzz/
 │       ├── Cargo.toml      # Fuzzer dependencies + features
-│       └── src/
-│           └── main.rs     # Fixtures, actions, and tests
-└── crashes/                # Crash artifacts saved here
-    └── <test_name>/
+│       ├── src/
+│       │   └── main.rs     # Fixtures, actions, and tests
+│       └── crashes/        # Crash artifacts saved here
+│           └── <test_name>/
+│               ├── abc123          # Raw crash input
+│               └── abc123.meta.json  # Crash metadata
 ```
 
 ---
@@ -379,12 +385,132 @@ impl MyFixture {
 
     // ✅ Discovered - generates Action::Stake variant
     pub fn action_stake(&mut self, amount: u64) { }
-    
-    // ✅ Discovered - generates Action::Withdraw variant  
+
+    // ✅ Discovered - generates Action::Withdraw variant
     pub fn action_withdraw(&mut self, #[range(0..3)] user_idx: usize) { }
-    
+
     // ❌ Not discovered - no action_ prefix
     pub fn helper_method(&self) { }
+}
+```
+
+### Action Return Types
+
+Actions can return `()` (implicit success) or `Result<T, E>` (explicit success/failure tracking):
+
+```rust
+#[fuzz_fixture]
+impl MyFixture {
+    // Implicit success - always recorded as successful
+    pub fn action_advance_time(&mut self, slots: u64) {
+        self.ctx.advance_slots(slots);
+    }
+
+    // Explicit success/failure - Result determines success status
+    pub fn action_deposit(&mut self, amount: u64) -> Result<()> {
+        self.ctx.program(self.program_id)
+            .call(instruction::Deposit { amount })
+            .accounts(accounts::Deposit { /* ... */ })
+            .signers(&[&*self.user])
+            .send()?
+            .into_result()
+    }
+}
+```
+
+The success/failure status is recorded in `.meta.json` crash metadata.
+
+### After-Action Callback
+
+Define an optional `after_action` method for custom logging or accounting after every action:
+
+```rust
+#[fuzz_fixture]
+impl MyFixture {
+    pub fn setup() -> Self { /* ... */ }
+
+    pub fn action_deposit(&mut self, amount: u64) { /* ... */ }
+    pub fn action_withdraw(&mut self, amount: u64) { /* ... */ }
+
+    // Optional: called after EVERY action dispatch
+    pub fn after_action(&self) {
+        // Query state, log metrics, update shadow accounting, etc.
+        let pool = self.ctx.read_anchor_account::<Pool>(&self.pool_pda).ok();
+        if let Some(pool) = pool {
+            eprintln!("[STATS] total_deposited: {}", pool.total_deposited);
+        }
+    }
+}
+```
+
+**Use cases:**
+- Logging state changes after each action
+- Updating shadow state for invariant checking
+- Collecting metrics for debugging coverage issues
+
+### Action Stats Tracking Pattern
+
+For better visibility into fuzzer progress, use atomic counters to track action success/failure rates:
+
+```rust
+mod action_stats {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    macro_rules! define_counters {
+        ($($name:ident),*) => {
+            $(pub static $name: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));)*
+        }
+    }
+
+    // Define counters for each action type
+    define_counters!(DEPOSIT, BORROW, REPAY, WITHDRAW, LIQUIDATE);
+
+    pub fn record(counter: &(AtomicU32, AtomicU32), success: bool) {
+        if success {
+            counter.0.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counter.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn print_summary() {
+        eprintln!("\n=== Action Stats ===");
+        eprintln!("deposit:    {} ok / {} fail", DEPOSIT.0.load(Ordering::Relaxed), DEPOSIT.1.load(Ordering::Relaxed));
+        eprintln!("borrow:     {} ok / {} fail", BORROW.0.load(Ordering::Relaxed), BORROW.1.load(Ordering::Relaxed));
+        // ... etc
+    }
+}
+```
+
+Use in actions:
+```rust
+pub fn action_deposit(&mut self, amount: u64) {
+    let result = self.ctx.program(self.program_id)
+        .call(instruction::Deposit { amount })
+        .accounts(/* ... */)
+        .signers(&[&*self.user])
+        .send();
+
+    let success = result.map(|o| o.is_success()).unwrap_or(false);
+    action_stats::record(&action_stats::DEPOSIT, success);
+}
+```
+
+Use in `after_action` for periodic reporting:
+```rust
+pub fn after_action(&self) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // Print summary every 1000 actions to avoid spam
+    if count > 0 && count % 1000 == 0 {
+        action_stats::print_summary();
+
+        // Optional: state snapshot
+        eprintln!("\n=== State Snapshot (action {}) ===", count);
+        // Read and print relevant protocol state...
+    }
 }
 ```
 
@@ -521,33 +647,71 @@ enum StakingFixtureActions {
 
 ---
 
-## Crash Replay
+## Crash Analysis & Replay
 
-When a crash is found, it's saved to `crashes/<test_name>/<hash>`.
+When a crash is found, it's saved to `crashes/<test_name>/<hash>` along with a `.meta.json` file containing rich metadata.
 
-### View crash inputs
+### Crash Metadata (.meta.json)
+
+Each crash file has a companion `.meta.json` with:
+- Test name
+- Timestamp
+- Iteration count
+- Random seed
+- Full action sequence with parameters (after range constraints applied) and success/failure status
+
+Example `crashes/invariant_test/abc123.meta.json`:
+```json
+{
+  "test_name": "invariant_test",
+  "timestamp": "2026-01-26T10:30:00Z",
+  "iteration": 12345,
+  "seed": 42,
+  "actions": [
+    {"name": "deposit", "params": {"user_idx": 2, "amount": 50000}, "success": true},
+    {"name": "borrow", "params": {"user_idx": 1, "amount": 10000}, "success": true},
+    {"name": "liquidate", "params": {"user_idx": 0}, "success": false}
+  ]
+}
+```
+
+### List all crashes
 
 ```bash
-anchor fuzz show <project> crashes/<test_name>/<crash_hash>
+anchor fuzz show <project>
 ```
 
-Example:
+Lists all crashes with metadata summary (timestamp, test name, action count).
+
+### View crash metadata (no compilation needed)
 
 ```bash
-anchor fuzz show staking crashes/invariant_fuzz/ded8fcc0c883fc7
+anchor fuzz show <project> <crash_file>
 ```
 
-Output:
+Reads the `.meta.json` file and displays the action sequence with parameters:
 
 ```
-Crash Input:
-param_1: [
-    Stake { user: 0, amount: 1000 },
-    AdvanceTime { slots: 500 },
-    Stake { user: 0, amount: 10000000 },
-    Claim { user: 1 },
-]
+=== CRASH METADATA ===
+Test: invariant_test
+Time: 2026-01-26T10:30:00Z
+Iteration: 12345
+Seed: 42
+
+=== ACTION SEQUENCE (3 actions) ===
+  1. deposit(user_idx=2, amount=50000) -> OK
+  2. borrow(user_idx=1, amount=10000) -> OK
+  3. liquidate(user_idx=0) -> FAIL
+==============================
 ```
+
+### Replay crash (requires compilation)
+
+```bash
+anchor fuzz show <project> <crash_file> --replay
+```
+
+Actually replays the crash by building and running the binary with `SHOW_CRASH=1`.
 
 ---
 
@@ -567,11 +731,20 @@ pub enum MyFixtureActions {
 impl MyFixtureActions {
     // Applies #[range] constraints to fields
     pub fn constrain_in_place(&mut self) { /* ... */ }
+
+    // Returns action name as string (for crash metadata)
+    pub fn action_name(&self) -> &'static str { /* ... */ }
+
+    // Returns parameters as JSON (for .meta.json)
+    pub fn to_json_params(&self) -> serde_json::Value { /* ... */ }
 }
 
 impl MyFixture {
-    // Dispatches action to appropriate method
-    pub fn __dispatch_action(&mut self, action: MyFixtureActions) { /* ... */ }
+    // Dispatches action to appropriate method, returns success status
+    pub fn __dispatch_action(&mut self, action: MyFixtureActions) -> bool { /* ... */ }
+
+    // Called after each action if after_action() method is defined
+    fn __maybe_after_action(&self) { /* ... */ }
 }
 ```
 
@@ -580,11 +753,23 @@ The `#[invariant_test]` macro generates:
 ```rust
 #[anchor_fuzz]
 fn invariant_fuzz(fixture: &mut MyFixture, actions: Vec<MyFixtureActions>) {
+    // Clear action history at start
+    anchor_test_context::clear_action_history();
+
     for action in actions {
         action.constrain_in_place();
-        fixture.__dispatch_action(action);
-        
-        // Your invariant check code here
+
+        // Get action info for history (after constraints applied)
+        let action_name = action.action_name().to_string();
+        let action_params = action.to_json_params();
+
+        // Execute action and track success
+        let success = fixture.__dispatch_action(action);
+
+        // Record in history for .meta.json
+        anchor_test_context::push_action_record(&action_name, action_params, success);
+
+        // Your invariant check code runs here
     }
 }
 ```
@@ -907,4 +1092,119 @@ Add `ctrlc` to your fuzz harness `Cargo.toml` for the exit handler:
 ```toml
 [dependencies]
 ctrlc = "3.4"
+```
+
+---
+
+## CLI Reference
+
+### `anchor fuzz init`
+
+Initialize a fuzz project for a program.
+
+```bash
+anchor fuzz init <program_name>
+```
+
+Creates a standalone fuzz workspace in `fuzz/<program_name>/` with:
+- `Cargo.toml` with `[workspace]` for isolation
+- `rust-toolchain.toml` (stable Rust)
+- `src/main.rs` template
+- `idls/` directory for IDL files
+
+### `anchor fuzz run`
+
+Run a fuzz test.
+
+```bash
+anchor fuzz run <program_name> <test_name> [OPTIONS]
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--release` | Build and run in release mode (recommended for fuzzing) |
+| `--coverage` | Enable coverage tracking and HTML/LCOV output |
+| `--timeout <SECS>` | Stop fuzzing after specified seconds |
+
+**Examples:**
+```bash
+# Basic run
+anchor fuzz run myproject invariant_test
+
+# Production fuzzing (optimized + coverage + 10 minute timeout)
+anchor fuzz run myproject invariant_test --release --coverage --timeout 600
+
+# Quick smoke test (1 minute)
+anchor fuzz run myproject invariant_test --release --timeout 60
+```
+
+**Environment variables:**
+- `FUZZ_DEBUG=1` - Enable verbose debug logging
+- `FUZZ_TIMEOUT_SECS=N` - Alternative to --timeout flag
+
+### `anchor fuzz show`
+
+View and replay crash information.
+
+```bash
+# List all crashes for a program
+anchor fuzz show <program_name>
+
+# View crash metadata (no compilation needed)
+anchor fuzz show <program_name> <crash_file>
+
+# Replay crash (requires compilation)
+anchor fuzz show <program_name> <crash_file> --replay
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--replay` | Actually replay the crash by running the binary |
+
+**Examples:**
+```bash
+# List all crashes
+anchor fuzz show myproject
+
+# View action sequence from metadata
+anchor fuzz show myproject crashes/invariant_test/abc123
+
+# Replay to debug
+anchor fuzz show myproject crashes/invariant_test/abc123 --replay
+```
+
+---
+
+## Example Harnesses
+
+Reference implementations in `examples/`:
+
+| Example | Description | Key Features |
+|---------|-------------|--------------|
+| `anchor-counter` | Minimal counter program | Simplest possible harness, good starting point |
+| `staking` | Multi-user staking protocol | Time control (`warp_to_slot`), multiple users |
+| `marginfi-v2-fuzz` | **Primary reference** - Complex lending protocol | Action stats, state snapshots, flash loans, multi-bank |
+| `klend` | Kamino Lending harness | Standalone workspace, IDL-based types, oracle mocking |
+| `whirlpools` | Orca DEX (CLMM) | Tick arrays, positions, liquidity management |
+
+### Recommended Learning Path
+
+1. **Start with `anchor-counter`** - Understand basic fixture structure
+2. **Study `staking`** - Learn multi-user patterns and time control
+3. **Reference `marginfi-v2-fuzz`** - See production-quality harness with stats tracking
+4. **Check `klend`** - Standalone workspace pattern for version isolation
+
+### Running Examples
+
+```bash
+# Build the target program first (from program directory)
+anchor build
+
+# Run the fuzz harness
+anchor fuzz run marginfi-v2-fuzz invariant_test --release --timeout 60
+
+# Run with coverage
+anchor fuzz run klend invariant_test --release --coverage --timeout 120
 ```

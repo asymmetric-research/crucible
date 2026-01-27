@@ -32,6 +32,9 @@ arbitrary = { version = "1", features = ["derive"] }
 # Utilities
 anyhow = "1.0"
 bytemuck = "1.14"
+ctrlc = "3.4"
+spl-token = "9.0"
+spl-associated-token-account = "7.0"
 
 [features]
 fuzz_single = []

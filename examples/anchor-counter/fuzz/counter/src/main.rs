@@ -53,26 +53,30 @@ impl CounterFixture {
 
     // ===== ACTIONS =====
     
-    pub fn action_increment(&mut self) {
-        let _ = self.ctx
+    pub fn action_increment(&mut self) -> bool {
+        self.ctx
             .program(self.program_id)
             .call(instruction::Increment {})
             .accounts(accounts::Update {
                 counter: self.counter_pda,
             })
             .signers(&[&*self.payer])
-            .send();
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
-    
-    pub fn action_decrement(&mut self) {
-        let _ = self.ctx
+
+    pub fn action_decrement(&mut self) -> bool {
+        self.ctx
             .program(self.program_id)
             .call(instruction::Decrement {})
             .accounts(accounts::Update {
                 counter: self.counter_pda,
             })
             .signers(&[&*self.payer])
-            .send();
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
 }
 

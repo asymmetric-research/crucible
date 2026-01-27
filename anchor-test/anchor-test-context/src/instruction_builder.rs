@@ -26,8 +26,6 @@ impl InstructionBuilder<'_> {
     pub fn add_transaction(self) -> Result<()> {
         self.ctx.pending_instructions.push(self.instruction);
         self.ctx.pending_signers.extend(self.signers);
-        // Capture current instruction name for coverage tracking
-        self.ctx.pending_instruction_names.push(crate::get_current_instruction());
         Ok(())
     }
 }

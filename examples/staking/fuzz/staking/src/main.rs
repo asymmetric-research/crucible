@@ -125,13 +125,13 @@ impl StakingFixture {
 
     /// ACTIONS
 
-    pub fn action_stake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) {
+    pub fn action_stake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) -> bool {
         self.update_user_stake_time(user_idx);
         let user = &self.users[user_idx];
         let balance = self.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
         let safe_amount = amount.min(balance.saturating_sub(10_000_000));
-        
-        let _ct = self.ctx.program(self.program_id)
+
+        self.ctx.program(self.program_id)
             .call(instruction::Stake { amount: safe_amount })
             .accounts(accounts::Stake {
                 pool: self.pool_pda,
@@ -140,20 +140,21 @@ impl StakingFixture {
                 system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
-            .send();
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
-    
-    pub fn action_unstake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) {
 
+    pub fn action_unstake(&mut self, #[range(0..3)] user_idx: usize, amount: u64) -> bool {
         self.update_user_stake_time(user_idx);
         let user = &self.users[user_idx];
-        if self.ctx.get_account(&user.user_pda).is_err() { return; }
-        
+        if self.ctx.get_account(&user.user_pda).is_err() { return false; }
+
         let user_account = self.ctx.read_anchor_account::<UserAccount>(&user.user_pda).unwrap();
         let safe_amount = amount.min(user_account.staked_amount);
-        if safe_amount == 0 { return; }
-        
-        let _ct = self.ctx.program(self.program_id)
+        if safe_amount == 0 { return false; }
+
+        self.ctx.program(self.program_id)
             .call(instruction::Unstake { amount: safe_amount })
             .accounts(accounts::Unstake {
                 pool: self.pool_pda,
@@ -163,16 +164,17 @@ impl StakingFixture {
             })
             .signers(&[&*user.keypair])
             .send()
-            .unwrap();
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
-    
-    pub fn action_claim(&mut self, #[range(0..3)] user_idx: usize) {
+
+    pub fn action_claim(&mut self, #[range(0..3)] user_idx: usize) -> bool {
         self.update_user_stake_time(user_idx);
-        
+
         let user = &self.users[user_idx];
-        if self.ctx.get_account(&user.user_pda).is_err() { return; }
-        
-        let _ct = self.ctx.program(self.program_id)
+        if self.ctx.get_account(&user.user_pda).is_err() { return false; }
+
+        self.ctx.program(self.program_id)
             .call(instruction::ClaimRewards {})
             .accounts(accounts::ClaimRewards {
                 pool: self.pool_pda,
@@ -181,17 +183,19 @@ impl StakingFixture {
             })
             .signers(&[&*user.keypair])
             .send()
-            .unwrap();
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
-    
-    pub fn action_advance_slots(&mut self, #[range(0..10000)] slots: u64) {
+
+    pub fn action_advance_slots(&mut self, #[range(0..10000)] slots: u64) -> bool {
         // Update all users before advancing time
         for i in 0..self.users.len() {
             self.update_user_stake_time(i);
         }
-        
+
         let new_slot = self.ctx.slot() + slots;
         self.ctx.warp_to_slot(new_slot);
+        true
     }
 }
 
@@ -376,13 +380,13 @@ impl StakingFixtureSingleTransaction {
     }
 
     /// ACTIONS
-    pub fn action_stake_batched(&mut self, #[range(0..3)] user_idx: usize, #[range(0..100_000_000)] amount: u64) {
+    pub fn action_stake_batched(&mut self, #[range(0..3)] user_idx: usize, #[range(0..100_000_000)] amount: u64) -> bool {
         self.update_user_stake_time(user_idx);
         let user = &self.users[user_idx];
         let balance = self.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
         let safe_amount = amount.min(balance.saturating_sub(10_000_000));
 
-        let _ = self.ctx.program(self.program_id)
+        self.ctx.program(self.program_id)
             .call(instruction::Stake { amount: safe_amount })
             .accounts(accounts::Stake {
                 pool: self.pool_pda,
@@ -391,19 +395,20 @@ impl StakingFixtureSingleTransaction {
                 system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
-            .add_transaction();
+            .add_transaction()
+            .is_ok()
     }
 
-    pub fn action_unstake_batched(&mut self, #[range(0..3)] user_idx: usize, #[range(0..100_000_000)] amount: u64) {
+    pub fn action_unstake_batched(&mut self, #[range(0..3)] user_idx: usize, #[range(0..100_000_000)] amount: u64) -> bool {
         self.update_user_stake_time(user_idx);
         let user = &self.users[user_idx];
-        if self.ctx.get_account(&user.user_pda).is_err() { return; }
+        if self.ctx.get_account(&user.user_pda).is_err() { return false; }
 
         let user_account = self.ctx.read_anchor_account::<UserAccount>(&user.user_pda).unwrap();
         let safe_amount = amount.min(user_account.staked_amount);
-        if safe_amount == 0 { return; }
+        if safe_amount == 0 { return false; }
 
-        let _ = self.ctx.program(self.program_id)
+        self.ctx.program(self.program_id)
             .call(instruction::Unstake { amount: safe_amount })
             .accounts(accounts::Unstake {
                 pool: self.pool_pda,
@@ -412,15 +417,16 @@ impl StakingFixtureSingleTransaction {
                 system_program: system_program::ID,
             })
             .signers(&[&*user.keypair])
-            .add_transaction();
+            .add_transaction()
+            .is_ok()
     }
 
-    pub fn action_claim_batched(&mut self, #[range(0..3)] user_idx: usize) {
+    pub fn action_claim_batched(&mut self, #[range(0..3)] user_idx: usize) -> bool {
         self.update_user_stake_time(user_idx);
         let user = &self.users[user_idx];
-        if self.ctx.get_account(&user.user_pda).is_err() { return; }
+        if self.ctx.get_account(&user.user_pda).is_err() { return false; }
 
-        let _ = self.ctx.program(self.program_id)
+        self.ctx.program(self.program_id)
             .call(instruction::ClaimRewards {})
             .accounts(accounts::ClaimRewards {
                 pool: self.pool_pda,
@@ -428,10 +434,11 @@ impl StakingFixtureSingleTransaction {
                 staker: user.keypair.pubkey(),
             })
             .signers(&[&*user.keypair])
-            .add_transaction();
+            .add_transaction()
+            .is_ok()
     }
 
-    pub fn action_advance_slots(&mut self, #[range(0..10000)] slots: u64) {
+    pub fn action_advance_slots(&mut self, #[range(0..10000)] slots: u64) -> bool {
         // Update all users before advancing time
         for i in 0..self.users.len() {
             self.update_user_stake_time(i);
@@ -439,10 +446,15 @@ impl StakingFixtureSingleTransaction {
 
         let new_slot = self.ctx.slot() + slots;
         self.ctx.warp_to_slot(new_slot);
+        true
     }
 
-    pub fn action_commit(&mut self) {
-        let _ = self.ctx.send_batch();
+    pub fn action_commit(&mut self) -> bool {
+        self.ctx.send_batch()
+            .ok()
+            .flatten()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
     }
 }
 

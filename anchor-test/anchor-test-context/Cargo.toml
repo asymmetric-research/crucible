@@ -25,4 +25,5 @@ solana-sbpf.workspace = true
 
 spl-token.workspace = true
 bytemuck.workspace = true
-once_cell.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

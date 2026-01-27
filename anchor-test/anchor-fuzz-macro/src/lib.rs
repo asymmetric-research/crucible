@@ -446,19 +446,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     &self,
                     _tx: &anchor_test_context::fuzz_types::SanitizedTransaction,
                     _program_indices: &[anchor_test_context::fuzz_types::IndexOfAccount],
-                    invoke_context: &anchor_test_context::fuzz_types::InvokeContext,
+                    _invoke_context: &anchor_test_context::fuzz_types::InvokeContext,
                 ) {
-                    // Only pop instruction name for top-level instructions, not CPI calls.
-                    // Stack height 0 = about to execute top-level instruction
-                    // Stack height > 0 = CPI (keep current instruction name)
-                    let stack_height = invoke_context.get_stack_height();
-
-                    if stack_height == 0 {
-                        // Pop the next instruction name from the batch queue
-                        if let Some(name) = anchor_test_context::pop_pending_batch_name() {
-                            anchor_test_context::set_current_instruction(Some(name));
-                        }
-                    }
+                    // No-op: coverage tracked in after_invocation
                 }
 
                 fn after_invocation(
@@ -694,21 +684,19 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        #[cfg(feature = #feature_name)]
         pub fn #show_fn_name() {
             use arbitrary::Unstructured;
             use std::io::Read;
-            
+
             let mut bytes = Vec::new();
             std::io::stdin().read_to_end(&mut bytes)
                 .expect("Failed to read crash input from stdin");
-            
+
             let mut u = Unstructured::new(&bytes);
-            
+
             #show_body
         }
 
-        #[cfg(feature = #feature_name)]
         fn main() {
             if std::env::var("SHOW_CRASH").is_ok() {
                 #show_fn_name();
@@ -809,17 +797,45 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             #template_setup
 
             // Initialize fuzzer start time for stats tracking
-            let _ = #mod_name::FUZZER_START_TIME.set(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            );
+            let start_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let _ = #mod_name::FUZZER_START_TIME.set(start_time);
+
+            // Parse timeout from environment variable
+            let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok());
+
+            // Track iteration count for metadata
+            let iteration_counter = std::sync::atomic::AtomicU64::new(0);
 
             let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
+                // Check timeout at the start of each iteration
+                if let Some(timeout) = timeout_secs {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now - start_time >= timeout {
+                        eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
+                        // Write final coverage files if enabled
+                        if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                            #mod_name::write_lcov_coverage("coverage.lcov");
+                            #mod_name::write_html_coverage("coverage.html");
+                        }
+                        std::process::exit(0);
+                    }
+                }
+
                 let bytes_ref = input.target_bytes();
                 let slice = bytes_ref.as_slice();
                 let mut u = Unstructured::new(slice);
+
+                // Update iteration count for metadata
+                let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                anchor_test_context::set_current_iteration(current_iteration);
 
                 #(#deser_stmts)*
 
@@ -840,6 +856,22 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Check if an invariant was violated (via fuzz_assert! macros)
                 if let Some(msg) = anchor_test_context::take_violation() {
                     eprintln!("[VIOLATION] {}", msg);
+
+                    // Print the action sequence that led to this violation
+                    anchor_test_context::print_action_sequence();
+
+                    // Write crash metadata (.meta.json)
+                    // Compute hash of input bytes for filename
+                    let input_hash = {
+                        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+                        for byte in slice {
+                            hash ^= *byte as u64;
+                            hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
+                        }
+                        hash
+                    };
+                    anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed));
+
                     ExitKind::Crash
                 } else {
                     ExitKind::Ok
@@ -898,7 +930,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
                 .expect("error in fuzz loop");
         }
+
     };
-    
+
     TokenStream::from(expanded)
 }
