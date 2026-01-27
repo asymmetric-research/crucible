@@ -134,13 +134,10 @@ impl MarginfiFixture {
     pub fn setup() -> Self {
         let mut ctx = TestContext::new();
         let program_id = marginfi::ID;
-
-        // Register all instruction discriminators from IDL for per-instruction coverage tracking
-        marginfi::register_discriminators();
-
+        
         ctx.add_program(&program_id, "../../marginfi.so")
             .expect("Failed to load marginfi program");
-
+        
         fixture_helpers::initialize_state(&mut ctx, &program_id)
     }
 
@@ -205,7 +202,7 @@ impl MarginfiFixture {
     }
 
     // ========================================================================
-    // Batch Control
+    // Actions
     // ========================================================================
 
     /// Send all pending batched instructions (no-op during flashloan)
@@ -292,18 +289,18 @@ impl MarginfiFixture {
         let user = &self.users[effective_user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let (liquidity_vault_authority, _) = Pubkey::find_program_address(
             &[b"liquidity_vault_auth", bank.bank.as_ref()],
             &self.program_id,
         );
-
+        
         let mut remaining = Vec::new();
         for b in &self.banks {
             remaining.push(b.bank);
             remaining.push(b.oracle);
         }
-
+        
         let builder = self.ctx.program(self.program_id)
             .call(instruction::LendingAccountBorrow { amount })
             .accounts(accounts::LendingAccountBorrow {
@@ -430,22 +427,22 @@ impl MarginfiFixture {
         let user = &self.users[effective_user_idx];
         let bank = &self.banks[bank_idx];
         let token_account = *user.token_accounts.get(&bank.mint).unwrap();
-
+        
         let (liquidity_vault_authority, _) = Pubkey::find_program_address(
             &[b"liquidity_vault_auth", bank.bank.as_ref()],
             &self.program_id,
         );
-
+        
         let mut remaining = Vec::new();
         for b in &self.banks {
             remaining.push(b.bank);
             remaining.push(b.oracle);
         }
-
-        let builder = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountWithdraw {
-                amount,
-                withdraw_all: Some(withdraw_all)
+        
+        let _ = self.ctx.program(self.program_id)
+            .call(instruction::LendingAccountWithdraw { 
+                amount, 
+                withdraw_all: Some(withdraw_all) 
             })
             .accounts(accounts::LendingAccountWithdraw {
                 group: self.group,

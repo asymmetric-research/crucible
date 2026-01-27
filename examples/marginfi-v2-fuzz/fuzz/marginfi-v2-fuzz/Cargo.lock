@@ -398,8 +398,8 @@ dependencies = [
  "borsh",
  "bytemuck",
  "litesvm",
- "serde",
- "serde_json",
+ "once_cell",
+ "rustc-hash",
  "solana-account",
  "solana-hash 3.1.0",
  "solana-keypair",
@@ -2229,7 +2229,6 @@ dependencies = [
  "libafl",
  "libafl_bolts",
  "litesvm",
- "serde_json",
  "solana-instruction",
  "solana-keypair",
  "solana-message",
@@ -2762,6 +2761,12 @@ name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f7d92ca342cea22a06f2121d944b4fd82af56988c270852495420f961d4ace"
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustc_version"

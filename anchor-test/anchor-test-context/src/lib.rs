@@ -2,6 +2,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::collections::{HashSet, HashMap};
 use litesvm::LiteSVM;
+
+// Fast hashing for hot-path coverage collections (10-50x faster than SipHash for integers)
+pub use rustc_hash::{FxHashMap, FxHashSet, FxBuildHasher};
+
+/// Type alias for fast HashSet (uses FxHash)
+pub type FastHashSet<T> = FxHashSet<T>;
+/// Type alias for fast HashMap (uses FxHash)
+pub type FastHashMap<K, V> = FxHashMap<K, V>;
 use solana_account::Account;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
