@@ -1126,6 +1126,11 @@ anchor fuzz run <program_name> <test_name> [OPTIONS]
 | `--release` | Build and run in release mode (recommended for fuzzing) |
 | `--coverage` | Enable coverage tracking and HTML/LCOV output |
 | `--timeout <SECS>` | Stop fuzzing after specified seconds |
+| `--corpus-in <DIR>` | Load initial seed corpus from directory (raw input files) |
+| `--corpus-out <DIR>` | Write corpus to directory (LibAFL format) |
+| `--crashes-dir <DIR>` | Write crash files to directory (default: `crashes/<test>/`) |
+| `--input <FILE>` | Replay a single input file (reproduce finding) |
+| `--dry-run` | Run once to validate setup, then exit |
 
 **Examples:**
 ```bash
@@ -1137,11 +1142,41 @@ anchor fuzz run myproject invariant_test --release --coverage --timeout 600
 
 # Quick smoke test (1 minute)
 anchor fuzz run myproject invariant_test --release --timeout 60
+
+# Validate harness setup without fuzzing
+anchor fuzz run myproject invariant_test --dry-run
+
+# Reproduce a crash from a saved input file
+anchor fuzz run myproject invariant_test --input ./crashes/invariant_test/abc123
+
+# Seed fuzzer with crash files (raw input bytes)
+anchor fuzz run myproject invariant_test --release --corpus-in ./crashes/invariant_test
+
+# Save corpus for later reuse (LibAFL format)
+anchor fuzz run myproject invariant_test --release --corpus-out ./corpus --timeout 600
+
+# Generate coverage report from existing corpus (coverage-only mode)
+anchor fuzz run myproject invariant_test --coverage --corpus-in ./crashes/invariant_test
+
+# Custom crash output directory
+anchor fuzz run myproject invariant_test --release --crashes-dir ./my_crashes
 ```
+
+**Corpus formats:**
+- `--corpus-in` expects **raw input files** (like crash files in `crashes/<test>/`)
+- `--corpus-out` saves in **LibAFL format** (dotfiles + metadata, for fuzzer state persistence)
+- To seed from previous runs, use crash files: `--corpus-in ./crashes/invariant_test`
 
 **Environment variables:**
 - `FUZZ_DEBUG=1` - Enable verbose debug logging
 - `FUZZ_TIMEOUT_SECS=N` - Alternative to --timeout flag
+
+**Execution modes:**
+
+1. **Normal fuzzing** (default): Continuously generate and mutate inputs
+2. **Dry-run** (`--dry-run`): Run setup() + single iteration to validate harness
+3. **Single input replay** (`--input`): Execute one specific input file
+4. **Coverage-only** (`--coverage --corpus-in` without `--timeout`): Run all corpus inputs once for coverage report
 
 ### `anchor fuzz show`
 
@@ -1174,6 +1209,94 @@ anchor fuzz show myproject crashes/invariant_test/abc123
 # Replay to debug
 anchor fuzz show myproject crashes/invariant_test/abc123 --replay
 ```
+
+### `anchor fuzz list`
+
+List available fuzz tests for a program.
+
+```bash
+# List tests for a specific program
+anchor fuzz list <program_name>
+
+# List all fuzz harnesses
+anchor fuzz list
+```
+
+---
+
+## Execution Modes
+
+The fuzzer supports multiple execution modes for different use cases:
+
+### 1. Normal Fuzzing (Default)
+
+Continuously generate and mutate inputs to explore the state space:
+
+```bash
+anchor fuzz run myproject invariant_test --release --timeout 600
+```
+
+### 2. Dry-Run Mode
+
+Validate that the harness is set up correctly without actual fuzzing:
+
+```bash
+anchor fuzz run myproject invariant_test --dry-run
+```
+
+This:
+- Runs `setup()` to initialize the fixture
+- Executes a single iteration with a seed input
+- Reports success/failure and exits
+
+Use this to verify:
+- Program binary loads correctly
+- Account creation succeeds
+- Initial state is valid
+
+### 3. Single Input Replay
+
+Reproduce a specific crash or execute a saved input:
+
+```bash
+anchor fuzz run myproject invariant_test --input ./crashes/invariant_test/abc123
+```
+
+This:
+- Reads the input bytes from the specified file
+- Executes the test once with that input
+- Reports whether a crash was reproduced
+- Prints the action sequence
+
+### 4. Coverage-Only Mode
+
+Generate a coverage report from an existing corpus without fuzzing:
+
+```bash
+anchor fuzz run myproject invariant_test --coverage --corpus-in ./corpus
+```
+
+This:
+- Loads all input files from the corpus directory
+- Executes each input once (no mutations)
+- Aggregates coverage across all inputs
+- Writes `coverage.lcov` and `coverage.html`
+- Exits after processing
+
+Requirements:
+- `--coverage` flag must be set
+- `--corpus-in` must point to a directory with input files
+- No `--timeout` (presence of timeout implies normal fuzzing)
+
+### 5. Seeded Fuzzing
+
+Start fuzzing with a pre-existing corpus:
+
+```bash
+anchor fuzz run myproject invariant_test --release --corpus-in ./seed_corpus --timeout 600
+```
+
+This loads all files from `seed_corpus/` as initial seeds, then continues normal fuzzing from those starting points.
 
 ---
 
