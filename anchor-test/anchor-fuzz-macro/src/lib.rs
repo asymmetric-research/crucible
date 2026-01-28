@@ -707,7 +707,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         .and_then(|p| p.split('/').next())
                         .and_then(|n| n.parse().ok())
                         .unwrap_or(0);
-                    let afl_pct = (afl_edges as f64 / 1<<15) * 100.0;
+                    let afl_pct = (afl_edges as f64 / (1u64 << 15) as f64) * 100.0;
                     let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                     let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
 

@@ -439,10 +439,10 @@ impl MarginfiFixture {
             remaining.push(b.oracle);
         }
         
-        let _ = self.ctx.program(self.program_id)
-            .call(instruction::LendingAccountWithdraw { 
-                amount, 
-                withdraw_all: Some(withdraw_all) 
+        let builder = self.ctx.program(self.program_id)
+            .call(instruction::LendingAccountWithdraw {
+                amount,
+                withdraw_all: Some(withdraw_all)
             })
             .accounts(accounts::LendingAccountWithdraw {
                 group: self.group,
