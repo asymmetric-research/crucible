@@ -106,72 +106,78 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     
+    // Helper: generate range constraint application code
+    fn gen_range_constraint(
+        param_name: &proc_macro2::Ident,
+        ty: &Type,
+        constraint: &RangeConstraint,
+    ) -> proc_macro2::TokenStream {
+        let start = constraint.start;
+        let range_size = if constraint.inclusive {
+            constraint.end - constraint.start + 1
+        } else {
+            constraint.end - constraint.start
+        };
+        quote! {
+            #param_name = (#start as #ty) + (#param_name % (#range_size as #ty));
+        }
+    }
+
     // Build parameter parsing - skip first param which is fixture
     let mut deser_stmts = Vec::new();
     let mut call_args = vec![quote! { &mut #fixture_param_name }];
-    let mut show_params = Vec::new();
-    
-    // Parse each input (skip first - that's fixture)
-    for (i, arg) in inputs.iter().enumerate().skip(1) {
-        let FnArg::Typed(pat_ty) = arg else { 
-            return syn::Error::new_spanned(arg, "Expected typed parameter")
-                .to_compile_error().into();
+
+    // Collect param info for all three deserialization modes
+    struct ParamInfo {
+        name: proc_macro2::Ident,
+        ty: Type,
+        constraint: Option<RangeConstraint>,
+    }
+    let params: Vec<ParamInfo> = inputs.iter().enumerate().skip(1).map(|(i, arg)| {
+        let FnArg::Typed(pat_ty) = arg else {
+            panic!("Expected typed parameter");
         };
-        
-        let ty = &pat_ty.ty;
-        let param_name = quote::format_ident!("param_{}", i);
-        
-        // Look up range constraint from saved HashMap
-        let range_constraint = range_constraints.get(&i);
-        
-        // Deserialize the parameter
+        ParamInfo {
+            name: quote::format_ident!("param_{}", i),
+            ty: (*pat_ty.ty).clone(),
+            constraint: range_constraints.get(&i).cloned(),
+        }
+    }).collect();
+
+    // Generate fuzzing mode deserialization (returns ExitKind::Ok on error)
+    for param in &params {
+        let name = &param.name;
+        let ty = &param.ty;
+
         deser_stmts.push(quote! {
-            let mut #param_name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
+            let mut #name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
                 Ok(v) => v,
                 Err(_) => return libafl::prelude::ExitKind::Ok,
             };
         });
 
-        // Apply constraint if present
-        if let Some(constraint) = range_constraint {
-            let start = constraint.start;
-            let range_size = if constraint.inclusive {
-                constraint.end - constraint.start + 1
-            } else {
-                constraint.end - constraint.start
-            };
-            deser_stmts.push(quote! {
-                #param_name = (#start as #ty) + (#param_name % (#range_size as #ty));
-            });
+        if let Some(ref constraint) = param.constraint {
+            deser_stmts.push(gen_range_constraint(name, ty, constraint));
         }
-        
-        call_args.push(quote! { #param_name });
-        show_params.push((param_name.clone(), ty.clone(), range_constraint.cloned()));
+
+        call_args.push(quote! { #name });
     }
 
-    // Create simple deserialization statements for non-fuzzing modes (dry-run, replay, coverage-only)
-    // These use expect() instead of returning ExitKind
-    let simple_deser_stmts: Vec<_> = inputs.iter().enumerate().skip(1).map(|(i, arg)| {
-        let FnArg::Typed(pat_ty) = arg else { panic!("Expected typed parameter") };
-        let ty = &pat_ty.ty;
-        let param_name = quote::format_ident!("param_{}", i);
-        let range_constraint = range_constraints.get(&i);
+    // Generate simple mode deserialization (uses expect() - for dry-run, replay, coverage-only)
+    let simple_deser_stmts: Vec<_> = params.iter().map(|param| {
+        let name = &param.name;
+        let ty = &param.ty;
 
         let base_deser = quote! {
-            let mut #param_name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
+            let mut #name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
                 .expect("Failed to deserialize input");
         };
 
-        if let Some(constraint) = range_constraint {
-            let start = constraint.start;
-            let range_size = if constraint.inclusive {
-                constraint.end - constraint.start + 1
-            } else {
-                constraint.end - constraint.start
-            };
+        if let Some(ref constraint) = param.constraint {
+            let constraint_code = gen_range_constraint(name, ty, constraint);
             quote! {
                 #base_deser
-                #param_name = (#start as #ty) + (#param_name % (#range_size as #ty));
+                #constraint_code
             }
         } else {
             base_deser
@@ -180,38 +186,82 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
     let show_fn_name = quote::format_ident!("__show_{}", fn_name);
-    
-    // Generate show code
+
+    // Generate show code (deserialize + print each param)
     let show_body = {
-        let param_deserializations: Vec<_> = show_params.iter().map(|(name, ty, range_constraint)| {
-            if let Some(constraint) = range_constraint {
-                let start = constraint.start;
-                let range_size = if constraint.inclusive {
-                    constraint.end - constraint.start + 1
-                } else {
-                    constraint.end - constraint.start
-                };
+        let param_deserializations: Vec<_> = params.iter().map(|param| {
+            let name = &param.name;
+            let ty = &param.ty;
+
+            let base_deser = quote! {
+                let mut #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
+                    .expect("Failed to deserialize parameter");
+            };
+
+            if let Some(ref constraint) = param.constraint {
+                let constraint_code = gen_range_constraint(name, ty, constraint);
                 quote! {
-                    let mut #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
-                        .expect("Failed to deserialize parameter");
-                    #name = (#start as #ty) + (#name % (#range_size as #ty));
+                    #base_deser
+                    #constraint_code
                     println!("{}: {:#?}", stringify!(#name), #name);
                 }
             } else {
                 quote! {
-                    let #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
-                        .expect("Failed to deserialize parameter");
+                    #base_deser
                     println!("{}: {:#?}", stringify!(#name), #name);
                 }
             }
         }).collect();
-        
+
         quote! {
             println!("Crash Input:");
             #(#param_deserializations)*
         }
     };
     
+    // ============================================================================
+    // SHARED COVERAGE INITIALIZATION
+    // Used by template_setup, replay mode, and coverage-only mode
+    // ============================================================================
+
+    // Basic coverage totals (edge_totals + instr_totals) - used by all modes
+    let init_coverage_totals = quote! {
+        let mut edge_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        let mut instr_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for (pubkey, (total_edges, total_instructions)) in template_fixture.ctx.get_program_coverage_totals() {
+            let program_hash = u64::from_le_bytes(
+                pubkey.to_bytes()[0..8].try_into().unwrap()
+            );
+            edge_totals.insert(program_hash, *total_edges);
+            instr_totals.insert(program_hash, *total_instructions);
+        }
+        #mod_name::init_program_totals(edge_totals, instr_totals);
+    };
+
+    // Program binaries (for LCOV output) - used by coverage-only and normal fuzzing
+    let init_program_binaries = quote! {
+        let mut program_binaries: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
+        for (pubkey, binary) in template_fixture.ctx.get_program_binaries() {
+            let program_hash = u64::from_le_bytes(
+                pubkey.to_bytes()[0..8].try_into().unwrap()
+            );
+            program_binaries.insert(program_hash, binary);
+        }
+        #mod_name::init_program_binaries(program_binaries.clone());
+    };
+
+    // Cached analysis (for fast HTML generation) - used only by normal fuzzing
+    let init_cached_analysis = quote! {
+        let mut cached_analysis: std::collections::HashMap<u64, anchor_test_context::CachedProgramAnalysis> = std::collections::HashMap::new();
+        for (prog_hash, binary) in &program_binaries {
+            let program_name = format!("program_{:016x}", prog_hash);
+            if let Some(analysis) = anchor_test_context::build_cached_analysis(&program_name, binary) {
+                cached_analysis.insert(*prog_hash, analysis);
+            }
+        }
+        #mod_name::init_cached_analysis(cached_analysis);
+    };
+
     // Template setup - call setup() once to build fully initialized fixture
     // Set env var so TestContext::new() creates a debuggable SVM with register tracing
     let template_setup = quote! {
@@ -224,41 +274,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             eprintln!("[SETUP] Template has {} programs", template_fixture.ctx.programs_count());
         }
 
-        // Extract program edge and instruction totals for coverage percentage display
-        // Convert Pubkey keys to program hashes (u64) matching the coverage tracking
+        // Initialize all coverage tracking data
         {
-            let mut edge_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            let mut instr_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            let mut program_binaries: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
-
-            for (pubkey, (total_edges, total_instructions)) in template_fixture.ctx.get_program_coverage_totals() {
-                let program_hash = u64::from_le_bytes(
-                    pubkey.to_bytes()[0..8].try_into().unwrap()
-                );
-                edge_totals.insert(program_hash, *total_edges);
-                instr_totals.insert(program_hash, *total_instructions);
-            }
-
-            // Also store program binaries for per-instruction CFG analysis
-            for (pubkey, binary) in template_fixture.ctx.get_program_binaries() {
-                let program_hash = u64::from_le_bytes(
-                    pubkey.to_bytes()[0..8].try_into().unwrap()
-                );
-                program_binaries.insert(program_hash, binary);
-            }
-
-            #mod_name::init_program_totals(edge_totals, instr_totals);
-            #mod_name::init_program_binaries(program_binaries.clone());
-
-            // Build cached analysis for fast HTML generation (parse binaries once)
-            let mut cached_analysis: std::collections::HashMap<u64, anchor_test_context::CachedProgramAnalysis> = std::collections::HashMap::new();
-            for (prog_hash, binary) in &program_binaries {
-                let program_name = format!("program_{:016x}", prog_hash);
-                if let Some(analysis) = anchor_test_context::build_cached_analysis(&program_name, binary) {
-                    cached_analysis.insert(*prog_hash, analysis);
-                }
-            }
-            #mod_name::init_cached_analysis(cached_analysis);
+            #init_coverage_totals
+            #init_program_binaries
+            #init_cached_analysis
         }
     };
     
@@ -276,6 +296,170 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         if std::env::var("FUZZ_DEBUG").is_ok() && FIRST_ITERATION.swap(false, std::sync::atomic::Ordering::SeqCst) {
             eprintln!("[ITER] After clone: {} tracked accounts", #fixture_param_name.ctx.tracked_accounts_count());
         }
+    };
+
+    // ============================================================================
+    // SHARED QUOTE BLOCKS FOR FUZZING MODE
+    // These are extracted to avoid duplicating ~400 lines between OnDisk and InMemory corpus modes
+    // ============================================================================
+
+    // Monitor creation - displays coverage stats with AFL-style formatting
+    let monitor_setup = quote! {
+        let monitor = SimpleMonitor::new(|s| {
+            let s = s.replace("objectives", "crashes");
+            let state = #mod_name::COVERAGE_STATE.lock().unwrap();
+            let true_edges = state.total_edges;
+            let branches = state.total_branches;
+            drop(state);
+            let total_edges: usize = #mod_name::PROGRAM_TOTALS.get().map(|t| t.values().sum()).unwrap_or(0);
+            let total_branches = total_edges / 2;
+            if let Some(idx) = s.find("edges:") {
+                let prefix = &s[..idx];
+                let edges_part = &s[idx..];
+                let afl_edges: usize = edges_part.split_whitespace().nth(1)
+                    .and_then(|p| p.split('/').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+                let afl_pct = (afl_edges as f64 / (1u64 << 15) as f64) * 100.0;
+                let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
+                let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
+                println!("{}afl_edges: {}/65536 ({:.1}%), edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
+                    prefix, afl_edges, afl_pct, true_edges, total_edges, edge_pct, branches, total_branches, branch_pct);
+            } else { println!("{s}"); }
+        });
+        let mut mgr = SimpleEventManager::new(monitor);
+    };
+
+    // Observer and feedback setup
+    let observer_feedback_setup = quote! {
+        let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
+        let edges_observer = HitcountsMapObserver::new(std_map).track_indices();
+        let time_observer = TimeObserver::new("time");
+
+        let map_feedback = MaxMapFeedback::new(&edges_observer);
+        let time_feedback = TimeFeedback::new(&time_observer);
+        let mut feedback = feedback_or!(map_feedback, time_feedback);
+        let mut objective = CrashFeedback::new();
+    };
+
+    // Harness wrapper - the core fuzzing logic
+    let harness_wrapper_code = quote! {
+        let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
+            if let Some(timeout) = timeout_secs {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                if now - start_time >= timeout {
+                    eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
+                    if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                        #mod_name::write_lcov_coverage("coverage.lcov");
+                        #mod_name::write_html_coverage("coverage.html");
+                    }
+                    std::process::exit(0);
+                }
+            }
+
+            let bytes_ref = input.target_bytes();
+            let slice = bytes_ref.as_slice();
+            let mut u = Unstructured::new(slice);
+
+            let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anchor_test_context::set_current_iteration(current_iteration);
+
+            #(#deser_stmts)*
+
+            #iteration_setup
+
+            #fn_name(#(#call_args),*);
+
+            let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                #mod_name::maybe_write_coverage(exec_count);
+            }
+
+            if let Some(msg) = anchor_test_context::take_violation() {
+                eprintln!("[VIOLATION] {}", msg);
+                anchor_test_context::print_action_sequence();
+                // Use the same hash as LibAFL (xxh3_64) so our metadata matches LibAFL's crash filenames
+                let input_hash = hash_std(slice);
+                anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
+                ExitKind::Crash
+            } else {
+                ExitKind::Ok
+            }
+        };
+    };
+
+    // Mutator and stages setup
+    let mutator_stages_setup = quote! {
+        let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
+            .expect("failed to create mutator");
+        let power_stage = StdPowerMutationalStage::new(mutator);
+        let mut stages = tuple_list!(power_stage);
+    };
+
+    // Exit handlers (panic hook and ctrlc)
+    let exit_handlers_setup = quote! {
+        let default_panic = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                #mod_name::write_lcov_coverage("coverage.lcov");
+                #mod_name::write_html_coverage("coverage.html");
+            }
+            default_panic(info);
+        }));
+
+        ctrlc::set_handler(move || {
+            if coverage_enabled {
+                eprintln!("\n[COVERAGE] Ctrl+C received. Coverage files written by periodic updates.");
+            }
+            std::process::exit(0);
+        }).ok();
+    };
+
+    // Common fuzzing setup (template, start time, timeout)
+    let common_fuzz_setup = quote! {
+        #template_setup
+
+        let start_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _ = #mod_name::FUZZER_START_TIME.set(start_time);
+
+        let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok());
+
+        let iteration_counter = std::sync::atomic::AtomicU64::new(0);
+    };
+
+    // Corpus loading: load inputs from a directory using add_input()
+    // Used by InMemoryCorpus and OnDiskCorpus (different-directory case)
+    let load_corpus_from_dir = quote! {
+        eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
+        let mut loaded = 0usize;
+        if let Ok(entries) = std::fs::read_dir(corpus_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_file() && is_corpus_input(&path) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let input = BytesInput::new(bytes);
+                        if fuzzer.add_input(&mut state, &mut executor, &mut mgr, input).is_ok() {
+                            loaded += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("[FUZZ] Loaded {} seed inputs from corpus", loaded);
+    };
+
+    // Default seed: add a zero-filled seed input
+    let add_default_seed = quote! {
+        let input = BytesInput::new(vec![0u8; 256]);
+        fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+            .expect("failed to add seed input");
     };
 
     let expanded = quote! {
@@ -298,6 +482,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 pub branch_pcs: anchor_test_context::FastHashMap<u64, anchor_test_context::FastHashSet<usize>>,
                 // LCOV branch tracking (only when --coverage enabled)
                 pub branch_outcomes: HashMap<u64, HashMap<(usize, bool), u64>>, // program -> ((branch_pc, taken) -> count)
+                // PC hit tracking for source-level LCOV (only when --coverage enabled)
+                pub pc_hits: HashMap<u64, HashMap<usize, u64>>, // program -> (pc -> count)
                 pub last_write_iteration: u64,   // Iteration-based throttling (not time-based)
                 pub last_coverage_count: usize,  // For smart batching
                 // Cached totals for SimpleMonitor (avoid iterating all data)
@@ -351,13 +537,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     Self { ptr, len }
                 }
 
-                /// Process pre-filtered branch edges for coverage tracking
+                /// Process pre-filtered branch edges and PC hits for coverage tracking
                 fn process_trace(
                     &self,
                     program_id: &anchor_test_context::fuzz_types::Pubkey,
                     branch_edges: &[(usize, usize)],
+                    visited_pcs: &[usize],
                 ) {
-                    if branch_edges.is_empty() {
+                    if branch_edges.is_empty() && visited_pcs.is_empty() {
                         return;
                     }
 
@@ -375,8 +562,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     let mut prev_location: usize = 0;
 
                     for &(pc, target_pc) in branch_edges {
-                        // AFL-style edge hashing (from QEMU mode)
-                        let cur_location = ((target_pc >> 4) ^ (target_pc << 8)) ^ (program_hash as usize);
+                        // Fibonacci hash for better distribution with BPF's small PC range
+                        // Combines full (source, target) edge info with golden ratio multiplier
+                        let edge_id = ((pc as u64) << 32) | (target_pc as u64);
+                        let cur_location = ((edge_id.wrapping_mul(0x9e3779b97f4a7c15)) >> 48) as usize;
                         let edge = (cur_location ^ prev_location) % MAP_SIZE;
                         prev_location = cur_location >> 1;
 
@@ -407,13 +596,19 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     branch_set.extend(&local_branch_pcs);
                     state.total_branches += branch_set.len() - old_branch_count;
 
-                    // Track branch outcomes for LCOV (only when --coverage enabled)
+                    // Track branch outcomes and PC hits for LCOV (only when --coverage enabled)
                     if COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
                         let program_outcomes = state.branch_outcomes.entry(program_hash).or_default();
                         for &(pc, target_pc) in branch_edges {
                             // taken = jump target is not the fall-through (pc + 8)
                             let taken = target_pc != pc + 8;
                             *program_outcomes.entry((pc, taken)).or_insert(0) += 1;
+                        }
+
+                        // Track all visited PC addresses for source-level LCOV
+                        let program_pc_hits = state.pc_hits.entry(program_hash).or_default();
+                        for &pc in visited_pcs {
+                            *program_pc_hits.entry(pc).or_insert(0) += 1;
                         }
                     }
                 }
@@ -435,6 +630,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     register_tracing_enabled: bool,
                 ) {
                     if register_tracing_enabled {
+                        let coverage_enabled = COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+
                         invoke_context.iterate_vm_traces(
                             &|instruction_context,
                               executable,
@@ -447,8 +644,21 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                                     // Pre-filter: extract only (branch_pc, target_pc) pairs
                                     let mut branch_edges: Vec<(usize, usize)> = Vec::with_capacity(register_trace.len() / 8);
 
+                                    // Collect all visited PCs for source-level LCOV (only when coverage enabled)
+                                    let mut visited_pcs: Vec<usize> = if coverage_enabled {
+                                        Vec::with_capacity(register_trace.len())
+                                    } else {
+                                        Vec::new()
+                                    };
+
                                     for i in 0..register_trace.len().saturating_sub(1) {
                                         let pc = register_trace[i][11] as usize;
+
+                                        // Collect all PCs for source-level coverage
+                                        if coverage_enabled {
+                                            visited_pcs.push(pc);
+                                        }
+
                                         let insn = ebpf::get_insn_unchecked(program, pc);
 
                                         // Only conditional branches
@@ -462,7 +672,13 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                                         branch_edges.push((pc, target_pc));
                                     }
 
-                                    self.process_trace(program_id, &branch_edges);
+                                    // Also add the last PC if we have any trace data
+                                    if coverage_enabled && !register_trace.is_empty() {
+                                        let last_pc = register_trace[register_trace.len() - 1][11] as usize;
+                                        visited_pcs.push(last_pc);
+                                    }
+
+                                    self.process_trace(program_id, &branch_edges, &visited_pcs);
                                 }
                             },
                         );
@@ -471,6 +687,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             /// Write LCOV coverage file to disk
+            ///
+            /// Tries source-level coverage first (using DWARF debug info),
+            /// falls back to bytecode-level if no debug info is available.
             pub fn write_lcov_coverage(output_path: &str) {
                 use std::fs::File;
                 use std::io::{BufWriter, Write};
@@ -484,40 +703,56 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 let mut writer = BufWriter::new(file);
 
-                // Get branch coverage data from state
+                // Get coverage data from state
                 let state = COVERAGE_STATE.lock().unwrap();
                 let branch_outcomes = state.branch_outcomes.clone();
+                let pc_hits = state.pc_hits.clone();
                 drop(state); // Release lock before file I/O
 
-                if branch_outcomes.is_empty() {
+                if branch_outcomes.is_empty() && pc_hits.is_empty() {
                     eprintln!("[LCOV] No coverage data to write");
                     return;
                 }
 
                 let program_binaries = PROGRAM_BINARIES.get();
                 let edge_totals = PROGRAM_TOTALS.get();
+                let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
 
                 let mut programs_written = 0usize;
-                // Empty pc_hits since we no longer track instruction coverage
-                let empty_pc_hits: HashMap<usize, u64> = HashMap::new();
 
-                for (prog_hash, outcomes) in &branch_outcomes {
+                // Get all program hashes (union of branch_outcomes and pc_hits keys)
+                let mut all_programs: std::collections::HashSet<u64> = branch_outcomes.keys().copied().collect();
+                all_programs.extend(pc_hits.keys());
+
+                for prog_hash in all_programs {
                     let program_name = format!("program_{:016x}", prog_hash);
-                    let functions = program_binaries
-                        .and_then(|b| b.get(prog_hash))
+
+                    let outcomes = branch_outcomes.get(&prog_hash)
+                        .cloned()
+                        .unwrap_or_default();
+                    let hits = pc_hits.get(&prog_hash)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let program_data = program_binaries
+                        .and_then(|b| b.get(&prog_hash))
+                        .map(|v| v.as_slice());
+
+                    let functions = program_data
                         .and_then(|data| anchor_test_context::extract_functions(data))
                         .unwrap_or_default();
 
-                    let total_edges = edge_totals.and_then(|t| t.get(prog_hash).copied()).unwrap_or(0);
+                    let total_edges = edge_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
                     let total_branches = total_edges / 2;
+                    let total_instructions = instr_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
 
                     if let Err(e) = anchor_test_context::generate_bytecode_lcov(
                         &mut writer,
                         &program_name,
-                        &empty_pc_hits,
+                        &hits,
                         &outcomes,
                         &functions,
-                        0, // No instruction tracking
+                        total_instructions,
                         total_branches,
                     ) {
                         eprintln!("[LCOV] Error writing coverage for {}: {}", program_name, e);
@@ -526,13 +761,21 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
 
-                // Explicitly flush to ensure data is written before process exit
+                // Explicitly flush and sync to ensure data is written before process exit
                 if let Err(e) = writer.flush() {
                     eprintln!("[LCOV] Error flushing buffer: {}", e);
                 }
+                // Get inner file and sync to disk
+                let file = writer.into_inner().expect("Failed to get inner file");
+                if let Err(e) = file.sync_all() {
+                    eprintln!("[LCOV] Error syncing file: {}", e);
+                }
 
-                eprintln!("[LCOV] Coverage written to {} ({} programs, {} branches)",
-                    output_path, programs_written, branch_outcomes.values().map(|h| h.len()).sum::<usize>());
+                eprintln!("[LCOV] Coverage written to {} ({} programs, {} lines, {} branches)",
+                    output_path,
+                    programs_written,
+                    pc_hits.values().map(|h| h.len()).sum::<usize>(),
+                    branch_outcomes.values().map(|h| h.len()).sum::<usize>());
             }
 
             /// Write coverage files every 5000 iterations when new coverage is discovered.
@@ -560,109 +803,94 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
-            /// Write HTML coverage visualization
-            pub fn write_html_coverage(output_path: &str) {
-                use std::io::Write;
+            /// Write HTML coverage visualization using genhtml (LCOV tool)
+            ///
+            /// Uses the standard genhtml tool for proper branch coverage visualization.
+            /// Falls back to a simple message if genhtml is not installed.
+            pub fn write_html_coverage(output_dir: &str) {
+                // First check if genhtml is available
+                let genhtml_available = std::process::Command::new("genhtml")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
 
-                let file = match std::fs::File::create(output_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("[HTML] Failed to create {}: {}", output_path, e);
-                        return;
-                    }
-                };
-                let mut writer = std::io::BufWriter::new(file);
-
-                // Get coverage data from state
-                let state = COVERAGE_STATE.lock().unwrap();
-                // Get per-program stats from state
-                let edges_map = state.edges.clone();
-                let branches_map = state.branch_pcs.clone();
-                drop(state); // Release lock before file I/O
-
-                // Get program binaries
-                let Some(binaries) = PROGRAM_BINARIES.get() else {
-                    eprintln!("[HTML] No program binaries available");
+                if !genhtml_available {
+                    eprintln!("[HTML] genhtml not found. Install lcov for HTML reports:");
+                    eprintln!("[HTML]   brew install lcov  # macOS");
+                    eprintln!("[HTML]   apt install lcov   # Ubuntu/Debian");
                     return;
-                };
-
-                // Get totals for stats
-                let edge_totals = PROGRAM_TOTALS.get();
-
-                // Generate HTML for each program
-                for (prog_hash, binary) in binaries {
-                    // Empty hits since we no longer track instruction coverage
-                    let hits: HashMap<usize, u64> = HashMap::new();
-
-                    // Build stats from coverage data
-                    let edges_hit = edges_map.get(prog_hash).map(|s| s.len()).unwrap_or(0);
-                    let branches_hit = branches_map.get(prog_hash).map(|s| s.len()).unwrap_or(0);
-
-                    let edges_total = edge_totals.and_then(|t| t.get(prog_hash).copied()).unwrap_or(0);
-                    let branches_total = edges_total / 2;
-
-                    // Calculate runtime stats
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    let start_time = FUZZER_START_TIME.get().copied().unwrap_or(now_secs);
-                    let run_time_secs = now_secs.saturating_sub(start_time);
-                    let executions = TOTAL_EXECUTIONS.load(std::sync::atomic::Ordering::Relaxed);
-
-                    let stats = anchor_test_context::CoverageWriteStats {
-                        run_time_secs,
-                        executions,
-                        edges_hit,
-                        edges_total,
-                        branches_hit,
-                        branches_total,
-                        instructions_hit: 0,
-                        instructions_total: 0,
-                    };
-
-                    // Use cached analysis if available (fast path), otherwise full analysis
-                    let result = if let Some(cached_map) = CACHED_ANALYSIS.get() {
-                        if let Some(cached) = cached_map.get(prog_hash) {
-                            // Fast path: use pre-computed CFG and function data
-                            anchor_test_context::generate_coverage_html_cached(
-                                &mut writer,
-                                cached,
-                                &hits,
-                                Some(&stats),
-                            )
-                        } else {
-                            // Fallback: full analysis (shouldn't happen normally)
-                            let program_name = format!("program_{:016x}", prog_hash);
-                            anchor_test_context::generate_coverage_html(
-                                &mut writer,
-                                &program_name,
-                                binary,
-                                &hits,
-                                Some(&stats),
-                            )
-                        }
-                    } else {
-                        // Fallback: no cache available
-                        let program_name = format!("program_{:016x}", prog_hash);
-                        anchor_test_context::generate_coverage_html(
-                            &mut writer,
-                            &program_name,
-                            binary,
-                            &hits,
-                            Some(&stats),
-                        )
-                    };
-
-                    if let Err(e) = result {
-                        eprintln!("[HTML] Error generating HTML: {}", e);
-                    }
                 }
 
-                if let Err(e) = writer.flush() {
-                    eprintln!("[HTML] Error flushing: {}", e);
-                } else {
-                    eprintln!("[HTML] Coverage written to {}", output_path);
+                // Find source directory (where program source files are)
+                // Search parent dirs and sibling directories for projects with programs/
+                let source_dir: Option<String> = {
+                    let mut found = None;
+
+                    // Check FUZZ_SOURCE_ROOT env var first
+                    if let Ok(root) = std::env::var("FUZZ_SOURCE_ROOT") {
+                        found = Some(root);
+                    }
+
+                    // Search parent and sibling directories
+                    if found.is_none() {
+                        'outer: for depth in 1..=8 {
+                            let parent: String = (0..depth).map(|_| "..").collect::<Vec<_>>().join("/");
+
+                            // Check if this directory has programs/
+                            if std::path::Path::new(&format!("{}/programs", parent)).exists() {
+                                found = Some(parent);
+                                break;
+                            }
+
+                            // Check sibling directories
+                            if let Ok(entries) = std::fs::read_dir(&parent) {
+                                for entry in entries.filter_map(|e| e.ok()) {
+                                    let sibling = entry.path();
+                                    if sibling.is_dir() && sibling.join("programs").exists() {
+                                        found = Some(sibling.to_string_lossy().to_string());
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    found
+                };
+
+                // Run genhtml on the LCOV file
+                let mut cmd = std::process::Command::new("genhtml");
+                cmd.arg("coverage.lcov")
+                    .arg("--branch-coverage")
+                    .arg("--output-directory")
+                    .arg(output_dir)
+                    .arg("--ignore-errors")
+                    .arg("source,source,missing,missing,empty") // Ignore missing source files and paths
+                    .arg("--synthesize-missing"); // Create placeholder for missing source files
+
+                if let Some(ref src_dir) = source_dir {
+                    cmd.arg("--source-directory").arg(src_dir);
+                }
+
+                match cmd.output() {
+                    Ok(output) => {
+                        if output.status.success() {
+                            eprintln!("[HTML] Coverage report written to {}/index.html", output_dir);
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            // Check for common non-fatal errors
+                            if stderr.contains("unused") {
+                                // --source-directory not used is fine
+                                eprintln!("[HTML] Coverage report written to {}/index.html", output_dir);
+                            } else {
+                                eprintln!("[HTML] genhtml error: {}", stderr);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[HTML] Failed to run genhtml: {}", e);
+                    }
                 }
             }
         }
@@ -699,7 +927,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             use libafl::monitors::SimpleMonitor;
             use libafl::schedulers::powersched::PowerSchedule;
             use libafl_bolts::tuples::tuple_list;
-            use libafl_bolts::{current_nanos, rands::StdRand, AsSlice};
+            use libafl_bolts::{current_nanos, rands::StdRand, AsSlice, hash_std};
             use std::time::Duration;
             use arbitrary::Unstructured;
 
@@ -768,20 +996,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Run setup
                 let template_fixture = #fixture_name::setup();
 
-                // Initialize coverage totals for reporting
-                {
-                    let mut edge_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-                    let mut instr_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-
-                    for (pubkey, (total_edges, total_instructions)) in template_fixture.ctx.get_program_coverage_totals() {
-                        let program_hash = u64::from_le_bytes(
-                            pubkey.to_bytes()[0..8].try_into().unwrap()
-                        );
-                        edge_totals.insert(program_hash, *total_edges);
-                        instr_totals.insert(program_hash, *total_instructions);
-                    }
-                    #mod_name::init_program_totals(edge_totals, instr_totals);
-                }
+                // Initialize coverage totals for reporting (replay only needs totals, not binaries)
+                { #init_coverage_totals }
 
                 let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 let mut fixture = template_fixture.clone();
@@ -815,6 +1031,22 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
 
+            // Helper to check if a file is a corpus input (not metadata)
+            // Defined once here and used by coverage-only and fuzzing modes
+            fn is_corpus_input(path: &std::path::Path) -> bool {
+                let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    None => return false,
+                };
+                // Skip LibAFL metadata files and our crash metadata
+                if file_name.starts_with('.') { return false; }
+                if file_name.ends_with(".metadata") { return false; }
+                if file_name.ends_with(".meta.json") { return false; }
+                if file_name == ".state" { return false; }
+                if file_name == ".state.metadata" { return false; }
+                true
+            }
+
             // === COVERAGE-ONLY MODE ===
             // Load corpus and run each input once for coverage, then exit
             if coverage_only_mode {
@@ -828,11 +1060,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 eprintln!("[COVERAGE-ONLY] Loading corpus from: {}", corpus_dir);
 
-                // Collect input files
+                // Collect input files (excluding metadata)
                 let input_files: Vec<_> = match std::fs::read_dir(&corpus_dir) {
                     Ok(entries) => entries
                         .filter_map(|e| e.ok())
-                        .filter(|e| e.path().is_file())
+                        .filter(|e| {
+                            let path = e.path();
+                            path.is_file() && is_corpus_input(&path)
+                        })
                         .collect(),
                     Err(e) => {
                         eprintln!("[COVERAGE-ONLY] Failed to read corpus directory: {}", e);
@@ -854,29 +1089,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 #mod_name::COVERAGE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
                 let template_fixture = #fixture_name::setup();
 
-                // Initialize coverage totals
+                // Initialize coverage totals and binaries (for LCOV output)
                 {
-                    let mut edge_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-                    let mut instr_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-                    let mut program_binaries: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
-
-                    for (pubkey, (total_edges, total_instructions)) in template_fixture.ctx.get_program_coverage_totals() {
-                        let program_hash = u64::from_le_bytes(
-                            pubkey.to_bytes()[0..8].try_into().unwrap()
-                        );
-                        edge_totals.insert(program_hash, *total_edges);
-                        instr_totals.insert(program_hash, *total_instructions);
-                    }
-
-                    for (pubkey, binary) in template_fixture.ctx.get_program_binaries() {
-                        let program_hash = u64::from_le_bytes(
-                            pubkey.to_bytes()[0..8].try_into().unwrap()
-                        );
-                        program_binaries.insert(program_hash, binary);
-                    }
-
-                    #mod_name::init_program_totals(edge_totals, instr_totals);
-                    #mod_name::init_program_binaries(program_binaries);
+                    #init_coverage_totals
+                    #init_program_binaries
                 }
 
                 // Process each input file
@@ -965,42 +1181,49 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             if let Some(ref corpus_out_path) = corpus_out_dir {
                 // === ON-DISK CORPUS MODE ===
                 std::fs::create_dir_all(corpus_out_path).expect("failed to create corpus output directory");
+
+                // Check if we're loading from this same directory
+                let loading_from_same_dir = corpus_in_dir.as_ref().map(|cin| {
+                    std::path::Path::new(cin)
+                        .canonicalize()
+                        .ok()
+                        .and_then(|cin_canon| std::path::Path::new(corpus_out_path)
+                            .canonicalize()
+                            .ok()
+                            .map(|cout_canon| cin_canon == cout_canon))
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+
+                // If NOT loading from this directory, clean up ALL metadata files
+                // This prevents OnDiskCorpus from trying to load entries from a previous run
+                // LibAFL uses hidden files for metadata: .HASH (pointers) and .HASH_N.metadata
+                if !loading_from_same_dir {
+                    let mut removed = 0usize;
+                    if let Ok(entries) = std::fs::read_dir(corpus_out_path) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                // Remove ALL hidden files (LibAFL metadata)
+                                if name.starts_with('.') {
+                                    if std::fs::remove_file(&path).is_ok() {
+                                        removed += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if removed > 0 {
+                        eprintln!("[FUZZ] Cleaned {} stale metadata files from corpus directory", removed);
+                    }
+                }
+
                 eprintln!("[FUZZ] Writing corpus entries to: {}", corpus_out_path);
 
-                // Create monitor for this mode
-                let monitor = SimpleMonitor::new(|s| {
-                    let s = s.replace("objectives", "crashes");
-                    let state = #mod_name::COVERAGE_STATE.lock().unwrap();
-                    let true_edges = state.total_edges;
-                    let branches = state.total_branches;
-                    drop(state);
-                    let total_edges: usize = #mod_name::PROGRAM_TOTALS.get().map(|t| t.values().sum()).unwrap_or(0);
-                    let total_branches = total_edges / 2;
-                    if let Some(idx) = s.find("edges:") {
-                        let prefix = &s[..idx];
-                        let edges_part = &s[idx..];
-                        let afl_edges: usize = edges_part.split_whitespace().nth(1)
-                            .and_then(|p| p.split('/').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
-                        let afl_pct = (afl_edges as f64 / (1u64 << 15) as f64) * 100.0;
-                        let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
-                        let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
-                        println!("{}afl_edges: {}/65536 ({:.1}%), edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
-                            prefix, afl_edges, afl_pct, true_edges, total_edges, edge_pct, branches, total_branches, branch_pct);
-                    } else { println!("{s}"); }
-                });
-                let mut mgr = SimpleEventManager::new(monitor);
+                // Use shared setup blocks
+                #monitor_setup
+                #observer_feedback_setup
 
-                // Observers
-                let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-                let edges_observer = HitcountsMapObserver::new(std_map).track_indices();
-                let time_observer = TimeObserver::new("time");
-
-                // Feedback
-                let map_feedback = MaxMapFeedback::new(&edges_observer);
-                let time_feedback = TimeFeedback::new(&time_observer);
-                let mut feedback = feedback_or!(map_feedback, time_feedback);
-                let mut objective = CrashFeedback::new();
-
+                // OnDiskCorpus-specific: create corpus and state
                 let rand = StdRand::with_seed(seed);
                 let corpus = OnDiskCorpus::<BytesInput>::new(corpus_out_path).expect("failed to create corpus");
                 let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
@@ -1012,72 +1235,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::fast()),
                 );
 
-                #template_setup
-
-                let start_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let _ = #mod_name::FUZZER_START_TIME.set(start_time);
-
-                let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok());
-
-                let iteration_counter = std::sync::atomic::AtomicU64::new(0);
-
-                let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
-                    if let Some(timeout) = timeout_secs {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-                        if now - start_time >= timeout {
-                            eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
-                            if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                                #mod_name::write_lcov_coverage("coverage.lcov");
-                                #mod_name::write_html_coverage("coverage.html");
-                            }
-                            std::process::exit(0);
-                        }
-                    }
-
-                    let bytes_ref = input.target_bytes();
-                    let slice = bytes_ref.as_slice();
-                    let mut u = Unstructured::new(slice);
-
-                    let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    anchor_test_context::set_current_iteration(current_iteration);
-
-                    #(#deser_stmts)*
-
-                    #iteration_setup
-
-                    #fn_name(#(#call_args),*);
-
-                    let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                        #mod_name::maybe_write_coverage(exec_count);
-                    }
-
-                    if let Some(msg) = anchor_test_context::take_violation() {
-                        eprintln!("[VIOLATION] {}", msg);
-                        anchor_test_context::print_action_sequence();
-                        let input_hash = {
-                            let mut hash: u64 = 0xcbf29ce484222325;
-                            for byte in slice {
-                                hash ^= *byte as u64;
-                                hash = hash.wrapping_mul(0x100000001b3);
-                            }
-                            hash
-                        };
-                        anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
-                        ExitKind::Crash
-                    } else {
-                        ExitKind::Ok
-                    }
-                };
+                #common_fuzz_setup
+                #harness_wrapper_code
 
                 let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
                 let timeout = Duration::from_millis(10000);
@@ -1093,54 +1252,76 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 // Load seed corpus if specified
                 if let Some(ref corpus_dir) = corpus_in_dir {
-                    eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
-                    let mut loaded = 0usize;
-                    if let Ok(entries) = std::fs::read_dir(corpus_dir) {
-                        for entry in entries.filter_map(|e| e.ok()) {
-                            let path = entry.path();
-                            if path.is_file() {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    let input = BytesInput::new(bytes);
-                                    if fuzzer.add_input(&mut state, &mut executor, &mut mgr, input).is_ok() {
-                                        loaded += 1;
+                    // Check if corpus-in and corpus-out are the same directory
+                    let same_directory = std::path::Path::new(corpus_dir)
+                        .canonicalize()
+                        .ok()
+                        .and_then(|cin| std::path::Path::new(corpus_out_path)
+                            .canonicalize()
+                            .ok()
+                            .map(|cout| cin == cout))
+                        .unwrap_or(false);
+
+                    if same_directory {
+                        // When corpus-in == corpus-out, check if corpus is healthy (has actual input files)
+                        // Count non-hidden files (actual inputs vs metadata)
+                        let input_count = std::fs::read_dir(corpus_dir)
+                            .map(|entries| entries
+                                .filter_map(|e| e.ok())
+                                .filter(|e| {
+                                    let path = e.path();
+                                    path.is_file() && is_corpus_input(&path)
+                                })
+                                .count())
+                            .unwrap_or(0);
+
+                        if input_count > 0 {
+                            // Healthy corpus - load entries WITHOUT calling add_input
+                            eprintln!("[FUZZ] Using existing corpus directory: {}", corpus_dir);
+                            let corpus_dirs = vec![std::path::PathBuf::from(corpus_dir)];
+                            state.load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
+                                .expect("failed to load initial corpus");
+                            let corpus_count = state.corpus().count();
+                            eprintln!("[FUZZ] Loaded {} existing corpus entries", corpus_count);
+                            if corpus_count == 0 {
+                                eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                                let input = BytesInput::new(vec![0u8; 256]);
+                                fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                                    .expect("failed to add seed input");
+                            }
+                        } else {
+                            // Corrupted corpus - only metadata, no input files
+                            // Clean metadata and start fresh
+                            eprintln!("[FUZZ] Corpus directory has no input files, cleaning stale metadata...");
+                            if let Ok(entries) = std::fs::read_dir(corpus_dir) {
+                                for entry in entries.filter_map(|e| e.ok()) {
+                                    let path = entry.path();
+                                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                        if name.starts_with('.') {
+                                            let _ = std::fs::remove_file(&path);
+                                        }
                                     }
                                 }
                             }
+                            eprintln!("[FUZZ] Starting fresh with default seed");
+                            let input = BytesInput::new(vec![0u8; 256]);
+                            fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                                .expect("failed to add seed input");
+                        }
+                    } else {
+                        // Different directories - load from input dir and add to output corpus
+                        #load_corpus_from_dir
+                        if loaded == 0 {
+                            eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                            #add_default_seed
                         }
                     }
-                    eprintln!("[FUZZ] Loaded {} seed inputs from corpus", loaded);
-                    if loaded == 0 {
-                        eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
-                        let input = BytesInput::new(vec![0u8; 256]);
-                        fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                            .expect("failed to add seed input");
-                    }
                 } else {
-                    let input = BytesInput::new(vec![0u8; 256]);
-                    fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                        .expect("failed to add seed input");
+                    #add_default_seed
                 }
 
-                let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
-                    .expect("failed to create mutator");
-                let power_stage = StdPowerMutationalStage::new(mutator);
-                let mut stages = tuple_list!(power_stage);
-
-                let default_panic = std::panic::take_hook();
-                std::panic::set_hook(Box::new(move |info| {
-                    if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                        #mod_name::write_lcov_coverage("coverage.lcov");
-                        #mod_name::write_html_coverage("coverage.html");
-                    }
-                    default_panic(info);
-                }));
-
-                ctrlc::set_handler(move || {
-                    if coverage_enabled {
-                        eprintln!("\n[COVERAGE] Ctrl+C received. Coverage files written by periodic updates.");
-                    }
-                    std::process::exit(0);
-                }).ok();
+                #mutator_stages_setup
+                #exit_handlers_setup
 
                 fuzzer
                     .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
@@ -1149,217 +1330,54 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             } else {
                 // === IN-MEMORY CORPUS MODE (default) ===
 
-                // Create monitor for this mode
-                let monitor = SimpleMonitor::new(|s| {
-                    let s = s.replace("objectives", "crashes");
-                    let state = #mod_name::COVERAGE_STATE.lock().unwrap();
-                    let true_edges = state.total_edges;
-                    let branches = state.total_branches;
-                    drop(state);
-                    let total_edges: usize = #mod_name::PROGRAM_TOTALS.get().map(|t| t.values().sum()).unwrap_or(0);
-                    let total_branches = total_edges / 2;
-                    if let Some(idx) = s.find("edges:") {
-                        let prefix = &s[..idx];
-                        let edges_part = &s[idx..];
-                        let afl_edges: usize = edges_part.split_whitespace().nth(1)
-                            .and_then(|p| p.split('/').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
-                        let afl_pct = (afl_edges as f64 / (1u64 << 15) as f64) * 100.0;
-                        let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
-                        let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
-                        println!("{}afl_edges: {}/65536 ({:.1}%), edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
-                            prefix, afl_edges, afl_pct, true_edges, total_edges, edge_pct, branches, total_branches, branch_pct);
-                    } else { println!("{s}"); }
-                });
-                let mut mgr = SimpleEventManager::new(monitor);
+                // Use shared setup blocks
+                #monitor_setup
+                #observer_feedback_setup
 
-                // Observers
-                let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-                let edges_observer = HitcountsMapObserver::new(std_map).track_indices();
-                let time_observer = TimeObserver::new("time");
-
-                // Feedback
-                let map_feedback = MaxMapFeedback::new(&edges_observer);
-                let time_feedback = TimeFeedback::new(&time_observer);
-                let mut feedback = feedback_or!(map_feedback, time_feedback);
-                let mut objective = CrashFeedback::new();
-
+                // InMemoryCorpus-specific: create corpus and state
                 let rand = StdRand::with_seed(seed);
                 let corpus: InMemoryCorpus<BytesInput> = InMemoryCorpus::new();
                 let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
                 let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 
-                // === SCHEDULER ===
                 let scheduler = IndexesLenTimeMinimizerScheduler::new(
                     &edges_observer,
                     PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::fast()),
                 );
 
-            #template_setup
+                #common_fuzz_setup
+                #harness_wrapper_code
 
-            // Initialize fuzzer start time for stats tracking
-            let start_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let _ = #mod_name::FUZZER_START_TIME.set(start_time);
+                let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+                let timeout = Duration::from_millis(10000);
+                let mut executor = InProcessExecutor::with_timeout(
+                    &mut harness_wrapper,
+                    tuple_list!(edges_observer, time_observer),
+                    &mut fuzzer,
+                    &mut state,
+                    &mut mgr,
+                    timeout,
+                )
+                .expect("failed to create InProcessExecutor");
 
-            // Parse timeout from environment variable
-            let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok());
-
-            // Track iteration count for metadata
-            let iteration_counter = std::sync::atomic::AtomicU64::new(0);
-
-            let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
-                // Check timeout at the start of each iteration
-                if let Some(timeout) = timeout_secs {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    if now - start_time >= timeout {
-                        eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
-                        // Write final coverage files if enabled
-                        if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            #mod_name::write_lcov_coverage("coverage.lcov");
-                            #mod_name::write_html_coverage("coverage.html");
-                        }
-                        std::process::exit(0);
+                // InMemoryCorpus: simple corpus loading (no same-dir handling needed)
+                if let Some(ref corpus_dir) = corpus_in_dir {
+                    #load_corpus_from_dir
+                    if loaded == 0 {
+                        eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                        #add_default_seed
                     }
-                }
-
-                let bytes_ref = input.target_bytes();
-                let slice = bytes_ref.as_slice();
-                let mut u = Unstructured::new(slice);
-
-                // Update iteration count for metadata
-                let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                anchor_test_context::set_current_iteration(current_iteration);
-
-                #(#deser_stmts)*
-
-                #iteration_setup
-
-                // Run the test
-                #fn_name(#(#call_args),*);
-
-                // Increment execution counter for timing report
-                let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                // Coverage tracking (only when --coverage flag passed)
-                if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    // Write coverage files every 5000 iterations when new coverage found (no syscall)
-                    #mod_name::maybe_write_coverage(exec_count);
-                }
-
-                // Check if an invariant was violated (via fuzz_assert! macros)
-                if let Some(msg) = anchor_test_context::take_violation() {
-                    eprintln!("[VIOLATION] {}", msg);
-
-                    // Print the action sequence that led to this violation
-                    anchor_test_context::print_action_sequence();
-
-                    // Write crash metadata (.meta.json)
-                    // Compute hash of input bytes for filename
-                    let input_hash = {
-                        let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-                        for byte in slice {
-                            hash ^= *byte as u64;
-                            hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
-                        }
-                        hash
-                    };
-                    anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
-
-                    ExitKind::Crash
                 } else {
-                    ExitKind::Ok
+                    #add_default_seed
                 }
-            };
 
-            let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
-            let timeout = Duration::from_millis(10000);
-            let mut executor = InProcessExecutor::with_timeout(
-                &mut harness_wrapper,
-                tuple_list!(edges_observer, time_observer),
-                &mut fuzzer,
-                &mut state,
-                &mut mgr,
-                timeout,
-            )
-            .expect("failed to create InProcessExecutor");
+                #mutator_stages_setup
+                #exit_handlers_setup
 
-            // Add initial seed inputs
-            // If corpus_in_dir is specified, load all files from that directory
-            if let Some(ref corpus_dir) = corpus_in_dir {
-                eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
-                let mut loaded = 0usize;
-                if let Ok(entries) = std::fs::read_dir(corpus_dir) {
-                    for entry in entries.filter_map(|e| e.ok()) {
-                        let path = entry.path();
-                        if path.is_file() {
-                            if let Ok(bytes) = std::fs::read(&path) {
-                                let input = BytesInput::new(bytes);
-                                if fuzzer.add_input(&mut state, &mut executor, &mut mgr, input).is_ok() {
-                                    loaded += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                eprintln!("[FUZZ] Loaded {} seed inputs from corpus", loaded);
-
-                // If no inputs were loaded, add a default seed
-                if loaded == 0 {
-                    eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
-                    let input = BytesInput::new(vec![0u8; 256]);
-                    fuzzer
-                        .add_input(&mut state, &mut executor, &mut mgr, input)
-                        .expect("failed to add seed input");
-                }
-            } else {
-                // Default: single zero-filled seed
-                let input = BytesInput::new(vec![0u8; 256]);
                 fuzzer
-                    .add_input(&mut state, &mut executor, &mut mgr, input)
-                    .expect("failed to add seed input");
-            }
-
-            // === STAGES ===
-            // Standard mutational stage with MOPT mutations
-            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
-                .expect("failed to create mutator");
-            let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(power_stage);
-
-            // === EXIT HANDLERS ===
-            // Write coverage on panic (runs on main thread, can access thread-locals)
-            let default_panic = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                    #mod_name::write_lcov_coverage("coverage.lcov");
-                    #mod_name::write_html_coverage("coverage.html");
-                }
-                default_panic(info);
-            }));
-
-            // Note: ctrlc handler runs on a different thread and CANNOT access
-            // thread-local coverage data. We rely on periodic writes from maybe_write_coverage()
-            // which runs on the main thread every 5 seconds. The last periodic write
-            // will have the most recent coverage data.
-            ctrlc::set_handler(move || {
-                if coverage_enabled {
-                    eprintln!("\n[COVERAGE] Ctrl+C received. Coverage files written by periodic updates (every 5s).");
-                    eprintln!("[COVERAGE] Check coverage.lcov and coverage.html for the latest coverage snapshot.");
-                }
-                std::process::exit(0);
-            }).ok();
-
-            fuzzer
-                .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
-                .expect("error in fuzz loop");
+                    .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
+                    .expect("error in fuzz loop");
             } // end of else (in-memory corpus mode)
         }
 
