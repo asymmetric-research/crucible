@@ -246,19 +246,64 @@ fn generate_enum(
         (false, false) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq)] },
     };
 
+    // Generate manual Default impl for enums where first variant has fields
+    let manual_default = if !can_derive_default && !variants.is_empty() {
+        generate_enum_manual_default(name, &variants[0])
+    } else {
+        quote! {}
+    };
+
     quote! {
         #derives
         #[repr(u8)]
         pub enum #name {
             #(#variants_tokens),*
         }
+
+        #manual_default
+    }
+}
+
+/// Generate manual Default impl for enum whose first variant has fields
+fn generate_enum_manual_default(
+    name: &syn::Ident,
+    first_variant: &anchor_lang_idl::types::IdlEnumVariant,
+) -> proc_macro2::TokenStream {
+    let variant_name = format_ident!("{}", first_variant.name.to_upper_camel_case());
+
+    match &first_variant.fields {
+        Some(IdlDefinedFields::Named(fields)) => {
+            let field_defaults = fields.iter().map(|f| {
+                // Use the IDL field name directly (preserves camelCase)
+                let field_name = format_ident!("{}", f.name);
+                quote! { #field_name: Default::default() }
+            });
+            quote! {
+                impl Default for #name {
+                    fn default() -> Self {
+                        Self::#variant_name {
+                            #(#field_defaults),*
+                        }
+                    }
+                }
+            }
+        }
+        Some(IdlDefinedFields::Tuple(types)) => {
+            let defaults = types.iter().map(|_| quote! { Default::default() });
+            quote! {
+                impl Default for #name {
+                    fn default() -> Self {
+                        Self::#variant_name(#(#defaults),*)
+                    }
+                }
+            }
+        }
+        None => quote! {}
     }
 }
 
 /// Check if fields can derive Default
 fn can_derive_default_fields(fields: &IdlDefinedFields) -> bool {
-    use anchor_lang_idl::types::IdlType;
-
     match fields {
         IdlDefinedFields::Named(named) => named.iter().all(|f| can_type_derive_default(&f.ty)),
         IdlDefinedFields::Tuple(types) => types.iter().all(can_type_derive_default),
