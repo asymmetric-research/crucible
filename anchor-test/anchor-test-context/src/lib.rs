@@ -230,15 +230,23 @@ fn format_json_value(v: &serde_json::Value) -> String {
     }
 }
 
-/// Write crash metadata to a .meta.json file
-pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>) {
+/// Write crash metadata to a .meta.json file and save input bytes for replay
+pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>, input_bytes: &[u8]) {
+    let crash_id = format!("crash_{:016x}", input_hash);
     let metadata = build_crash_metadata(seed);
-    let filename = format!("{}/crash_{:016x}.meta.json", crash_dir, input_hash);
+    let meta_filename = format!("{}/{}.meta.json", crash_dir, crash_id);
+    let input_filename = format!("{}/{}", crash_dir, crash_id);
 
+    // Save the input bytes for replay
+    if let Err(e) = std::fs::write(&input_filename, input_bytes) {
+        eprintln!("[META] Failed to write crash input {}: {}", input_filename, e);
+    }
+
+    // Save the metadata
     match serde_json::to_string_pretty(&metadata) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&filename, json) {
-                eprintln!("[META] Failed to write {}: {}", filename, e);
+            if let Err(e) = std::fs::write(&meta_filename, json) {
+                eprintln!("[META] Failed to write {}: {}", meta_filename, e);
             }
         }
         Err(e) => {

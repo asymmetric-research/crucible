@@ -1072,7 +1072,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             }
                             hash
                         };
-                        anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed));
+                        anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
                         ExitKind::Crash
                     } else {
                         ExitKind::Ok
@@ -1271,7 +1271,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         }
                         hash
                     };
-                    anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed));
+                    anchor_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
 
                     ExitKind::Crash
                 } else {
