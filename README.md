@@ -1126,6 +1126,7 @@ anchor fuzz run <program_name> <test_name> [OPTIONS]
 | `--release` | Build and run in release mode (recommended for fuzzing) |
 | `--coverage` | Enable coverage tracking and HTML/LCOV output |
 | `--timeout <SECS>` | Stop fuzzing after specified seconds |
+| `--cores N` / `-j N` | Run N parallel fuzzer workers (multi-core mode) |
 | `--corpus-in <DIR>` | Load initial seed corpus from directory (raw input files) |
 | `--corpus-out <DIR>` | Write corpus to directory (LibAFL format) |
 | `--crashes-dir <DIR>` | Write crash files to directory (default: `crashes/<test>/`) |
@@ -1168,6 +1169,7 @@ anchor fuzz run myproject invariant_test --release --crashes-dir ./my_crashes
 - To seed from previous runs, use crash files: `--corpus-in ./crashes/invariant_test`
 
 **Environment variables:**
+- `FUZZ_VERBOSE=1` - Enable verbose harness output (action stats, state snapshots)
 - `FUZZ_DEBUG=1` - Enable verbose debug logging
 - `FUZZ_TIMEOUT_SECS=N` - Alternative to --timeout flag
 
@@ -1221,6 +1223,50 @@ anchor fuzz list <program_name>
 # List all fuzz harnesses
 anchor fuzz list
 ```
+
+### `anchor fuzz cmin`
+
+Minimize corpus to smallest set preserving all coverage (like `afl-cmin`).
+
+```bash
+anchor fuzz cmin <program_name> <test_name> <corpus_in> [OPTIONS]
+```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `--corpus-out <DIR>` | Output directory (default: in-place overwrite) |
+| `--release` | Build in release mode |
+
+**Examples:**
+```bash
+# In-place minimization
+anchor fuzz cmin myproject invariant_test ./corpus --release
+
+# Output to new directory
+anchor fuzz cmin myproject invariant_test ./corpus --corpus-out ./corpus_min --release
+```
+
+**Algorithm:** Greedy set-cover with file-size tiebreaking (prefers smaller inputs). Computes the minimum set of inputs that preserve all discovered edge coverage.
+
+### Multi-core Fuzzing
+
+Run parallel fuzzer workers for faster exploration:
+
+```bash
+# 4 parallel workers
+anchor fuzz run myproject invariant_test --release --cores 4
+
+# Short form
+anchor fuzz run myproject invariant_test --release -j 4
+```
+
+**Notes:**
+- Uses LibAFL Launcher with `fork()` and LLMP message passing
+- Coverage shared across workers via shared memory
+- LCOV coverage output disabled in multi-core mode (AFL coverage still works)
+- Crashes written to shared directory with content-based hashing (no conflicts)
+- Corpus synchronization via LLMP (lock-free, scales linearly)
 
 ---
 

@@ -282,14 +282,13 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     
-    // Per-iteration setup - clone fixture and replace ctx with new invocation callback
-    // Important: clone ctx directly from template (not from the already-cloned fixture)
-    // to avoid potential issues with nested cloning in debuggable mode
+    // Per-iteration setup - clone fixture and set invocation callback
+    // Uses set_invocation_callback() instead of clone_with_invocation_callback() to avoid
+    // double SVM clone (fixture.clone() already clones the SVM once)
     let iteration_setup = quote! {
         let mut #fixture_param_name = template_fixture.clone();
         let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
-        // Clone ctx directly from the original template, not from the cloned fixture
-        #fixture_param_name.ctx = template_fixture.ctx.clone_with_invocation_callback(callback);
+        #fixture_param_name.ctx.set_invocation_callback(callback);
 
         // First iteration debug: verify accounts after clone
         static FIRST_ITERATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -328,42 +327,70 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         let mut mgr = SimpleEventManager::new(monitor);
     };
 
-    // Observer and feedback setup
+    // Observer and feedback setup for SINGLE-CORE mode
+    // Uses MaxMapFeedback for corpus decisions + TimeFeedback for PowerScheduler metadata
+    // TimeFeedback's is_interesting returns false by default, so only MaxMapFeedback decides
+    // what goes into corpus, but TimeFeedback stores execution time for PowerScheduler
     let observer_feedback_setup = quote! {
-        let std_map = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-        let edges_observer = HitcountsMapObserver::new(std_map).track_indices();
+        // Use StdMapObserver directly (no hitcount bucketing) for simpler/faster coverage
+        let edges_observer = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
         let time_observer = TimeObserver::new("time");
 
+        // MaxMapFeedback decides if input is interesting based on coverage
+        // TimeFeedback only appends execution time metadata (is_interesting returns false)
         let map_feedback = MaxMapFeedback::new(&edges_observer);
         let time_feedback = TimeFeedback::new(&time_observer);
         let mut feedback = feedback_or!(map_feedback, time_feedback);
         let mut objective = CrashFeedback::new();
     };
 
+    // Observer and feedback setup for MULTI-CORE mode
+    // Uses SharedBitmapFeedback which checks the atomically-updated shared bitmap
+    // to prevent N× corpus duplication across workers
+    // Also includes TimeFeedback to store execution time for PowerScheduler
+    let observer_feedback_setup_multicore = quote! {
+        // Use StdMapObserver directly (no hitcount bucketing) for simpler/faster coverage
+        let edges_observer = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
+        let time_observer = TimeObserver::new("time");
+
+        // SharedBitmapFeedback checks if any NEW bits were set in the shared bitmap
+        // TimeFeedback only appends execution time metadata (is_interesting returns false)
+        // Using feedback_or! means: interesting if SharedBitmapFeedback says so, but always collect time metadata
+        let bitmap_feedback = #mod_name::SharedBitmapFeedback::new();
+        let time_feedback = TimeFeedback::new(&time_observer);
+        let mut feedback = feedback_or!(bitmap_feedback, time_feedback);
+        let mut objective = CrashFeedback::new();
+    };
+
     // Harness wrapper - the core fuzzing logic
     let harness_wrapper_code = quote! {
         let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
-            if let Some(timeout) = timeout_secs {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                if now - start_time >= timeout {
-                    eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
-                    if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                        #mod_name::write_lcov_coverage("coverage.lcov");
-                        #mod_name::write_html_coverage("coverage.html");
-                    }
-                    std::process::exit(0);
-                }
-            }
-
             let bytes_ref = input.target_bytes();
             let slice = bytes_ref.as_slice();
             let mut u = Unstructured::new(slice);
 
             let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Rate-limit timeout check to every 300 iterations to avoid syscall overhead
+            if let Some(timeout) = timeout_secs {
+                if current_iteration % 300 == 0 {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now - start_time >= timeout {
+                        eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
+                        if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                            #mod_name::write_lcov_coverage("coverage.lcov");
+                            #mod_name::write_html_coverage("coverage.html");
+                        }
+                        std::process::exit(0);
+                    }
+                }
+            }
+
             anchor_test_context::set_current_iteration(current_iteration);
+            anchor_test_context::clear_action_history();
 
             #(#deser_stmts)*
 
@@ -390,7 +417,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         };
     };
 
-    // Mutator and stages setup
+    // Mutator and stages setup - use StdPowerMutationalStage for PowerScheduler
     let mutator_stages_setup = quote! {
         let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
             .expect("failed to create mutator");
@@ -435,9 +462,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Corpus loading: load inputs from a directory using add_input()
-    // Used by InMemoryCorpus and OnDiskCorpus (different-directory case)
+    // Used by InMemoryCorpus and CachedOnDiskCorpus (different-directory case)
     let load_corpus_from_dir = quote! {
-        eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
+        if verbose { eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir); }
         let mut loaded = 0usize;
         if let Ok(entries) = std::fs::read_dir(corpus_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
@@ -452,7 +479,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-        eprintln!("[FUZZ] Loaded {} seed inputs from corpus", loaded);
+        if verbose { eprintln!("[FUZZ] Loaded {} seed inputs from corpus", loaded); }
     };
 
     // Default seed: add a zero-filled seed input
@@ -472,6 +499,20 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             use std::sync::{Mutex, LazyLock};
 
             pub const MAP_SIZE: usize = 1 << 16;
+            pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 16;    // 64KB = 512K bits for edges
+            pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 16;  // 64KB = 512K bits for branches
+
+            /// Mix bits thoroughly using xxhash-style finalization
+            /// This ensures uniform distribution even for clustered inputs like BPF PCs
+            #[inline]
+            fn mix_hash(mut h: u64) -> u64 {
+                h ^= h >> 33;
+                h = h.wrapping_mul(0xff51afd7ed558ccd);
+                h ^= h >> 33;
+                h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
+                h ^= h >> 33;
+                h
+            }
 
             /// Consolidated coverage state - uses Mutex instead of TLS.
             /// Single-threaded fuzzer means no contention, ~20ns lock overhead.
@@ -497,6 +538,25 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
             // Coverage enabled flag (set by --coverage arg)
             pub static COVERAGE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+            // Multi-core mode: Track whether this iteration discovered new coverage in the shared bitmap.
+            // This is set by flush_bitmap_updates when fetch_or returns a value without the bit set.
+            // Reset at start of each iteration, checked by SharedBitmapFeedback.
+            thread_local! {
+                pub static NEW_COVERAGE_THIS_ITERATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            }
+
+            pub fn reset_new_coverage_flag() {
+                NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(false));
+            }
+
+            pub fn found_new_coverage() -> bool {
+                NEW_COVERAGE_THIS_ITERATION.with(|f| f.get())
+            }
+
+            fn mark_new_coverage() {
+                NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(true));
+            }
 
             // Runtime stats tracking
             pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -527,6 +587,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             pub struct FuzzCallback {
                 ptr: *mut u8,
                 len: usize,
+                // Optional shared memory for multi-core edge/branch tracking (set before fork)
+                shared_edge_bitmap: Option<*mut u8>,
+                shared_branch_bitmap: Option<*mut u8>,
+                // Flag to skip global state updates in multi-core mode (reduces lock contention)
+                skip_global_state: bool,
             }
 
             unsafe impl Send for FuzzCallback {}
@@ -534,10 +599,131 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
             impl FuzzCallback {
                 pub fn from_raw(ptr: *mut u8, len: usize) -> Self {
-                    Self { ptr, len }
+                    Self {
+                        ptr,
+                        len,
+                        shared_edge_bitmap: None,
+                        shared_branch_bitmap: None,
+                        skip_global_state: false,
+                    }
+                }
+
+                pub fn with_shared_memory(
+                    ptr: *mut u8,
+                    len: usize,
+                    shared_edge_bitmap: *mut u8,
+                    shared_branch_bitmap: *mut u8,
+                ) -> Self {
+                    Self {
+                        ptr,
+                        len,
+                        shared_edge_bitmap: Some(shared_edge_bitmap),
+                        shared_branch_bitmap: Some(shared_branch_bitmap),
+                        // In multi-core mode, skip global state tracking - shared bitmaps are the source of truth
+                        skip_global_state: true,
+                    }
+                }
+
+                /// Batch flush bitmap updates - merges masks by byte position for fewer atomics
+                /// This reduces atomic operations from O(edges) to O(unique_bytes), typically 10-100x fewer
+                #[inline]
+                fn flush_bitmap_updates(bitmap: *mut u8, updates: &[(usize, u8)], bitmap_size: usize) {
+                    if updates.is_empty() {
+                        return;
+                    }
+
+                    // Merge updates by byte position using a small inline buffer
+                    // Most transactions touch <256 unique bytes, so stack allocation is efficient
+                    let mut merged: [u8; 256] = [0u8; 256];
+                    let mut byte_positions: [usize; 256] = [usize::MAX; 256];
+                    let mut num_unique = 0usize;
+
+                    for &(byte_pos, mask) in updates {
+                        if byte_pos >= bitmap_size {
+                            continue;
+                        }
+                        // Linear scan for small N is faster than HashMap overhead
+                        let mut found = false;
+                        for i in 0..num_unique {
+                            if byte_positions[i] == byte_pos {
+                                merged[i] |= mask;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found && num_unique < 256 {
+                            byte_positions[num_unique] = byte_pos;
+                            merged[num_unique] = mask;
+                            num_unique += 1;
+                        }
+                    }
+
+                    // Single atomic per unique byte position
+                    // Track whether any bits were newly set (for SharedBitmapFeedback)
+                    unsafe {
+                        for i in 0..num_unique {
+                            let byte_ptr = bitmap.add(byte_positions[i]) as *const std::sync::atomic::AtomicU8;
+                            let prev = (*byte_ptr).fetch_or(merged[i], std::sync::atomic::Ordering::Relaxed);
+                            // If any bit in merged[i] was not set in prev, we found new coverage
+                            if (prev & merged[i]) != merged[i] {
+                                mark_new_coverage();
+                            }
+                        }
+                    }
+                }
+
+                /// Batch flush for large update sets (>256 unique bytes) using HashMap
+                #[inline]
+                fn flush_bitmap_updates_large(bitmap: *mut u8, updates: &[(usize, u8)], bitmap_size: usize) {
+                    use std::collections::HashMap;
+
+                    let mut merged: HashMap<usize, u8> = HashMap::with_capacity(updates.len() / 4);
+                    for &(byte_pos, mask) in updates {
+                        if byte_pos < bitmap_size {
+                            *merged.entry(byte_pos).or_insert(0) |= mask;
+                        }
+                    }
+
+                    // Track whether any bits were newly set (for SharedBitmapFeedback)
+                    unsafe {
+                        for (byte_pos, mask) in merged {
+                            let byte_ptr = bitmap.add(byte_pos) as *const std::sync::atomic::AtomicU8;
+                            let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                            // If any bit in mask was not set in prev, we found new coverage
+                            if (prev & mask) != mask {
+                                mark_new_coverage();
+                            }
+                        }
+                    }
+                }
+
+                /// Count set bits in a shared bitmap (for monitor display)
+                /// Uses volatile reads to avoid cache-line contention with workers doing atomic writes
+                pub fn count_shared_bits(bitmap: *const u8, size: usize) -> usize {
+                    let mut count = 0usize;
+                    unsafe {
+                        // Process 8 bytes at a time using u64 for better performance
+                        let mut i = 0usize;
+                        while i + 8 <= size {
+                            let val = std::ptr::read_volatile(bitmap.add(i) as *const u64);
+                            count += val.count_ones() as usize;
+                            i += 8;
+                        }
+                        // Handle remaining bytes
+                        while i < size {
+                            let val = std::ptr::read_volatile(bitmap.add(i));
+                            count += val.count_ones() as usize;
+                            i += 1;
+                        }
+                    }
+                    count
                 }
 
                 /// Process pre-filtered branch edges and PC hits for coverage tracking
+                ///
+                /// Performance optimizations for multi-core mode:
+                /// 1. Skip global COVERAGE_STATE updates (shared bitmaps are source of truth)
+                /// 2. Batch atomic bitmap updates to reduce cache-line bouncing
                 fn process_trace(
                     &self,
                     program_id: &anchor_test_context::fuzz_types::Pubkey,
@@ -553,10 +739,25 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         program_id.to_bytes()[0..8].try_into().unwrap()
                     );
 
-                    let mut local_branch_pcs: anchor_test_context::FastHashSet<usize> = anchor_test_context::FastHashSet::default();
-                    local_branch_pcs.reserve(branch_edges.len());
-                    let mut local_edges: anchor_test_context::FastHashSet<u64> = anchor_test_context::FastHashSet::default();
-                    local_edges.reserve(branch_edges.len());
+                    // Batch updates for shared bitmaps (multi-core mode)
+                    let mut edge_bitmap_updates: Vec<(usize, u8)> = Vec::new();
+                    let mut branch_bitmap_updates: Vec<(usize, u8)> = Vec::new();
+
+                    // Only allocate local sets if we're updating global state (single-core mode)
+                    let mut local_branch_pcs: anchor_test_context::FastHashSet<usize> = if self.skip_global_state {
+                        anchor_test_context::FastHashSet::default()
+                    } else {
+                        let mut set = anchor_test_context::FastHashSet::default();
+                        set.reserve(branch_edges.len());
+                        set
+                    };
+                    let mut local_edges: anchor_test_context::FastHashSet<u64> = if self.skip_global_state {
+                        anchor_test_context::FastHashSet::default()
+                    } else {
+                        let mut set = anchor_test_context::FastHashSet::default();
+                        set.reserve(branch_edges.len());
+                        set
+                    };
 
                     // AFL-style edge tracking with prev_location state
                     let mut prev_location: usize = 0;
@@ -575,13 +776,55 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             buf[edge] = buf[edge].wrapping_add(1);
                         }
 
-                        // Collect edges and branches (for SimpleMonitor display)
-                        let unique_edge = ((pc as u64) << 32) | (target_pc as u64);
-                        local_edges.insert(unique_edge);
-                        local_branch_pcs.insert(pc);
+                        // Multi-core mode: batch updates to shared bitmaps
+                        if let Some(edge_bitmap) = self.shared_edge_bitmap {
+                            // Use mix_hash for uniform distribution in shared bitmap
+                            let mixed = mix_hash(edge_id);
+                            let bit_idx = (mixed as usize) % (SHARED_EDGE_BITMAP_SIZE * 8);
+                            let byte_pos = bit_idx / 8;
+                            let bit_pos = bit_idx % 8;
+                            edge_bitmap_updates.push((byte_pos, 1u8 << bit_pos));
+                        }
+
+                        if let Some(branch_bitmap) = self.shared_branch_bitmap {
+                            // Use mix_hash for branch PC too
+                            let mixed = mix_hash((program_hash << 32) | (pc as u64));
+                            let bit_idx = (mixed as usize) % (SHARED_BRANCH_BITMAP_SIZE * 8);
+                            let byte_pos = bit_idx / 8;
+                            let bit_pos = bit_idx % 8;
+                            branch_bitmap_updates.push((byte_pos, 1u8 << bit_pos));
+                        }
+
+                        // Single-core mode: collect for global state
+                        if !self.skip_global_state {
+                            let unique_edge = ((pc as u64) << 32) | (target_pc as u64);
+                            local_edges.insert(unique_edge);
+                            local_branch_pcs.insert(pc);
+                        }
                     }
 
-                    // Update global state
+                    // Flush batched updates to shared bitmaps (multi-core mode)
+                    if let Some(edge_bitmap) = self.shared_edge_bitmap {
+                        if edge_bitmap_updates.len() <= 256 {
+                            Self::flush_bitmap_updates(edge_bitmap, &edge_bitmap_updates, SHARED_EDGE_BITMAP_SIZE);
+                        } else {
+                            Self::flush_bitmap_updates_large(edge_bitmap, &edge_bitmap_updates, SHARED_EDGE_BITMAP_SIZE);
+                        }
+                    }
+                    if let Some(branch_bitmap) = self.shared_branch_bitmap {
+                        if branch_bitmap_updates.len() <= 256 {
+                            Self::flush_bitmap_updates(branch_bitmap, &branch_bitmap_updates, SHARED_BRANCH_BITMAP_SIZE);
+                        } else {
+                            Self::flush_bitmap_updates_large(branch_bitmap, &branch_bitmap_updates, SHARED_BRANCH_BITMAP_SIZE);
+                        }
+                    }
+
+                    // Skip global state updates in multi-core mode (shared bitmaps are source of truth)
+                    if self.skip_global_state {
+                        return;
+                    }
+
+                    // Update global state (single-core mode only)
                     let mut state = COVERAGE_STATE.lock().unwrap();
 
                     // Track edges and update cached total
@@ -683,6 +926,52 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             },
                         );
                     }
+                }
+            }
+
+            /// Custom feedback for multi-core mode that uses the shared bitmap as source of truth.
+            ///
+            /// Unlike MaxMapFeedback (which has per-worker virgin maps), this feedback checks
+            /// whether any NEW bits were set in the shared bitmap during this iteration.
+            /// This prevents N× corpus duplication across workers.
+            ///
+            /// The shared bitmap is updated atomically during harness execution (in FuzzCallback::flush_bitmap_updates).
+            /// That function sets NEW_COVERAGE_THIS_ITERATION when it successfully sets a new bit.
+            pub struct SharedBitmapFeedback {
+                name: std::borrow::Cow<'static, str>,
+            }
+
+            impl SharedBitmapFeedback {
+                pub fn new() -> Self {
+                    Self {
+                        name: std::borrow::Cow::Borrowed("shared_bitmap"),
+                    }
+                }
+            }
+
+            impl<S> libafl::feedbacks::StateInitializer<S> for SharedBitmapFeedback {
+                fn init_state(&mut self, _state: &mut S) -> std::result::Result<(), libafl::Error> {
+                    Ok(())
+                }
+            }
+
+            impl<EM, I, OT, S> libafl::feedbacks::Feedback<EM, I, OT, S> for SharedBitmapFeedback {
+                fn is_interesting(
+                    &mut self,
+                    _state: &mut S,
+                    _manager: &mut EM,
+                    _input: &I,
+                    _observers: &OT,
+                    _exit_kind: &libafl::prelude::ExitKind,
+                ) -> std::result::Result<bool, libafl::Error> {
+                    // Check if any new bits were set in the shared bitmap during this iteration
+                    Ok(found_new_coverage())
+                }
+            }
+
+            impl libafl_bolts::Named for SharedBitmapFeedback {
+                fn name(&self) -> &std::borrow::Cow<'static, str> {
+                    &self.name
                 }
             }
 
@@ -925,7 +1214,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             use libafl::mutators::StdMOptMutator;
             use libafl::prelude::*;
             use libafl::monitors::SimpleMonitor;
-            use libafl::schedulers::powersched::PowerSchedule;
+            use libafl::schedulers::QueueScheduler;
+            use libafl::schedulers::powersched::{PowerQueueScheduler, PowerSchedule};
+            use libafl::corpus::CachedOnDiskCorpus;
             use libafl_bolts::tuples::tuple_list;
             use libafl_bolts::{current_nanos, rands::StdRand, AsSlice, hash_std};
             use std::time::Duration;
@@ -935,9 +1226,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             let dry_run_mode = std::env::var("FUZZ_DRY_RUN").is_ok();
             let input_file = std::env::var("FUZZ_INPUT_FILE").ok();
             let coverage_only_mode = std::env::var("FUZZ_COVERAGE_ONLY").is_ok();
+            let cmin_mode = std::env::var("FUZZ_CMIN").is_ok();
             let corpus_in_dir = std::env::var("FUZZ_CORPUS_IN").ok();
             let corpus_out_dir = std::env::var("FUZZ_CORPUS_OUT").ok();
             let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok();
+            let verbose = std::env::var("FUZZ_VERBOSE").is_ok();
 
             // Coverage map - just a simple vec, no shared memory needed for InProcessExecutor
             let mut coverage_map = vec![0u8; #mod_name::MAP_SIZE];
@@ -958,9 +1251,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 eprintln!("[DRY-RUN] - {} programs loaded", template_fixture.ctx.programs_count());
 
                 // Run a single iteration with seed input
+                // Use set_invocation_callback to avoid double SVM clone
                 let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 let mut fixture = template_fixture.clone();
-                fixture.ctx = template_fixture.ctx.clone_with_invocation_callback(callback);
+                fixture.ctx.set_invocation_callback(callback);
 
                 // Create minimal input and run test
                 let seed_bytes = vec![0u8; 256];
@@ -999,9 +1293,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Initialize coverage totals for reporting (replay only needs totals, not binaries)
                 { #init_coverage_totals }
 
+                // Use set_invocation_callback to avoid double SVM clone
                 let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 let mut fixture = template_fixture.clone();
-                fixture.ctx = template_fixture.ctx.clone_with_invocation_callback(callback);
+                fixture.ctx.set_invocation_callback(callback);
 
                 // Reset iteration counter
                 anchor_test_context::set_current_iteration(0);
@@ -1111,9 +1406,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                     };
 
                     // Create fresh fixture for each input
+                    // Use set_invocation_callback to avoid double SVM clone (critical for performance in loops)
                     let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                     let mut fixture = template_fixture.clone();
-                    fixture.ctx = template_fixture.ctx.clone_with_invocation_callback(callback);
+                    fixture.ctx.set_invocation_callback(callback);
 
                     // Create fresh Unstructured for parsing
                     let mut u = Unstructured::new(&input_bytes);
@@ -1167,7 +1463,634 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 std::process::exit(0);
             }
 
-            // === NORMAL FUZZING MODE ===
+            // === CORPUS MINIMIZATION MODE (CMIN) ===
+            // Run each input once to collect coverage, then use greedy set-cover
+            // to find minimum set of inputs that preserve all coverage
+            if cmin_mode {
+                let corpus_dir = match &corpus_in_dir {
+                    Some(dir) => dir.clone(),
+                    None => {
+                        eprintln!("[CMIN] Error: FUZZ_CORPUS_IN required for cmin mode");
+                        std::process::exit(1);
+                    }
+                };
+
+                let corpus_out = corpus_out_dir.clone().unwrap_or_else(|| corpus_dir.clone());
+
+                eprintln!("[CMIN] Minimizing corpus from: {}", corpus_dir);
+                eprintln!("[CMIN] Output directory: {}", corpus_out);
+
+                // Collect input files (excluding metadata)
+                let mut input_files: Vec<_> = match std::fs::read_dir(&corpus_dir) {
+                    Ok(entries) => entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let path = e.path();
+                            path.is_file() && is_corpus_input(&path)
+                        })
+                        .map(|e| e.path())
+                        .collect(),
+                    Err(e) => {
+                        eprintln!("[CMIN] Failed to read corpus directory: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Sort by file size (prefer smaller inputs for tie-breaking)
+                input_files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
+
+                eprintln!("[CMIN] Found {} input files", input_files.len());
+
+                if input_files.is_empty() {
+                    eprintln!("[CMIN] No input files found in corpus directory");
+                    std::process::exit(1);
+                }
+
+                // Setup tracing for coverage
+                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+
+                // Run setup
+                let template_fixture = #fixture_name::setup();
+
+                // Initialize coverage totals
+                { #init_coverage_totals }
+
+                // Data structure: for each input, track which edges it covers
+                // edges_per_input[i] = set of edge IDs covered by input i
+                let mut edges_per_input: Vec<std::collections::HashSet<u64>> = Vec::with_capacity(input_files.len());
+                let mut input_paths: Vec<std::path::PathBuf> = Vec::with_capacity(input_files.len());
+
+                // Phase 1: Execute each input and record coverage
+                eprintln!("[CMIN] Phase 1: Collecting coverage from {} inputs...", input_files.len());
+                let start_time = std::time::Instant::now();
+
+                for (idx, path) in input_files.iter().enumerate() {
+                    let input_bytes = match std::fs::read(path) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            eprintln!("[CMIN] Failed to read {}: {}", path.display(), e);
+                            continue;
+                        }
+                    };
+
+                    // Reset coverage map for this input
+                    unsafe {
+                        std::ptr::write_bytes(cov_ptr, 0, #mod_name::MAP_SIZE);
+                    }
+
+                    // Create fresh fixture for each input
+                    // Use set_invocation_callback to avoid double SVM clone (critical for performance)
+                    let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                    let mut fixture = template_fixture.clone();
+                    fixture.ctx.set_invocation_callback(callback);
+
+                    // Create fresh Unstructured for parsing
+                    let mut u = Unstructured::new(&input_bytes);
+
+                    // Run the test in a closure to handle deserialization failures
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #(#simple_deser_stmts)*
+                        #fn_name(#(#call_args),*);
+                    }));
+
+                    // Clear any violation flag
+                    let _ = anchor_test_context::take_violation();
+
+                    // Collect edges hit by this input from the coverage map
+                    let mut edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                    unsafe {
+                        let map = std::slice::from_raw_parts(cov_ptr, #mod_name::MAP_SIZE);
+                        for (edge_idx, &count) in map.iter().enumerate() {
+                            if count > 0 {
+                                edges.insert(edge_idx as u64);
+                            }
+                        }
+                    }
+
+                    if !edges.is_empty() {
+                        edges_per_input.push(edges);
+                        input_paths.push(path.clone());
+                    }
+
+                    if (idx + 1) % 50 == 0 {
+                        eprintln!("[CMIN] Processed {}/{} inputs...", idx + 1, input_files.len());
+                    }
+                }
+
+                let phase1_time = start_time.elapsed();
+                eprintln!("[CMIN] Phase 1 complete: {} inputs with coverage in {:.1}s",
+                    edges_per_input.len(), phase1_time.as_secs_f64());
+
+                // Collect all unique edges
+                let mut all_edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
+                for edges in &edges_per_input {
+                    all_edges.extend(edges);
+                }
+                eprintln!("[CMIN] Total unique edges: {}", all_edges.len());
+
+                // Phase 2: Greedy set-cover algorithm
+                eprintln!("[CMIN] Phase 2: Computing minimum corpus...");
+
+                let mut uncovered: std::collections::HashSet<u64> = all_edges.clone();
+                let mut selected: Vec<usize> = Vec::new();
+                let mut used: Vec<bool> = vec![false; edges_per_input.len()];
+
+                while !uncovered.is_empty() {
+                    // Find input that covers the most uncovered edges
+                    // (ties broken by file size - smaller inputs sorted first)
+                    let mut best_idx = None;
+                    let mut best_count = 0usize;
+
+                    for (idx, edges) in edges_per_input.iter().enumerate() {
+                        if used[idx] { continue; }
+
+                        let new_coverage = edges.iter().filter(|e| uncovered.contains(e)).count();
+                        if new_coverage > best_count {
+                            best_count = new_coverage;
+                            best_idx = Some(idx);
+                        }
+                    }
+
+                    match best_idx {
+                        Some(idx) => {
+                            used[idx] = true;
+                            selected.push(idx);
+                            for edge in &edges_per_input[idx] {
+                                uncovered.remove(edge);
+                            }
+                        }
+                        None => break, // No more inputs can cover remaining edges
+                    }
+                }
+
+                eprintln!("[CMIN] Selected {} inputs (reduced from {})",
+                    selected.len(), edges_per_input.len());
+
+                // Phase 3: Copy selected inputs to output directory
+                if corpus_out != corpus_dir {
+                    std::fs::create_dir_all(&corpus_out).ok();
+                }
+
+                let mut copied = 0usize;
+                for idx in &selected {
+                    let src_path = &input_paths[*idx];
+                    let filename = src_path.file_name().unwrap_or_default();
+                    let dst_path = std::path::Path::new(&corpus_out).join(filename);
+
+                    if corpus_out == corpus_dir {
+                        // In-place: mark as kept (will delete others later)
+                        copied += 1;
+                    } else {
+                        // Different directory: copy file
+                        if std::fs::copy(src_path, &dst_path).is_ok() {
+                            copied += 1;
+                        }
+                    }
+                }
+
+                // If in-place minimization, remove non-selected files
+                if corpus_out == corpus_dir {
+                    let selected_set: std::collections::HashSet<_> = selected.iter()
+                        .map(|&idx| input_paths[idx].clone())
+                        .collect();
+
+                    let mut removed = 0usize;
+                    for path in &input_files {
+                        if !selected_set.contains(path) {
+                            if std::fs::remove_file(path).is_ok() {
+                                removed += 1;
+                            }
+                        }
+                    }
+                    eprintln!("[CMIN] Removed {} redundant inputs", removed);
+                }
+
+                let total_time = start_time.elapsed();
+                eprintln!("[CMIN] Complete! {} -> {} inputs ({:.1}% reduction) in {:.1}s",
+                    input_files.len(),
+                    selected.len(),
+                    (1.0 - (selected.len() as f64 / input_files.len() as f64)) * 100.0,
+                    total_time.as_secs_f64());
+                eprintln!("[CMIN] Output: {}", corpus_out);
+
+                std::process::exit(0);
+            }
+
+            // === MULTI-CORE MODE ===
+            // Check for multi-core mode
+            let cores_spec = std::env::var("FUZZ_CORES").ok();
+            let use_launcher = cores_spec.is_some();
+
+            if use_launcher {
+                // Uses LibAFL Launcher with fork() and LLMP for parallel fuzzing
+                use std::collections::HashSet;
+                use libafl_bolts::shmem::{ShMem, ShMemProvider, StdShMemProvider};
+                use libafl_bolts::core_affinity::Cores;
+                use libafl::events::{EventConfig, Launcher, ClientDescription};
+                use libafl::monitors::MultiMonitor;
+                use libafl::Error as LibAflError;
+
+                let num_cores: usize = cores_spec.as_ref().unwrap().parse()
+                    .expect("FUZZ_CORES must be a valid number");
+
+                if coverage_enabled {
+                    eprintln!("[FUZZ] Warning: --coverage LCOV output disabled in multi-core mode");
+                    eprintln!("[FUZZ] (AFL shared memory coverage still works for fuzzing)");
+                    #mod_name::COVERAGE_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                let seed = current_nanos().max(1);
+                let crash_dir = crashes_dir_env.clone().unwrap_or_else(|| format!("crashes/{}", #feature_name));
+                std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
+
+                if verbose { eprintln!("[FUZZ] Initializing program analysis..."); }
+
+                // Initialize PROGRAM_TOTALS in the broker BEFORE forking
+                // This allows the monitor callback to access total edge counts
+                {
+                    std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+                    let template_fixture = #fixture_name::setup();
+                    #init_coverage_totals
+                }
+
+                eprintln!("[FUZZ] Starting {} parallel workers", num_cores);
+
+                // Clean up stale shared memory files from previous runs
+                {
+                    // Remove stale LibAFL socket file
+                    let _ = std::fs::remove_file("libafl_unix_shmem_server");
+
+                    // On macOS, try to clean up orphaned POSIX shared memory segments
+                    #[cfg(target_os = "macos")]
+                    {
+                        use std::process::Command;
+                        if let Ok(output) = Command::new("ipcs").arg("-m").output() {
+                            let output_str = String::from_utf8_lossy(&output.stdout);
+                            for line in output_str.lines() {
+                                if line.contains("libafl") || line.contains("__shmem") {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() >= 2 {
+                                        let _ = Command::new("ipcrm").arg("-m").arg(parts[1]).output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        extern "C" {
+                            fn shm_unlink(name: *const std::ffi::c_char) -> std::ffi::c_int;
+                        }
+                        for name in &["/__libafl_fuzzer", "/__libafl_edges", "/__libafl_branches", "/__libafl_corpus"] {
+                            let c_name = std::ffi::CString::new(*name).unwrap();
+                            unsafe { shm_unlink(c_name.as_ptr()); }
+                        }
+                    }
+                }
+
+                // Shared memory provider for coverage map and shared bitmaps
+                let mut shmem_provider = StdShMemProvider::new()
+                    .expect("failed to create shared memory provider");
+
+                // Allocate shared memory for cross-process edge/branch tracking
+                let mut shared_edge_shmem = shmem_provider
+                    .new_shmem(#mod_name::SHARED_EDGE_BITMAP_SIZE)
+                    .expect("failed to allocate shared edge bitmap");
+                shared_edge_shmem.fill(0);
+                let shared_edge_ptr = shared_edge_shmem.as_slice().as_ptr() as *mut u8;
+
+                let mut shared_branch_shmem = shmem_provider
+                    .new_shmem(#mod_name::SHARED_BRANCH_BITMAP_SIZE)
+                    .expect("failed to allocate shared branch bitmap");
+                shared_branch_shmem.fill(0);
+                let shared_branch_ptr = shared_branch_shmem.as_slice().as_ptr() as *mut u8;
+
+                // Setup shared corpus directory for multi-core mode
+                let shared_corpus_dir = corpus_out_dir.clone()
+                    .unwrap_or_else(|| {
+                        let temp_shared = std::env::temp_dir().join(format!("fuzz_corpus_shared_{}", #feature_name));
+                        temp_shared.to_string_lossy().to_string()
+                    });
+                let has_corpus_out = corpus_out_dir.is_some();
+                std::fs::create_dir_all(&shared_corpus_dir).expect("failed to create shared corpus directory");
+
+                // Clean corpus_out if it differs from corpus_in
+                let loading_from_same_dir = corpus_in_dir.as_ref().map(|cin| {
+                    std::path::Path::new(cin)
+                        .canonicalize()
+                        .ok()
+                        .and_then(|cin_canon| std::path::Path::new(&shared_corpus_dir)
+                            .canonicalize()
+                            .ok()
+                            .map(|cout_canon| cin_canon == cout_canon))
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+
+                if !loading_from_same_dir {
+                    let mut removed = 0usize;
+                    if let Ok(entries) = std::fs::read_dir(&shared_corpus_dir) {
+                        for entry in entries.filter_map(|e| e.ok()) {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if std::fs::remove_file(&path).is_ok() {
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                    if removed > 0 && verbose {
+                        eprintln!("[FUZZ] Cleaned {} stale files from corpus output directory", removed);
+                    }
+                }
+
+                if verbose {
+                    if has_corpus_out {
+                        eprintln!("[FUZZ] Using shared corpus directory: {}", shared_corpus_dir);
+                    } else {
+                        eprintln!("[FUZZ] Using temp shared corpus: {}", shared_corpus_dir);
+                    }
+                }
+
+                // Clone values for closures
+                let corpus_in_dir_for_client = corpus_in_dir.clone();
+                let shared_corpus_dir_for_client = shared_corpus_dir.clone();
+
+                // Cached monitor values with rate-limiting
+                use std::sync::atomic::{AtomicUsize, AtomicU64};
+                static CACHED_EDGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+                static CACHED_BRANCH_COUNT: AtomicUsize = AtomicUsize::new(0);
+                static CACHED_CORPUS_COUNT: AtomicUsize = AtomicUsize::new(0);
+                static LAST_CACHE_UPDATE_MS: AtomicU64 = AtomicU64::new(0);
+                const CACHE_REFRESH_MS: u64 = 2000;
+
+                // Monitor for aggregated stats across all workers
+                let monitor = MultiMonitor::new(move |s| {
+                    for line in s.lines() {
+                        if line.contains("(GLOBAL)") {
+                            let line = line.replace("objectives", "crashes");
+
+                            let total_edges: usize = #mod_name::PROGRAM_TOTALS.get()
+                                .map(|t| t.values().sum())
+                                .unwrap_or(0);
+                            let total_branches = total_edges / 2;
+
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let last_update = LAST_CACHE_UPDATE_MS.load(std::sync::atomic::Ordering::Relaxed);
+
+                            let (true_edges, true_branches, _corpus_count) = if now_ms - last_update > CACHE_REFRESH_MS {
+                                LAST_CACHE_UPDATE_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+
+                                let edges = #mod_name::FuzzCallback::count_shared_bits(
+                                    shared_edge_ptr as *const u8,
+                                    #mod_name::SHARED_EDGE_BITMAP_SIZE
+                                );
+                                let branches = #mod_name::FuzzCallback::count_shared_bits(
+                                    shared_branch_ptr as *const u8,
+                                    #mod_name::SHARED_BRANCH_BITMAP_SIZE
+                                );
+                                // Note: We no longer count corpus via fs::read_dir() as it's O(corpus_size)
+                                // and becomes a bottleneck. The corpus count from LibAFL's monitor string
+                                // is parsed below and used instead. We keep a cached count for display.
+
+                                CACHED_EDGE_COUNT.store(edges, std::sync::atomic::Ordering::Relaxed);
+                                CACHED_BRANCH_COUNT.store(branches, std::sync::atomic::Ordering::Relaxed);
+                                // CACHED_CORPUS_COUNT is updated below when parsing LibAFL's output
+
+                                let corpus_count = CACHED_CORPUS_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+                                (edges, branches, corpus_count)
+                            } else {
+                                (
+                                    CACHED_EDGE_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                                    CACHED_BRANCH_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                                    CACHED_CORPUS_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                                )
+                            };
+
+                            // Parse corpus count from LibAFL's output and update cache
+                            // LibAFL format: "corpus: 123, ..."
+                            if let Some(corpus_idx) = line.find("corpus: ") {
+                                let after_corpus = &line[corpus_idx + 8..];
+                                if let Some(comma_idx) = after_corpus.find(',') {
+                                    if let Ok(parsed_corpus) = after_corpus[..comma_idx].trim().parse::<usize>() {
+                                        CACHED_CORPUS_COUNT.store(parsed_corpus, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            // Try to find edges: from MaxMapFeedback (single-core mode)
+                            // or append stats after exec/sec (multi-core mode with SharedBitmapFeedback)
+                            if let Some(edges_idx) = line.find("edges:") {
+                                // Single-core mode: MaxMapFeedback provides edges stats
+                                let edges_part = &line[edges_idx..];
+                                let afl_edges: usize = edges_part
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .and_then(|p| p.split('/').next())
+                                    .and_then(|n| n.parse().ok())
+                                    .unwrap_or(0);
+
+                                let afl_pct = (afl_edges as f64 / 65536.0) * 100.0;
+                                let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
+                                let branch_pct = if total_branches > 0 { (true_branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
+
+                                let prefix = &line[..edges_idx];
+                                println!("{}afl_edges: {}/65536 ({:.1}%), edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
+                                    prefix, afl_edges, afl_pct, true_edges, total_edges, edge_pct, true_branches, total_branches, branch_pct);
+                            } else if line.contains("exec/sec:") {
+                                // Multi-core mode: SharedBitmapFeedback doesn't provide edges stats
+                                // Append our coverage stats after the line
+                                let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
+                                let branch_pct = if total_branches > 0 { (true_branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
+
+                                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
+                                    line.trim_end(), true_edges, total_edges, edge_pct, true_branches, total_branches, branch_pct);
+                            } else {
+                                println!("{}", line);
+                            }
+                        }
+                    }
+                });
+
+                // The run_client closure is called once per forked worker
+                let mut run_client = |state: Option<_>, mut mgr, _client_desc: ClientDescription| {
+                    let mut coverage_map = vec![0u8; #mod_name::MAP_SIZE];
+                    let cov_ptr = coverage_map.as_mut_ptr();
+
+                    let worker_id = _client_desc.core_id().0;
+
+                    // Setup template fixture per worker
+                    #template_setup
+
+                    // Observer and feedback setup (multi-core uses SharedBitmapFeedback)
+                    #observer_feedback_setup_multicore
+
+                    // Create state with shared corpus
+                    // Use CachedOnDiskCorpus to reduce disk I/O - caches up to 1000 entries in memory
+                    let rand = StdRand::with_seed(seed.wrapping_add(_client_desc.core_id().0 as u64));
+                    let corpus = CachedOnDiskCorpus::<BytesInput>::new(&shared_corpus_dir_for_client, 1000)
+                        .expect("failed to create cached on-disk corpus");
+                    let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
+
+                    let mut state = state.unwrap_or_else(|| {
+                        StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
+                            .expect("failed to create StdState")
+                    });
+
+                    // Cap input size to 1KB to prevent unbounded growth from havoc mutations
+                    state.set_max_size(1024);
+
+                    // PowerQueueScheduler prioritizes inputs that execute faster and discover more coverage
+                    let scheduler = PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::explore());
+
+                    let start_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let _ = #mod_name::FUZZER_START_TIME.set(start_time);
+
+                    let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok());
+
+                    let iteration_counter = std::sync::atomic::AtomicU64::new(0);
+
+                    let crash_dir_clone = crash_dir.clone();
+                    let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
+                        let bytes_ref = input.target_bytes();
+                        let slice = bytes_ref.as_slice();
+                        let mut u = Unstructured::new(slice);
+
+                        let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Rate-limit timeout check to every 1000 iterations to avoid syscall overhead
+                        if let Some(timeout) = timeout_secs {
+                            if current_iteration % 1000 == 0 {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                if now - start_time >= timeout {
+                                    eprintln!("\n[FUZZ] Timeout reached ({}s). Worker {} exiting.", timeout, worker_id);
+                                    std::process::exit(0);
+                                }
+                            }
+                        }
+                        anchor_test_context::set_current_iteration(current_iteration);
+                        anchor_test_context::clear_action_history();
+                        // Reset the "new coverage" flag for SharedBitmapFeedback
+                        #mod_name::reset_new_coverage_flag();
+
+                        #(#deser_stmts)*
+
+                        // Multi-core iteration setup with shared memory for coverage aggregation
+                        let mut #fixture_param_name = template_fixture.clone();
+                        let callback = #mod_name::FuzzCallback::with_shared_memory(
+                            cov_ptr,
+                            #mod_name::MAP_SIZE,
+                            shared_edge_ptr,
+                            shared_branch_ptr,
+                        );
+                        #fixture_param_name.ctx.set_invocation_callback(callback);
+
+                        #fn_name(#(#call_args),*);
+
+                        let _exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        if let Some(msg) = anchor_test_context::take_violation() {
+                            if std::env::var("FUZZ_VERBOSE").is_ok() {
+                                eprintln!("[VIOLATION] {}", msg);
+                                anchor_test_context::print_action_sequence();
+                            }
+                            let input_hash = hash_std(slice);
+                            anchor_test_context::write_crash_metadata(&crash_dir_clone, input_hash, Some(seed), slice);
+                            ExitKind::Crash
+                        } else {
+                            ExitKind::Ok
+                        }
+                    };
+
+                    let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+                    let timeout = Duration::from_millis(10000);
+                    let mut executor = InProcessExecutor::with_timeout(
+                        &mut harness_wrapper,
+                        tuple_list!(edges_observer, time_observer),
+                        &mut fuzzer,
+                        &mut state,
+                        &mut mgr,
+                        timeout,
+                    )
+                    .expect("failed to create InProcessExecutor");
+
+                    // Load corpus - ONLY Worker 0 loads seed corpus.
+                    // Workers 1-N do NOT load anything - they receive corpus via LLMP from Worker 0.
+                    // LLMP's corpus sync properly updates each worker's feedback state (virgin map)
+                    // when it receives testcases, preventing N× corpus duplication.
+                    if worker_id == 0 {
+                        if let Some(ref corpus_dir) = corpus_in_dir_for_client {
+                            // Worker 0: Load corpus (adds to shared corpus, broadcasts via LLMP to other workers)
+                            if verbose { eprintln!("[FUZZ] Worker 0 loading seed corpus from: {}", corpus_dir); }
+                            let corpus_dirs = vec![std::path::PathBuf::from(corpus_dir)];
+                            state.load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
+                                .expect("failed to load initial corpus");
+                            let corpus_count = state.corpus().count();
+                            if verbose { eprintln!("[FUZZ] Worker 0 loaded {} seed inputs", corpus_count); }
+
+                            if corpus_count == 0 {
+                                let input = BytesInput::new(vec![0u8; 256]);
+                                fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                                    .expect("failed to add seed input");
+                            }
+                        } else {
+                            // No corpus_in specified, add single seed input
+                            let input = BytesInput::new(vec![0u8; 256]);
+                            fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                                .expect("failed to add seed input");
+                        }
+                    } else {
+                        // Workers 1-N: Start with minimal seed, will sync corpus via LLMP
+                        // LLMP broadcasts testcases from Worker 0, and receiving workers
+                        // run evaluate_input() which updates their feedback's virgin map
+                        if verbose { eprintln!("[FUZZ] Worker {} starting with minimal seed (will sync via LLMP)", worker_id); }
+                        let input = BytesInput::new(vec![0u8; 256]);
+                        fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                            .expect("failed to add seed input");
+                    }
+
+                    #mutator_stages_setup
+
+                    fuzzer
+                        .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
+                        .expect("error in fuzz loop");
+
+                    Ok(())
+                };
+
+                // Build and launch the multi-core fuzzer
+                let cores = Cores::from((0..num_cores).collect::<Vec<_>>());
+
+                match Launcher::builder()
+                    .shmem_provider(shmem_provider)
+                    .configuration(EventConfig::from_name("default"))
+                    .monitor(monitor)
+                    .run_client(&mut run_client)
+                    .cores(&cores)
+                    .broker_port(1337)
+                    .build()
+                    .launch()
+                {
+                    Ok(()) => eprintln!("[FUZZ] Launcher completed"),
+                    Err(LibAflError::ShuttingDown) => eprintln!("[FUZZ] Fuzzing stopped"),
+                    Err(e) => panic!("[FUZZ] Launcher failed: {}", e),
+                }
+
+                return;
+            }
+
+            // === SINGLE-THREADED MODE (default) ===
 
             // === CORPUS ===
             let seed = current_nanos().max(1);
@@ -1195,7 +2118,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 }).unwrap_or(false);
 
                 // If NOT loading from this directory, clean up ALL metadata files
-                // This prevents OnDiskCorpus from trying to load entries from a previous run
+                // This prevents CachedOnDiskCorpus from trying to load entries from a previous run
                 // LibAFL uses hidden files for metadata: .HASH (pointers) and .HASH_N.metadata
                 if !loading_from_same_dir {
                     let mut removed = 0usize;
@@ -1212,28 +2135,28 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                             }
                         }
                     }
-                    if removed > 0 {
+                    if removed > 0 && verbose {
                         eprintln!("[FUZZ] Cleaned {} stale metadata files from corpus directory", removed);
                     }
                 }
 
-                eprintln!("[FUZZ] Writing corpus entries to: {}", corpus_out_path);
+                if verbose { eprintln!("[FUZZ] Writing corpus entries to: {}", corpus_out_path); }
 
                 // Use shared setup blocks
                 #monitor_setup
                 #observer_feedback_setup
 
-                // OnDiskCorpus-specific: create corpus and state
+                // CachedOnDiskCorpus: caches up to 1000 entries in memory to reduce disk I/O
                 let rand = StdRand::with_seed(seed);
-                let corpus = OnDiskCorpus::<BytesInput>::new(corpus_out_path).expect("failed to create corpus");
+                let corpus = CachedOnDiskCorpus::<BytesInput>::new(corpus_out_path, 1000).expect("failed to create corpus");
                 let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
                 let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 
-                let scheduler = IndexesLenTimeMinimizerScheduler::new(
-                    &edges_observer,
-                    PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::fast()),
-                );
+                // Cap input size to 1KB to prevent unbounded growth from havoc mutations
+                state.set_max_size(1024);
+
+                let scheduler = PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::explore());
 
                 #common_fuzz_setup
                 #harness_wrapper_code
@@ -1277,14 +2200,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
 
                         if input_count > 0 {
                             // Healthy corpus - load entries WITHOUT calling add_input
-                            eprintln!("[FUZZ] Using existing corpus directory: {}", corpus_dir);
+                            if verbose { eprintln!("[FUZZ] Using existing corpus directory: {}", corpus_dir); }
                             let corpus_dirs = vec![std::path::PathBuf::from(corpus_dir)];
                             state.load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
                                 .expect("failed to load initial corpus");
                             let corpus_count = state.corpus().count();
-                            eprintln!("[FUZZ] Loaded {} existing corpus entries", corpus_count);
+                            if verbose { eprintln!("[FUZZ] Loaded {} existing corpus entries", corpus_count); }
                             if corpus_count == 0 {
-                                eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                                if verbose { eprintln!("[FUZZ] No valid inputs in corpus, using default seed"); }
                                 let input = BytesInput::new(vec![0u8; 256]);
                                 fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
                                     .expect("failed to add seed input");
@@ -1292,7 +2215,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         } else {
                             // Corrupted corpus - only metadata, no input files
                             // Clean metadata and start fresh
-                            eprintln!("[FUZZ] Corpus directory has no input files, cleaning stale metadata...");
+                            if verbose { eprintln!("[FUZZ] Corpus directory has no input files, cleaning..."); }
                             if let Ok(entries) = std::fs::read_dir(corpus_dir) {
                                 for entry in entries.filter_map(|e| e.ok()) {
                                     let path = entry.path();
@@ -1303,7 +2226,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                                     }
                                 }
                             }
-                            eprintln!("[FUZZ] Starting fresh with default seed");
                             let input = BytesInput::new(vec![0u8; 256]);
                             fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
                                 .expect("failed to add seed input");
@@ -1312,7 +2234,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                         // Different directories - load from input dir and add to output corpus
                         #load_corpus_from_dir
                         if loaded == 0 {
-                            eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                            if verbose { eprintln!("[FUZZ] No valid inputs in corpus, using default seed"); }
                             #add_default_seed
                         }
                     }
@@ -1341,10 +2263,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 let mut state = StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 
-                let scheduler = IndexesLenTimeMinimizerScheduler::new(
-                    &edges_observer,
-                    PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::fast()),
-                );
+                // Cap input size to 1KB to prevent unbounded growth from havoc mutations
+                state.set_max_size(1024);
+
+                let scheduler = PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::explore());
 
                 #common_fuzz_setup
                 #harness_wrapper_code
@@ -1365,7 +2287,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 if let Some(ref corpus_dir) = corpus_in_dir {
                     #load_corpus_from_dir
                     if loaded == 0 {
-                        eprintln!("[FUZZ] Warning: No valid inputs in corpus, using default seed");
+                        if verbose { eprintln!("[FUZZ] No valid inputs in corpus, using default seed"); }
                         #add_default_seed
                     }
                 } else {

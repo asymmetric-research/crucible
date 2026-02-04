@@ -317,9 +317,14 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #[anchor_fuzz]
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
+            // Cap actions to prevent unbounded input growth causing performance degradation
+            // Each action = one SVM transaction, more actions = exponentially more work
+            const MAX_ACTIONS: usize = 8;
+
             let debug = std::env::var("FUZZ_DEBUG").is_ok();
             if debug {
-                eprintln!("[FUZZ] Starting iteration with {} actions", actions.len());
+                eprintln!("[FUZZ] Starting iteration with {} actions (capped from {})",
+                    actions.len().min(MAX_ACTIONS), actions.len());
             }
 
             // Clear action history at start of iteration
@@ -327,7 +332,7 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
             // Set test name for metadata
             anchor_test_context::set_current_test_name(#test_name_str);
 
-            for (i, mut action) in actions.into_iter().enumerate() {
+            for (i, mut action) in actions.into_iter().take(MAX_ACTIONS).enumerate() {
                 action.constrain_in_place();
 
                 // Get action info for history (after constraint applied)

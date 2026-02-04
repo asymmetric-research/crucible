@@ -1071,10 +1071,9 @@ impl TestContext {
         // Run static analysis
         let analysis = Analysis::from_executable(&executable).ok()?;
 
-        // Track stats by opcode for diagnostics: (count, all_dests, conditional_dests)
-        let mut stats: std::collections::HashMap<u8, (usize, usize, usize)> = std::collections::HashMap::new();
-
-        // Count only BPF_JMP edges (matching runtime tracking in process_trace)
+        // Count conditional jump edges for coverage percentage calculation
+        // Only count BPF_JMP edges (matching runtime tracking in process_trace)
+        let mut total_conditional: usize = 0;
         for cfg_node in analysis.cfg_nodes.values() {
             if cfg_node.instructions.is_empty() {
                 continue;
@@ -1091,89 +1090,13 @@ impl TestContext {
                 // Only count conditional jumps for coverage purposes
                 // Exclude: CALL (0x85), EXIT (0x95), JA unconditional (0x05), CALLX (0x8d)
                 let is_conditional = opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
-
-                let entry = stats.entry(opc).or_insert((0, 0, 0)); // (count, all_dests, conditional_dests)
-                entry.0 += 1;
-                entry.1 += cfg_node.destinations.len();
                 if is_conditional {
-                    entry.2 += cfg_node.destinations.len();
+                    total_conditional += cfg_node.destinations.len();
                 }
             }
-        }
-
-        // Print diagnostic breakdown
-        eprintln!("[STATIC] Edge analysis breakdown by opcode:");
-        let mut sorted_stats: Vec<_> = stats.iter().collect();
-        sorted_stats.sort_by_key(|(opc, _)| *opc);
-        for (opc, (count, dests, _cond_dests)) in &sorted_stats {
-            let name = match *opc {
-                0x05 => "JA (unconditional)",
-                0x85 => "CALL",
-                0x8d => "CALLX (indirect)",
-                0x95 => "EXIT",
-                0x15 => "JEQ (==)",
-                0x1d => "JEQ reg",
-                0x25 => "JGT (>)",
-                0x2d => "JGT reg",
-                0x35 => "JGE (>=)",
-                0x3d => "JGE reg",
-                0x45 => "JSET (&)",
-                0x4d => "JSET reg",
-                0x55 => "JNE (!=)",
-                0x5d => "JNE reg",
-                0x65 => "JSGT (signed >)",
-                0x6d => "JSGT reg",
-                0x75 => "JSGE (signed >=)",
-                0x7d => "JSGE reg",
-                0xa5 => "JLT (<)",
-                0xad => "JLT reg",
-                0xb5 => "JLE (<=)",
-                0xbd => "JLE reg",
-                0xc5 => "JSLT (signed <)",
-                0xcd => "JSLT reg",
-                0xd5 => "JSLE (signed <=)",
-                0xdd => "JSLE reg",
-                _ => "unknown",
-            };
-            let is_excluded = **opc == 0x05 || **opc == 0x85 || **opc == 0x8d || **opc == 0x95;
-            let marker = if is_excluded { " [excluded]" } else { "" };
-            let avg = if *count > 0 { *dests as f64 / *count as f64 } else { 0.0 };
-            eprintln!("[STATIC]   {:#04x} {:18}: {:5} nodes, {:6} edges (avg {:.1}){}",
-                opc, name, count, dests, avg, marker);
-        }
-
-        let total_all: usize = stats.values().map(|(_, d, _)| d).sum();
-        let total_conditional: usize = stats.values().map(|(_, _, c)| c).sum();
-        eprintln!("[STATIC] Total edges: {} (all) / {} (conditional only)", total_all, total_conditional);
-
-        // Show PC range distribution to help identify unreached code regions
-        let mut pc_ranges: Vec<usize> = Vec::new();
-        for cfg_node in analysis.cfg_nodes.values() {
-            if !cfg_node.instructions.is_empty() {
-                let last_insn = &analysis.instructions[cfg_node.instructions.end - 1];
-                let is_jmp = last_insn.opc & 7 == ebpf::BPF_JMP;
-                let opc = last_insn.opc;
-                let is_conditional = is_jmp && opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
-                if is_conditional {
-                    pc_ranges.push(last_insn.ptr);
-                }
-            }
-        }
-        pc_ranges.sort();
-        if !pc_ranges.is_empty() {
-            let min_pc = pc_ranges[0];
-            let max_pc = pc_ranges[pc_ranges.len() - 1];
-            let quartiles = [
-                pc_ranges[pc_ranges.len() / 4],
-                pc_ranges[pc_ranges.len() / 2],
-                pc_ranges[3 * pc_ranges.len() / 4],
-            ];
-            eprintln!("[STATIC] Conditional jump PC range: {} - {} (quartiles: {}, {}, {})",
-                min_pc, max_pc, quartiles[0], quartiles[1], quartiles[2]);
         }
 
         let total_instructions = analysis.instructions.len();
-        eprintln!("[STATIC] Total instructions: {}", total_instructions);
 
         Some((total_conditional, total_instructions))
     }
@@ -1213,6 +1136,10 @@ impl TestContext {
     /// Clone this context and set an invocation callback for coverage tracking.
     /// The source SVM must have been created with debuggable mode (via ANCHOR_FUZZ_DEBUGGABLE env var)
     /// for register tracing to work. Cloning preserves the debuggable state and loaded programs.
+    ///
+    /// NOTE: For better performance in fuzzing loops, prefer using `set_invocation_callback` after
+    /// cloning the fixture instead of this method. This method performs an additional SVM clone
+    /// beyond the fixture clone, which can be expensive.
     pub fn clone_with_invocation_callback<C: InvocationInspectCallback + 'static>(&self, callback: C) -> Self {
         // Just clone the SVM directly and set callback - don't use builder methods
         // as they may create a fresh SVM and lose account data
@@ -1227,6 +1154,22 @@ impl TestContext {
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
         }
+    }
+
+    /// Set an invocation callback for coverage tracking on this context.
+    /// Unlike `clone_with_invocation_callback`, this modifies the context in place
+    /// without performing an additional SVM clone.
+    ///
+    /// The SVM must have been created with debuggable mode (via ANCHOR_FUZZ_DEBUGGABLE env var)
+    /// for register tracing to work.
+    ///
+    /// Usage pattern for fuzzing loops:
+    /// ```ignore
+    /// let mut fixture = template_fixture.clone();  // Single clone
+    /// fixture.ctx.set_invocation_callback(callback);  // No additional clone
+    /// ```
+    pub fn set_invocation_callback<C: InvocationInspectCallback + 'static>(&mut self, callback: C) {
+        self.svm.set_invocation_inspect_callback(callback);
     }
 
     /// Track an account pubkey so it gets copied when cloning with invocation callback.
@@ -1649,10 +1592,11 @@ impl TestContext {
             }
         }
 
-        // Send transaction with all queued instructions
+        // Send transaction with all queued instructions (take ownership to avoid clone)
+        let instructions = std::mem::take(&mut self.pending_instructions);
         let result = instruction_builder::send_transaction(
             &mut self.svm,
-            self.pending_instructions.clone(),
+            instructions,
             &unique_signers
         )?;
 
@@ -1679,8 +1623,7 @@ impl TestContext {
             }
         }
 
-        // Clear queue regardless of success/failure
-        self.pending_instructions.clear();
+        // Clear signers queue (pending_instructions already taken via std::mem::take)
         self.pending_signers.clear();
 
         Ok(Some(outcome))

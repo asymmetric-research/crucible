@@ -75,6 +75,10 @@ mod action_stats {
     }
 
     pub fn print_summary() {
+        // Gate verbose output behind FUZZ_VERBOSE for cleaner multi-core output
+        if std::env::var("FUZZ_VERBOSE").is_err() {
+            return;
+        }
         eprintln!("=== Action Stats ===");
         eprintln!("deposit:   {:>5} ok / {:>5} fail", DEPOSIT.0.load(Ordering::Relaxed), DEPOSIT.1.load(Ordering::Relaxed));
         eprintln!("borrow:    {:>5} ok / {:>5} fail", BORROW.0.load(Ordering::Relaxed), BORROW.1.load(Ordering::Relaxed));
@@ -542,25 +546,27 @@ impl MarginfiFixture {
     // ========================================================================
 
     pub fn after_action(&self) {
-        // Only print periodically to avoid verbosity
+        // Only print periodically and only when FUZZ_VERBOSE is set
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let count = COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if count > 0 && count % 1000 == 0 {
             action_stats::print_summary();
 
-            // State snapshot - show user token balances
-            eprintln!("\n=== State Snapshot (action {}) ===", count);
-            for (u_idx, user) in self.users.iter().enumerate() {
-                for (m_idx, mint) in user.token_accounts.keys().enumerate() {
-                    let ta = user.token_accounts[mint];
-                    let balance = self.ctx.token_balance(&ta);
-                    if balance > 0 {
-                        eprintln!("user[{}] token[{}]: {}", u_idx, m_idx, balance);
+            // State snapshot - show user token balances (gated by FUZZ_VERBOSE)
+            if std::env::var("FUZZ_VERBOSE").is_ok() {
+                eprintln!("\n=== State Snapshot (action {}) ===", count);
+                for (u_idx, user) in self.users.iter().enumerate() {
+                    for (m_idx, mint) in user.token_accounts.keys().enumerate() {
+                        let ta = user.token_accounts[mint];
+                        let balance = self.ctx.token_balance(&ta);
+                        if balance > 0 {
+                            eprintln!("user[{}] token[{}]: {}", u_idx, m_idx, balance);
+                        }
                     }
                 }
+                eprintln!();
             }
-            eprintln!();
         }
     }
 }
