@@ -56,6 +56,10 @@ rust.unused_must_use = "deny"
 rust.unused_import_braces = "allow"
 clippy.wildcard_imports = "deny"
 
+[dev-dependencies]
+tempfile = "3.10"
+serde_json = "1.0"
+
 [features]
 no-entrypoint = []
 

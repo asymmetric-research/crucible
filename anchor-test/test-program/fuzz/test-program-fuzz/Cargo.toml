@@ -1,0 +1,35 @@
+[package]
+name = "test-program-fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+# Standalone workspace to avoid conflicts with parent
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[dependencies]
+anchor-test = { path = "../../.." }
+anchor-test-context = { path = "../../../anchor-test-context" }
+
+arbitrary = { version = "1", features = ["derive"] }
+libafl = { version = "0.15", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15", features = ["std"] }
+ctrlc = "3.4"
+
+solana-pubkey = "3.0"
+solana-keypair = "3.0"
+solana-signer = "3.0"
+
+# Staking program types
+staking = { path = "../../../../examples/staking/programs/staking", features = ["no-entrypoint"] }
+
+[features]
+default = []
+invariant_test = []
+
+[profile.release]
+debug = true
+strip = false

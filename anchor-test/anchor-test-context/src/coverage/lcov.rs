@@ -1,6 +1,7 @@
 //! LCOV coverage file generation for BPF programs.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hash};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -35,15 +36,22 @@ pub fn extract_functions(program_data: &[u8]) -> Option<Vec<FunctionInfo>> {
 }
 
 /// Generate LCOV coverage data for a program (bytecode mode)
-pub fn generate_bytecode_lcov<W: Write>(
+///
+/// Accepts any HashMap-like type (standard HashMap or FastHashMap) via generic hasher parameter.
+pub fn generate_bytecode_lcov<W, S1, S2>(
     writer: &mut W,
     program_name: &str,
-    pc_hits: &HashMap<usize, u64>,
-    branch_outcomes: &HashMap<(usize, bool), u64>,
+    pc_hits: &HashMap<usize, u64, S1>,
+    branch_outcomes: &HashMap<(usize, bool), u64, S2>,
     functions: &[FunctionInfo],
     total_instructions: usize,
     total_branches: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    W: Write,
+    S1: BuildHasher,
+    S2: BuildHasher,
+{
 
     writeln!(writer, "TN:fuzzer")?;
     writeln!(writer, "SF:{}.bpf", program_name)?;

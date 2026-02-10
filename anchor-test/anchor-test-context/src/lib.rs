@@ -77,6 +77,9 @@ thread_local! {
     static ACTION_HISTORY: RefCell<Vec<ActionRecord>> = RefCell::new(Vec::new());
     static CURRENT_TEST_NAME: RefCell<Option<String>> = RefCell::new(None);
     static CURRENT_ITERATION: RefCell<u64> = RefCell::new(0);
+    // Early exit tracking: total actions in sequence and which action triggered the violation
+    static TOTAL_ACTIONS_IN_SEQUENCE: RefCell<usize> = RefCell::new(0);
+    static VIOLATION_ACTION_INDEX: RefCell<Option<usize>> = RefCell::new(None);
 }
 
 #[doc(hidden)]
@@ -169,6 +172,32 @@ pub fn clear_action_history() {
     ACTION_HISTORY.with(|h| h.borrow_mut().clear());
 }
 
+/// Set the total number of actions in the current sequence (for early exit tracking)
+pub fn set_total_actions(count: usize) {
+    TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow_mut() = count);
+}
+
+/// Record which action index triggered a violation (only records first violation)
+pub fn set_violation_action_index(idx: usize) {
+    VIOLATION_ACTION_INDEX.with(|v| {
+        let mut guard = v.borrow_mut();
+        if guard.is_none() {
+            *guard = Some(idx);
+        }
+    });
+}
+
+/// Get the action index that triggered the violation (if any)
+pub fn get_violation_action_index() -> Option<usize> {
+    VIOLATION_ACTION_INDEX.with(|v| *v.borrow())
+}
+
+/// Clear all violation tracking state (called at start of each iteration)
+pub fn clear_violation_tracking() {
+    TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow_mut() = 0);
+    VIOLATION_ACTION_INDEX.with(|v| *v.borrow_mut() = None);
+}
+
 /// Build crash metadata from current state
 pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
     let timestamp = chrono_lite_timestamp();
@@ -184,11 +213,17 @@ pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
 /// Print the action sequence to stderr (for debugging crashes)
 pub fn print_action_sequence() {
     let history = get_action_history();
-    if history.is_empty() {
+    let total_actions = TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow());
+    let violation_idx = get_violation_action_index();
+
+    if history.is_empty() && total_actions == 0 {
         return;
     }
 
-    eprintln!("\n=== FUZZ SEQUENCE ({} actions) ===", history.len());
+    let executed = history.len();
+    let skipped = total_actions.saturating_sub(executed);
+
+    eprintln!("\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===", executed, skipped);
     for (i, record) in history.iter().enumerate() {
         // Format params as key=value pairs
         let params_str = if let serde_json::Value::Object(map) = &record.params {
@@ -201,12 +236,22 @@ pub fn print_action_sequence() {
         };
 
         let status = if record.success { "OK" } else { "FAIL" };
+
+        // Mark the action that triggered the violation
+        let violation_marker = if violation_idx == Some(i) { " [VIOLATION]" } else { "" };
+
         if params_str.is_empty() {
-            eprintln!("  {}. {} -> {}", i + 1, record.name, status);
+            eprintln!("  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
         } else {
-            eprintln!("  {}. {}({}) -> {}", i + 1, record.name, params_str, status);
+            eprintln!("  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
         }
     }
+
+    // Show skipped actions
+    if skipped > 0 {
+        eprintln!("  ... {} action(s) not executed (stopped on violation)", skipped);
+    }
+
     eprintln!("================================\n");
 }
 
@@ -393,6 +438,11 @@ pub fn record_violation(msg: String) {
 /// Take the current violation (clearing it). Returns Some if violated.
 pub fn take_violation() -> Option<String> {
     VIOLATION.with(|v| v.borrow_mut().take())
+}
+
+/// Check if a violation has been recorded (without consuming it)
+pub fn has_violation() -> bool {
+    VIOLATION.with(|v| v.borrow().is_some())
 }
 
 /// Assert a condition is true
@@ -1627,6 +1677,226 @@ impl TestContext {
         self.pending_signers.clear();
 
         Ok(Some(outcome))
+    }
+}
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // Violation tracking tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_violation_tracking_basic() {
+        // Clear any existing violation
+        let _ = take_violation();
+
+        // No violation initially
+        assert!(!has_violation());
+        assert!(take_violation().is_none());
+
+        // Record a violation
+        record_violation("test violation".to_string());
+
+        // Violation should be recorded
+        assert!(has_violation());
+
+        // Taking the violation should return it and clear it
+        let v = take_violation();
+        assert_eq!(v, Some("test violation".to_string()));
+        assert!(!has_violation());
+        assert!(take_violation().is_none());
+    }
+
+    #[test]
+    fn test_violation_only_records_first() {
+        let _ = take_violation();
+
+        record_violation("first".to_string());
+        record_violation("second".to_string());
+        record_violation("third".to_string());
+
+        // Only the first violation should be recorded
+        let v = take_violation();
+        assert_eq!(v, Some("first".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Action history tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_action_history() {
+        clear_action_history();
+
+        assert!(get_action_history().is_empty());
+
+        push_action_record("action_deposit", serde_json::json!({"amount": 100}), true);
+        push_action_record("action_withdraw", serde_json::json!({"amount": 50}), false);
+
+        let history = get_action_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].name, "action_deposit");
+        assert!(history[0].success);
+        assert_eq!(history[1].name, "action_withdraw");
+        assert!(!history[1].success);
+
+        clear_action_history();
+        assert!(get_action_history().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Violation action index tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_violation_action_index() {
+        clear_violation_tracking();
+
+        assert!(get_violation_action_index().is_none());
+
+        set_total_actions(5);
+        set_violation_action_index(2);
+
+        assert_eq!(get_violation_action_index(), Some(2));
+
+        // Only records first violation index
+        set_violation_action_index(3);
+        assert_eq!(get_violation_action_index(), Some(2));
+
+        clear_violation_tracking();
+        assert!(get_violation_action_index().is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // IntoActionSuccess trait tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_into_action_success_unit() {
+        assert!(().into_success());
+    }
+
+    #[test]
+    fn test_into_action_success_result() {
+        let ok: Result<(), &str> = Ok(());
+        let err: Result<(), &str> = Err("error");
+
+        assert!(ok.into_success());
+        assert!(!err.into_success());
+    }
+
+    #[test]
+    fn test_into_action_success_bool() {
+        assert!(true.into_success());
+        assert!(!false.into_success());
+    }
+
+    // -------------------------------------------------------------------------
+    // Iteration tracking tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_iteration_tracking() {
+        set_current_iteration(42);
+        assert_eq!(get_current_iteration(), 42);
+
+        set_current_iteration(100);
+        assert_eq!(get_current_iteration(), 100);
+    }
+
+    #[test]
+    fn test_test_name_tracking() {
+        set_current_test_name("my_test");
+        assert_eq!(get_current_test_name(), Some("my_test".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Crash metadata tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_crash_metadata() {
+        clear_action_history();
+        set_current_test_name("test_func");
+        set_current_iteration(999);
+
+        push_action_record("action_a", serde_json::json!({"x": 1}), true);
+
+        let meta = build_crash_metadata(Some(12345));
+
+        assert_eq!(meta.test_name, "test_func");
+        assert_eq!(meta.iteration, 999);
+        assert_eq!(meta.seed, Some(12345));
+        assert_eq!(meta.actions.len(), 1);
+        assert_eq!(meta.actions[0].name, "action_a");
+    }
+
+    // -------------------------------------------------------------------------
+    // TxOutcome tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tx_outcome_helpers() {
+        let success = TxOutcome::Success {
+            compute_units: 100,
+            logs: vec!["log1".to_string()],
+        };
+
+        assert!(success.is_success());
+        assert!(!success.is_error());
+        assert!(success.error_code().is_none());
+        assert_eq!(success.compute_units(), Some(100));
+        assert_eq!(success.logs().len(), 1);
+
+        let error = TxOutcome::ProgramError {
+            error: TransactionError::AccountInUse,
+            error_code: Some(6051),
+            instruction_index: Some(0),
+            logs: vec!["error log".to_string()],
+        };
+
+        assert!(!error.is_success());
+        assert!(error.is_error());
+        assert_eq!(error.error_code(), Some(6051));
+        assert!(error.compute_units().is_none());
+    }
+
+    #[test]
+    fn test_tx_outcome_into_result() {
+        let success = TxOutcome::Success {
+            compute_units: 100,
+            logs: vec![],
+        };
+        assert!(success.into_result().is_ok());
+
+        let error = TxOutcome::ProgramError {
+            error: TransactionError::AccountInUse,
+            error_code: Some(6051),
+            instruction_index: Some(0),
+            logs: vec![],
+        };
+        assert!(error.into_result().is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // format_json_value tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_format_json_value() {
+        assert_eq!(format_json_value(&serde_json::json!(null)), "null");
+        assert_eq!(format_json_value(&serde_json::json!(true)), "true");
+        assert_eq!(format_json_value(&serde_json::json!(42)), "42");
+        assert_eq!(format_json_value(&serde_json::json!("hello")), "\"hello\"");
+        assert_eq!(format_json_value(&serde_json::json!([1, 2, 3])), "[1, 2, 3]");
+        assert_eq!(format_json_value(&serde_json::json!({"a": 1})), "{a: 1}");
     }
 }
 

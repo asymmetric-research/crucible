@@ -322,13 +322,18 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
             const MAX_ACTIONS: usize = 8;
 
             let debug = std::env::var("FUZZ_DEBUG").is_ok();
+            let capped_len = actions.len().min(MAX_ACTIONS);
+
             if debug {
                 eprintln!("[FUZZ] Starting iteration with {} actions (capped from {})",
-                    actions.len().min(MAX_ACTIONS), actions.len());
+                    capped_len, actions.len());
             }
 
-            // Clear action history at start of iteration
+            // Clear action history and violation tracking at start of iteration
             anchor_test_context::clear_action_history();
+            anchor_test_context::clear_violation_tracking();
+            // Track total actions for early exit display
+            anchor_test_context::set_total_actions(capped_len);
             // Set test name for metadata
             anchor_test_context::set_current_test_name(#test_name_str);
 
@@ -350,6 +355,12 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 anchor_test_context::push_action_record(&action_name, action_params, success);
 
                 #fn_body
+
+                // === EARLY EXIT: Stop immediately if invariant was violated ===
+                if anchor_test_context::has_violation() {
+                    anchor_test_context::set_violation_action_index(i);
+                    break;
+                }
             }
             fixture.__auto_flush();
         }
