@@ -1,9 +1,9 @@
 use anchor_counter::*;
-use anchor_test::*;
+use crucible_fuzzer::*;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
-use anchor_test::anchor_lang::system_program;
+use crucible_fuzzer::anchor_lang::system_program;
 use std::rc::Rc;
 
 #[derive(Clone)]

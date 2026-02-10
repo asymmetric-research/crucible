@@ -1,0 +1,11 @@
+[package]
+name = "crucible-macro-utils"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+
+[dependencies]
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"

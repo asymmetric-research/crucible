@@ -3,10 +3,13 @@ name = "staking_fuzz"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+# Standalone workspace - isolated from parent to avoid Solana version conflicts
+
 [dependencies]
-anchor-test = { path = "../../../../anchor-test" }
-anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
-anchor-lang = { path = "../../../../../lang" }
+crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
+crucible-test-context = { path = "../../../../crates/crucible-test-context" }
+anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }

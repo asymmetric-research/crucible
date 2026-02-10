@@ -1,4 +1,4 @@
-use anchor_test::*;
+use crucible_fuzzer::*;
 use anchor_lang::prelude::*;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -6,7 +6,7 @@ use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 
 // Generate complete types from IDL (including state types for deserialization)
-anchor_fuzz_gen::declare_fuzz_program!("idls/marginfi.json");
+crucible_idl_gen::declare_fuzz_program!("idls/marginfi.json");
 
 use marginfi::instruction;
 use marginfi::accounts;
@@ -47,8 +47,8 @@ mod sysvar {
 use std::{rc::Rc, collections::HashMap};
 use fixed::types::I80F48;
 use fixed_macro::types::I80F48;
-use anchor_test::anchor_spl::token::spl_token;
-use anchor_test::anchor_lang::InstructionData;
+use crucible_fuzzer::anchor_spl::token::spl_token;
+use crucible_fuzzer::anchor_lang::InstructionData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -920,6 +920,6 @@ fn bad_debt_check(fixture: &mut MarginfiFixture) {
             liabs_usd += l * bank.price / scale;
         }
         
-        anchor_test_context::fuzz_assert_le!(liabs_usd, assets_usd, "BAD DEBT: {} > {}", liabs_usd, assets_usd);
+        crucible_test_context::fuzz_assert_le!(liabs_usd, assets_usd, "BAD DEBT: {} > {}", liabs_usd, assets_usd);
     }
 }

@@ -1,5 +1,5 @@
-use anchor_test::*;
-use anchor_test_context::TxOutcome;
+use crucible_fuzzer::*;
+use crucible_test_context::TxOutcome;
 #[allow(unused_imports)]
 use anchor_lang::prelude::*;
 use solana_keypair::Keypair;
@@ -7,13 +7,13 @@ use solana_signer::Signer;
 use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 use std::{rc::Rc, collections::HashMap};
-use anchor_test::anchor_spl::token::spl_token;
+use crucible_fuzzer::anchor_spl::token::spl_token;
 
 mod types;
 use types::{Reserve, Obligation, RESERVE_SIZE, OBLIGATION_SIZE};
 
 // Generate types from IDL
-anchor_fuzz_gen::declare_fuzz_program!("idls/klend.json");
+crucible_idl_gen::declare_fuzz_program!("idls/klend.json");
 
 use kamino_lending::instruction;
 use kamino_lending::accounts;
@@ -2052,7 +2052,7 @@ fn solvency_check(fixture: &mut KlendFixture) {
         if borrowed_value > 0 && deposited_value > 0 {
             // Allow 10% margin for rounding, fees, and interest
             let margin = deposited_value / 10;
-            anchor_test_context::fuzz_assert_le!(
+            crucible_test_context::fuzz_assert_le!(
                 borrowed_value,
                 deposited_value + margin,
                 "SOLVENCY VIOLATION: user {} has borrowed {} > deposited {} + margin {}",

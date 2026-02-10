@@ -1,9 +1,9 @@
 use staking::*;
-use anchor_test::*;
+use crucible_fuzzer::*;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
-use anchor_test::anchor_lang::system_program;
+use crucible_fuzzer::anchor_lang::system_program;
 use std::rc::Rc;
 
 const INITIAL_BALANCE: u64 = 100_000_000_000;

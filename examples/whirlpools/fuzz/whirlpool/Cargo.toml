@@ -8,12 +8,12 @@ edition = "2021"
 
 [dependencies]
 # Fuzzing framework
-anchor-test = { path = "../../../../anchor-test" }
-anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
-anchor-fuzz-gen = { path = "../../../../anchor-test/anchor-fuzz-gen" }
+crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
+crucible-test-context = { path = "../../../../crates/crucible-test-context" }
+crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
 
 # Anchor (local v3-compatible)
-anchor-lang = { path = "../../../../../lang" }
+anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
 
 # Solana v3.x (required for litesvm 0.9.0)
 solana-pubkey = "3.0"

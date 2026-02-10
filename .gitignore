@@ -1,10 +1,16 @@
-# Crash artifacts from fuzzing
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Fuzzing artifacts
 crashes/
+*.lcov
+coverage.html/
 
 # Claude Code context file
 CLAUDE.md
 
-# Common
+# OS / IDE
 .DS_Store
-target/
-**/*.rs.bk
+.vscode/
+.idea/

@@ -6,10 +6,10 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-anchor-test = { path = "../../../../anchor-test" }
-anchor-test-context = { path = "../../../../anchor-test/anchor-test-context" }
-anchor-lang = { path = "../../../../../lang" }
-anchor-fuzz-gen = { path = "../../../../anchor-test/anchor-fuzz-gen" }
+crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
+crucible-test-context = { path = "../../../../crates/crucible-test-context" }
+anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
+crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }

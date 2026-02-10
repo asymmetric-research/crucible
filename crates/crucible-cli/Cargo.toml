@@ -1,0 +1,16 @@
+[package]
+name = "crucible-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Crucible - Solana smart contract fuzzing framework"
+
+[[bin]]
+name = "crucible"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

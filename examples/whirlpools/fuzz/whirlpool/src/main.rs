@@ -1,5 +1,5 @@
-use anchor_test::*;
-use anchor_test_context::TxOutcome;
+use crucible_fuzzer::*;
+use crucible_test_context::TxOutcome;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_pubkey::Pubkey;
@@ -7,11 +7,11 @@ use anchor_lang::system_program;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use anchor_test::anchor_spl::token::spl_token;
-use anchor_test::anchor_spl::associated_token;
+use crucible_fuzzer::anchor_spl::token::spl_token;
+use crucible_fuzzer::anchor_spl::associated_token;
 
 // Generate types from IDL (no crate dependency - avoids version conflicts)
-anchor_fuzz_gen::declare_fuzz_program!("idls/whirlpool.json");
+crucible_idl_gen::declare_fuzz_program!("idls/whirlpool.json");
 
 use whirlpool::instruction;
 use whirlpool::accounts;

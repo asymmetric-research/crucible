@@ -1,0 +1,22 @@
+[package]
+name = "crucible-fuzzer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Solana smart contract fuzzing framework"
+
+[dependencies]
+rand = "0.8"
+anyhow = { workspace = true }
+crucible-test-context = { path = "../crucible-test-context" }
+crucible-fuzz-macro = { path = "../crucible-fuzz-macro" }
+crucible-invariant-macro = { path = "../crucible-invariant-macro" }
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+serde_json = "1.0"
+
+[features]
+no-entrypoint = []

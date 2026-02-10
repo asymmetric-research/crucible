@@ -1,0 +1,31 @@
+[package]
+name = "crucible-test-context"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+litesvm.workspace = true
+anchor-lang.workspace = true
+anyhow.workspace = true
+borsh = "1.5"
+
+# Client-side crates - versions resolved by cargo
+solana-pubkey.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-signature.workspace = true
+solana-account.workspace = true
+solana-transaction.workspace = true
+solana-message.workspace = true
+solana-hash.workspace = true
+solana-program-runtime.workspace = true
+solana-transaction-context.workspace = true
+solana-transaction-error.workspace = true
+solana-sbpf.workspace = true
+
+spl-token.workspace = true
+bytemuck.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+once_cell.workspace = true
+rustc-hash = "2.0"
