@@ -42,7 +42,7 @@ fn ensure_cli_built() {
     let crucible_bin = project_root().join("target/debug/crucible");
     if !crucible_bin.exists() {
         panic!(
-            "Crucible CLI not found at {}. Build it first with: cargo build -p crucible-cli",
+            "Crucible CLI not found at {}. Build it first with: cargo build -p crucible-fuzz-cli",
             crucible_bin.display()
         );
     }

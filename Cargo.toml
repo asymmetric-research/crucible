@@ -6,7 +6,7 @@ members = [
     "crates/crucible-invariant-macro",
     "crates/crucible-macro-utils",
     "crates/crucible-idl-gen",
-    "crates/crucible-cli",
+    "crates/crucible-fuzz-cli",
 ]
 resolver = "2"
 

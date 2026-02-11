@@ -19,7 +19,7 @@ Crucible enables property-based testing and stateful invariant checking for Sola
 ### Install
 
 ```bash
-cargo install crucible-cli
+cargo install crucible-fuzz-cli
 ```
 
 ### Initialize a fuzz harness

@@ -1,5 +1,5 @@
 [package]
-name = "crucible-cli"
+name = "crucible-fuzz-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
