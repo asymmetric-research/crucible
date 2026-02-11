@@ -1424,40 +1424,40 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
 
     // Check that all positions have valid tick ranges
     for (idx, position) in fixture.positions.iter().enumerate() {
-        assert!(
-            position.tick_lower_index < position.tick_upper_index,
+        fuzz_assert_lt!(
+            position.tick_lower_index, position.tick_upper_index,
             "Position {} tick range invalid: {} >= {}",
             idx, position.tick_lower_index, position.tick_upper_index
         );
 
         // Ticks must be multiples of tick_spacing
-        assert!(
-            position.tick_lower_index % (TICK_SPACING as i32) == 0,
+        fuzz_assert_eq!(
+            position.tick_lower_index % (TICK_SPACING as i32), 0,
             "Position {} lower tick not aligned to tick spacing",
             idx
         );
-        assert!(
-            position.tick_upper_index % (TICK_SPACING as i32) == 0,
+        fuzz_assert_eq!(
+            position.tick_upper_index % (TICK_SPACING as i32), 0,
             "Position {} upper tick not aligned to tick spacing",
             idx
         );
 
         // Ticks must be within bounds
-        assert!(
-            position.tick_lower_index >= MIN_TICK_INDEX,
+        fuzz_assert_ge!(
+            position.tick_lower_index, MIN_TICK_INDEX,
             "Position {} lower tick below min: {} < {}",
             idx, position.tick_lower_index, MIN_TICK_INDEX
         );
-        assert!(
-            position.tick_upper_index <= MAX_TICK_INDEX,
+        fuzz_assert_le!(
+            position.tick_upper_index, MAX_TICK_INDEX,
             "Position {} upper tick above max: {} > {}",
             idx, position.tick_upper_index, MAX_TICK_INDEX
         );
     }
 
     // Verify we have tick arrays
-    assert!(
-        fixture.pool.tick_arrays.len() >= 3,
+    fuzz_assert_ge!(
+        fixture.pool.tick_arrays.len(), 3,
         "Not enough tick arrays: {}",
         fixture.pool.tick_arrays.len()
     );

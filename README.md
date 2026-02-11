@@ -407,7 +407,7 @@ For testing individual operations with random inputs:
 fn fuzz_stake(fixture: &mut StakingFixture, #[range(0..100_000)] amount: u64) {
     fixture.action_stake(0, amount);
     let user = fixture.ctx.read_anchor_account::<User>(&fixture.user_pda).unwrap();
-    assert!(user.staked <= INITIAL_BALANCE);
+    fuzz_assert_le!(user.staked, INITIAL_BALANCE);
 }
 ```
 
@@ -433,7 +433,7 @@ impl StakingFixture {
 fn invariant_fuzz(fixture: &mut StakingFixture) {
     // Runs AFTER EACH action in the sequence
     let pool = fixture.ctx.read_anchor_account::<Pool>(&fixture.pool_pda).unwrap();
-    assert!(pool.total_staked <= fixture.total_deposited);
+    fuzz_assert_le!(pool.total_staked, fixture.total_deposited);
 }
 ```
 

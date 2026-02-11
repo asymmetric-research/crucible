@@ -224,7 +224,7 @@ fn test_stake_reward_debt_exploit() {
     println!("User 0 can claim: {} ({}x more than User 1's {})", 
         pending_exploited, pending_exploited / rewards1.max(1), rewards1);
     
-    assert!(pending_exploited > rewards1 * 100);
+    fuzz_assert_gt!(pending_exploited, rewards1 * 100);
 }
 
 #[anchor_fuzz]
@@ -236,7 +236,7 @@ fn fuzz_single_stake(fixture: &mut StakingFixture, #[range(0..100_000)] amount: 
         let balance = fixture.ctx.get_account(&user.keypair.pubkey()).unwrap().lamports;
         let total = balance + user_account.staked_amount;
         
-        assert!(total <= INITIAL_BALANCE, "User somehow gained lamports!");
+        fuzz_assert_le!(total, INITIAL_BALANCE, "User somehow gained lamports!");
     }
 }
 
@@ -263,8 +263,8 @@ fn invariant_fuzz(fixture: &mut StakingFixture) {
                 0
             };
             
-            assert!(
-                actual_rewards <= expected_rewards, 
+            fuzz_assert_le!(
+                actual_rewards, expected_rewards,
                 "User stake-time {} but earned {} vs expected {}",
                 user_stake_time, actual_rewards, expected_rewards
             );
@@ -481,8 +481,8 @@ fn invariant_fuzz_batched(fixture: &mut StakingFixtureSingleTransaction) {
                 0
             };
 
-            assert!(
-                actual_rewards <= expected_rewards,
+            fuzz_assert_le!(
+                actual_rewards, expected_rewards,
                 "User stake-time {} but earned {} vs expected {}",
                 user_stake_time, actual_rewards, expected_rewards
             );

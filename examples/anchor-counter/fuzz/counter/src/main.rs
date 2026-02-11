@@ -106,7 +106,7 @@ fn fuzz_single(fixture: &mut CounterFixture, #[range(1..100)] iterations: u64) {
         .unwrap();
     
     // Invariant: count should never exceed iterations
-    assert!(counter.count <= iterations);
+    fuzz_assert_le!(counter.count, iterations);
 }
 
 // Stateful invariant test - fuzzer generates random action sequences automatically
@@ -118,5 +118,5 @@ fn invariant_counter(fixture: &mut CounterFixture) {
         .unwrap();
     
     // Example invariant: count should stay below some threshold
-    assert!(counter.count < 1000, "Counter exceeded max value: {}", counter.count);
+    fuzz_assert_lt!(counter.count, 1000, "Counter exceeded max value: {}", counter.count);
 }

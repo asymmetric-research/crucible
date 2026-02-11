@@ -270,20 +270,20 @@ fn invariant_check(&mut self) {
 ```rust
 let total_in_vaults = self.ctx.token_balance(&vault_a) + self.ctx.token_balance(&vault_b);
 let expected = self.total_deposits - self.total_withdrawals + self.accrued_fees;
-assert!(total_in_vaults >= expected, "Token conservation violated");
+fuzz_assert_ge!(total_in_vaults, expected, "Token conservation violated");
 ```
 
 **Solvency invariants** (protocol can meet obligations):
 ```rust
 let total_liabilities = self.positions.iter().map(|p| p.owed_amount).sum();
 let total_assets = self.ctx.token_balance(&vault);
-assert!(total_assets >= total_liabilities, "Protocol insolvent");
+fuzz_assert_ge!(total_assets, total_liabilities, "Protocol insolvent");
 ```
 
 **State consistency invariants** (data structures are valid):
 ```rust
 for pos in &self.positions {
-    assert!(pos.tick_lower < pos.tick_upper, "Invalid tick range");
+    fuzz_assert_lt!(pos.tick_lower, pos.tick_upper, "Invalid tick range");
 }
 ```
 
