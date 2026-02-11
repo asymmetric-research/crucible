@@ -5,8 +5,8 @@ use quote::{format_ident, quote};
 use super::{idl_type_to_tokens, array_len_to_usize};
 
 /// Generate custom type definitions from IDL types section
-pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
-    let type_defs = idl.types.iter().map(generate_type_def);
+pub fn generate(idl: &Idl, use_bincode: bool) -> proc_macro2::TokenStream {
+    let type_defs = idl.types.iter().map(|td| generate_type_def(td, &idl.types, use_bincode));
 
     quote! {
         /// Custom type definitions
@@ -18,7 +18,7 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_type_def(typedef: &IdlTypeDef) -> proc_macro2::TokenStream {
+fn generate_type_def(typedef: &IdlTypeDef, all_types: &[IdlTypeDef], use_bincode: bool) -> proc_macro2::TokenStream {
     let name = format_ident!("{}", typedef.name);
 
     // Check if this is a zero-copy type (repr: C)
@@ -29,11 +29,11 @@ fn generate_type_def(typedef: &IdlTypeDef) -> proc_macro2::TokenStream {
             if is_zero_copy {
                 generate_zero_copy_struct(&name, fields, &typedef.name)
             } else {
-                generate_struct(&name, fields, &typedef.name)
+                generate_struct(&name, fields, &typedef.name, all_types)
             }
         }
         IdlTypeDefTy::Enum { variants } => {
-            generate_enum(&name, variants)
+            generate_enum(&name, variants, all_types, use_bincode)
         }
         IdlTypeDefTy::Type { alias } => {
             let alias_ty = idl_type_to_tokens(alias);
@@ -48,6 +48,7 @@ fn generate_struct(
     name: &syn::Ident,
     fields: &Option<IdlDefinedFields>,
     type_name: &str,
+    all_types: &[IdlTypeDef],
 ) -> proc_macro2::TokenStream {
     let fields_tokens = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
@@ -74,7 +75,7 @@ fn generate_struct(
 
     // Determine if we should add Copy and Eq based on field types
     let can_copy = should_derive_copy(fields);
-    let can_eq = fields.as_ref().map_or(true, |f| can_derive_eq_fields(f));
+    let can_eq = fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types));
     let can_derive_default = fields.as_ref().map_or(true, |f| can_derive_default_fields(f));
 
     // Build derives without Default (we'll implement it manually if needed)
@@ -200,7 +201,19 @@ fn generate_zero_copy_struct(
 fn generate_enum(
     name: &syn::Ident,
     variants: &[anchor_lang_idl::types::IdlEnumVariant],
+    all_types: &[IdlTypeDef],
+    use_bincode: bool,
 ) -> proc_macro2::TokenStream {
+    // Check if all variants are unit variants (no fields)
+    let all_unit = variants.iter().all(|v| v.fields.is_none());
+
+    // Bincode mode: unit-only enums use #[repr(u32)] with manual serialization
+    // (bincode encodes enum variant indices as u32 LE, borsh uses u8)
+    // Enums with fields (like StakeState) are account state types — keep borsh for those
+    if use_bincode && all_unit {
+        return generate_bincode_unit_enum(name, variants);
+    }
+
     // Check if first variant is a unit variant (no fields) - required for #[default] attribute
     let first_is_unit = variants.first().map_or(false, |v| v.fields.is_none());
 
@@ -209,7 +222,7 @@ fn generate_enum(
 
     // Check if enum can derive Eq (no f32/f64 fields)
     let can_derive_eq = variants.iter().all(|v| {
-        v.fields.as_ref().map_or(true, |f| can_derive_eq_fields(f))
+        v.fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
     });
 
     let variants_tokens = variants.iter().enumerate().map(|(i, v)| {
@@ -261,6 +274,75 @@ fn generate_enum(
         }
 
         #manual_default
+    }
+}
+
+/// Generate a unit enum with u32 variant indices for bincode serialization.
+///
+/// Bincode programs (native Solana programs) encode enum variants as u32 LE,
+/// unlike borsh which uses u8. We use #[repr(u32)] and implement manual
+/// AnchorSerialize/AnchorDeserialize to write/read a u32 variant index.
+fn generate_bincode_unit_enum(
+    name: &syn::Ident,
+    variants: &[anchor_lang_idl::types::IdlEnumVariant],
+) -> proc_macro2::TokenStream {
+    let variant_idents: Vec<_> = variants.iter().map(|v| {
+        format_ident!("{}", v.name.to_upper_camel_case())
+    }).collect();
+
+    let variant_defs = variant_idents.iter().enumerate().map(|(i, ident)| {
+        let idx = i as u32;
+        if i == 0 {
+            quote! { #[default] #ident = #idx }
+        } else {
+            quote! { #ident = #idx }
+        }
+    });
+
+    // Match arms for serialization: Self::Variant => 0u32,
+    let ser_arms = variant_idents.iter().enumerate().map(|(i, ident)| {
+        let idx = i as u32;
+        quote! { Self::#ident => #idx }
+    });
+
+    // Match arms for deserialization: 0 => Ok(Self::Variant),
+    let deser_arms = variant_idents.iter().enumerate().map(|(i, ident)| {
+        let idx = i as u32;
+        quote! { #idx => Ok(Self::#ident) }
+    });
+
+    let name_str = name.to_string();
+
+    quote! {
+        #[derive(Clone, Copy, Default, PartialEq, Eq)]
+        #[repr(u32)]
+        pub enum #name {
+            #(#variant_defs),*
+        }
+
+        impl AnchorSerialize for #name {
+            fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+                let idx: u32 = match self {
+                    #(#ser_arms),*
+                };
+                writer.write_all(&idx.to_le_bytes())
+            }
+        }
+
+        impl AnchorDeserialize for #name {
+            fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+                let mut buf = [0u8; 4];
+                reader.read_exact(&mut buf)?;
+                let idx = u32::from_le_bytes(buf);
+                match idx {
+                    #(#deser_arms,)*
+                    _ => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid {} variant index: {}", #name_str, idx),
+                    )),
+                }
+            }
+        }
     }
 }
 
@@ -337,15 +419,15 @@ fn can_type_derive_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
 }
 
 /// Check if fields can derive Eq
-fn can_derive_eq_fields(fields: &IdlDefinedFields) -> bool {
+fn can_derive_eq_fields(fields: &IdlDefinedFields, all_types: &[IdlTypeDef]) -> bool {
     match fields {
-        IdlDefinedFields::Named(named) => named.iter().all(|f| can_type_derive_eq(&f.ty)),
-        IdlDefinedFields::Tuple(types) => types.iter().all(can_type_derive_eq),
+        IdlDefinedFields::Named(named) => named.iter().all(|f| can_type_derive_eq(&f.ty, all_types)),
+        IdlDefinedFields::Tuple(types) => types.iter().all(|t| can_type_derive_eq(t, all_types)),
     }
 }
 
 /// Check if a type can derive Eq (f32/f64 cannot)
-fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType) -> bool {
+fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) -> bool {
     use anchor_lang_idl::types::IdlType;
 
     match ty {
@@ -358,11 +440,27 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType) -> bool {
         IdlType::Pubkey => true,
         IdlType::String => true,
         IdlType::Bytes => true,
-        IdlType::Vec(inner) => can_type_derive_eq(inner),
-        IdlType::Option(inner) => can_type_derive_eq(inner),
-        IdlType::Array(inner, _) => can_type_derive_eq(inner),
-        // Assume user types can derive Eq
-        IdlType::Defined { .. } => true,
+        IdlType::Vec(inner) => can_type_derive_eq(inner, all_types),
+        IdlType::Option(inner) => can_type_derive_eq(inner, all_types),
+        IdlType::Array(inner, _) => can_type_derive_eq(inner, all_types),
+        // Look up defined types to check their fields recursively
+        IdlType::Defined { name, .. } => {
+            if let Some(typedef) = all_types.iter().find(|t| &t.name == name) {
+                match &typedef.ty {
+                    IdlTypeDefTy::Struct { fields } => {
+                        fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
+                    }
+                    IdlTypeDefTy::Enum { variants } => {
+                        variants.iter().all(|v| {
+                            v.fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
+                        })
+                    }
+                    IdlTypeDefTy::Type { alias } => can_type_derive_eq(alias, all_types),
+                }
+            } else {
+                true // Unknown type, assume Eq
+            }
+        }
         _ => true,
     }
 }

@@ -5,6 +5,7 @@ mod codegen;
 use std::{env, fs, path::PathBuf};
 
 use anchor_lang_idl::convert::convert_idl;
+use anchor_lang_idl::types::Idl;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, LitStr};
@@ -73,18 +74,31 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
     let idl_bytes = fs::read(&idl_path)
         .map_err(|e| anyhow::anyhow!("Failed to read IDL at {}: {e}", idl_path.display()))?;
 
-    let idl = convert_idl(&idl_bytes)?;
+    let mut idl = convert_idl(&idl_bytes)?;
+
+    // Detect and fix bincode-style discriminators.
+    // Native Solana programs use 4-byte u32 LE instruction indices. IDLs may
+    // represent these as 8-byte arrays with trailing zeros (e.g. [1,0,0,0,0,0,0,0]).
+    // If every instruction discriminator is 8 bytes with the last 4 all zero,
+    // truncate to 4 bytes so downstream codegen detects bincode format.
+    truncate_bincode_discriminators(&mut idl);
 
     // Determine module name
     let module_name = input.name.clone()
         .unwrap_or_else(|| format_ident!("{}", idl.metadata.name));
+
+    // Detect serialization format from discriminator length:
+    // 8 bytes → Anchor (borsh), 4 bytes → native/bincode
+    let use_bincode = idl.instructions.first()
+        .map(|ix| ix.discriminator.len() == 4)
+        .unwrap_or(false);
 
     // Generate code
     let program_id = codegen::gen_program_id(&idl);
     let instructions = codegen::instructions::generate(&idl);
     let accounts = codegen::accounts::generate(&idl);
     let state = codegen::state::generate(&idl);
-    let types = codegen::types::generate(&idl);
+    let types = codegen::types::generate(&idl, use_bincode);
     let discriminators = codegen::discriminators::generate(&idl);
 
     Ok(quote! {
@@ -101,4 +115,29 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
             #discriminators
         }
     })
+}
+
+/// Detect bincode-style discriminators and truncate from 8 to 4 bytes.
+///
+/// Native Solana programs (stake, vote, system) use bincode with 4-byte u32 LE
+/// instruction indices. Hand-written IDLs may pad these to 8 bytes to match
+/// Anchor's discriminator length (e.g. `[2,0,0,0,0,0,0,0]` for index 2).
+///
+/// Detection: all instruction discriminators are exactly 8 bytes with the last
+/// 4 bytes all zero. This is essentially impossible for real Anchor programs
+/// (SHA256 hashes), so the detection is safe.
+fn truncate_bincode_discriminators(idl: &mut Idl) {
+    if idl.instructions.is_empty() {
+        return;
+    }
+
+    let all_padded = idl.instructions.iter().all(|ix| {
+        ix.discriminator.len() == 8 && ix.discriminator[4..] == [0, 0, 0, 0]
+    });
+
+    if all_padded {
+        for ix in &mut idl.instructions {
+            ix.discriminator.truncate(4);
+        }
+    }
 }

@@ -380,45 +380,51 @@ fn chrono_lite_timestamp() -> String {
 
 use std::sync::OnceLock;
 
-/// Global map from Anchor discriminator (8 bytes) to instruction name.
+/// Global map from discriminator bytes to instruction name.
+/// Supports both 8-byte (Anchor/borsh) and 4-byte (native/bincode) discriminators.
 /// Populated once at harness startup via `register_instruction_discriminators()`.
 /// Uses OnceLock for lock-free reads after initialization (single-threaded).
-static DISCRIMINATOR_MAP: OnceLock<HashMap<[u8; 8], String>> = OnceLock::new();
+static DISCRIMINATOR_MAP: OnceLock<(usize, HashMap<Vec<u8>, String>)> = OnceLock::new();
 
 /// Register instruction discriminators for per-instruction coverage tracking.
 /// Call this once at harness initialization with discriminators from the program's IDL.
+/// Supports variable-length discriminators (4 bytes for bincode, 8 bytes for Anchor).
 /// Subsequent calls are ignored (OnceLock can only be set once).
 ///
 /// Example:
 /// ```ignore
 /// register_instruction_discriminators(&[
-///     ("deposit", [171, 94, 235, 200, 28, 230, 215, 98]),
-///     ("borrow", [4, 126, 116, 45, 173, 75, 231, 84]),
+///     ("deposit", vec![171, 94, 235, 200, 28, 230, 215, 98]),
+///     ("borrow", vec![4, 126, 116, 45, 173, 75, 231, 84]),
 /// ]);
 /// ```
-pub fn register_instruction_discriminators(discriminators: &[(&str, [u8; 8])]) {
-    let map: HashMap<[u8; 8], String> = discriminators
+pub fn register_instruction_discriminators(discriminators: &[(&str, Vec<u8>)]) {
+    // Determine discriminator length from first entry (all must be same length)
+    let disc_len = discriminators.first().map(|(_, d)| d.len()).unwrap_or(8);
+    let map: HashMap<Vec<u8>, String> = discriminators
         .iter()
-        .map(|(name, disc)| (*disc, name.to_string()))
+        .map(|(name, disc)| (disc.clone(), name.to_string()))
         .collect();
-    let _ = DISCRIMINATOR_MAP.set(map);
+    let _ = DISCRIMINATOR_MAP.set((disc_len, map));
 }
 
-/// Look up instruction name from an 8-byte discriminator.
+/// Look up instruction name from discriminator bytes at the start of instruction data.
+/// Automatically uses the correct discriminator length (4 or 8 bytes).
 /// Returns None if discriminator is not registered or if the data is too short.
 /// Lock-free after initialization.
 pub fn lookup_instruction_by_discriminator(instruction_data: &[u8]) -> Option<String> {
-    if instruction_data.len() < 8 {
+    let (disc_len, map) = DISCRIMINATOR_MAP.get()?;
+    if instruction_data.len() < *disc_len {
         return None;
     }
-    let disc: [u8; 8] = instruction_data[0..8].try_into().ok()?;
-    DISCRIMINATOR_MAP.get()?.get(&disc).cloned()
+    let disc = instruction_data[..*disc_len].to_vec();
+    map.get(&disc).cloned()
 }
 
 /// Get all registered discriminators (for debugging)
-pub fn get_registered_discriminators() -> Vec<(String, [u8; 8])> {
+pub fn get_registered_discriminators() -> Vec<(String, Vec<u8>)> {
     DISCRIMINATOR_MAP.get()
-        .map(|map| map.iter().map(|(k, v)| (v.clone(), *k)).collect())
+        .map(|(_, map)| map.iter().map(|(k, v)| (v.clone(), k.clone())).collect())
         .unwrap_or_default()
 }
 

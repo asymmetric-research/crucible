@@ -5,15 +5,15 @@ use quote::quote;
 ///
 /// This generates a function that can be called at harness initialization to
 /// automatically register all instruction discriminators from the IDL.
+/// Supports both 8-byte (Anchor/borsh) and 4-byte (native/bincode) discriminators.
 pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
     // Generate discriminator registration entries for each instruction
     let entries = idl.instructions.iter().map(|ix| {
         let name = &ix.name;
         let disc = &ix.discriminator;
 
-        // The discriminator in IDL is always 8 bytes
         quote! {
-            (#name, [#(#disc),*])
+            (#name, vec![#(#disc),*])
         }
     });
 
