@@ -280,18 +280,22 @@ pub fn multicore_mode(
             let mut run_client = |state: Option<_>, mut mgr, _client_desc: ClientDescription| {
                 let worker_id = _client_desc.core_id().0;
 
-                // Set up panic hook to suppress expected stop signal panics
-                // This prevents noisy "Stop signal received" and "Timeout reached" messages
+                // Set up panic hook to suppress expected shutdown panics and
+                // LibAFL shared memory cleanup panics on Ctrl+C
                 std::panic::set_hook(Box::new(|info| {
-                    let msg = info.payload()
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
-                        .unwrap_or("");
-                    // Only print unexpected panics
-                    if !msg.contains("Stop signal") && !msg.contains("Timeout reached") {
-                        eprintln!("{}", info);
+                    // Suppress by source location (LibAFL shmem cleanup + double-panic)
+                    if let Some(loc) = info.location() {
+                        let file = loc.file();
+                        if file.contains("unix_shmem_server") || file.contains("panicking.rs") {
+                            return;
+                        }
                     }
+                    // Suppress by message content (our intentional shutdown panics)
+                    let msg = format!("{}", info);
+                    if msg.contains("Stop signal") || msg.contains("Timeout reached") {
+                        return;
+                    }
+                    eprintln!("{}", info);
                 }));
 
                 // Check stop signal at startup - if set, exit immediately
@@ -520,12 +524,18 @@ pub fn multicore_mode(
             // Set up panic hook for Launcher to suppress expected shutdown panics
             let default_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
+                // Suppress by source location (LibAFL shmem cleanup + double-panic)
+                if let Some(loc) = info.location() {
+                    let file = loc.file();
+                    if file.contains("unix_shmem_server") || file.contains("panicking.rs") {
+                        return;
+                    }
+                }
+                // Suppress by message content
                 let msg = format!("{}", info);
-                // Suppress expected LibAFL respawner panics during --stop-on-crash shutdown
                 if msg.contains("Storing state in crashed fuzzer") ||
                    msg.contains("Stop signal") ||
                    msg.contains("Timeout reached") {
-                    // Expected during --stop-on-crash or --timeout, suppress
                     return;
                 }
                 default_hook(info);

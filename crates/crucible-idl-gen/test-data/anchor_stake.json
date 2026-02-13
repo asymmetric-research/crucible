@@ -1,0 +1,1066 @@
+{
+  "address": "Stake11111111111111111111111111111111111111",
+  "metadata": {
+    "name": "stake",
+    "version": "2.0.2",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "initialize",
+      "discriminator": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "authorized",
+          "type": {
+            "defined": {
+              "name": "Authorized"
+            }
+          }
+        },
+        {
+          "name": "lockup",
+          "type": {
+            "defined": {
+              "name": "Lockup"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "authorize",
+      "discriminator": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "lockupAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "newAuthorizedPubkey",
+          "type": "pubkey"
+        },
+        {
+          "name": "stakeAuthorize",
+          "type": {
+            "defined": {
+              "name": "StakeAuthorize"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "delegateStake",
+      "discriminator": [
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "stakeHistory",
+          "address": "SysvarStakeHistory1111111111111111111111111"
+        },
+        {
+          "name": "unused"
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "split",
+      "discriminator": [
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "splitStake",
+          "writable": true
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "stakeHistory",
+          "address": "SysvarStakeHistory1111111111111111111111111"
+        },
+        {
+          "name": "withdrawAuthority",
+          "signer": true
+        },
+        {
+          "name": "lockupAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deactivate",
+      "discriminator": [
+        5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "setLockup",
+      "discriminator": [
+        6,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lockupParams",
+          "type": {
+            "defined": {
+              "name": "LockupParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "merge",
+      "discriminator": [
+        7,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "destinationStake",
+          "writable": true
+        },
+        {
+          "name": "sourceStake",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "stakeHistory",
+          "address": "SysvarStakeHistory1111111111111111111111111"
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "authorizeWithSeed",
+      "discriminator": [
+        8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "base",
+          "signer": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "lockupAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "AuthorizeWithSeedParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "initializeChecked",
+      "discriminator": [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        },
+        {
+          "name": "stakeAuthority"
+        },
+        {
+          "name": "withdrawAuthority",
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "authorizeChecked",
+      "discriminator": [
+        10,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "newAuthority",
+          "signer": true
+        },
+        {
+          "name": "lockupAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "stakeAuthorize",
+          "type": {
+            "defined": {
+              "name": "StakeAuthorize"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "authorizeCheckedWithSeed",
+      "discriminator": [
+        11,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "base",
+          "signer": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "newAuthority",
+          "signer": true
+        },
+        {
+          "name": "lockupAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "AuthorizeCheckedWithSeedParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "setLockupChecked",
+      "discriminator": [
+        12,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "newAuthority",
+          "signer": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lockupCheckedParams",
+          "type": {
+            "defined": {
+              "name": "LockupCheckedParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "getMinimumDelegation",
+      "discriminator": [
+        13,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [],
+      "args": []
+    },
+    {
+      "name": "deactivateDelinquent",
+      "discriminator": [
+        14,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "stake",
+          "writable": true
+        },
+        {
+          "name": "delinquentVote"
+        },
+        {
+          "name": "referenceVote"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "redelegate",
+      "discriminator": [
+        15,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [],
+      "args": []
+    },
+    {
+      "name": "moveStake",
+      "discriminator": [
+        16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "sourceStake",
+          "writable": true
+        },
+        {
+          "name": "destinationStake",
+          "writable": true
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "moveLamports",
+      "discriminator": [
+        17,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "sourceStake",
+          "writable": true
+        },
+        {
+          "name": "destinationStake",
+          "writable": true
+        },
+        {
+          "name": "stakeAuthority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [],
+  "types": [
+    {
+      "name": "Authorized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "staker",
+            "type": "pubkey"
+          },
+          {
+            "name": "withdrawer",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Lockup",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "unixTimestamp",
+            "type": "i64"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "custodian",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LockupParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "unixTimestamp",
+            "type": {
+              "option": "i64"
+            }
+          },
+          {
+            "name": "epoch",
+            "type": {
+              "option": "u64"
+            }
+          },
+          {
+            "name": "custodian",
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "LockupCheckedParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "unixTimestamp",
+            "type": {
+              "option": "i64"
+            }
+          },
+          {
+            "name": "epoch",
+            "type": {
+              "option": "u64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorizeWithSeedParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "newAuthorizedPubkey",
+            "type": "pubkey"
+          },
+          {
+            "name": "stakeAuthorize",
+            "type": {
+              "defined": {
+                "name": "StakeAuthorize"
+              }
+            }
+          },
+          {
+            "name": "authoritySeed",
+            "type": "string"
+          },
+          {
+            "name": "authorityOwner",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorizeCheckedWithSeedParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "stakeAuthorize",
+            "type": {
+              "defined": {
+                "name": "StakeAuthorize"
+              }
+            }
+          },
+          {
+            "name": "authoritySeed",
+            "type": "string"
+          },
+          {
+            "name": "authorityOwner",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeAuthorize",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Staker"
+          },
+          {
+            "name": "Withdrawer"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeFlags",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bits",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Meta",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "rentExemptReserve",
+            "type": "u64"
+          },
+          {
+            "name": "authorized",
+            "type": {
+              "defined": {
+                "name": "Authorized"
+              }
+            }
+          },
+          {
+            "name": "lockup",
+            "type": {
+              "defined": {
+                "name": "Lockup"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Delegation",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "voterPubkey",
+            "type": "pubkey"
+          },
+          {
+            "name": "stake",
+            "type": "u64"
+          },
+          {
+            "name": "activationEpoch",
+            "type": "u64"
+          },
+          {
+            "name": "deactivationEpoch",
+            "type": "u64"
+          },
+          {
+            "name": "warmupCooldownRate",
+            "type": "f64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Stake",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "delegation",
+            "type": {
+              "defined": {
+                "name": "Delegation"
+              }
+            }
+          },
+          {
+            "name": "creditsObserved",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeState",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Uninitialized"
+          },
+          {
+            "name": "Initialized",
+            "fields": [
+              {
+                "name": "meta",
+                "type": {
+                  "defined": {
+                    "name": "Meta"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "Stake",
+            "fields": [
+              {
+                "name": "meta",
+                "type": {
+                  "defined": {
+                    "name": "Meta"
+                  }
+                }
+              },
+              {
+                "name": "stake",
+                "type": {
+                  "defined": {
+                    "name": "Stake"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "RewardsPool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StakeStateV2",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Uninitialized"
+          },
+          {
+            "name": "Initialized",
+            "fields": [
+              {
+                "name": "meta",
+                "type": {
+                  "defined": {
+                    "name": "Meta"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "Stake",
+            "fields": [
+              {
+                "name": "meta",
+                "type": {
+                  "defined": {
+                    "name": "Meta"
+                  }
+                }
+              },
+              {
+                "name": "stake",
+                "type": {
+                  "defined": {
+                    "name": "Stake"
+                  }
+                }
+              },
+              {
+                "name": "stakeFlags",
+                "type": {
+                  "defined": {
+                    "name": "StakeFlags"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "RewardsPool"
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "code": 0,
+      "name": "NoCreditsToRedeem",
+      "msg": "Not enough credits to redeem"
+    },
+    {
+      "code": 1,
+      "name": "LockupInForce",
+      "msg": "Lockup has not yet expired"
+    },
+    {
+      "code": 2,
+      "name": "AlreadyDeactivated",
+      "msg": "Stake already deactivated"
+    },
+    {
+      "code": 3,
+      "name": "TooSoonToRedelegate",
+      "msg": "One re-delegation permitted per epoch"
+    },
+    {
+      "code": 4,
+      "name": "InsufficientStake",
+      "msg": "Split amount is more than is staked"
+    },
+    {
+      "code": 5,
+      "name": "MergeTransientStake",
+      "msg": "Stake account with transient stake cannot be merged"
+    },
+    {
+      "code": 6,
+      "name": "MergeMismatch",
+      "msg": "Stake account merge failed due to different authority, lockups or state"
+    },
+    {
+      "code": 7,
+      "name": "CustodianMissing",
+      "msg": "Custodian address not present"
+    },
+    {
+      "code": 8,
+      "name": "CustodianSignatureMissing",
+      "msg": "Custodian signature not present"
+    },
+    {
+      "code": 9,
+      "name": "InsufficientReferenceVotes",
+      "msg": "Insufficient voting activity in the reference vote account"
+    },
+    {
+      "code": 10,
+      "name": "VoteAddressMismatch",
+      "msg": "Stake account is not delegated to the provided vote account"
+    },
+    {
+      "code": 11,
+      "name": "MinimumDelinquentEpochsForDeactivationNotMet",
+      "msg": "Stake account has not been delinquent for the minimum epochs required for deactivation"
+    },
+    {
+      "code": 12,
+      "name": "InsufficientDelegation",
+      "msg": "Delegation amount is less than the minimum"
+    },
+    {
+      "code": 13,
+      "name": "RedelegateTransientOrInactiveStake",
+      "msg": "Stake account with transient or inactive stake cannot be redelegated"
+    },
+    {
+      "code": 14,
+      "name": "RedelegateToSameVoteAccount",
+      "msg": "Stake redelegation to the same vote account is not permitted"
+    },
+    {
+      "code": 15,
+      "name": "RedelegatedStakeMustFullyActivateBeforeDeactivationIsPermitted",
+      "msg": "Redelegated stake must be fully activated before deactivation"
+    },
+    {
+      "code": 16,
+      "name": "EpochRewardsActive",
+      "msg": "Stake action is not permitted while the epoch rewards period is active"
+    }
+  ]
+}
