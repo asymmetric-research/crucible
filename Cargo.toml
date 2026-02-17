@@ -3,6 +3,7 @@ members = [
     "crates/crucible-fuzzer",
     "crates/crucible-test-context",
     "crates/crucible-fuzz-macro",
+    "crates/crucible-fuzz-runtime",
     "crates/crucible-invariant-macro",
     "crates/crucible-macro-utils",
     "crates/crucible-idl-gen",

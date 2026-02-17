@@ -19,3 +19,17 @@ pub use crucible_test_context::fuzz_assert_gt;
 pub use anchor_lang;
 pub use anchor_spl;
 
+// Re-export fuzz runtime types for structured mutation
+// These are used by generated code from #[fuzz_fixture] and #[anchor_fuzz(structured)]
+pub use crucible_fuzz_runtime::FuzzAction;
+pub use crucible_fuzz_runtime::FuzzInput;
+pub use crucible_fuzz_runtime::ActionGenerator;
+pub use crucible_fuzz_runtime::SequenceMutator;
+pub use crucible_fuzz_runtime::ParamMutator;
+pub use crucible_fuzz_runtime::CrossoverMutator;
+pub use crucible_fuzz_runtime::{
+    gen_range_u64, gen_range_usize, mutate_u64, mutate_usize, mutate_bool, mutate_i64,
+    rand_below,
+};
+pub use crucible_fuzz_runtime::FuzzRand;
+

@@ -12,14 +12,39 @@ mod modes;
 mod multicore;
 mod singlecore;
 
+/// Extract the inner type T from Vec<T>
+fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return Some(inner.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[proc_macro_attribute]
 pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
-    if !proc_macro2::TokenStream::from(args.clone()).is_empty() {
-        return syn::Error::new_spanned(
-            proc_macro2::TokenStream::from(args),
-            "anchor_fuzz no longer takes arguments - fixture type is inferred from first parameter"
-        ).to_compile_error().into();
-    }
+    // Parse args: accept empty (arbitrary mode) or "structured" (structured mutation mode)
+    let args_stream = proc_macro2::TokenStream::from(args.clone());
+    let structured = if args_stream.is_empty() {
+        false
+    } else {
+        let args_str = args_stream.to_string();
+        if args_str.trim() == "structured" {
+            true
+        } else {
+            return syn::Error::new_spanned(
+                args_stream,
+                "anchor_fuzz accepts no arguments or 'structured'"
+            ).to_compile_error().into();
+        }
+    };
 
     let mut input_fn = parse_macro_input!(item as ItemFn);
 
@@ -151,51 +176,106 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     }).collect();
 
-    // Generate fuzzing mode deserialization (returns ExitKind::Ok on error)
-    for param in &params {
-        let name = &param.name;
-        let ty = &param.ty;
+    // Extract action type for structured mode
+    let action_type: Option<Type> = if structured {
+        if params.len() != 1 {
+            return syn::Error::new_spanned(
+                &input_fn.sig,
+                "#[anchor_fuzz(structured)] requires exactly 2 parameters: (fixture: &mut Fixture, actions: Vec<ActionType>)"
+            ).to_compile_error().into();
+        }
+        let inner = extract_vec_inner_type(&params[0].ty);
+        if inner.is_none() {
+            return syn::Error::new_spanned(
+                &input_fn.sig,
+                "#[anchor_fuzz(structured)] second parameter must be Vec<ActionType>"
+            ).to_compile_error().into();
+        }
+        inner
+    } else {
+        None
+    };
 
+    // Generate deserialization stmts and simple_deser_stmts based on mode
+    let mut simple_deser_stmts: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    if structured {
+        let action_ty = action_type.as_ref().unwrap();
+        let param_name = &params[0].name;
+
+        // Fuzz harness deser_stmts: decode from `slice` (available in harness closure)
         deser_stmts.push(quote! {
-            let mut #name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
-                Ok(v) => v,
-                Err(_) => return libafl::prelude::ExitKind::Ok,
-            };
+            let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(slice);
+            let mut #param_name = __fuzz_input.actions;
+            if #param_name.is_empty() {
+                return libafl::prelude::ExitKind::Ok;
+            }
         });
 
-        if let Some(ref constraint) = param.constraint {
-            deser_stmts.push(gen_range_constraint(name, ty, constraint));
-        }
+        call_args.push(quote! { #param_name });
 
-        call_args.push(quote! { #name });
-    }
+        // Simple deser_stmts for modes: decode from `__raw_bytes` (set by each mode)
+        simple_deser_stmts.push(quote! {
+            let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&__raw_bytes);
+            let mut #param_name = __fuzz_input.actions;
+        });
+    } else {
+        // Generate fuzzing mode deserialization (returns ExitKind::Ok on error)
+        for param in &params {
+            let name = &param.name;
+            let ty = &param.ty;
 
-    // Generate simple mode deserialization (uses expect() - for dry-run, replay, coverage-only)
-    let simple_deser_stmts: Vec<_> = params.iter().map(|param| {
-        let name = &param.name;
-        let ty = &param.ty;
+            deser_stmts.push(quote! {
+                let mut #name: #ty = match <#ty as arbitrary::Arbitrary>::arbitrary(&mut u) {
+                    Ok(v) => v,
+                    Err(_) => return libafl::prelude::ExitKind::Ok,
+                };
+            });
 
-        let base_deser = quote! {
-            let mut #name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
-                .expect("Failed to deserialize input");
-        };
-
-        if let Some(ref constraint) = param.constraint {
-            let constraint_code = gen_range_constraint(name, ty, constraint);
-            quote! {
-                #base_deser
-                #constraint_code
+            if let Some(ref constraint) = param.constraint {
+                deser_stmts.push(gen_range_constraint(name, ty, constraint));
             }
-        } else {
-            base_deser
+
+            call_args.push(quote! { #name });
         }
-    }).collect();
+
+        // Generate simple mode deserialization (uses expect() - for dry-run, replay, coverage-only)
+        simple_deser_stmts = params.iter().map(|param| {
+            let name = &param.name;
+            let ty = &param.ty;
+
+            let base_deser = quote! {
+                let mut #name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
+                    .expect("Failed to deserialize input");
+            };
+
+            if let Some(ref constraint) = param.constraint {
+                let constraint_code = gen_range_constraint(name, ty, constraint);
+                quote! {
+                    #base_deser
+                    #constraint_code
+                }
+            } else {
+                base_deser
+            }
+        }).collect();
+    }
 
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
     let show_fn_name = quote::format_ident!("__show_{}", fn_name);
 
     // Generate show code (deserialize + print each param)
-    let show_body = {
+    let show_body = if structured {
+        let action_ty = action_type.as_ref().unwrap();
+        quote! {
+            println!("Crash Input (structured):");
+            let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&bytes);
+            println!("Actions ({} total):", __fuzz_input.actions.len());
+            for (i, action) in __fuzz_input.actions.iter().enumerate() {
+                println!("  {}: {:?}", i, action);
+            }
+        }
+    } else {
         let param_deserializations: Vec<_> = params.iter().map(|param| {
             let name = &param.name;
             let ty = &param.ty;
@@ -226,6 +306,36 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Show function: conditionally use Unstructured or FuzzInput
+    let show_fn_code = if structured {
+        quote! {
+            pub fn #show_fn_name() {
+                use std::io::Read;
+
+                let mut bytes = Vec::new();
+                std::io::stdin().read_to_end(&mut bytes)
+                    .expect("Failed to read crash input from stdin");
+
+                #show_body
+            }
+        }
+    } else {
+        quote! {
+            pub fn #show_fn_name() {
+                use arbitrary::Unstructured;
+                use std::io::Read;
+
+                let mut bytes = Vec::new();
+                std::io::stdin().read_to_end(&mut bytes)
+                    .expect("Failed to read crash input from stdin");
+
+                let mut u = Unstructured::new(&bytes);
+
+                #show_body
+            }
+        }
+    };
+
     // Generate coverage-related code from coverage module
     let coverage_code = coverage::all_coverage_code();
 
@@ -235,6 +345,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the load_inputs_from_dir helper function
     let load_inputs_fn = corpus::load_inputs_into_memory();
 
+    // Convert action_type to TokenStream for passing to codegen functions
+    let action_type_tokens: Option<proc_macro2::TokenStream> = action_type.as_ref().map(|ty| quote! { #ty });
+
     // Generate mode-specific code
     let dry_run_code = modes::dry_run_mode(
         &mod_name,
@@ -242,6 +355,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         fn_name,
         &simple_deser_stmts,
         &call_args,
+        structured,
     );
 
     let replay_code = modes::replay_mode(
@@ -250,6 +364,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         fn_name,
         &simple_deser_stmts,
         &call_args,
+        structured,
     );
 
     let coverage_only_code = modes::coverage_only_mode(
@@ -258,6 +373,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         fn_name,
         &simple_deser_stmts,
         &call_args,
+        structured,
     );
 
     let cmin_code = corpus::cmin_mode(
@@ -276,6 +392,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &feature_name,
         &deser_stmts,
         &call_args,
+        structured,
+        action_type_tokens.as_ref(),
     );
 
     let singlecore_code = singlecore::singlecore_mode(
@@ -286,7 +404,16 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &feature_name,
         &deser_stmts,
         &call_args,
+        structured,
+        action_type_tokens.as_ref(),
     );
+
+    // Conditionally include Unstructured import
+    let unstructured_import = if structured {
+        quote! {}
+    } else {
+        quote! { use arbitrary::Unstructured; }
+    };
 
     let expanded = quote! {
         #input_fn
@@ -300,19 +427,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             #coverage_code
         }
 
-        pub fn #show_fn_name() {
-            use arbitrary::Unstructured;
-            use std::io::Read;
+        #[cfg(feature = #feature_name)]
+        #show_fn_code
 
-            let mut bytes = Vec::new();
-            std::io::stdin().read_to_end(&mut bytes)
-                .expect("Failed to read crash input from stdin");
-
-            let mut u = Unstructured::new(&bytes);
-
-            #show_body
-        }
-
+        #[cfg(feature = #feature_name)]
         fn main() {
             if std::env::var("SHOW_CRASH").is_ok() {
                 #show_fn_name();
@@ -336,7 +454,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             use libafl_bolts::tuples::tuple_list;
             use libafl_bolts::{current_nanos, rands::StdRand, AsSlice, hash_std};
             use std::time::Duration;
-            use arbitrary::Unstructured;
+            #unstructured_import
 
             // Parse environment variables for new modes
             let dry_run_mode = std::env::var("FUZZ_DRY_RUN").is_ok();

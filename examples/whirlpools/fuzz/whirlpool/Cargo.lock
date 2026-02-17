@@ -152,6 +152,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "anchor-attribute-access-control"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "proc-macro2",
@@ -162,6 +163,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-account"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "bs58",
@@ -173,6 +175,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-constant"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "quote",
@@ -182,6 +185,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-error"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "quote",
@@ -191,6 +195,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-event"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "proc-macro2",
@@ -201,8 +206,9 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-program"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
- "anchor-lang-idl",
+ "anchor-lang-idl 0.1.2 (git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing)",
  "anchor-syn",
  "anyhow",
  "bs58",
@@ -216,6 +222,7 @@ dependencies = [
 [[package]]
 name = "anchor-derive-accounts"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "quote",
@@ -225,6 +232,7 @@ dependencies = [
 [[package]]
 name = "anchor-derive-serde"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-syn",
  "proc-macro2",
@@ -235,6 +243,7 @@ dependencies = [
 [[package]]
 name = "anchor-derive-space"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -242,43 +251,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "anchor-fuzz-gen"
-version = "0.1.0"
-dependencies = [
- "anchor-lang-idl",
- "anyhow",
- "bs58",
- "heck 0.5.0",
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.114",
-]
-
-[[package]]
-name = "anchor-fuzz-macro"
-version = "0.1.0"
-dependencies = [
- "anchor-macro-utils",
- "proc-macro2",
- "quote",
- "syn 2.0.114",
-]
-
-[[package]]
-name = "anchor-invariant-macro"
-version = "0.1.0"
-dependencies = [
- "anchor-macro-utils",
- "proc-macro2",
- "quote",
- "syn 2.0.114",
-]
-
-[[package]]
 name = "anchor-lang"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-attribute-access-control",
  "anchor-attribute-account",
@@ -321,8 +296,23 @@ dependencies = [
 [[package]]
 name = "anchor-lang-idl"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e8599d21995f68e296265aa5ab0c3cef582fd58afec014d01bd0bce18a4418"
 dependencies = [
- "anchor-lang-idl-spec",
+ "anchor-lang-idl-spec 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "anyhow",
+ "heck 0.3.3",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "anchor-lang-idl"
+version = "0.1.2"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
+dependencies = [
+ "anchor-lang-idl-spec 0.1.0 (git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing)",
  "anyhow",
  "heck 0.3.3",
  "serde",
@@ -333,23 +323,26 @@ dependencies = [
 [[package]]
 name = "anchor-lang-idl-spec"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bdf143115440fe621bdac3a29a1f7472e09f6cd82b2aa569429a0c13f103838"
 dependencies = [
  "anyhow",
  "serde",
 ]
 
 [[package]]
-name = "anchor-macro-utils"
+name = "anchor-lang-idl-spec"
 version = "0.1.0"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.114",
+ "anyhow",
+ "serde",
 ]
 
 [[package]]
 name = "anchor-spl"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anchor-lang",
  "spl-associated-token-account-interface",
@@ -363,6 +356,7 @@ dependencies = [
 [[package]]
 name = "anchor-syn"
 version = "0.32.1"
+source = "git+https://github.com/asymmetric-research/anchor-fuzzing?branch=feature%2Ffuzzing#e342859a65ce7046762db66b0a1204e0bbbdacdc"
 dependencies = [
  "anyhow",
  "bs58",
@@ -374,45 +368,6 @@ dependencies = [
  "sha2 0.10.9",
  "syn 1.0.109",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "anchor-test"
-version = "0.1.0"
-dependencies = [
- "anchor-fuzz-macro",
- "anchor-invariant-macro",
- "anchor-lang",
- "anchor-spl",
- "anchor-test-context",
- "anyhow",
- "rand 0.8.5",
-]
-
-[[package]]
-name = "anchor-test-context"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "anyhow",
- "borsh 1.6.0",
- "bytemuck",
- "litesvm",
- "serde",
- "serde_json",
- "solana-account 3.2.0",
- "solana-hash 3.1.0",
- "solana-keypair",
- "solana-message 3.0.1",
- "solana-program-runtime",
- "solana-pubkey 3.0.0",
- "solana-sbpf",
- "solana-signature 3.1.0",
- "solana-signer 3.0.0",
- "solana-transaction",
- "solana-transaction-context",
- "solana-transaction-error 3.0.0",
- "spl-token 9.0.0",
 ]
 
 [[package]]
@@ -1019,6 +974,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "cargo_toml"
+version = "0.20.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88da5a13c620b4ca0078845707ea9c3faf11edbc3ffd8497d11d686211cd1ac0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1074,59 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "codama-errors"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6485d98de3a1cfd25975cc5afca9c8e03da3ae85c0e4ef1ad818579f7fdc640a"
+dependencies = [
+ "cargo_toml",
+ "proc-macro2",
+ "serde_json",
+ "syn 2.0.114",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "codama-nodes"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b4a10746031fb835ee90b0f1d67844de91e938d93df6167129325bb886a5da"
+dependencies = [
+ "codama-errors",
+ "codama-nodes-derive",
+ "derive_more",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "codama-nodes-derive"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e195f4c7b6a93180a3eb59ba53016d4ea4bbef212f78fa6a04835fe244cb3da1"
+dependencies = [
+ "codama-errors",
+ "codama-syn-helpers",
+ "derive_more",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "codama-syn-helpers"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13dd908283642bba89c720b5f58d43746e7a3506a960b90357ce64e160381374"
+dependencies = [
+ "codama-errors",
+ "derive_more",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -1208,6 +1226,101 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crucible-fuzz-macro"
+version = "0.1.0"
+dependencies = [
+ "crucible-macro-utils",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "crucible-fuzz-runtime"
+version = "0.1.0"
+dependencies = [
+ "libafl",
+ "libafl_bolts",
+]
+
+[[package]]
+name = "crucible-fuzzer"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "anyhow",
+ "crucible-fuzz-macro",
+ "crucible-fuzz-runtime",
+ "crucible-invariant-macro",
+ "crucible-test-context",
+ "rand 0.8.5",
+]
+
+[[package]]
+name = "crucible-idl-gen"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang-idl 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "anyhow",
+ "bs58",
+ "codama-nodes",
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "crucible-invariant-macro"
+version = "0.1.0"
+dependencies = [
+ "crucible-macro-utils",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "crucible-macro-utils"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "crucible-test-context"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anyhow",
+ "borsh 1.6.0",
+ "bytemuck",
+ "litesvm",
+ "once_cell",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "solana-account 3.2.0",
+ "solana-hash 3.1.0",
+ "solana-keypair",
+ "solana-message 3.0.1",
+ "solana-program-runtime",
+ "solana-pubkey 3.0.0",
+ "solana-sbpf",
+ "solana-signature 3.1.0",
+ "solana-signer 3.0.0",
+ "solana-transaction",
+ "solana-transaction-context",
+ "solana-transaction-error 3.0.0",
+ "spl-token 9.0.0",
 ]
 
 [[package]]
@@ -1371,6 +1484,26 @@ name = "derive_arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "derive_more"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9b99b9cbbe49445b21764dc0625032a89b145a2642e67603e1c936f5458d05"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7330aeadfbe296029522e6c40f315320aba36fc43a5b3632f3795348f3bd22"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2551,7 +2684,7 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d6ea3c4595b96363c13943497db34af4460fb474a95c43f4446ad341b8c9785"
 dependencies = [
- "toml",
+ "toml 0.5.11",
 ]
 
 [[package]]
@@ -2560,7 +2693,7 @@ version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219cb19e96be00ab2e37d6e299658a0cfa83e52429179969b0f0121b4ac46983"
 dependencies = [
- "toml_edit",
+ "toml_edit 0.23.10+spec-1.0.0",
 ]
 
 [[package]]
@@ -2739,6 +2872,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f7d92ca342cea22a06f2121d944b4fd82af56988c270852495420f961d4ace"
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2876,6 +3015,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -6015,6 +6163,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned",
+ "toml_datetime 0.6.11",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6025,12 +6194,26 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime 0.6.11",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
+name = "toml_edit"
 version = "0.23.10+spec-1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269"
 dependencies = [
  "indexmap",
- "toml_datetime",
+ "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "winnow",
 ]
@@ -6043,6 +6226,12 @@ checksum = "a3198b4b0a8e11f09dd03e133c0280504d0801269e9afa46362ffde1cbeebf44"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tuple_list"
@@ -6275,13 +6464,13 @@ dependencies = [
 name = "whirlpool_fuzz"
 version = "0.1.0"
 dependencies = [
- "anchor-fuzz-gen",
  "anchor-lang",
- "anchor-test",
- "anchor-test-context",
  "anyhow",
  "arbitrary",
  "bytemuck",
+ "crucible-fuzzer",
+ "crucible-idl-gen",
+ "crucible-test-context",
  "ctrlc",
  "libafl",
  "libafl_bolts",

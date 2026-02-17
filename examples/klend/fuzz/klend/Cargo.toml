@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
 crucible-test-context = { path = "../../../../crates/crucible-test-context" }
-anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
 crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
+anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }

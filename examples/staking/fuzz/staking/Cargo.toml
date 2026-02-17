@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
 crucible-test-context = { path = "../../../../crates/crucible-test-context" }
-anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
+anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 arbitrary = { version = "1", features = ["derive"] }
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
@@ -18,6 +18,8 @@ solana-pubkey = "3.0"
 solana-signer = "3.0"
 
 staking = { path = "../../programs/staking", features = ["no-entrypoint"] }
+ctrlc = "3.4"
+serde_json = "1.0"
 
 [features]
 fuzz_staking = []

@@ -160,7 +160,6 @@ impl MarginfiFixture {
             .accounts(accounts::LendingAccountStartFlashloan {
                 marginfi_account,
                 authority: user.keypair.pubkey(),
-                ixs_sysvar: sysvar::instructions::id(),
             })
             .signers(&[&*user.keypair])
             .add_transaction();
@@ -349,7 +348,6 @@ impl MarginfiFixture {
                 authority: user.keypair.pubkey(),
                 new_authority: user.keypair.pubkey(),
                 global_fee_wallet: self.global_fee_wallet,
-                system_program: system_program::ID,
             })
             .signers(&[&*user.keypair, &new_marginfi_account]);
 
@@ -667,8 +665,6 @@ mod fixture_helpers {
             .accounts(accounts::InitGlobalFeeState {
                 payer: admin.pubkey(),
                 fee_state,
-                rent: sysvar::rent::id(),
-                system_program: system_program::ID,
             })
             .signers(&[&**admin])
             .send()
@@ -691,7 +687,6 @@ mod fixture_helpers {
                 marginfi_group: group.pubkey(),
                 admin: admin.pubkey(),
                 fee_state: *fee_state,
-                system_program: system_program::ID,
             })
             .signers(&[&**admin, &group])
             .send()
@@ -759,9 +754,7 @@ mod fixture_helpers {
                 insurance_vault,
                 fee_vault_authority,
                 fee_vault,
-                rent: sysvar::rent::id(),
                 token_program: spl_token::id(),
-                system_program: system_program::ID,
             })
             .signers(&[&**admin, &bank])
             .send()
@@ -809,7 +802,6 @@ mod fixture_helpers {
                 marginfi_account: marginfi_account.pubkey(),
                 authority: keypair.pubkey(),
                 fee_payer: keypair.pubkey(),
-                system_program: system_program::ID,
             })
             .signers(&[&*keypair, &marginfi_account])
             .send()
@@ -892,6 +884,7 @@ fn usdc_bank_config() -> BankConfigCompact {
 // Invariant Test
 // ============================================================================
 
+#[cfg(feature = "invariant_test")]
 #[invariant_test]
 fn invariant_test(fixture: &mut MarginfiFixture) {
     bad_debt_check(fixture);

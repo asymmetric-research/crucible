@@ -35,7 +35,7 @@ impl StakingFixture {
         let program_id = Pubkey::new_from_array(ID.to_bytes());
         
         // Load program
-        ctx.add_program(&program_id, "target/deploy/staking.so").unwrap();
+        ctx.add_program(&program_id, "../../target/deploy/staking.so").unwrap();
         
         let (pool_pda, _) = Pubkey::find_program_address(&[b"pool"], &program_id);
         let current_slot = ctx.slot();
@@ -291,7 +291,7 @@ impl StakingFixtureSingleTransaction {
         let program_id = Pubkey::new_from_array(ID.to_bytes());
 
         // Load program
-        ctx.add_program(&program_id, "target/deploy/staking.so").unwrap();
+        ctx.add_program(&program_id, "../../target/deploy/staking.so").unwrap();
 
         let (pool_pda, _) = Pubkey::find_program_address(&[b"pool"], &program_id);
         let current_slot = ctx.slot();

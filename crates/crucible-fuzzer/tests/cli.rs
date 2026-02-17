@@ -290,6 +290,42 @@ test_feature = []
     );
 }
 
+#[test]
+fn test_run_max_actions_message() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    // Create minimal fuzz structure
+    let fuzz_dir = temp.path().join("fuzz/test_prog");
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "test_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[features]
+test_feature = []
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--max-actions", "20", "--dry-run"],
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // CLI should print message about max actions
+    assert!(
+        stdout.contains("20") && stdout.contains("ax actions"),
+        "CLI should acknowledge max-actions setting in output, got: {}", stdout
+    );
+}
+
 // =============================================================================
 // anchor fuzz list
 // =============================================================================
@@ -523,6 +559,13 @@ edition = "2021"
     assert!(stdout.contains("action_deposit"), "should show first action");
     assert!(stdout.contains("action_withdraw"), "should show second action");
     assert!(stdout.contains("2 actions"), "should show action count");
+
+    // Parameter value assertions
+    assert!(stdout.contains("user=0"), "should show user param value for deposit");
+    assert!(stdout.contains("amount=500"), "should show amount param value for deposit");
+    assert!(stdout.contains("amount=1000"), "should show amount param value for withdraw");
+    assert!(stdout.contains("OK"), "should show success status");
+    assert!(stdout.contains("FAIL"), "should show failure status");
 }
 
 #[test]
@@ -556,6 +599,180 @@ edition = "2021"
     assert!(
         stderr.contains("not found") || stderr.contains("Crash metadata not found"),
         "error should indicate crash not found"
+    );
+}
+
+#[test]
+fn test_show_crash_metadata_with_params() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    let fuzz_dir = temp.path().join("fuzz/my_prog");
+    let crashes_dir = fuzz_dir.join("crashes/invariant_test");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "my_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    // Crash metadata with diverse parameter types including no-param action
+    fs::write(
+        crashes_dir.join("crash_params.meta.json"),
+        r#"{
+            "test_name": "invariant_test",
+            "timestamp": "2026-02-10T08:00:00Z",
+            "iteration": 50,
+            "actions": [
+                {"name": "action_deposit", "params": {"user": 1, "amount": 999}, "success": true},
+                {"name": "action_noop", "params": {}, "success": true},
+                {"name": "action_withdraw", "params": {"user": 2, "amount": 42}, "success": false}
+            ]
+        }"#,
+    ).unwrap();
+
+    let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_params"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "show should succeed");
+
+    // Numbers render correctly
+    assert!(stdout.contains("user=1"), "should show user=1 for deposit");
+    assert!(stdout.contains("amount=999"), "should show amount=999 for deposit");
+    assert!(stdout.contains("user=2"), "should show user=2 for withdraw");
+    assert!(stdout.contains("amount=42"), "should show amount=42 for withdraw");
+
+    // No-param action should not have parens
+    // Expected format: "2. action_noop -> OK" (not "action_noop() -> OK")
+    assert!(
+        stdout.contains("action_noop -> OK") || stdout.contains("action_noop ->"),
+        "no-param action should show without parens: {}",
+        stdout
+    );
+
+    // Actions numbered sequentially
+    assert!(stdout.contains("1."), "should have numbered action 1");
+    assert!(stdout.contains("2."), "should have numbered action 2");
+    assert!(stdout.contains("3."), "should have numbered action 3");
+
+    // Status indicators
+    assert!(stdout.contains("OK"), "should show OK for success");
+    assert!(stdout.contains("FAIL"), "should show FAIL for failure");
+    assert!(stdout.contains("3 actions"), "should show 3 actions in header");
+}
+
+#[test]
+fn test_show_crash_metadata_action_format() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    let fuzz_dir = temp.path().join("fuzz/my_prog");
+    let crashes_dir = fuzz_dir.join("crashes/invariant_test");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "my_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    fs::write(
+        crashes_dir.join("crash_fmt.meta.json"),
+        r#"{
+            "test_name": "invariant_test",
+            "timestamp": "2026-02-10T09:00:00Z",
+            "iteration": 7,
+            "actions": [
+                {"name": "action_deposit", "params": {"user": 0, "amount": 500}, "success": true},
+                {"name": "action_withdraw", "params": {"user": 0, "amount": 1000}, "success": false},
+                {"name": "action_noop", "params": {}, "success": true}
+            ]
+        }"#,
+    ).unwrap();
+
+    let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_fmt"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "show should succeed");
+
+    // Verify exact format patterns for each action line
+    assert!(
+        stdout.contains("action_deposit(") && stdout.contains(") -> OK"),
+        "action with params + success should show: action_deposit(...) -> OK\ngot: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("action_withdraw(") && stdout.contains(") -> FAIL"),
+        "action with params + failure should show: action_withdraw(...) -> FAIL\ngot: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("action_noop -> OK"),
+        "action without params should show: action_noop -> OK\ngot: {}",
+        stdout
+    );
+
+    // Header should show action count
+    assert!(stdout.contains("3 actions"), "header should show '3 actions'");
+}
+
+#[test]
+fn test_show_crash_replay_hint() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    let fuzz_dir = temp.path().join("fuzz/my_prog");
+    let crashes_dir = fuzz_dir.join("crashes/invariant_test");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "my_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    fs::write(
+        crashes_dir.join("crash_hint.meta.json"),
+        r#"{
+            "test_name": "invariant_test",
+            "timestamp": "2026-02-10T10:00:00Z",
+            "iteration": 1,
+            "actions": [
+                {"name": "action_deposit", "params": {"amount": 100}, "success": true}
+            ]
+        }"#,
+    ).unwrap();
+
+    let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_hint"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "show should succeed");
+    assert!(
+        stdout.contains("To replay this crash") && stdout.contains("crucible show"),
+        "should show replay hint message\ngot: {}",
+        stdout
     );
 }
 

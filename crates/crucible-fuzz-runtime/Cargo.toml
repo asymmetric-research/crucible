@@ -1,0 +1,10 @@
+[package]
+name = "crucible-fuzz-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Runtime support for structured fuzzing with crucible-fuzzer"
+
+[dependencies]
+libafl = { version = "0.15.1", features = ["std", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }

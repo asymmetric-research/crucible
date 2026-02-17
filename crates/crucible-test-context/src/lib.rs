@@ -62,6 +62,20 @@ pub use litesvm::InvocationInspectCallback;
 pub use serde_json;
 
 // ============================================================================
+// Global Action Counter (for monitor: actions/exec metric)
+// ============================================================================
+
+/// Global counter of total actions dispatched across all iterations.
+/// Used with TOTAL_EXECUTIONS to compute average actions per execution.
+pub static TOTAL_ACTIONS_DISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Increment the global action counter by one.
+#[inline]
+pub fn increment_action_count() {
+    TOTAL_ACTIONS_DISPATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ============================================================================
 // Thread-Local State
 // ============================================================================
 
@@ -159,6 +173,30 @@ pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) 
             params,
             success,
         });
+    });
+}
+
+/// Lite action record: only records name and success, defers JSON params.
+/// Avoids serde_json::Value allocation on every action of every iteration.
+/// The params field is set to `null` and should be backfilled via
+/// `backfill_action_params` only when needed (crash/violation).
+pub fn push_action_record_lite(name: &str, success: bool) {
+    ACTION_HISTORY.with(|h| {
+        h.borrow_mut().push(ActionRecord {
+            name: name.to_string(),
+            params: serde_json::Value::Null,
+            success,
+        });
+    });
+}
+
+/// Backfill the params for a specific action record in the history.
+pub fn backfill_action_params(index: usize, params: serde_json::Value) {
+    ACTION_HISTORY.with(|h| {
+        let mut history = h.borrow_mut();
+        if let Some(record) = history.get_mut(index) {
+            record.params = params;
+        }
     });
 }
 

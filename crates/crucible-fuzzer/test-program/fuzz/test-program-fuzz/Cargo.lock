@@ -1088,6 +1088,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-fuzz-runtime"
+version = "0.1.0"
+dependencies = [
+ "libafl",
+ "libafl_bolts",
+]
+
+[[package]]
 name = "crucible-fuzzer"
 version = "0.1.0"
 dependencies = [
@@ -1095,6 +1103,7 @@ dependencies = [
  "anchor-spl",
  "anyhow",
  "crucible-fuzz-macro",
+ "crucible-fuzz-runtime",
  "crucible-invariant-macro",
  "crucible-test-context",
  "rand 0.8.5",

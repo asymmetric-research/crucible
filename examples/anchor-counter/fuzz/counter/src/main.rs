@@ -21,7 +21,7 @@ impl CounterFixture {
         let mut ctx = TestContext::new();
         let program_id = Pubkey::new_from_array(ID.to_bytes());
         
-        ctx.add_program(&program_id, "target/deploy/anchor_counter.so").unwrap();
+        ctx.add_program(&program_id, "../../target/deploy/anchor_counter.so").unwrap();
 
         let payer = Rc::new(Keypair::new());
         
@@ -78,35 +78,6 @@ impl CounterFixture {
             .map(|o| o.is_success())
             .unwrap_or(false)
     }
-}
-
-// Basic unit test
-#[test]
-fn test_increment() {
-    let mut fixture = CounterFixture::setup();
-    fixture.action_increment();
-    fixture.action_increment();
-    fixture.action_increment();
-    
-    let counter = fixture.ctx
-        .read_anchor_account::<Counter>(&fixture.counter_pda)
-        .unwrap();
-    assert_eq!(counter.count, 3);
-}
-
-// Simple single-input fuzz test
-#[anchor_fuzz]
-fn fuzz_single(fixture: &mut CounterFixture, #[range(1..100)] iterations: u64) {
-    for _ in 0..iterations {
-        fixture.action_increment();
-    }
-    
-    let counter = fixture.ctx
-        .read_anchor_account::<Counter>(&fixture.counter_pda)
-        .unwrap();
-    
-    // Invariant: count should never exceed iterations
-    fuzz_assert_le!(counter.count, iterations);
 }
 
 // Stateful invariant test - fuzzer generates random action sequences automatically

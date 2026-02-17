@@ -82,7 +82,42 @@ pub fn iteration_setup(
 /// Generate the monitor setup code
 pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
-        let monitor = SimpleMonitor::new(|s| {
+        // CSV stats file setup (when FUZZ_STATS_CSV env var is set)
+        let __stats_csv: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>> =
+            std::env::var("FUZZ_STATS_CSV").ok().map(|path| {
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true).write(true).truncate(true)
+                    .open(&path).expect("failed to open FUZZ_STATS_CSV file");
+                {
+                    use std::io::Write;
+                    writeln!(f, "elapsed_secs,executions,exec_sec,corpus,crashes,edges,total_edges,edge_pct,branches,total_branches,branch_pct").unwrap();
+                    f.flush().unwrap();
+                }
+                std::sync::Arc::new(std::sync::Mutex::new(f))
+            });
+        let __csv_ref = __stats_csv.clone();
+
+        let monitor = SimpleMonitor::new(move |s| {
+            // Helper to parse numeric values from LibAFL's monitor string
+            // Handles SI suffixes: k (1000), M (1000000)
+            fn __parse_monitor_val(s: &str, key: &str) -> f64 {
+                s.find(key)
+                    .and_then(|i| {
+                        let rest = &s[i + key.len()..];
+                        let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
+                            .unwrap_or(rest.len());
+                        let token = rest[..end].trim();
+                        if let Some(num) = token.strip_suffix('k') {
+                            num.parse::<f64>().ok().map(|v| v * 1000.0)
+                        } else if let Some(num) = token.strip_suffix('M') {
+                            num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
+                        } else {
+                            token.parse().ok()
+                        }
+                    })
+                    .unwrap_or(0.0)
+            }
+
             let s = s.replace("objectives", "crashes");
             // Remove LibAFL's "edges: N" if present (we add our own program-level stats)
             let s = {
@@ -102,11 +137,37 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
             let total_edges: usize = #mod_name::PROGRAM_TOTALS.get().map(|t| t.values().sum()).unwrap_or(0);
             let total_branches = total_edges / 2;
             // Append program-level coverage stats to LibAFL's output
-            if let Some(idx) = s.find("exec/sec:") {
+            if let Some(_idx) = s.find("exec/sec:") {
                 let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                 let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
-                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
-                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct);
+                let total_actions = crucible_test_context::TOTAL_ACTIONS_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed);
+                let execs_for_avg = #mod_name::TOTAL_EXECUTIONS.load(std::sync::atomic::Ordering::Relaxed);
+                let avg_actions = if execs_for_avg > 0 { total_actions as f64 / execs_for_avg as f64 } else { 0.0 };
+                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}",
+                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions);
+
+                // Write CSV stats row if enabled
+                if let Some(ref csv) = __csv_ref {
+                    let elapsed = #mod_name::FUZZER_START_TIME.get()
+                        .map(|start| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() - start
+                        })
+                        .unwrap_or(0);
+                    let execs = #mod_name::TOTAL_EXECUTIONS.load(std::sync::atomic::Ordering::Relaxed);
+                    let exec_sec = __parse_monitor_val(&s, "exec/sec: ");
+                    let corpus_count = __parse_monitor_val(&s, "corpus: ") as u64;
+                    let crashes_count = __parse_monitor_val(&s, "crashes: ") as u64;
+                    if let Ok(mut f) = csv.lock() {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{},{},{:.1},{},{},{},{},{:.1},{},{},{:.1}",
+                            elapsed, execs, exec_sec, corpus_count, crashes_count,
+                            true_edges, total_edges, edge_pct, branches, total_branches, branch_pct);
+                        let _ = f.flush();
+                    }
+                }
             } else { println!("{s}"); }
         });
         let mut mgr = SimpleEventManager::new(monitor);
@@ -230,11 +291,32 @@ pub fn harness_wrapper_code(
     }
 }
 
-/// Generate the mutator and stages setup
+/// Generate the mutator and stages setup (arbitrary mode - havoc mutations)
 pub fn mutator_stages_setup() -> proc_macro2::TokenStream {
     quote! {
         let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
             .expect("failed to create mutator");
+        let power_stage = StdPowerMutationalStage::new(mutator);
+        let mut stages = tuple_list!(power_stage);
+    }
+}
+
+/// Generate the mutator and stages setup for structured mode
+/// Uses custom SequenceMutator, ParamMutator, CrossoverMutator instead of havoc
+pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! {
+        let __fuzz_max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let seq_mutator = crucible_fuzzer::SequenceMutator::<#action_type>::new(__fuzz_max_actions);
+        let param_mutator = crucible_fuzzer::ParamMutator::<#action_type>::new();
+        let cross_mutator = crucible_fuzzer::CrossoverMutator::<#action_type>::new(__fuzz_max_actions);
+        let mutator = StdMOptMutator::new(
+            &mut state,
+            tuple_list!(seq_mutator, param_mutator, cross_mutator),
+            7, 5
+        ).expect("failed to create structured mutator");
         let power_stage = StdPowerMutationalStage::new(mutator);
         let mut stages = tuple_list!(power_stage);
     }
@@ -301,12 +383,40 @@ pub fn load_corpus_from_dir() -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the default seed input code
+/// Generate the default seed input code (arbitrary mode)
 pub fn add_default_seed() -> proc_macro2::TokenStream {
     quote! {
         let input = BytesInput::new(vec![0u8; 256]);
         fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
             .expect("failed to add seed input");
+    }
+}
+
+/// Generate the default seed input code for structured mode
+/// Uses ActionGenerator to create properly-formatted seed inputs
+pub fn structured_add_default_seed(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    quote! {
+        {
+            use libafl::generators::Generator;
+            let __seed_max: usize = std::env::var("FUZZ_MAX_ACTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10)
+                .min(4);
+            let mut gen = crucible_fuzzer::ActionGenerator::<#action_type>::new(1, __seed_max);
+            // Generate a few diverse seed inputs
+            for _ in 0..4 {
+                if let Ok(input) = gen.generate(&mut state) {
+                    let _ = fuzzer.add_input(&mut state, &mut executor, &mut mgr, input);
+                }
+            }
+            // Ensure at least one seed exists
+            if state.corpus().count() == 0 {
+                let input = BytesInput::new(vec![0u8; 256]);
+                fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                    .expect("failed to add fallback seed input");
+            }
+        }
     }
 }
 

@@ -21,7 +21,7 @@ solana-signature = "3.1"
 solana-instruction = "3.1"
 
 # anchor-lang is needed for prelude and serialization traits
-anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
+anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 # crucible-idl-gen generates complete types from IDL (including state types)
 crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" } 
 

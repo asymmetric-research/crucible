@@ -144,6 +144,7 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         // Runtime stats tracking
         pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         pub static TOTAL_EXECUTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        pub static TOTAL_ACTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
         // Static storage for total edges per program (for percentage calculation)
         pub static PROGRAM_TOTALS: std::sync::OnceLock<HashMap<u64, usize>> = std::sync::OnceLock::new();

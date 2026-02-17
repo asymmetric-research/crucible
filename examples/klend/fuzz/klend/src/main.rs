@@ -401,6 +401,8 @@ struct KlendFixture {
     lending_market_authority: Pubkey,
     reserves: Vec<ReserveData>,
     users: Vec<UserData>,
+    // Invariant tracking
+    prev_borrow_rates: Vec<[u64; 4]>,
 }
 
 #[fuzz_fixture]
@@ -592,9 +594,10 @@ impl KlendFixture {
 
                                 // Use a default exchange rate of 1:1 (collateral_mint_supply / liquidity_available)
                                 // In reality this would be computed from reserve state, but 1:1 is reasonable for fresh reserves
+                                let mint_decimals = reserve.liquidity.mint_decimals;
                                 let deposit_value = (deposit.deposited_amount as u128)
                                     .saturating_mul(price_sf)
-                                    .saturating_div(10_u128.pow(9));  // Adjust for decimals
+                                    .saturating_div(10_u128.pow(mint_decimals as u32));
 
                                 total_value = total_value.saturating_add(deposit_value);
 
@@ -1552,6 +1555,7 @@ mod fixture_helpers {
             })
             .collect();
 
+        let num_reserves = reserves.len();
         KlendFixture {
             ctx: std::mem::replace(ctx, TestContext::new()),
             program_id: *program_id,
@@ -1560,6 +1564,7 @@ mod fixture_helpers {
             lending_market_authority,
             reserves,
             users,
+            prev_borrow_rates: vec![[0u64; 4]; num_reserves],
         }
     }
 
@@ -2027,6 +2032,9 @@ mod fixture_helpers {
 #[invariant_test]
 fn invariant_test(fixture: &mut KlendFixture) {
     solvency_check(fixture);
+    reserve_liquidity_conservation(fixture);
+    no_phantom_borrows(fixture);
+    interest_rate_monotonicity(fixture);
 }
 
 fn solvency_check(fixture: &mut KlendFixture) {
@@ -2049,18 +2057,116 @@ fn solvency_check(fixture: &mut KlendFixture) {
         let borrowed_value = u64_pair_to_u128(obligation.borrowed_assets_market_value_sf);
 
         // Solvency check: borrowed should not exceed deposited significantly
-        if borrowed_value > 0 && deposited_value > 0 {
-            // Allow 10% margin for rounding, fees, and interest
-            let margin = deposited_value / 10;
-            crucible_test_context::fuzz_assert_le!(
-                borrowed_value,
-                deposited_value + margin,
-                "SOLVENCY VIOLATION: user {} has borrowed {} > deposited {} + margin {}",
-                user.keypair.pubkey(),
-                borrowed_value,
-                deposited_value,
-                margin
+        if borrowed_value > 0 {
+            if deposited_value == 0 {
+                crucible_test_context::fuzz_assert!(
+                    false,
+                    "SOLVENCY VIOLATION: user {} has borrowed {} with zero deposited value",
+                    user.keypair.pubkey(),
+                    borrowed_value
+                );
+            } else {
+                // Allow 10% margin for rounding, fees, and interest
+                let margin = deposited_value / 10;
+                crucible_test_context::fuzz_assert_le!(
+                    borrowed_value,
+                    deposited_value + margin,
+                    "SOLVENCY VIOLATION: user {} has borrowed {} > deposited {} + margin {}",
+                    user.keypair.pubkey(),
+                    borrowed_value,
+                    deposited_value,
+                    margin
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: SPL token vault balance >= reserve.liquidity.available_amount.
+/// The vault also holds accumulated protocol/referrer fees, so vault >= available.
+/// If vault < available, tokens have leaked out — a critical accounting bug.
+fn reserve_liquidity_conservation(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        // Read reserve account
+        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+        let available_amount = reserve.liquidity.available_amount;
+
+        // Read actual SPL token balance of the vault
+        let vault_balance = fixture.ctx.token_balance(&reserve_data.liquidity_supply);
+
+        crucible_test_context::fuzz_assert_ge!(
+            vault_balance,
+            available_amount,
+            "RESERVE LIQUIDITY CONSERVATION: reserve {} vault balance {} < available_amount {}",
+            reserve_data.reserve,
+            vault_balance,
+            available_amount
+        );
+    }
+}
+
+/// Invariant: If has_debt == 0, no borrow entry should have nonzero borrowed_amount_sf.
+/// This catches the dangerous case where debt exists but the flag says otherwise
+/// (could allow unauthorized withdrawals). The reverse (has_debt=1 but all zeros)
+/// is benign — has_debt is only cleared on RefreshObligation, not immediately on repay.
+fn no_phantom_borrows(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        if obligation.has_debt != 0 { continue; }
+
+        for borrow in &obligation.borrows {
+            if borrow.borrow_reserve != [0u8; 32] {
+                let borrowed_amount = u64_pair_to_u128(borrow.borrowed_amount_sf);
+                crucible_test_context::fuzz_assert!(
+                    borrowed_amount == 0,
+                    "PHANTOM BORROW: user {} has_debt=0 but borrow entry has amount {}",
+                    user.keypair.pubkey(),
+                    borrowed_amount
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: cumulative_borrow_rate can only increase (interest only accrues).
+/// A decrease would indicate an interest calculation bug.
+/// Compares all 4 words of the 256-bit BigFractionBytes value.
+fn interest_rate_monotonicity(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for (i, reserve_data) in fixture.reserves.iter().enumerate() {
+        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+        let current = reserve.liquidity.cumulative_borrow_rate_bsf.value;
+        let prev = fixture.prev_borrow_rates[i];
+
+        // Only check if we have a previous nonzero value
+        if prev != [0u64; 4] {
+            // Compare as 256-bit: [3] is most significant, [0] is least
+            let decreased = (current[3], current[2], current[1], current[0])
+                < (prev[3], prev[2], prev[1], prev[0]);
+            crucible_test_context::fuzz_assert!(
+                !decreased,
+                "INTEREST RATE DECREASED: reserve {} rate went from {:?} to {:?}",
+                reserve_data.reserve,
+                prev,
+                current
             );
         }
+
+        fixture.prev_borrow_rates[i] = current;
     }
 }

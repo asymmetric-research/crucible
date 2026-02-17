@@ -16,9 +16,24 @@ pub fn dry_run_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
     let init_program_binaries = codegen::init_program_binaries(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    // For arbitrary mode, they reference u (Unstructured)
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = seed_bytes;
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&seed_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
 
     quote! {
         // === DRY-RUN MODE ===
@@ -78,9 +93,7 @@ pub fn dry_run_mode(
                 vec![0u8; 256]
             };
 
-            let mut u = Unstructured::new(&seed_bytes);
-
-            #(#simple_deser_stmts)*
+            #deser_block
 
             #fn_name(#(#call_args),*);
 
@@ -105,8 +118,22 @@ pub fn replay_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = input_bytes;
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&input_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
 
     quote! {
         // === SINGLE INPUT REPLAY MODE ===
@@ -142,9 +169,7 @@ pub fn replay_mode(
             crucible_test_context::set_current_iteration(0);
 
             // Parse input and run test
-            let mut u = Unstructured::new(&input_bytes);
-
-            #(#simple_deser_stmts)*
+            #deser_block
 
             // Clear any previous action sequence
             crucible_test_context::clear_action_history();
@@ -175,9 +200,23 @@ pub fn coverage_only_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
     let init_program_binaries = codegen::init_program_binaries(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = input_bytes.clone();
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&input_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
 
     quote! {
         // === COVERAGE-ONLY MODE ===
@@ -249,12 +288,9 @@ pub fn coverage_only_mode(
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
 
-                // Create fresh Unstructured for parsing
-                let mut u = Unstructured::new(&input_bytes);
-
                 // Run the test in a closure to handle deserialization failures
                 let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #(#simple_deser_stmts)*
+                    #deser_block
 
                     #fn_name(#(#call_args),*);
                 }));

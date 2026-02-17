@@ -24,8 +24,78 @@ pub fn multicore_mode(
     feature_name: &str,
     deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
+
+    // Conditional code for structured vs arbitrary mode
+    let unstructured_init = if structured {
+        quote! {}
+    } else {
+        quote! { let mut u = Unstructured::new(slice); }
+    };
+
+    // Max input size: 1024 for both modes (structured max valid ~336 bytes, 1024 is 3x headroom)
+    let max_size_setup = quote! { state.set_max_size(1024); };
+
+    let default_seed_code = if structured {
+        let at = action_type.unwrap();
+        quote! {
+            {
+                use libafl::generators::Generator;
+                let __seed_max: usize = std::env::var("FUZZ_MAX_ACTIONS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(10)
+                    .min(4);
+                let mut gen = crucible_fuzzer::ActionGenerator::<#at>::new(1, __seed_max);
+                for _ in 0..4 {
+                    if let Ok(input) = gen.generate(&mut state) {
+                        let _ = fuzzer.add_input(&mut state, &mut executor, &mut mgr, input);
+                    }
+                }
+                if state.corpus().count() == 0 {
+                    let input = BytesInput::new(vec![0u8; 256]);
+                    fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                        .expect("failed to add fallback seed");
+                }
+            }
+        }
+    } else {
+        quote! {
+            let input = BytesInput::new(vec![0u8; 256]);
+            fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
+                .expect("failed to add default seed");
+        }
+    };
+
+    let mutator_setup = if structured {
+        let at = action_type.unwrap();
+        quote! {
+            let __fuzz_max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
+            let seq_mutator = crucible_fuzzer::SequenceMutator::<#at>::new(__fuzz_max_actions);
+            let param_mutator = crucible_fuzzer::ParamMutator::<#at>::new();
+            let cross_mutator = crucible_fuzzer::CrossoverMutator::<#at>::new(__fuzz_max_actions);
+            let mutator = StdMOptMutator::new(
+                &mut state,
+                tuple_list!(seq_mutator, param_mutator, cross_mutator),
+                7, 5
+            ).expect("failed to create structured mutator");
+            let power_stage = StdPowerMutationalStage::new(mutator);
+            let mut stages = tuple_list!(power_stage);
+        }
+    } else {
+        quote! {
+            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
+                .expect("failed to create mutator");
+            let power_stage = StdPowerMutationalStage::new(mutator);
+            let mut stages = tuple_list!(power_stage);
+        }
+    };
 
     quote! {
         // === MULTI-CORE MODE ===
@@ -121,6 +191,21 @@ pub fn multicore_mode(
             shared_branch_shmem.fill(0);
             let shared_branch_ptr = shared_branch_shmem.as_slice().as_ptr() as *mut u8;
 
+            // Allocate shared memory for cross-process action counter (8 bytes for AtomicU64)
+            let mut shared_actions_shmem = shmem_provider
+                .new_shmem(8)
+                .expect("failed to allocate shared action counter");
+            shared_actions_shmem.fill(0);
+            let shared_actions_ptr = shared_actions_shmem.as_slice().as_ptr() as *mut u8;
+
+            // Allocate shared memory for cross-process execution counter (8 bytes for AtomicU64)
+            // Batched together with shared_actions to ensure accurate actions/exec ratio
+            let mut shared_execs_shmem = shmem_provider
+                .new_shmem(8)
+                .expect("failed to allocate shared execution counter");
+            shared_execs_shmem.fill(0);
+            let shared_execs_ptr = shared_execs_shmem.as_slice().as_ptr() as *mut u8;
+
             // Setup shared corpus directory for multi-core mode
             let shared_corpus_dir = corpus_out_dir.clone()
                 .unwrap_or_else(|| {
@@ -181,6 +266,25 @@ pub fn multicore_mode(
 
             // Clone corpus dir for monitor closure
             let shared_corpus_dir_for_monitor = shared_corpus_dir.clone();
+
+            // CSV stats file setup for multi-core mode (when FUZZ_STATS_CSV env var is set)
+            let __mc_start_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let __stats_csv_mc: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>> =
+                std::env::var("FUZZ_STATS_CSV").ok().map(|path| {
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true).write(true).truncate(true)
+                        .open(&path).expect("failed to open FUZZ_STATS_CSV file");
+                    {
+                        use std::io::Write;
+                        writeln!(f, "elapsed_secs,executions,exec_sec,corpus,crashes,edges,total_edges,edge_pct,branches,total_branches,branch_pct").unwrap();
+                        f.flush().unwrap();
+                    }
+                    std::sync::Arc::new(std::sync::Mutex::new(f))
+                });
+            let __csv_ref_mc = __stats_csv_mc.clone();
 
             // Monitor for aggregated stats across all workers
             // Uses rate-limited caching to avoid expensive operations on every callback
@@ -263,9 +367,61 @@ pub fn multicore_mode(
                         if line.contains("exec/sec:") {
                             let edge_pct = if total_edges > 0 { (cached_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                             let branch_pct = if total_branches > 0 { (cached_branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
+                            // Read total actions and executions from shared memory
+                            // Both counters are flushed together by workers, ensuring accurate ratio
+                            let shared_total_actions = unsafe {
+                                let counter = &*(shared_actions_ptr as *const std::sync::atomic::AtomicU64);
+                                counter.load(std::sync::atomic::Ordering::Relaxed)
+                            };
+                            let shared_execs = unsafe {
+                                let counter = &*(shared_execs_ptr as *const std::sync::atomic::AtomicU64);
+                                counter.load(std::sync::atomic::Ordering::Relaxed)
+                            };
+                            let avg_actions = if shared_execs > 0 {
+                                shared_total_actions as f64 / shared_execs as f64
+                            } else { 0.0 };
 
-                            println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%)",
-                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct);
+                            println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}",
+                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions);
+
+                            // Write CSV stats row if enabled
+                            if let Some(ref csv) = __csv_ref_mc {
+                                // Handles SI suffixes: k (1000), M (1000000)
+                                fn __parse_mc_val(s: &str, key: &str) -> f64 {
+                                    s.find(key)
+                                        .and_then(|i| {
+                                            let rest = &s[i + key.len()..];
+                                            let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
+                                                .unwrap_or(rest.len());
+                                            let token = rest[..end].trim();
+                                            if let Some(num) = token.strip_suffix('k') {
+                                                num.parse::<f64>().ok().map(|v| v * 1000.0)
+                                            } else if let Some(num) = token.strip_suffix('M') {
+                                                num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
+                                            } else {
+                                                token.parse().ok()
+                                            }
+                                        })
+                                        .unwrap_or(0.0)
+                                }
+                                let elapsed = {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    now - __mc_start_secs
+                                };
+                                let execs = __parse_mc_val(&line, "executions: ") as u64;
+                                let exec_sec = __parse_mc_val(&line, "exec/sec: ");
+                                let crashes_count = __parse_mc_val(&line, "crashes: ") as u64;
+                                if let Ok(mut f) = csv.lock() {
+                                    use std::io::Write;
+                                    let _ = writeln!(f, "{},{},{:.1},{},{},{},{},{:.1},{},{},{:.1}",
+                                        elapsed, execs, exec_sec, cached_corpus, crashes_count,
+                                        cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct);
+                                    let _ = f.flush();
+                                }
+                            }
                         } else {
                             println!("{}", line);
                         }
@@ -336,8 +492,8 @@ pub fn multicore_mode(
                         .expect("failed to create StdState")
                 });
 
-                // Cap input size to 1KB to prevent unbounded growth from havoc mutations
-                state.set_max_size(1024);
+                // Cap input size to prevent unbounded growth
+                #max_size_setup
 
                 // PowerQueueScheduler prioritizes inputs that execute faster and discover more coverage
                 let scheduler = PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::explore());
@@ -361,6 +517,11 @@ pub fn multicore_mode(
                 // Clone stop signal file path for harness closure
                 let stop_signal_for_harness = stop_signal_file_for_client.clone();
 
+                // Local accumulators for batching shared counter updates
+                // Both are flushed together every 64 iterations to ensure accurate actions/exec ratio
+                let mut __local_actions_pending: u64 = 0;
+                let mut __local_execs_pending: u64 = 0;
+
                 let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
                     // Check file-based stop signal (set by any worker on --stop-on-crash or timeout)
                     // Rate-limit this check to every 100 iterations to avoid filesystem overhead
@@ -379,7 +540,7 @@ pub fn multicore_mode(
 
                     let bytes_ref = input.target_bytes();
                     let slice = bytes_ref.as_slice();
-                    let mut u = Unstructured::new(slice);
+                    #unstructured_init
 
                     let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -417,6 +578,10 @@ pub fn multicore_mode(
                     );
                     #fixture_param_name.ctx.set_invocation_callback(callback);
 
+                    // Track action count before test function for delta calculation
+                    let actions_before = crucible_test_context::TOTAL_ACTIONS_DISPATCHED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+
                     #fn_name(#(#call_args),*);
 
                     // Flush thread-local bitmap buffers to shared memory at end of iteration.
@@ -424,9 +589,24 @@ pub fn multicore_mode(
                     // The buffering still reduces atomic ops by merging updates within the iteration.
                     #mod_name::flush_local_bitmap_buffers(shared_edge_ptr, shared_branch_ptr);
 
-                    // Rate-limit global execution counter to reduce atomic contention (update every 100 iterations)
-                    if current_iteration % 100 == 0 {
-                        #mod_name::TOTAL_EXECUTIONS.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+                    // Accumulate this iteration's action count and execution count locally
+                    let actions_this_iter = crucible_test_context::TOTAL_ACTIONS_DISPATCHED
+                        .load(std::sync::atomic::Ordering::Relaxed) - actions_before;
+                    __local_actions_pending += actions_this_iter;
+                    __local_execs_pending += 1;
+
+                    // Flush both counters together every 64 iterations to reduce atomic contention.
+                    // Flushing together ensures the actions/exec ratio is always accurate since
+                    // both numerator and denominator update atomically in lockstep.
+                    if current_iteration % 64 == 0 {
+                        unsafe {
+                            let action_counter = &*(shared_actions_ptr as *const std::sync::atomic::AtomicU64);
+                            action_counter.fetch_add(__local_actions_pending, std::sync::atomic::Ordering::Relaxed);
+                            let exec_counter = &*(shared_execs_ptr as *const std::sync::atomic::AtomicU64);
+                            exec_counter.fetch_add(__local_execs_pending, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        __local_actions_pending = 0;
+                        __local_execs_pending = 0;
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
@@ -498,18 +678,13 @@ pub fn multicore_mode(
 
                 // Ensure at least one input - ALL workers need a seed to fuzz
                 if state.corpus().count() == 0 {
-                    let input = BytesInput::new(vec![0u8; 256]);
-                    fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                        .expect("failed to add default seed");
+                    #default_seed_code
                 }
 
                 let loaded = state.corpus().count();
                 eprintln!("[Worker {}] Loaded {} corpus entries (ready to fuzz)", worker_id, loaded);
 
-                let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
-                    .expect("failed to create mutator");
-                let power_stage = StdPowerMutationalStage::new(mutator);
-                let mut stages = tuple_list!(power_stage);
+                #mutator_setup
 
                 fuzzer
                     .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)

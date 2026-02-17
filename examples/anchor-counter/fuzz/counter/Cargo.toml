@@ -3,11 +3,14 @@ name = "counter_fuzz"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
 crucible-test-context = { path = "../../../../crates/crucible-test-context" }
-anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
+anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 arbitrary = { version = "1", features = ["derive"] }
+ctrlc = "3.4"
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
 anchor_counter = { path = "../../programs/anchor-counter", features = ["no-entrypoint"] }
@@ -16,6 +19,4 @@ solana-pubkey = "3.0"
 solana-signer = "3.0"
 
 [features]
-fuzz_single = []
-invariant_increment = []
 invariant_counter = []

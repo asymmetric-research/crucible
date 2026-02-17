@@ -24,21 +24,41 @@ pub fn singlecore_mode(
     feature_name: &str,
     deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let monitor_setup = codegen::monitor_setup(mod_name);
     let common_fuzz_setup = codegen::common_fuzz_setup(mod_name, fixture_name);
     let iteration_setup = codegen::iteration_setup(fixture_param_name, mod_name);
-    let mutator_stages_setup = codegen::mutator_stages_setup();
     let exit_handlers_setup = codegen::exit_handlers_setup(mod_name);
-    let add_default_seed = codegen::add_default_seed();
     let observer_feedback_setup = codegen::singlecore_observer_feedback(mod_name);
+
+    // Use structured or arbitrary mutator/seed setup
+    let mutator_stages_setup = if structured {
+        codegen::structured_mutator_stages_setup(action_type.unwrap())
+    } else {
+        codegen::mutator_stages_setup()
+    };
+
+    let add_default_seed = if structured {
+        codegen::structured_add_default_seed(action_type.unwrap())
+    } else {
+        codegen::add_default_seed()
+    };
+
+    // Conditionally include Unstructured creation in harness
+    let unstructured_init = if structured {
+        quote! {}
+    } else {
+        quote! { let mut u = Unstructured::new(slice); }
+    };
 
     // Harness wrapper code - shared between both corpus modes
     let harness_wrapper_code = quote! {
         let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
             let bytes_ref = input.target_bytes();
             let slice = bytes_ref.as_slice();
-            let mut u = Unstructured::new(slice);
+            #unstructured_init
 
             let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -95,6 +115,11 @@ pub fn singlecore_mode(
         };
     };
 
+    // Max input size: cap to prevent unbounded growth from havoc mutations
+    // Structured: 8 actions * (2 bytes variant + ~5 fields * 8 bytes) = ~336 bytes typical max, 1024 is 3x headroom
+    // Arbitrary: 1024 matches existing cap
+    let max_size_setup = quote! { state.set_max_size(1024); };
+
     quote! {
         // === SINGLE-THREADED MODE (default) ===
 
@@ -120,8 +145,8 @@ pub fn singlecore_mode(
                 let mut state = StdState::new(rand, $corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 
-                // Cap input size to 1KB to prevent unbounded growth from havoc mutations
-                state.set_max_size(1024);
+                // Cap input size to prevent unbounded growth
+                #max_size_setup
 
                 let scheduler = PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::explore());
 

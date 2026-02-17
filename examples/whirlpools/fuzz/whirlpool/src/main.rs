@@ -7,7 +7,6 @@ use anchor_lang::system_program;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crucible_fuzzer::anchor_spl::token::spl_token;
 use crucible_fuzzer::anchor_spl::associated_token;
 
 // Generate types from IDL (no crate dependency - avoids version conflicts)
@@ -16,20 +15,6 @@ crucible_idl_gen::declare_fuzz_program!("idls/whirlpool.json");
 use whirlpool::instruction;
 use whirlpool::accounts;
 use whirlpool::types::{WhirlpoolBumps, OpenPositionBumps};
-
-// Sysvar IDs for Solana v3
-mod sysvar {
-    pub mod rent {
-        pub fn id() -> solana_pubkey::Pubkey {
-            solana_pubkey::Pubkey::new_from_array([
-                0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x5c, 0x51,
-                0x21, 0x8c, 0xc9, 0x4c, 0x3d, 0x4a, 0xf1, 0x7f,
-                0x58, 0xda, 0xee, 0x08, 0x9b, 0xa1, 0xfd, 0x44,
-                0xe3, 0xdb, 0xd9, 0x8a, 0x00, 0x00, 0x00, 0x00,
-            ])
-        }
-    }
-}
 
 // ============================================================================
 // Debug Flag
@@ -170,7 +155,7 @@ impl WhirlpoolFixture {
         let program_id = whirlpool::ID;
 
         // Load program binary (built separately from fuzz harness)
-        ctx.add_program(&program_id, "../../target/deploy/whirlpool.so").unwrap();
+        ctx.add_program(&program_id, "../../whirlpool.so").unwrap();
 
         fixture_helpers::initialize_state(&mut ctx, &program_id)
     }
@@ -216,7 +201,7 @@ impl WhirlpoolFixture {
         #[range(0..3)] user_idx: usize,
         amount: u64,
         a_to_b: bool,
-        limit_pct: u8,  // 0-100 percentage of the way to the limit
+        limit_pct: u64,  // 0-100 percentage of the way to the limit
     ) {
         let amount = (amount % 1_000_000) + 1;
         let limit_pct = (limit_pct % 101) as u128;
@@ -271,7 +256,6 @@ impl WhirlpoolFixture {
                 a_to_b,
             })
             .accounts(accounts::Swap {
-                token_program: spl_token::id(),
                 token_authority: user.keypair.pubkey(),
                 whirlpool: pool.whirlpool,
                 token_owner_account_a: user.token_account_a,
@@ -374,7 +358,6 @@ impl WhirlpoolFixture {
             })
             .accounts(accounts::IncreaseLiquidity {
                 whirlpool: pool.whirlpool,
-                token_program: spl_token::id(),
                 position_authority: user.keypair.pubkey(),
                 position: position.position,
                 position_token_account: position.position_token_account,
@@ -439,7 +422,6 @@ impl WhirlpoolFixture {
             })
             .accounts(accounts::DecreaseLiquidity {
                 whirlpool: pool.whirlpool,
-                token_program: spl_token::id(),
                 position_authority: user.keypair.pubkey(),
                 position: position.position,
                 position_token_account: position.position_token_account,
@@ -539,7 +521,6 @@ impl WhirlpoolFixture {
                 token_vault_a: pool.token_vault_a,
                 token_owner_account_b: user.token_account_b,
                 token_vault_b: pool.token_vault_b,
-                token_program: spl_token::id(),
             })
             .signers(&[&*user.keypair])
             .send();
@@ -570,8 +551,8 @@ impl WhirlpoolFixture {
     pub fn action_open_position(
         &mut self,
         #[range(0..3)] user_idx: usize,
-        tick_lower_offset: i32,
-        tick_upper_offset: i32,
+        tick_lower_offset: i64,
+        tick_upper_offset: i64,
     ) {
         // Limit to 10 positions to avoid memory issues
         if self.positions.len() >= 10 {
@@ -580,6 +561,8 @@ impl WhirlpoolFixture {
 
         // Calculate tick indices (must be multiples of tick_spacing)
         // Keep within a reasonable range around current tick (0)
+        let tick_lower_offset = tick_lower_offset as i32;
+        let tick_upper_offset = tick_upper_offset as i32;
         let tick_lower_raw = ((tick_lower_offset % 50) - 25) * (TICK_SPACING as i32);
         let tick_upper_raw = tick_lower_raw + ((tick_upper_offset.abs() % 20 + 1) * (TICK_SPACING as i32));
 
@@ -614,10 +597,6 @@ impl WhirlpoolFixture {
                 position_mint: position_mint.pubkey(),
                 position_token_account,
                 whirlpool: pool.whirlpool,
-                token_program: spl_token::id(),
-                system_program: system_program::ID,
-                rent: sysvar::rent::id(),
-                associated_token_program: associated_token::ID,
             })
             .signers(&[&*user.keypair, &position_mint])
             .send();
@@ -674,7 +653,6 @@ impl WhirlpoolFixture {
                 position: position.position,
                 position_mint: position.position_mint,
                 position_token_account: position.position_token_account,
-                token_program: spl_token::id(),
             })
             .signers(&[&*user.keypair])
             .send();
@@ -736,10 +714,6 @@ impl WhirlpoolFixture {
                 position_mint: position_mint.pubkey(),
                 position_token_account,
                 whirlpool: pool.whirlpool,
-                token_program: spl_token::id(),
-                system_program: system_program::ID,
-                rent: sysvar::rent::id(),
-                associated_token_program: associated_token::ID,
             })
             .signers(&[&*user.keypair, &position_mint])
             .send();
@@ -992,7 +966,6 @@ mod fixture_helpers {
             .accounts(accounts::InitializeConfig {
                 config: config.pubkey(),
                 funder: admin.pubkey(),
-                system_program: system_program::ID,
             })
             .signers(&[&**admin, &config])
             .send();
@@ -1034,7 +1007,6 @@ mod fixture_helpers {
                 fee_tier,
                 funder: admin.pubkey(),
                 fee_authority: admin.pubkey(),
-                system_program: system_program::ID,
             })
             .signers(&[&**admin])
             .send();
@@ -1122,9 +1094,6 @@ mod fixture_helpers {
                 token_vault_a: token_vault_a.pubkey(),
                 token_vault_b: token_vault_b.pubkey(),
                 fee_tier: *fee_tier,
-                token_program: spl_token::id(),
-                system_program: system_program::ID,
-                rent: sysvar::rent::id(),
             })
             .signers(&[&**admin, &token_vault_a, &token_vault_b])
             .send();
@@ -1187,7 +1156,6 @@ mod fixture_helpers {
                     whirlpool: *whirlpool,
                     funder: admin.pubkey(),
                     tick_array,
-                    system_program: system_program::ID,
                 })
                 .signers(&[&**admin])
                 .send();
@@ -1304,10 +1272,6 @@ mod fixture_helpers {
                     position_mint: position_mint.pubkey(),
                     position_token_account,
                     whirlpool: pool.whirlpool,
-                    token_program: spl_token::id(),
-                    system_program: system_program::ID,
-                    rent: sysvar::rent::id(),
-                    associated_token_program: associated_token::ID,
                 })
                 .signers(&[&*user.keypair, &position_mint])
                 .send();
@@ -1372,7 +1336,6 @@ mod fixture_helpers {
                 })
                 .accounts(accounts::IncreaseLiquidity {
                     whirlpool: pool.whirlpool,
-                    token_program: spl_token::id(),
                     position_authority: user.keypair.pubkey(),
                     position: position.position,
                     position_token_account: position.position_token_account,

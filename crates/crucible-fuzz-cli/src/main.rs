@@ -64,6 +64,9 @@ enum Commands {
         /// Stop fuzzing on first crash
         #[arg(long)]
         stop_on_crash: bool,
+        /// Maximum number of actions per fuzzer iteration
+        #[arg(long, default_value = "10")]
+        max_actions: usize,
     },
     /// List available fuzz tests
     List {
@@ -144,6 +147,7 @@ fn main() -> Result<()> {
             dry_run,
             seed,
             stop_on_crash,
+            max_actions,
         } => fuzz_run(
             &program_name,
             &test_name,
@@ -158,6 +162,7 @@ fn main() -> Result<()> {
             cores,
             seed,
             stop_on_crash,
+            max_actions,
         ),
         Commands::List { program_name } => fuzz_list(program_name.as_deref()),
         Commands::Show {
@@ -288,7 +293,6 @@ anyhow = "1.0"
 bytemuck = "1.14"
 
 [features]
-fuzz_single = []
 invariant_test = []
 "#
     )
@@ -407,6 +411,7 @@ fn fuzz_run(
     cores: Option<usize>,
     seed: Option<u64>,
     stop_on_crash: bool,
+    max_actions: usize,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
@@ -493,6 +498,9 @@ fn fuzz_run(
         cmd.env("FUZZ_STOP_ON_CRASH", "1");
         println!("[FUZZ] Stop-on-crash enabled");
     }
+
+    cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());
+    println!("[FUZZ] Max actions per iteration: {}", max_actions);
 
     if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && input.is_none() {
         cmd.env("FUZZ_COVERAGE_ONLY", "1");

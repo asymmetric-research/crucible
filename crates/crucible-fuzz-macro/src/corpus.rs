@@ -18,6 +18,14 @@ pub fn cmin_mode(
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
 
+    // The simple_deser_stmts may reference either `u` (Unstructured) or `__raw_bytes` (structured)
+    // We create both and let the stmts use whichever they need
+    let deser_block = quote! {
+        let __raw_bytes = input_bytes.clone();
+        let mut u = arbitrary::Unstructured::new(&input_bytes);
+        #(#simple_deser_stmts)*
+    };
+
     quote! {
         // === CORPUS MINIMIZATION MODE (CMIN) ===
         // Run each input once to collect coverage, then use greedy set-cover
@@ -100,12 +108,9 @@ pub fn cmin_mode(
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
 
-                // Create fresh Unstructured for parsing
-                let mut u = Unstructured::new(&input_bytes);
-
                 // Run the test in a closure to handle deserialization failures
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #(#simple_deser_stmts)*
+                    #deser_block
                     #fn_name(#(#call_args),*);
                 }));
 

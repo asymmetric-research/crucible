@@ -11,9 +11,7 @@ edition = "2021"
 crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
 crucible-test-context = { path = "../../../../crates/crucible-test-context" }
 crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
-
-# Anchor (local v3-compatible)
-anchor-lang = { path = "../../../../../anchor-fuzzing/lang" }
+anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 
 # Solana v3.x (required for litesvm 0.9.0)
 solana-pubkey = "3.0"
