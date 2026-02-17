@@ -1,11 +1,11 @@
+use crucible_macro_utils::RangeConstraint;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{
-    parse::Parse, parse::ParseStream, parse_macro_input, FnArg, Ident, ImplItem, ItemFn, ItemImpl,
-    PatType, Path, Token, Type, Expr, ExprRange, RangeLimits, Lit, Meta,
-};
 use std::collections::HashMap;
-use crucible_macro_utils::RangeConstraint;
+use syn::{
+    parse::Parse, parse::ParseStream, parse_macro_input, Expr, ExprRange, FnArg, Ident, ImplItem,
+    ItemFn, ItemImpl, Lit, Meta, PatType, Path, RangeLimits, Token, Type,
+};
 
 #[proc_macro_attribute]
 pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
@@ -49,11 +49,13 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                         if let syn::Pat::Ident(pat_ident) = &**pat {
                             if pat_ident.ident != "self" {
                                 // Check for range constraint before stripping
-                                if let Some(range_attr) = attrs.iter().find(|a| a.path().is_ident("range")) {
+                                if let Some(range_attr) =
+                                    attrs.iter().find(|a| a.path().is_ident("range"))
+                                {
                                     if let Ok(constraint) = RangeConstraint::from_attr(range_attr) {
                                         constraints.insert(
                                             (action_ident.to_string(), pat_ident.ident.to_string()),
-                                            constraint
+                                            constraint,
                                         );
                                     }
                                 }
@@ -140,26 +142,35 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
     });
 
     // Generate constrain_in_place method to apply constraints to the inputs
-    let constrain_arms: Vec<_> = actions.iter().map(|(action_name, _, params)| {
-        // Get each constraint for the field
-        let field_constraints: Vec<_> = params.iter().filter_map(|(field_name, field_type)| {
-            constraints.get(&(action_name.to_string(), field_name.to_string()))
-                .map(|constraint| constraint.generate_constraint_expr(field_name, field_type))
-        }).collect();
+    let constrain_arms: Vec<_> = actions
+        .iter()
+        .map(|(action_name, _, params)| {
+            // Get each constraint for the field
+            let field_constraints: Vec<_> = params
+                .iter()
+                .filter_map(|(field_name, field_type)| {
+                    constraints
+                        .get(&(action_name.to_string(), field_name.to_string()))
+                        .map(|constraint| {
+                            constraint.generate_constraint_expr(field_name, field_type)
+                        })
+                })
+                .collect();
 
-        if field_constraints.is_empty() {
-            quote! { #enum_name::#action_name { .. } => {} }
-        } else if params.is_empty() {
-            quote! { #enum_name::#action_name => {} }
-        } else {
-            let field_names = params.iter().map(|(name, _)| name);
-            quote! {
-                #enum_name::#action_name { #(#field_names),* } => {
-                    #(#field_constraints)*
+            if field_constraints.is_empty() {
+                quote! { #enum_name::#action_name { .. } => {} }
+            } else if params.is_empty() {
+                quote! { #enum_name::#action_name => {} }
+            } else {
+                let field_names = params.iter().map(|(name, _)| name);
+                quote! {
+                    #enum_name::#action_name { #(#field_names),* } => {
+                        #(#field_constraints)*
+                    }
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     let generated = quote! {
         #input
@@ -234,7 +245,7 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             impl #fixture_type {
                 #[doc(hidden)]
                 #[inline(always)]
-                fn __maybe_after_action(&self) {
+                fn __maybe_after_action(&mut self) {
                     self.after_action();
                 }
             }
@@ -244,7 +255,7 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             impl #fixture_type {
                 #[doc(hidden)]
                 #[inline(always)]
-                fn __maybe_after_action(&self) {
+                fn __maybe_after_action(&mut self) {
                     // No after_action callback defined
                 }
             }
@@ -264,36 +275,42 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     if !proc_macro2::TokenStream::from(args.clone()).is_empty() {
         return syn::Error::new_spanned(
             proc_macro2::TokenStream::from(args),
-            "invariant_test no longer takes arguments - fixture type is inferred from parameter"
-        ).to_compile_error().into();
+            "invariant_test no longer takes arguments - fixture type is inferred from parameter",
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     let input_fn = parse_macro_input!(item as ItemFn);
     let fn_name = &input_fn.sig.ident;
     let fn_body = &input_fn.block;
-    
+
     // Extract fixture type from first parameter
-    let fixture_param = input_fn.sig.inputs.first()
+    let fixture_param = input_fn
+        .sig
+        .inputs
+        .first()
         .expect("invariant_test function must have a fixture parameter");
-    
+
     let FnArg::Typed(pat_type) = fixture_param else {
-        return syn::Error::new_spanned(
-            fixture_param,
-            "Expected typed parameter"
-        ).to_compile_error().into();
+        return syn::Error::new_spanned(fixture_param, "Expected typed parameter")
+            .to_compile_error()
+            .into();
     };
-    
+
     // Extract type from &mut FixtureType or &FixtureType
     let fixture_type = match &*pat_type.ty {
         Type::Reference(type_ref) => &*type_ref.elem,
         _ => {
             return syn::Error::new_spanned(
                 &pat_type.ty,
-                "Fixture parameter must be a reference (&mut FixtureType)"
-            ).to_compile_error().into();
+                "Fixture parameter must be a reference (&mut FixtureType)",
+            )
+            .to_compile_error()
+            .into();
         }
     };
-    
+
     let fixture_name = match fixture_type {
         Type::Path(type_path) => type_path
             .path
@@ -304,11 +321,13 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 fixture_type,
-                "Expected a simple type path for fixture"
-            ).to_compile_error().into();
+                "Expected a simple type path for fixture",
+            )
+            .to_compile_error()
+            .into();
         }
     };
-    
+
     let mod_name = format_ident!("__{}_fuzz", to_snake_case(&fixture_name.to_string()));
     let enum_name = format_ident!("{}Actions", fixture_name);
 
