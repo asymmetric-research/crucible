@@ -77,6 +77,7 @@ pub fn multicore_mode(
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10);
+            let trim_stage = crucible_fuzzer::SuccessTrimStage::<#at>::new();
             let seq_mutator = crucible_fuzzer::SequenceMutator::<#at>::new(__fuzz_max_actions);
             let param_mutator = crucible_fuzzer::ParamMutator::<#at>::new();
             let cross_mutator = crucible_fuzzer::CrossoverMutator::<#at>::new(__fuzz_max_actions);
@@ -86,7 +87,7 @@ pub fn multicore_mode(
                 7, 5
             ).expect("failed to create structured mutator");
             let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(power_stage);
+            let mut stages = tuple_list!(trim_stage, power_stage);
         }
     } else {
         quote! {
@@ -134,7 +135,9 @@ pub fn multicore_mode(
             // =====================================================================
             // PRE-FORK: Initialize PROGRAM_TOTALS for coverage tracking
             // =====================================================================
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            if std::env::var("FUZZ_NO_TRACING").is_err() {
+                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            }
             let template_fixture = #fixture_name::setup();
             #init_coverage_totals
 
@@ -464,8 +467,35 @@ pub fn multicore_mode(
                 let cov_ptr = coverage_map.as_mut_ptr();
 
                 // Setup template fixture per worker (fresh SVM instance)
-                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+                if std::env::var("FUZZ_NO_TRACING").is_err() {
+                    std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+                }
                 let template_fixture = #fixture_name::setup();
+
+                // Take snapshot of initial SVM state for reference
+                #[allow(unused_mut)]
+                let mut template_fixture = template_fixture;
+                template_fixture.ctx.take_snapshot();
+                if worker_id == 0 {
+                    eprintln!("[FUZZ] Worker 0: snapshot taken ({} tracked accounts)",
+                        template_fixture.ctx.tracked_accounts_count());
+                }
+
+                // SVM swap trick: move SVM out of template so clone is cheap (empty SVM + Arc programs).
+                // The real SVM is swapped in/out of each iteration's clone, never deep-copied.
+                // Keep a pristine copy for periodic full reset (prevents unbounded internal state growth
+                // in LiteSVM's accounts HashMap, program cache, etc.)
+                let __pristine_svm = template_fixture.ctx.svm.clone();
+                let mut __saved_svm = std::mem::replace(
+                    &mut template_fixture.ctx.svm,
+                    litesvm::LiteSVM::new(),
+                );
+
+                // Periodic full SVM reset interval (0 = disabled)
+                let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1000);
 
                 // Observer and feedback setup (multi-core uses SharedBitmapFeedback)
                 // HitcountsMapObserver applies AFL-style bucketing (1,2,3,4-7,8-15,16-31,32-127,128+)
@@ -475,9 +505,11 @@ pub fn multicore_mode(
 
                 // SharedBitmapFeedback checks if any NEW bits were set in the shared bitmap
                 // TimeFeedback stores execution time metadata for PowerQueueScheduler
+                // SuccessPatternFeedback attaches action success/fail metadata to corpus entries
                 let bitmap_feedback = #mod_name::SharedBitmapFeedback::new();
                 let time_feedback = TimeFeedback::new(&time_observer);
-                let mut feedback = feedback_or!(bitmap_feedback, time_feedback);
+                let success_pattern_feedback = #mod_name::SuccessPatternFeedback::new();
+                let mut feedback = feedback_or!(bitmap_feedback, time_feedback, success_pattern_feedback);
                 let mut objective = CrashFeedback::new();
 
                 // Create state with shared corpus
@@ -566,10 +598,20 @@ pub fn multicore_mode(
                     // Reset the "new coverage" flag for SharedBitmapFeedback
                     #mod_name::reset_new_coverage_flag();
 
+                    // Periodic full SVM reset: replace working SVM with pristine clone to prevent
+                    // unbounded growth in LiteSVM internals (accounts HashMap, program cache, etc.)
+                    if __svm_reset_interval > 0 && current_iteration > 0 && current_iteration % __svm_reset_interval == 0 {
+                        __saved_svm = __pristine_svm.clone();
+                    }
+
                     #(#deser_stmts)*
 
-                    // Multi-core iteration setup with shared memory for coverage aggregation
+                    // Clone template for clean non-SVM state (cheap: empty SVM + Arc programs)
                     let mut #fixture_param_name = template_fixture.clone();
+
+                    // Swap real SVM into the clone
+                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+
                     let callback = #mod_name::FuzzCallback::with_shared_memory(
                         cov_ptr,
                         #mod_name::MAP_SIZE,
@@ -583,6 +625,13 @@ pub fn multicore_mode(
                         .load(std::sync::atomic::Ordering::Relaxed);
 
                     #fn_name(#(#call_args),*);
+
+                    // Collect success pattern from action history for SuccessPatternFeedback
+                    {
+                        let __history = crucible_test_context::get_action_history();
+                        let __pattern: Vec<bool> = __history.iter().map(|r| r.success).collect();
+                        #mod_name::set_success_pattern(__pattern);
+                    }
 
                     // Flush thread-local bitmap buffers to shared memory at end of iteration.
                     // This is required for SharedBitmapFeedback to detect new coverage.
@@ -608,6 +657,18 @@ pub fn multicore_mode(
                         __local_actions_pending = 0;
                         __local_execs_pending = 0;
                     }
+
+                    // Restore dirty accounts from snapshot (O(dirty) not O(all))
+                    if let Some(ref snap) = template_fixture.ctx.snapshot {
+                        snap.restore(&mut #fixture_param_name.ctx.svm, &#fixture_param_name.ctx.dirty_tracker);
+                    }
+                    // Clear all tracked dirty state after restore
+                    #fixture_param_name.ctx.dirty_tracker.clear();
+                    #fixture_param_name.ctx.taint_log.clear();
+
+                    // Swap restored SVM back for next iteration
+                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+                    // fixture is dropped here (cheap: only empty SVM + small fields)
 
                     if let Some(msg) = crucible_test_context::take_violation() {
                         if std::env::var("FUZZ_VERBOSE").is_ok() {

@@ -12,6 +12,7 @@ pub use generator::ActionGenerator;
 pub use mutators::{
     gen_range_u64, gen_range_usize, mutate_u64, mutate_usize, mutate_bool, mutate_i64,
     rand_below, SequenceMutator, ParamMutator, CrossoverMutator,
+    SuccessTrimStage, SuccessPatternMetadata,
 };
 
 // Re-export Rand trait so generated code can reference it

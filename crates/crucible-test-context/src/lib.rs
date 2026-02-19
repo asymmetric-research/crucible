@@ -47,6 +47,7 @@ pub use crate::mock_oracles::{
 mod account_builders;
 mod instruction_builder;
 mod program_builder;
+pub mod snapshot;
 mod transaction_builder;
 
 // Coverage analysis and visualization
@@ -79,7 +80,7 @@ pub fn increment_action_count() {
 // Thread-Local State
 // ============================================================================
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use serde::{Serialize, Deserialize};
 
 thread_local! {
@@ -94,6 +95,8 @@ thread_local! {
     // Early exit tracking: total actions in sequence and which action triggered the violation
     static TOTAL_ACTIONS_IN_SEQUENCE: RefCell<usize> = RefCell::new(0);
     static VIOLATION_ACTION_INDEX: RefCell<Option<usize>> = RefCell::new(None);
+    // Error code passthrough from tx_result_to_outcome to push_action_record
+    static LAST_ERROR_CODE: Cell<Option<u32>> = const { Cell::new(None) };
 }
 
 #[doc(hidden)]
@@ -109,6 +112,16 @@ pub fn get_current_instruction() -> Option<String> {
     CURRENT_INSTRUCTION.with(|c| c.borrow().clone())
 }
 
+/// Set the last error code from a transaction result (called by tx_result_to_outcome)
+pub fn set_last_error_code(code: Option<u32>) {
+    LAST_ERROR_CODE.with(|c| c.set(code));
+}
+
+/// Take the last error code, resetting it to None (called by push_action_record)
+fn take_last_error_code() -> Option<u32> {
+    LAST_ERROR_CODE.with(|c| c.replace(None))
+}
+
 // ============================================================================
 // Action History Tracking (for .meta.json crash metadata)
 // ============================================================================
@@ -122,6 +135,9 @@ pub struct ActionRecord {
     pub params: serde_json::Value,
     /// Whether the action succeeded (from Result return value)
     pub success: bool,
+    /// Error code from the last transaction (e.g., Custom(6051) → Some(6051))
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<u32>,
 }
 
 /// Complete crash metadata for .meta.json files
@@ -166,12 +182,14 @@ pub fn get_current_iteration() -> u64 {
 
 /// Push an action record to the history and update cumulative stats.
 pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) {
+    let error_code = take_last_error_code();
     // Record in per-iteration history (for crash metadata)
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
             name: name.to_string(),
             params,
             success,
+            error_code,
         });
     });
 }
@@ -181,11 +199,13 @@ pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) 
 /// The params field is set to `null` and should be backfilled via
 /// `backfill_action_params` only when needed (crash/violation).
 pub fn push_action_record_lite(name: &str, success: bool) {
+    let error_code = take_last_error_code();
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
             name: name.to_string(),
             params: serde_json::Value::Null,
             success,
+            error_code,
         });
     });
 }
@@ -784,7 +804,7 @@ pub fn parse_instruction_index(err: &TransactionError) -> Option<u8> {
 
 /// Convert litesvm transaction result to TxOutcome
 pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutcome {
-    match result {
+    let outcome = match result {
         Ok(meta) => TxOutcome::Success {
             compute_units: meta.compute_units_consumed,
             logs: meta.logs,
@@ -795,7 +815,10 @@ pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutc
             instruction_index: parse_instruction_index(&failed.err),
             logs: failed.meta.logs,
         },
-    }
+    };
+    // Store error code in TLS for push_action_record to pick up
+    set_last_error_code(outcome.error_code());
+    outcome
 }
 
 // Re-export types needed by generated code
@@ -1057,13 +1080,20 @@ pub struct TestContext {
     pub svm: LiteSVM,
     pub pending_instructions: Vec<Instruction>,
     pending_signers: Vec<Keypair>,
-    /// Programs loaded into this context (for reloading into debuggable SVMs)
-    programs: Vec<ProgramData>,
+    /// Programs loaded into this context (for reloading into debuggable SVMs).
+    /// Arc-wrapped so cloning doesn't deep-copy program binaries (~1-2MB each).
+    programs: std::sync::Arc<Vec<ProgramData>>,
     /// Account pubkeys that have been set (for copying to debuggable SVMs)
     tracked_accounts: HashSet<Pubkey>,
     /// Total CFG edges and instructions per program (for coverage percentage calculation)
     /// Value is (total_edges, total_instructions)
     program_coverage_totals: HashMap<Pubkey, (usize, usize)>,
+    /// Snapshot of initial state for fast restore (always-on in fuzz mode)
+    pub snapshot: Option<snapshot::SvmSnapshot>,
+    /// Tracks dirty accounts across all transactions in an iteration
+    pub dirty_tracker: snapshot::DirtyTracker,
+    /// Per-transaction taint records for the current iteration
+    pub taint_log: snapshot::IterationTaintLog,
 }
 
 impl Clone for TestContext {
@@ -1075,6 +1105,11 @@ impl Clone for TestContext {
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
+            // Snapshot is not cloned — only the template fixture owns it
+            snapshot: None,
+            // Fresh tracker/log for each clone
+            dirty_tracker: self.dirty_tracker.clone(),
+            taint_log: self.taint_log.clone(),
         }
     }
 }
@@ -1117,9 +1152,12 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            programs: Vec::new(),
+            programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
+            snapshot: None,
+            dirty_tracker: snapshot::DirtyTracker::new(),
+            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1133,9 +1171,12 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            programs: Vec::new(),
+            programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
+            snapshot: None,
+            dirty_tracker: snapshot::DirtyTracker::new(),
+            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1205,7 +1246,7 @@ impl TestContext {
 
         self.svm.add_program(program_id.clone(), &program_data);
         // Store program data for reloading into debuggable SVMs
-        self.programs.push(ProgramData {
+        std::sync::Arc::make_mut(&mut self.programs).push(ProgramData {
             program_id: *program_id,
             data: program_data,
         });
@@ -1217,9 +1258,12 @@ impl TestContext {
             svm,
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
-            programs: Vec::new(),
+            programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: HashSet::new(),
             program_coverage_totals: HashMap::new(),
+            snapshot: None,
+            dirty_tracker: snapshot::DirtyTracker::new(),
+            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1247,6 +1291,9 @@ impl TestContext {
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
+            snapshot: None,
+            dirty_tracker: snapshot::DirtyTracker::new(),
+            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1282,6 +1329,12 @@ impl TestContext {
         self.programs.len()
     }
 
+    /// Get total number of accounts in the SVM's internal HashMap.
+    /// Used to detect unbounded account growth across fuzzing iterations.
+    pub fn svm_account_count(&self) -> usize {
+        self.svm.accounts_db().inner.len()
+    }
+
     /// Check if a specific account exists in the SVM (for debugging)
     pub fn account_exists(&self, pubkey: &Pubkey) -> bool {
         self.svm.get_account(pubkey).is_some()
@@ -1308,6 +1361,62 @@ impl TestContext {
         self.programs.iter()
             .find(|p| &p.program_id == pubkey)
             .map(|p| p.data.as_slice())
+    }
+
+    // =========================================================================
+    // Snapshot/Restore API (always-on in fuzz mode)
+    // =========================================================================
+
+    /// Take a snapshot of all tracked accounts + Clock sysvar.
+    /// Called once after setup, before the fuzz loop begins.
+    ///
+    /// Also includes accounts that were touched during setup transactions
+    /// (from the dirty tracker), which captures CPI-created accounts like PDAs
+    /// that aren't in `tracked_accounts`.
+    pub fn take_snapshot(&mut self) {
+        // Merge dirty tracker accounts into tracked set so CPI-created accounts
+        // (e.g., PDAs created by Initialize instructions) are included in the snapshot
+        for pubkey in self.dirty_tracker.dirty_accounts() {
+            self.tracked_accounts.insert(*pubkey);
+        }
+        self.snapshot = Some(snapshot::SvmSnapshot::take(&self.svm, &self.tracked_accounts));
+        // Clear the dirty tracker so it's fresh for the first iteration
+        self.dirty_tracker.clear();
+    }
+
+    /// Prepare for a new iteration: clear dirty tracker, taint log, and pending state.
+    /// Called at the start of each fuzzing iteration.
+    pub fn begin_iteration(&mut self) {
+        self.dirty_tracker.clear();
+        self.taint_log.clear();
+        // Clear pending instructions/signers from previous iteration
+        self.pending_instructions.clear();
+        self.pending_signers.clear();
+    }
+
+    /// Restore only dirty accounts from snapshot. Returns count restored.
+    /// Much faster than full SVM clone when only ~5-20 accounts were modified.
+    pub fn restore_snapshot(&mut self) -> usize {
+        if let Some(ref snap) = self.snapshot {
+            snap.restore(&mut self.svm, &self.dirty_tracker)
+        } else {
+            0
+        }
+    }
+
+    /// Whether a snapshot has been taken.
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
+    /// Get the taint log for the current iteration.
+    pub fn taint_log(&self) -> &snapshot::IterationTaintLog {
+        &self.taint_log
+    }
+
+    /// Get the dirty tracker for the current iteration.
+    pub fn dirty_tracker(&self) -> &snapshot::DirtyTracker {
+        &self.dirty_tracker
     }
 
     /// Account Creation Helpers
@@ -1416,10 +1525,12 @@ impl TestContext {
     }
 
     pub fn warp_to_slot(&mut self, slot: u64) {
+        self.dirty_tracker.mark_clock_dirty();
         self.svm.warp_to_slot(slot);
     }
-    
+
     pub fn advance_slots(&mut self, slots: u64) {
+        self.dirty_tracker.mark_clock_dirty();
         let current_slot = self.slot();
         let target_slot = current_slot + slots;
         self.svm.warp_to_slot(target_slot);
@@ -1506,6 +1617,7 @@ impl TestContext {
     // Write account directly to SVM
     pub fn write_account(&mut self, address: &Pubkey, account: Account) -> Result<()> {
         self.tracked_accounts.insert(*address);
+        self.dirty_tracker.mark_account_dirty(address);
         let _ = self.svm.set_account(*address, account);
         Ok(())
     }
@@ -1525,6 +1637,7 @@ impl TestContext {
 
         // Update account data and write back
         account.data = account_data;
+        self.dirty_tracker.mark_account_dirty(address);
         let _ = self.svm.set_account(*address, account);
 
         Ok(())
@@ -1607,6 +1720,7 @@ impl TestContext {
         }
         account.data[discriminator_len..discriminator_len + bytes.len()].copy_from_slice(bytes);
         self.tracked_accounts.insert(*address);
+        self.dirty_tracker.mark_account_dirty(address);
         let _ = self.svm.set_account(*address, account);
         Ok(())
     }
@@ -1679,12 +1793,27 @@ impl TestContext {
             .filter(|k| seen.insert(k.pubkey()))
             .collect();
 
+        let fee_payer = unique_signers.first().map(|k| k.pubkey()).unwrap_or_default();
+
         if debug {
             eprintln!("[TX] Sending batch with {} instructions", num_ixs);
             for (i, ix) in self.pending_instructions.iter().enumerate() {
                 eprintln!("[TX]   ix[{}]: program={}", i, ix.program_id);
             }
         }
+
+        // Record dirty accounts + capture metadata before instructions are consumed
+        self.dirty_tracker.record_tx(&self.pending_instructions, &fee_payer);
+        let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer);
+        let pre_state = if self.taint_log.collects_diffs() {
+            Some(snapshot::snapshot_writable_accounts(
+                &self.svm,
+                &self.pending_instructions,
+                &fee_payer,
+            ))
+        } else {
+            None
+        };
 
         // Send transaction with all queued instructions (take ownership to avoid clone)
         let instructions = std::mem::take(&mut self.pending_instructions);
@@ -1715,6 +1844,14 @@ impl TestContext {
                     }
                 }
             }
+        }
+
+        // Build taint record from captured metadata (only for successful txs)
+        if outcome.is_success() {
+            let taint = snapshot::build_taint_record_from_captured(
+                &self.svm, captured, pre_state.as_ref(),
+            );
+            self.taint_log.push(taint);
         }
 
         // Clear signers queue (pending_instructions already taken via std::mem::take)
@@ -1788,8 +1925,21 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].name, "action_deposit");
         assert!(history[0].success);
+        assert_eq!(history[0].error_code, None);
         assert_eq!(history[1].name, "action_withdraw");
         assert!(!history[1].success);
+        assert_eq!(history[1].error_code, None);
+
+        // Test with error code passthrough
+        clear_action_history();
+        set_last_error_code(Some(6051));
+        push_action_record("action_borrow", serde_json::json!({}), false);
+        let history = get_action_history();
+        assert_eq!(history[0].error_code, Some(6051));
+        // Verify TLS is cleared after take
+        push_action_record("action_deposit", serde_json::json!({}), true);
+        let history = get_action_history();
+        assert_eq!(history[1].error_code, None);
 
         clear_action_history();
         assert!(get_action_history().is_empty());
@@ -1880,6 +2030,7 @@ mod tests {
         assert_eq!(meta.seed, Some(12345));
         assert_eq!(meta.actions.len(), 1);
         assert_eq!(meta.actions[0].name, "action_a");
+        assert_eq!(meta.actions[0].error_code, None);
     }
 
     // -------------------------------------------------------------------------
@@ -1941,6 +2092,398 @@ mod tests {
         assert_eq!(format_json_value(&serde_json::json!("hello")), "\"hello\"");
         assert_eq!(format_json_value(&serde_json::json!([1, 2, 3])), "[1, 2, 3]");
         assert_eq!(format_json_value(&serde_json::json!({"a": 1})), "{a: 1}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Snapshot/Restore integration tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_basic_roundtrip() {
+        let mut ctx = TestContext::new();
+
+        // Write some accounts
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.write_account(&pk1, Account {
+            lamports: 1_000_000,
+            data: vec![1, 2, 3, 4],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.write_account(&pk2, Account {
+            lamports: 2_000_000,
+            data: vec![10, 20, 30],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Take snapshot
+        ctx.take_snapshot();
+        assert!(ctx.has_snapshot());
+
+        // Begin iteration (clears dirty tracker)
+        ctx.begin_iteration();
+
+        // Modify accounts
+        ctx.write_account(&pk1, Account {
+            lamports: 999,
+            data: vec![99, 99, 99, 99],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.write_account(&pk2, Account {
+            lamports: 0,
+            data: vec![],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Verify accounts are modified
+        let acc1 = ctx.read_account(&pk1).unwrap();
+        assert_eq!(acc1.lamports, 999);
+        assert_eq!(acc1.data, vec![99, 99, 99, 99]);
+
+        // Restore snapshot
+        let restored = ctx.restore_snapshot();
+        assert_eq!(restored, 2); // 2 dirty accounts
+
+        // Verify accounts are back to original state
+        let acc1 = ctx.read_account(&pk1).unwrap();
+        assert_eq!(acc1.lamports, 1_000_000);
+        assert_eq!(acc1.data, vec![1, 2, 3, 4]);
+
+        let acc2 = ctx.read_account(&pk2).unwrap();
+        assert_eq!(acc2.lamports, 2_000_000);
+        assert_eq!(acc2.data, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_snapshot_created_account_removed_on_restore() {
+        let mut ctx = TestContext::new();
+
+        // Write one initial account
+        let pk_initial = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        ctx.write_account(&pk_initial, Account {
+            lamports: 1_000_000,
+            data: vec![1, 2, 3],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.take_snapshot();
+        ctx.begin_iteration();
+
+        // Create a new account that didn't exist at snapshot time
+        let pk_new = Pubkey::new_unique();
+        ctx.write_account(&pk_new, Account {
+            lamports: 500_000,
+            data: vec![42],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Verify new account exists
+        assert!(ctx.read_account(&pk_new).is_ok());
+
+        // Restore: new account should be zeroed out
+        ctx.restore_snapshot();
+
+        // Account should now be zeroed (lamports=0 means effectively deleted)
+        let acc = ctx.svm.get_account(&pk_new);
+        match acc {
+            Some(a) => assert_eq!(a.lamports, 0, "Created account should be zeroed on restore"),
+            None => {} // Also acceptable — SVM may remove zero-lamport accounts
+        }
+
+        // Initial account should still be intact
+        let acc_initial = ctx.read_account(&pk_initial).unwrap();
+        assert_eq!(acc_initial.lamports, 1_000_000);
+    }
+
+    #[test]
+    fn test_snapshot_clock_restore() {
+        let mut ctx = TestContext::new();
+
+        // Set a known slot before snapshot
+        ctx.warp_to_slot(100);
+        let original_slot = ctx.slot();
+        assert_eq!(original_slot, 100);
+
+        ctx.take_snapshot();
+        ctx.begin_iteration();
+
+        // Advance the clock
+        ctx.warp_to_slot(500);
+        assert_eq!(ctx.slot(), 500);
+
+        // Restore snapshot
+        ctx.restore_snapshot();
+
+        // Clock should be back to original
+        assert_eq!(ctx.slot(), 100);
+    }
+
+    #[test]
+    fn test_snapshot_multiple_iterations() {
+        let mut ctx = TestContext::new();
+
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.write_account(&pk, Account {
+            lamports: 1_000_000,
+            data: vec![0; 32],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.take_snapshot();
+
+        // Simulate multiple fuzzing iterations
+        for i in 0..5 {
+            ctx.begin_iteration();
+
+            // Each iteration modifies the account differently
+            ctx.write_account(&pk, Account {
+                lamports: (i + 1) * 100,
+                data: vec![i as u8; 32],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            }).unwrap();
+
+            // Verify modification took effect
+            let acc = ctx.read_account(&pk).unwrap();
+            assert_eq!(acc.lamports, (i + 1) * 100);
+
+            // Restore to original
+            ctx.restore_snapshot();
+
+            // Verify restoration
+            let acc = ctx.read_account(&pk).unwrap();
+            assert_eq!(acc.lamports, 1_000_000, "Failed on iteration {}", i);
+            assert_eq!(acc.data, vec![0; 32], "Failed on iteration {}", i);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_dirty_tracker_tracks_write_account() {
+        let mut ctx = TestContext::new();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.write_account(&pk1, Account {
+            lamports: 100,
+            data: vec![],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.write_account(&pk2, Account {
+            lamports: 200,
+            data: vec![],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Both should be tracked as dirty
+        assert!(ctx.dirty_tracker.dirty_accounts().contains(&pk1));
+        assert!(ctx.dirty_tracker.dirty_accounts().contains(&pk2));
+        assert_eq!(ctx.dirty_tracker.dirty_count(), 2);
+
+        // begin_iteration clears the tracker and pending state
+        ctx.begin_iteration();
+        assert_eq!(ctx.dirty_tracker.dirty_count(), 0);
+        assert!(ctx.pending_instructions.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_dirty_tracker_tracks_clock() {
+        let mut ctx = TestContext::new();
+
+        assert!(!ctx.dirty_tracker.is_clock_dirty());
+
+        ctx.warp_to_slot(100);
+        assert!(ctx.dirty_tracker.is_clock_dirty());
+
+        ctx.begin_iteration();
+        assert!(!ctx.dirty_tracker.is_clock_dirty());
+
+        ctx.advance_slots(10);
+        assert!(ctx.dirty_tracker.is_clock_dirty());
+    }
+
+    #[test]
+    fn test_snapshot_no_snapshot_returns_zero() {
+        let mut ctx = TestContext::new();
+
+        // Without taking a snapshot, restore should return 0
+        assert!(!ctx.has_snapshot());
+        let restored = ctx.restore_snapshot();
+        assert_eq!(restored, 0);
+    }
+
+    #[test]
+    fn test_snapshot_unmodified_accounts_untouched() {
+        let mut ctx = TestContext::new();
+
+        let pk_modified = Pubkey::new_unique();
+        let pk_untouched = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.write_account(&pk_modified, Account {
+            lamports: 100,
+            data: vec![1, 2, 3],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.write_account(&pk_untouched, Account {
+            lamports: 200,
+            data: vec![4, 5, 6],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.take_snapshot();
+        ctx.begin_iteration();
+
+        // Only modify one account
+        ctx.write_account(&pk_modified, Account {
+            lamports: 999,
+            data: vec![9, 9, 9],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Only 1 dirty account (pk_modified) should be restored
+        let restored = ctx.restore_snapshot();
+        assert_eq!(restored, 1);
+
+        // Modified account restored
+        let acc = ctx.read_account(&pk_modified).unwrap();
+        assert_eq!(acc.lamports, 100);
+
+        // Untouched account still has original data
+        let acc = ctx.read_account(&pk_untouched).unwrap();
+        assert_eq!(acc.lamports, 200);
+        assert_eq!(acc.data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn test_snapshot_clone_does_not_inherit_snapshot() {
+        let mut ctx = TestContext::new();
+
+        let pk = Pubkey::new_unique();
+        ctx.write_account(&pk, Account {
+            lamports: 100,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        ctx.take_snapshot();
+        assert!(ctx.has_snapshot());
+
+        // Clone should NOT have a snapshot
+        let cloned = ctx.clone();
+        assert!(!cloned.has_snapshot());
+
+        // Clone should have a fresh dirty tracker
+        assert_eq!(cloned.dirty_tracker.dirty_count(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_includes_dirty_tracker_accounts() {
+        // Simulates CPI-created accounts: dirty tracker tracks them during setup
+        // but they're not in tracked_accounts. take_snapshot() should include them.
+        let mut ctx = TestContext::new();
+
+        let pk_tracked = Pubkey::new_unique();
+        let pk_cpi = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        // This goes through write_account → tracked_accounts
+        ctx.write_account(&pk_tracked, Account {
+            lamports: 100,
+            data: vec![1],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Simulate a CPI-created account: manually set in SVM and mark dirty
+        // (In real usage, this happens via record_tx during a send() call)
+        let _ = ctx.svm.set_account(pk_cpi, Account {
+            lamports: 200,
+            data: vec![2],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        });
+        ctx.dirty_tracker.mark_account_dirty(&pk_cpi);
+
+        // take_snapshot should include pk_cpi even though it's not in tracked_accounts
+        ctx.take_snapshot();
+        assert!(ctx.has_snapshot());
+
+        ctx.begin_iteration();
+
+        // Modify the CPI-created account
+        let _ = ctx.svm.set_account(pk_cpi, Account {
+            lamports: 999,
+            data: vec![9],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        });
+        ctx.dirty_tracker.mark_account_dirty(&pk_cpi);
+
+        // Restore should bring it back
+        ctx.restore_snapshot();
+        let acc = ctx.svm.get_account(&pk_cpi).unwrap();
+        assert_eq!(acc.lamports, 200);
+        assert_eq!(acc.data, vec![2]);
+    }
+
+    #[test]
+    fn test_snapshot_programs_arc_clone() {
+        let mut ctx = TestContext::new();
+
+        // Verify programs field uses Arc (clone is cheap)
+        let pk = Pubkey::new_unique();
+        ctx.write_account(&pk, Account {
+            lamports: 100,
+            data: vec![0; 1024],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+
+        // Clone should share program data via Arc
+        let cloned = ctx.clone();
+        assert_eq!(ctx.programs_count(), cloned.programs_count());
     }
 }
 

@@ -67,6 +67,9 @@ enum Commands {
         /// Maximum number of actions per fuzzer iteration
         #[arg(long, default_value = "10")]
         max_actions: usize,
+        /// Disable SVM register tracing for higher throughput (no coverage guidance)
+        #[arg(long)]
+        no_tracing: bool,
     },
     /// List available fuzz tests
     List {
@@ -148,6 +151,7 @@ fn main() -> Result<()> {
             seed,
             stop_on_crash,
             max_actions,
+            no_tracing,
         } => fuzz_run(
             &program_name,
             &test_name,
@@ -163,6 +167,7 @@ fn main() -> Result<()> {
             seed,
             stop_on_crash,
             max_actions,
+            no_tracing,
         ),
         Commands::List { program_name } => fuzz_list(program_name.as_deref()),
         Commands::Show {
@@ -412,6 +417,7 @@ fn fuzz_run(
     seed: Option<u64>,
     stop_on_crash: bool,
     max_actions: usize,
+    no_tracing: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
@@ -497,6 +503,11 @@ fn fuzz_run(
     if stop_on_crash {
         cmd.env("FUZZ_STOP_ON_CRASH", "1");
         println!("[FUZZ] Stop-on-crash enabled");
+    }
+
+    if no_tracing {
+        cmd.env("FUZZ_NO_TRACING", "1");
+        println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
     }
 
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());

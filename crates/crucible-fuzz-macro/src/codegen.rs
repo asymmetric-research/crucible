@@ -44,7 +44,9 @@ pub fn template_setup(
     let init_binaries = init_program_binaries(mod_name);
 
     quote! {
-        std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+        if std::env::var("FUZZ_NO_TRACING").is_err() {
+            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+        }
         let template_fixture = #fixture_name::setup();
 
         // Debug: verify accounts exist in template after setup
@@ -57,24 +59,6 @@ pub fn template_setup(
         {
             #init_totals
             #init_binaries
-        }
-    }
-}
-
-/// Generate the per-iteration setup code
-pub fn iteration_setup(
-    fixture_param_name: &syn::Ident,
-    mod_name: &syn::Ident,
-) -> proc_macro2::TokenStream {
-    quote! {
-        let mut #fixture_param_name = template_fixture.clone();
-        let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
-        #fixture_param_name.ctx.set_invocation_callback(callback);
-
-        // First iteration debug: verify accounts after clone
-        static FIRST_ITERATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-        if std::env::var("FUZZ_DEBUG").is_ok() && FIRST_ITERATION.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            eprintln!("[ITER] After clone: {} tracked accounts", #fixture_param_name.ctx.tracked_accounts_count());
         }
     }
 }
@@ -186,7 +170,8 @@ pub fn singlecore_observer_feedback(mod_name: &syn::Ident) -> proc_macro2::Token
         let time_observer = TimeObserver::new("time");
         let map_feedback = MaxMapFeedback::new(&edges_observer);
         let time_feedback = TimeFeedback::new(&time_observer);
-        let mut feedback = feedback_or!(map_feedback, time_feedback);
+        let success_pattern_feedback = #mod_name::SuccessPatternFeedback::new();
+        let mut feedback = feedback_or!(map_feedback, time_feedback, success_pattern_feedback);
         let mut objective = CrashFeedback::new();
     }
 }
@@ -309,6 +294,7 @@ pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
+        let trim_stage = crucible_fuzzer::SuccessTrimStage::<#action_type>::new();
         let seq_mutator = crucible_fuzzer::SequenceMutator::<#action_type>::new(__fuzz_max_actions);
         let param_mutator = crucible_fuzzer::ParamMutator::<#action_type>::new();
         let cross_mutator = crucible_fuzzer::CrossoverMutator::<#action_type>::new(__fuzz_max_actions);
@@ -318,7 +304,7 @@ pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -
             7, 5
         ).expect("failed to create structured mutator");
         let power_stage = StdPowerMutationalStage::new(mutator);
-        let mut stages = tuple_list!(power_stage);
+        let mut stages = tuple_list!(trim_stage, power_stage);
     }
 }
 

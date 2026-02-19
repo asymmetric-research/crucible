@@ -19,8 +19,32 @@ impl InstructionBuilder<'_> {
     }
 
     pub fn send(self) -> Result<TxOutcome> {
+        let fee_payer = self.signers.first().map(|k| k.pubkey()).unwrap_or_default();
+        let ixs = std::slice::from_ref(&self.instruction);
+
+        // Always: record dirty accounts (just FxHashSet inserts, zero-alloc)
+        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer);
+
+        // Capture metadata + optional pre-state before instruction is consumed
+        let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer);
+        let pre_state = if self.ctx.taint_log.collects_diffs() {
+            Some(crate::snapshot::snapshot_writable_accounts(&self.ctx.svm, ixs, &fee_payer))
+        } else {
+            None
+        };
+
         let result = send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)?;
-        Ok(tx_result_to_outcome(result))
+        let outcome = tx_result_to_outcome(result);
+
+        // Build taint record from captured metadata (only for successful txs)
+        if outcome.is_success() {
+            let taint = crate::snapshot::build_taint_record_from_captured(
+                &self.ctx.svm, captured, pre_state.as_ref(),
+            );
+            self.ctx.taint_log.push(taint);
+        }
+
+        Ok(outcome)
     }
 
     pub fn add_transaction(self) -> Result<()> {

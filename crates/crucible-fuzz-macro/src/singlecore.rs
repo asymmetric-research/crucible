@@ -29,7 +29,6 @@ pub fn singlecore_mode(
 ) -> proc_macro2::TokenStream {
     let monitor_setup = codegen::monitor_setup(mod_name);
     let common_fuzz_setup = codegen::common_fuzz_setup(mod_name, fixture_name);
-    let iteration_setup = codegen::iteration_setup(fixture_param_name, mod_name);
     let exit_handlers_setup = codegen::exit_handlers_setup(mod_name);
     let observer_feedback_setup = codegen::singlecore_observer_feedback(mod_name);
 
@@ -55,12 +54,43 @@ pub fn singlecore_mode(
 
     // Harness wrapper code - shared between both corpus modes
     let harness_wrapper_code = quote! {
+        // Take snapshot of initial SVM state for reference
+        #[allow(unused_mut)]
+        let mut template_fixture = template_fixture;
+        template_fixture.ctx.take_snapshot();
+        if verbose {
+            eprintln!("[FUZZ] Snapshot taken ({} tracked accounts)",
+                template_fixture.ctx.tracked_accounts_count());
+        }
+
+        // SVM swap trick: move SVM out of template so clone is cheap (empty SVM + Arc programs).
+        // The real SVM is swapped in/out of each iteration's clone, never deep-copied.
+        // Keep a pristine copy for periodic full reset (prevents unbounded internal state growth
+        // in LiteSVM's accounts HashMap, program cache, etc.)
+        let __pristine_svm = template_fixture.ctx.svm.clone();
+        let mut __saved_svm = std::mem::replace(
+            &mut template_fixture.ctx.svm,
+            litesvm::LiteSVM::new(),
+        );
+
+        // Periodic full SVM reset interval (0 = disabled)
+        let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000);
+
         let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
             let bytes_ref = input.target_bytes();
             let slice = bytes_ref.as_slice();
             #unstructured_init
 
             let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            // Periodic full SVM reset: replace working SVM with pristine clone to prevent
+            // unbounded growth in LiteSVM internals (accounts HashMap, program cache, etc.)
+            if __svm_reset_interval > 0 && current_iteration > 0 && current_iteration % __svm_reset_interval == 0 {
+                __saved_svm = __pristine_svm.clone();
+            }
 
             // Rate-limit timeout check to every 300 iterations to avoid syscall overhead
             if let Some(timeout) = timeout_secs {
@@ -85,15 +115,41 @@ pub fn singlecore_mode(
 
             #(#deser_stmts)*
 
-            #iteration_setup
+            // Clone template for clean non-SVM state (cheap: empty SVM + Arc programs)
+            let mut #fixture_param_name = template_fixture.clone();
+
+            // Swap real SVM into the clone
+            std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+
+            let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+            #fixture_param_name.ctx.set_invocation_callback(callback);
 
             #fn_name(#(#call_args),*);
+
+            // Collect success pattern from action history for SuccessPatternFeedback
+            {
+                let __history = crucible_test_context::get_action_history();
+                let __pattern: Vec<bool> = __history.iter().map(|r| r.success).collect();
+                #mod_name::set_success_pattern(__pattern);
+            }
 
             let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
                 #mod_name::maybe_write_coverage(exec_count);
             }
+
+            // Restore dirty accounts from snapshot (O(dirty) not O(all))
+            if let Some(ref snap) = template_fixture.ctx.snapshot {
+                snap.restore(&mut #fixture_param_name.ctx.svm, &#fixture_param_name.ctx.dirty_tracker);
+            }
+            // Clear all tracked dirty state after restore
+            #fixture_param_name.ctx.dirty_tracker.clear();
+            #fixture_param_name.ctx.taint_log.clear();
+
+            // Swap restored SVM back for next iteration
+            std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+            // fixture is dropped here (cheap: only empty SVM + small fields)
 
             if let Some(msg) = crucible_test_context::take_violation() {
                 eprintln!("[VIOLATION] {}", msg);

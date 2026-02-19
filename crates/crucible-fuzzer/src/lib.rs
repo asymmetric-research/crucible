@@ -32,4 +32,6 @@ pub use crucible_fuzz_runtime::{
     rand_below,
 };
 pub use crucible_fuzz_runtime::FuzzRand;
+pub use crucible_fuzz_runtime::SuccessTrimStage;
+pub use crucible_fuzz_runtime::SuccessPatternMetadata;
 

@@ -714,6 +714,87 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
     }
 }
 
+/// Generate the success pattern TLS and SuccessPatternFeedback for action-level success tracking
+pub fn success_pattern_code() -> proc_macro2::TokenStream {
+    quote! {
+        // Thread-local storage for the success pattern of the last harness iteration.
+        // Set by the harness wrapper after executing actions, read by SuccessPatternFeedback.
+        thread_local! {
+            static LAST_SUCCESS_PATTERN: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+
+        /// Set the success pattern for the current iteration (called from harness wrapper)
+        pub fn set_success_pattern(pattern: Vec<bool>) {
+            LAST_SUCCESS_PATTERN.with(|p| *p.borrow_mut() = pattern);
+        }
+
+        /// Get the success pattern from the current iteration (called by SuccessPatternFeedback)
+        pub fn get_success_pattern() -> Vec<bool> {
+            LAST_SUCCESS_PATTERN.with(|p| p.borrow().clone())
+        }
+
+        /// Feedback that attaches success pattern metadata to corpus entries.
+        ///
+        /// This feedback never causes corpus admission on its own (is_interesting returns false).
+        /// It only appends `SuccessPatternMetadata` to testcases that are admitted by other
+        /// feedbacks (e.g., MaxMapFeedback or SharedBitmapFeedback).
+        ///
+        /// The metadata is later read by `SuccessTrimStage` to strip failed actions.
+        pub struct SuccessPatternFeedback {
+            name: std::borrow::Cow<'static, str>,
+        }
+
+        impl SuccessPatternFeedback {
+            pub fn new() -> Self {
+                Self {
+                    name: std::borrow::Cow::Borrowed("success_pattern"),
+                }
+            }
+        }
+
+        impl<S> libafl::feedbacks::StateInitializer<S> for SuccessPatternFeedback {
+            fn init_state(&mut self, _state: &mut S) -> std::result::Result<(), libafl::Error> {
+                Ok(())
+            }
+        }
+
+        impl<EM, I, OT, S> libafl::feedbacks::Feedback<EM, I, OT, S> for SuccessPatternFeedback {
+            fn is_interesting(
+                &mut self,
+                _state: &mut S,
+                _manager: &mut EM,
+                _input: &I,
+                _observers: &OT,
+                _exit_kind: &libafl::prelude::ExitKind,
+            ) -> std::result::Result<bool, libafl::Error> {
+                // Never causes corpus admission on its own
+                Ok(false)
+            }
+
+            fn append_metadata(
+                &mut self,
+                _state: &mut S,
+                _manager: &mut EM,
+                _observers: &OT,
+                testcase: &mut libafl::corpus::Testcase<I>,
+            ) -> std::result::Result<(), libafl::Error> {
+                use libafl::HasMetadata;
+                let pattern = get_success_pattern();
+                if !pattern.is_empty() {
+                    testcase.add_metadata(crucible_fuzzer::SuccessPatternMetadata { pattern });
+                }
+                Ok(())
+            }
+        }
+
+        impl libafl_bolts::Named for SuccessPatternFeedback {
+            fn name(&self) -> &std::borrow::Cow<'static, str> {
+                &self.name
+            }
+        }
+    }
+}
+
 /// Generate all coverage-related code for the runtime module
 pub fn all_coverage_code() -> proc_macro2::TokenStream {
     let state_code = coverage_state_code();
@@ -721,6 +802,7 @@ pub fn all_coverage_code() -> proc_macro2::TokenStream {
     let callback_impl = invocation_callback_impl_code();
     let feedback_code = shared_bitmap_feedback_code();
     let lcov_code = lcov_coverage_code();
+    let success_pattern = success_pattern_code();
 
     quote! {
         #state_code
@@ -728,5 +810,6 @@ pub fn all_coverage_code() -> proc_macro2::TokenStream {
         #callback_impl
         #feedback_code
         #lcov_code
+        #success_pattern
     }
 }
