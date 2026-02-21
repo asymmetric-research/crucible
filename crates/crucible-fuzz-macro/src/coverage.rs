@@ -161,6 +161,15 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         pub fn init_program_binaries(binaries: HashMap<u64, Vec<u8>>) {
             let _ = PROGRAM_BINARIES.set(binaries);
         }
+
+        // Static storage for DWARF source maps (for source-level LCOV)
+        pub static DWARF_SOURCE_MAP: std::sync::OnceLock<
+            HashMap<u64, crucible_test_context::DwarfSourceMap>
+        > = std::sync::OnceLock::new();
+
+        pub fn init_dwarf_source_maps(maps: HashMap<u64, crucible_test_context::DwarfSourceMap>) {
+            let _ = DWARF_SOURCE_MAP.set(maps);
+        }
     }
 }
 
@@ -627,6 +636,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             let program_binaries = PROGRAM_BINARIES.get();
             let edge_totals = PROGRAM_TOTALS.get();
             let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
+            let dwarf_maps = DWARF_SOURCE_MAP.get();
 
             let mut programs_written = 0usize;
 
@@ -652,6 +662,27 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                     .and_then(|data| crucible_test_context::extract_functions(data))
                     .unwrap_or_default();
 
+                // Try source-level LCOV if DWARF map available
+                if let Some(source_map) = dwarf_maps.and_then(|m| m.get(&prog_hash)) {
+                    match crucible_test_context::generate_source_lcov(
+                        &mut writer,
+                        &hits,
+                        &outcomes,
+                        source_map,
+                        &functions,
+                    ) {
+                        Ok(n) => {
+                            eprintln!("[LCOV] Source-level coverage: {} source files", n);
+                            programs_written += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("[LCOV] Source-level failed, falling back: {}", e);
+                        }
+                    }
+                }
+
+                // Fallback: bytecode-level LCOV
                 let total_edges = edge_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
                 let total_branches = total_edges / 2;
                 let total_instructions = instr_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
@@ -688,12 +719,25 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 branch_outcomes.values().map(|h| h.len()).sum::<usize>());
         }
 
-        /// Write coverage files every 5000 iterations when new coverage is discovered.
-        /// Uses iteration-based throttling (no syscalls) instead of wall-clock time.
+        /// Write coverage files periodically when new coverage is discovered.
+        /// Uses iteration-based pre-check (cheap modulo) and time-based throttle
+        /// (write at most every 10 seconds) for live coverage viewing.
         /// Note: Caller should check COVERAGE_ENABLED before calling this function
         pub fn maybe_write_coverage(exec_count: u64) {
-            // Iteration-based throttling: only check every 5000 iterations
-            if exec_count % 5000 != 0 {
+            // Rate limit: only check every 1000 iterations (cheap modulo, no syscall)
+            if exec_count % 1000 != 0 {
+                return;
+            }
+
+            // Time-based throttle: write at most every 10 seconds
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_WRITE_TIME: AtomicU64 = AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let last = LAST_WRITE_TIME.load(Ordering::Relaxed);
+            if now.saturating_sub(last) < 10 {
                 return;
             }
 
@@ -706,6 +750,8 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 // Update coverage count
                 state.last_coverage_count = current_coverage_count;
                 drop(state); // Release lock before file I/O
+
+                LAST_WRITE_TIME.store(now, Ordering::Relaxed);
 
                 // Write LCOV when new coverage is found
                 write_lcov_coverage("coverage.lcov");

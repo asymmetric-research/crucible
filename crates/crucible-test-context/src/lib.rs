@@ -55,7 +55,8 @@ pub mod coverage;
 
 // Re-export coverage types for backward compatibility
 pub use coverage::{FunctionInfo, ReachableAnalysis, CoverageStats, CoverageWriteStats, CachedFunctionInfo, CachedProgramAnalysis};
-pub use coverage::{extract_functions, generate_bytecode_lcov, generate_coverage_html, build_cached_analysis, generate_coverage_html_cached};
+pub use coverage::{extract_functions, generate_bytecode_lcov, generate_source_lcov, generate_coverage_html, build_cached_analysis, generate_coverage_html_cached};
+pub use coverage::{DwarfSourceMap, SourceLocation, build_dwarf_source_map};
 
 pub use litesvm::InvocationInspectCallback;
 

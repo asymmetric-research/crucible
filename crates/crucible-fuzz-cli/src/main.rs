@@ -70,6 +70,9 @@ enum Commands {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
+        /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
+        #[arg(long)]
+        symbols: Option<PathBuf>,
     },
     /// List available fuzz tests
     List {
@@ -152,6 +155,7 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            symbols,
         } => fuzz_run(
             &program_name,
             &test_name,
@@ -168,6 +172,7 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            symbols,
         ),
         Commands::List { program_name } => fuzz_list(program_name.as_deref()),
         Commands::Show {
@@ -418,6 +423,7 @@ fn fuzz_run(
     stop_on_crash: bool,
     max_actions: usize,
     no_tracing: bool,
+    symbols: Option<PathBuf>,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
@@ -508,6 +514,14 @@ fn fuzz_run(
     if no_tracing {
         cmd.env("FUZZ_NO_TRACING", "1");
         println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
+    }
+
+    if let Some(ref symbols_path) = symbols {
+        let abs_path = resolve_path(&cwd, symbols_path);
+        // Canonicalize to resolve symlinks and ".." so DWARF workspace-root detection works
+        let canonical = abs_path.canonicalize().unwrap_or(abs_path);
+        cmd.env("FUZZ_SYMBOLS", &canonical);
+        println!("[FUZZ] Debug symbols: {}", canonical.display());
     }
 
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());

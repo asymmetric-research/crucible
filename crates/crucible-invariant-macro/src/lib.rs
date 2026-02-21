@@ -45,10 +45,16 @@ fn read_cargo_features() -> Vec<String> {
 
 // Field type classification for FuzzAction code generation
 enum FieldTypeKind {
+    U8,
+    U16,
+    U32,
     U64,
+    I8,
+    I16,
+    I32,
+    I64,
     Usize,
     Bool,
-    I64,
     Option(Box<FieldTypeKind>),
     Vec(Box<FieldTypeKind>),
 }
@@ -86,9 +92,16 @@ fn classify_field_type(ty: &Type) -> FieldTypeKind {
     if let Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
             return match seg.ident.to_string().as_str() {
+                "u8" => FieldTypeKind::U8,
+                "u16" => FieldTypeKind::U16,
+                "u32" => FieldTypeKind::U32,
+                "u64" => FieldTypeKind::U64,
+                "i8" => FieldTypeKind::I8,
+                "i16" => FieldTypeKind::I16,
+                "i32" => FieldTypeKind::I32,
+                "i64" => FieldTypeKind::I64,
                 "usize" => FieldTypeKind::Usize,
                 "bool" => FieldTypeKind::Bool,
-                "i64" | "i32" | "i16" | "i8" => FieldTypeKind::I64,
                 _ => FieldTypeKind::U64,
             };
         }
@@ -102,6 +115,9 @@ fn field_byte_size(kind: &FieldTypeKind, max_len: Option<usize>) -> usize {
             let ml = max_len.unwrap_or(8);
             (1 + ml) * 8
         }
+        FieldTypeKind::U8 | FieldTypeKind::I8 | FieldTypeKind::Bool => 1,
+        FieldTypeKind::U16 | FieldTypeKind::I16 => 2,
+        FieldTypeKind::U32 | FieldTypeKind::I32 => 4,
         _ => 8,
     }
 }
@@ -115,40 +131,65 @@ fn gen_inner_random_expr(
     constraint: Option<&RangeConstraint>,
 ) -> proc_macro2::TokenStream {
     match (inner_kind, constraint) {
+        // u64 — direct, no cast needed
         (FieldTypeKind::U64, Some(c)) => {
             let lo = c.start;
             let hi = if c.inclusive { c.end + 1 } else { c.end };
             quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) }
         }
         (FieldTypeKind::U64, None) => quote! { rng.next() },
+        // u8/u16/u32 — generate as u64 then cast to target type
+        (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, Some(c)) => {
+            let lo = c.start;
+            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let ty = inner_ty.expect("small unsigned needs inner_ty");
+            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
+        }
+        (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, None) => {
+            let ty = inner_ty.expect("small unsigned needs inner_ty");
+            quote! { rng.next() as #ty }
+        }
+        // i64 — direct with cast
+        (FieldTypeKind::I64, Some(c)) => {
+            let lo = c.start;
+            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as i64 }
+        }
+        (FieldTypeKind::I64, None) => quote! { rng.next() as i64 },
+        // i8/i16/i32 — generate as u64 then cast to target type
+        (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
+            let lo = c.start;
+            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let ty = inner_ty.expect("small signed needs inner_ty");
+            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
+        }
+        (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, None) => {
+            let ty = inner_ty.expect("small signed needs inner_ty");
+            quote! { rng.next() as #ty }
+        }
+        // usize — dedicated function
         (FieldTypeKind::Usize, Some(c)) => {
             let lo = c.start as usize;
             let hi = if c.inclusive { (c.end + 1) as usize } else { c.end as usize };
             quote! { crucible_fuzzer::gen_range_usize(rng, #lo, #hi) }
         }
         (FieldTypeKind::Usize, None) => quote! { rng.next() as usize },
+        // bool
         (FieldTypeKind::Bool, _) => quote! { crucible_fuzzer::rand_below(rng, 2) == 1 },
-        (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
-            let ty = inner_ty.expect("I64 needs inner_ty");
-            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
-        }
-        (FieldTypeKind::I64, None) => {
-            let ty = inner_ty.expect("I64 needs inner_ty");
-            quote! { rng.next() as #ty }
-        }
         (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => unreachable!("handled at top level"),
     }
 }
 
 /// Statement that mutates a value through a mutable reference `ref_tok`.
+/// `inner_ty` is the concrete type (e.g. u8, i32) for small-type widen/narrow.
 fn gen_inner_mutate_stmt(
     inner_kind: &FieldTypeKind,
+    inner_ty: Option<&Type>,
     ref_tok: &proc_macro2::TokenStream,
     constraint: Option<&RangeConstraint>,
 ) -> proc_macro2::TokenStream {
     match (inner_kind, constraint) {
+        // u64 — direct call
         (FieldTypeKind::U64, Some(c)) => {
             let lo = c.start;
             let hi = if c.inclusive { c.end + 1 } else { c.end };
@@ -157,6 +198,54 @@ fn gen_inner_mutate_stmt(
         (FieldTypeKind::U64, None) => {
             quote! { crucible_fuzzer::mutate_u64(#ref_tok, 0, u64::MAX, rng); }
         }
+        // u8/u16/u32 — widen to u64, mutate, narrow back
+        (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, c) => {
+            let ty = inner_ty.expect("small unsigned needs inner_ty");
+            let (lo, hi) = match c {
+                Some(c) => {
+                    let lo = c.start;
+                    let hi = if c.inclusive { c.end + 1 } else { c.end };
+                    (quote! { #lo }, quote! { #hi })
+                }
+                None => (quote! { 0u64 }, quote! { (#ty::MAX as u64) + 1 }),
+            };
+            quote! {
+                {
+                    let mut __w = *#ref_tok as u64;
+                    crucible_fuzzer::mutate_u64(&mut __w, #lo, #hi, rng);
+                    *#ref_tok = __w as #ty;
+                }
+            }
+        }
+        // i64 — direct call
+        (FieldTypeKind::I64, Some(c)) => {
+            let lo = c.start as i64;
+            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+            quote! { crucible_fuzzer::mutate_i64(#ref_tok, #lo, #hi, rng); }
+        }
+        (FieldTypeKind::I64, None) => {
+            quote! { crucible_fuzzer::mutate_i64(#ref_tok, i64::MIN, i64::MAX, rng); }
+        }
+        // i8/i16/i32 — widen to i64, mutate, narrow back
+        (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, c) => {
+            let ty = inner_ty.expect("small signed needs inner_ty");
+            let (lo, hi) = match c {
+                Some(c) => {
+                    let lo = c.start as i64;
+                    let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+                    (quote! { #lo }, quote! { #hi })
+                }
+                None => (quote! { #ty::MIN as i64 }, quote! { (#ty::MAX as i64) + 1 }),
+            };
+            quote! {
+                {
+                    let mut __w = *#ref_tok as i64;
+                    crucible_fuzzer::mutate_i64(&mut __w, #lo, #hi, rng);
+                    *#ref_tok = __w as #ty;
+                }
+            }
+        }
+        // usize — dedicated function
         (FieldTypeKind::Usize, Some(c)) => {
             let lo = c.start as usize;
             let hi = if c.inclusive { (c.end + 1) as usize } else { c.end as usize };
@@ -165,16 +254,9 @@ fn gen_inner_mutate_stmt(
         (FieldTypeKind::Usize, None) => {
             quote! { crucible_fuzzer::mutate_usize(#ref_tok, 0, usize::MAX, rng); }
         }
+        // bool
         (FieldTypeKind::Bool, _) => {
             quote! { crucible_fuzzer::mutate_bool(#ref_tok, rng); }
-        }
-        (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start as i64;
-            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
-            quote! { crucible_fuzzer::mutate_i64(#ref_tok, #lo, #hi, rng); }
-        }
-        (FieldTypeKind::I64, None) => {
-            quote! { crucible_fuzzer::mutate_i64(#ref_tok, i64::MIN, i64::MAX, rng); }
         }
         (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => unreachable!("handled at top level"),
     }
@@ -232,7 +314,7 @@ fn gen_mutate_field_code(
         let inner_ty = extract_vec_inner(ty);
         let inner_random_expr = gen_inner_random_expr(inner_kind, inner_ty, constraint);
         let elem_ref = quote! { &mut #name[__idx] };
-        let inner_mutate = gen_inner_mutate_stmt(inner_kind, &elem_ref, constraint);
+        let inner_mutate = gen_inner_mutate_stmt(inner_kind, inner_ty, &elem_ref, constraint);
         return quote! {
             #field_idx => {
                 if crucible_fuzzer::rand_below(rng, 100) < 20 {
@@ -261,7 +343,7 @@ fn gen_mutate_field_code(
         let inner_ty = extract_option_inner(ty);
         let random_expr = gen_inner_random_expr(inner_kind, inner_ty, constraint);
         let inner_ref = quote! { __inner };
-        let mutate_stmt = gen_inner_mutate_stmt(inner_kind, &inner_ref, constraint);
+        let mutate_stmt = gen_inner_mutate_stmt(inner_kind, inner_ty, &inner_ref, constraint);
         quote! {
             #field_idx => {
                 if crucible_fuzzer::rand_below(rng, 100) < 15 {
@@ -277,7 +359,7 @@ fn gen_mutate_field_code(
         }
     } else {
         let ref_tok = quote! { #name };
-        let mutate_stmt = gen_inner_mutate_stmt(inner_kind, &ref_tok, constraint);
+        let mutate_stmt = gen_inner_mutate_stmt(inner_kind, Some(ty), &ref_tok, constraint);
         quote! { #field_idx => { #mutate_stmt }, }
     }
 }
@@ -289,10 +371,10 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
         let elem_bytes = match inner_kind.as_ref() {
-            FieldTypeKind::U64 => quote! { (*__item as u64).to_le_bytes() },
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! { (*__item as u64).to_le_bytes() },
             FieldTypeKind::Usize => quote! { (*__item as u64).to_le_bytes() },
             FieldTypeKind::Bool => quote! { (if *__item { 1u64 } else { 0u64 }).to_le_bytes() },
-            FieldTypeKind::I64 => quote! { (*__item as u64).to_le_bytes() },
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! { (*__item as u64).to_le_bytes() },
             _ => unreachable!(),
         };
         return quote! {
@@ -315,10 +397,10 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
     // `val_tok` is the token referring to the value.
     let to_bytes = |val_tok: proc_macro2::TokenStream, kind: &FieldTypeKind| -> proc_macro2::TokenStream {
         match kind {
-            FieldTypeKind::U64 => quote! { (#val_tok as u64).to_le_bytes() },
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Usize => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Bool => quote! { (if #val_tok { 1u64 } else { 0u64 }).to_le_bytes() },
-            FieldTypeKind::I64 => quote! { (#val_tok as u64).to_le_bytes() },
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Option(_) | FieldTypeKind::Vec(_) => unreachable!(),
         }
     };
@@ -344,13 +426,13 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
         let raw_to_val = match inner_kind.as_ref() {
-            FieldTypeKind::U64 => {
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
                 let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
                 quote! { __raw as #inner_ty }
             }
             FieldTypeKind::Usize => quote! { __raw as usize },
             FieldTypeKind::Bool => quote! { __raw != 0 },
-            FieldTypeKind::I64 => {
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
                 let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
                 quote! { __raw as #inner_ty }
             }
@@ -377,13 +459,13 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
 
     let raw_to_val = |kind: &FieldTypeKind| -> proc_macro2::TokenStream {
         match kind {
-            FieldTypeKind::U64 => {
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
                 let inner_ty = extract_option_inner(ty).unwrap_or(ty);
                 quote! { __raw as #inner_ty }
             }
             FieldTypeKind::Usize => quote! { __raw as usize },
             FieldTypeKind::Bool => quote! { __raw != 0 },
-            FieldTypeKind::I64 => {
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
                 let inner_ty = extract_option_inner(ty).unwrap_or(ty);
                 quote! { __raw as #inner_ty }
             }
@@ -400,7 +482,7 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
         }
     } else {
         match inner_kind {
-            FieldTypeKind::U64 => quote! {
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! {
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
                 *cursor += 8;
             },
@@ -412,7 +494,7 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) != 0;
                 *cursor += 8;
             },
-            FieldTypeKind::I64 => quote! {
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! {
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
                 *cursor += 8;
             },

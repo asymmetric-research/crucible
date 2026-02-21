@@ -204,6 +204,7 @@ pub fn coverage_only_mode(
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
     let init_program_binaries = codegen::init_program_binaries(mod_name);
+    let init_dwarf = codegen::init_dwarf_maps(mod_name);
 
     // For structured mode, simple_deser_stmts reference __raw_bytes
     let deser_block = if structured {
@@ -261,10 +262,11 @@ pub fn coverage_only_mode(
             #mod_name::COVERAGE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
             let template_fixture = #fixture_name::setup();
 
-            // Initialize coverage totals and binaries (for LCOV output)
+            // Initialize coverage totals, binaries, and DWARF source maps (for LCOV output)
             {
                 #init_coverage_totals
                 #init_program_binaries
+                #init_dwarf
             }
 
             // Process each input file

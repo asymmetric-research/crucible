@@ -35,6 +35,35 @@ pub fn init_program_binaries(mod_name: &syn::Ident) -> proc_macro2::TokenStream 
     }
 }
 
+/// Generate the initialization code for DWARF source maps (for source-level LCOV)
+pub fn init_dwarf_maps(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
+    quote! {
+        // Only build DWARF maps when --coverage + --symbols are both active
+        if std::env::var("FUZZ_SYMBOLS").is_ok() {
+            let symbols_path = std::env::var("FUZZ_SYMBOLS").unwrap();
+            let debug_binary = std::fs::read(&symbols_path)
+                .unwrap_or_else(|e| panic!("Failed to read symbols file {}: {}", symbols_path, e));
+
+            let mut dwarf_maps = std::collections::HashMap::new();
+            if let Some(source_map) = crucible_test_context::build_dwarf_source_map(&debug_binary) {
+                eprintln!("[COVERAGE] DWARF source map loaded: {} PCs resolved, {} functions",
+                    source_map.pc_map.len(), source_map.fn_map.len());
+                // Associate with all loaded programs
+                for (pubkey, _) in template_fixture.ctx.get_program_coverage_totals() {
+                    let program_hash = u64::from_le_bytes(
+                        pubkey.to_bytes()[0..8].try_into().unwrap()
+                    );
+                    dwarf_maps.insert(program_hash, source_map.clone());
+                }
+            } else {
+                eprintln!("[COVERAGE] Warning: {} has no DWARF debug info. \
+                    Build with [profile.release] debug = true", symbols_path);
+            }
+            #mod_name::init_dwarf_source_maps(dwarf_maps);
+        }
+    }
+}
+
 /// Generate the template setup code
 pub fn template_setup(
     fixture_name: &syn::Ident,
@@ -42,11 +71,13 @@ pub fn template_setup(
 ) -> proc_macro2::TokenStream {
     let init_totals = init_coverage_totals(mod_name);
     let init_binaries = init_program_binaries(mod_name);
+    let init_dwarf = init_dwarf_maps(mod_name);
 
     quote! {
-        if std::env::var("FUZZ_NO_TRACING").is_err() {
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
-        }
+        // Always enable tracing for initial fixture setup so corpus loading
+        // establishes a coverage baseline. If --no-tracing is set, we switch to
+        // a non-instrumented SVM after corpus loading completes.
+        std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
         let template_fixture = #fixture_name::setup();
 
         // Debug: verify accounts exist in template after setup
@@ -59,6 +90,7 @@ pub fn template_setup(
         {
             #init_totals
             #init_binaries
+            #init_dwarf
         }
     }
 }

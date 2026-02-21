@@ -37,6 +37,8 @@ solana-transaction-context = "3.0"
 solana-transaction-error = "3.0"
 solana-clock = "3.0"
 solana-sbpf = "0.13"
+solana-compute-budget = "3.0"
+solana-bpf-loader-program = "3.0"
 
 spl-token = "9.0"
 bytemuck = { version = "1.14", features = ["derive"] }

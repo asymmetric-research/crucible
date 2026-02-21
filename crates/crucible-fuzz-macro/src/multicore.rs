@@ -135,9 +135,8 @@ pub fn multicore_mode(
             // =====================================================================
             // PRE-FORK: Initialize PROGRAM_TOTALS for coverage tracking
             // =====================================================================
-            if std::env::var("FUZZ_NO_TRACING").is_err() {
-                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
-            }
+            // Always enable tracing for pre-fork fixture (coverage totals init)
+            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
             let template_fixture = #fixture_name::setup();
             #init_coverage_totals
 
@@ -467,9 +466,9 @@ pub fn multicore_mode(
                 let cov_ptr = coverage_map.as_mut_ptr();
 
                 // Setup template fixture per worker (fresh SVM instance)
-                if std::env::var("FUZZ_NO_TRACING").is_err() {
-                    std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
-                }
+                // Always enable tracing so corpus loading establishes coverage baseline.
+                // If --no-tracing, we switch to non-instrumented SVM after corpus loading.
+                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
                 let template_fixture = #fixture_name::setup();
 
                 // Take snapshot of initial SVM state for reference
@@ -485,11 +484,11 @@ pub fn multicore_mode(
                 // The real SVM is swapped in/out of each iteration's clone, never deep-copied.
                 // Keep a pristine copy for periodic full reset (prevents unbounded internal state growth
                 // in LiteSVM's accounts HashMap, program cache, etc.)
-                let __pristine_svm = template_fixture.ctx.svm.clone();
-                let mut __saved_svm = std::mem::replace(
+                let __pristine_svm = std::cell::RefCell::new(template_fixture.ctx.svm.clone());
+                let __saved_svm = std::cell::RefCell::new(std::mem::replace(
                     &mut template_fixture.ctx.svm,
                     litesvm::LiteSVM::new(),
-                );
+                ));
 
                 // Periodic full SVM reset interval (0 = disabled)
                 let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
@@ -601,7 +600,7 @@ pub fn multicore_mode(
                     // Periodic full SVM reset: replace working SVM with pristine clone to prevent
                     // unbounded growth in LiteSVM internals (accounts HashMap, program cache, etc.)
                     if __svm_reset_interval > 0 && current_iteration > 0 && current_iteration % __svm_reset_interval == 0 {
-                        __saved_svm = __pristine_svm.clone();
+                        *__saved_svm.borrow_mut() = __pristine_svm.borrow().clone();
                     }
 
                     #(#deser_stmts)*
@@ -610,7 +609,7 @@ pub fn multicore_mode(
                     let mut #fixture_param_name = template_fixture.clone();
 
                     // Swap real SVM into the clone
-                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
 
                     let callback = #mod_name::FuzzCallback::with_shared_memory(
                         cov_ptr,
@@ -667,7 +666,7 @@ pub fn multicore_mode(
                     #fixture_param_name.ctx.taint_log.clear();
 
                     // Swap restored SVM back for next iteration
-                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __saved_svm);
+                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
                     // fixture is dropped here (cheap: only empty SVM + small fields)
 
                     if let Some(msg) = crucible_test_context::take_violation() {
@@ -744,6 +743,24 @@ pub fn multicore_mode(
 
                 let loaded = state.corpus().count();
                 eprintln!("[Worker {}] Loaded {} corpus entries (ready to fuzz)", worker_id, loaded);
+
+                // After corpus loading, switch to non-tracing SVM for max throughput.
+                // The corpus was loaded with tracing enabled so the coverage baseline
+                // (shared edge/branch bitmaps) is populated. Now recreate the fixture
+                // without JIT instrumentation for maximum exec/sec during fuzzing.
+                if std::env::var("FUZZ_NO_TRACING").is_ok() {
+                    std::env::remove_var("ANCHOR_FUZZ_DEBUGGABLE");
+                    if worker_id == 0 {
+                        eprintln!("[FUZZ] Corpus loaded with tracing. Switching to no-tracing mode for fuzzing.");
+                    }
+                    let mut __new_fixture = #fixture_name::setup();
+                    __new_fixture.ctx.take_snapshot();
+                    *__pristine_svm.borrow_mut() = __new_fixture.ctx.svm.clone();
+                    *__saved_svm.borrow_mut() = std::mem::replace(
+                        &mut __new_fixture.ctx.svm,
+                        litesvm::LiteSVM::new(),
+                    );
+                }
 
                 #mutator_setup
 

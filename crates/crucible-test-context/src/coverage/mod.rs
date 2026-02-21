@@ -8,8 +8,10 @@
 pub mod types;
 pub mod lcov;
 pub mod html;
+pub mod dwarf;
 
 // Re-export main types and functions
 pub use types::{FunctionInfo, ReachableAnalysis, CoverageStats, CoverageWriteStats, CachedFunctionInfo, CachedProgramAnalysis};
-pub use lcov::{extract_functions, generate_bytecode_lcov};
+pub use lcov::{extract_functions, generate_bytecode_lcov, generate_source_lcov};
+pub use dwarf::{DwarfSourceMap, SourceLocation, build_dwarf_source_map};
 pub use html::{generate_coverage_html, build_cached_analysis, generate_coverage_html_cached};
