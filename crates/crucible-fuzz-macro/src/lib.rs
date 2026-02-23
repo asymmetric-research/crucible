@@ -376,6 +376,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         structured,
     );
 
+    let tmin_code = modes::tmin_mode(
+        &mod_name,
+        fixture_name,
+        fn_name,
+        structured,
+        action_type_tokens.as_ref(),
+    );
+
     let cmin_code = corpus::cmin_mode(
         &mod_name,
         fixture_name,
@@ -477,6 +485,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             #replay_code
             #coverage_only_code
             #cmin_code
+            #tmin_code
             #multicore_code
             #singlecore_code
         }

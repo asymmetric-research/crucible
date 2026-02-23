@@ -359,6 +359,23 @@ pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>,
     }
 }
 
+/// Write crash metadata for a known crash ID (used by tmin to update metadata in place)
+pub fn write_crash_metadata_for_id(crash_dir: &str, crash_id: &str, seed: Option<u64>) {
+    let metadata = build_crash_metadata(seed);
+    let meta_filename = format!("{}/{}.meta.json", crash_dir, crash_id);
+
+    match serde_json::to_string_pretty(&metadata) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&meta_filename, json) {
+                eprintln!("[META] Failed to write {}: {}", meta_filename, e);
+            }
+        }
+        Err(e) => {
+            eprintln!("[META] Failed to serialize metadata: {}", e);
+        }
+    }
+}
+
 // ============================================================================
 // Action Result Trait (for Feature 2: actions return Result)
 // ============================================================================

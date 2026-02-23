@@ -124,7 +124,10 @@ pub fn singlecore_mode(
             let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
             #fixture_param_name.ctx.set_invocation_callback(callback);
 
-            #fn_name(#(#call_args),*);
+            // Wrap test function in catch_unwind so panics print location and exit cleanly
+            let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #fn_name(#(#call_args),*);
+            }));
 
             // Collect success pattern from action history for SuccessPatternFeedback
             {
@@ -150,6 +153,12 @@ pub fn singlecore_mode(
             // Swap restored SVM back for next iteration
             std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
             // fixture is dropped here (cheap: only empty SVM + small fields)
+
+            // On panic: resume unwinding so the default panic handler prints
+            // the message with file/line, then the process exits naturally
+            if let Err(__panic_payload) = __panic_result {
+                std::panic::resume_unwind(__panic_payload);
+            }
 
             if let Some(msg) = crucible_test_context::take_violation() {
                 eprintln!("[VIOLATION] {}", msg);

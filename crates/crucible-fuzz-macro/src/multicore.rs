@@ -564,9 +564,9 @@ pub fn multicore_mode(
                     };
 
                     if global_stop || should_stop {
-                        // Panic to break out of fuzz_loop - LibAFL will catch this
-                        // and the worker will return, triggering ShuttingDown check on respawn
-                        panic!("Stop signal received");
+                        // Exit cleanly - don't panic, as LibAFL's InProcessExecutor
+                        // would catch the panic and record the current input as a crash
+                        std::process::exit(0);
                     }
 
                     let bytes_ref = input.target_bytes();
@@ -587,7 +587,9 @@ pub fn multicore_mode(
                                 should_stop = true;
                                 // Create stop signal file to notify all workers
                                 let _ = std::fs::write(&stop_signal_for_harness, b"stop");
-                                panic!("Timeout reached");
+                                // Exit cleanly - don't panic, as LibAFL's InProcessExecutor
+                                // would catch the panic and record the current input as a crash
+                                std::process::exit(0);
                             }
                         }
                     }
@@ -623,7 +625,10 @@ pub fn multicore_mode(
                     let actions_before = crucible_test_context::TOTAL_ACTIONS_DISPATCHED
                         .load(std::sync::atomic::Ordering::Relaxed);
 
-                    #fn_name(#(#call_args),*);
+                    // Wrap test function in catch_unwind so panics print location and exit cleanly
+                    let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #fn_name(#(#call_args),*);
+                    }));
 
                     // Collect success pattern from action history for SuccessPatternFeedback
                     {
@@ -668,6 +673,12 @@ pub fn multicore_mode(
                     // Swap restored SVM back for next iteration
                     std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
                     // fixture is dropped here (cheap: only empty SVM + small fields)
+
+                    // On panic: resume unwinding so the default panic handler prints
+                    // the message with file/line, then the process exits naturally
+                    if let Err(__panic_payload) = __panic_result {
+                        std::panic::resume_unwind(__panic_payload);
+                    }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
                         if std::env::var("FUZZ_VERBOSE").is_ok() {

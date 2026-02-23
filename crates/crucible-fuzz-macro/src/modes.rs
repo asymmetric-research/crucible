@@ -4,6 +4,7 @@
 //! - Dry-run mode: Validate harness setup with a single iteration
 //! - Input replay mode: Replay a specific input file
 //! - Coverage-only mode: Run corpus once for coverage report
+//! - Tmin mode: Minimize a crash to smallest reproducing action sequence
 
 use quote::quote;
 
@@ -335,6 +336,205 @@ pub fn coverage_only_mode(
                 if branch_totals > 0 { (total_branches as f64 / branch_totals as f64) * 100.0 } else { 0.0 },
             );
 
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Generate the tmin (crash minimization) mode code.
+///
+/// Only works with structured mode (action sequences from #[invariant_test]).
+/// Uses a 1-pass linear removal algorithm:
+/// 1. Truncate actions after the violation index
+/// 2. Try removing each remaining action; keep removal if crash still reproduces
+pub fn tmin_mode(
+    mod_name: &syn::Ident,
+    fixture_name: &syn::Ident,
+    fn_name: &syn::Ident,
+    structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    if !structured {
+        // For non-structured mode, emit a check that prints an error
+        return quote! {
+            if let Ok(_tmin_file) = std::env::var("FUZZ_TMIN_FILE") {
+                eprintln!("[TMIN] ERROR: tmin only supports structured/invariant tests");
+                std::process::exit(1);
+            }
+        };
+    }
+
+    let action_ty = match action_type {
+        Some(ty) => ty,
+        None => {
+            return quote! {
+                if let Ok(_tmin_file) = std::env::var("FUZZ_TMIN_FILE") {
+                    eprintln!("[TMIN] ERROR: tmin requires an action type (structured mode)");
+                    std::process::exit(1);
+                }
+            };
+        }
+    };
+
+    quote! {
+        // === TMIN MODE (Crash Minimization) ===
+        // Supports two modes:
+        //   FUZZ_TMIN_FILE — minimize a single crash file
+        //   FUZZ_TMIN_ALL_DIR — minimize all crashes in a directory (one setup() call)
+        if std::env::var("FUZZ_TMIN_FILE").is_ok() || std::env::var("FUZZ_TMIN_ALL_DIR").is_ok() {
+            // Collect crash files to minimize
+            let crash_files: Vec<(String, std::path::PathBuf)> = if let Ok(all_dir) = std::env::var("FUZZ_TMIN_ALL_DIR") {
+                // --all mode: iterate all crash binaries with .meta.json in the directory
+                let dir = std::path::Path::new(&all_dir);
+                let mut files = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with(".meta.json") {
+                                let crash_id = name.strip_suffix(".meta.json").unwrap().to_string();
+                                let binary_path = dir.join(&crash_id);
+                                if binary_path.exists() && binary_path.is_file() {
+                                    files.push((crash_id, binary_path));
+                                }
+                            }
+                        }
+                    }
+                }
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                eprintln!("[TMIN] Found {} crash(es) to minimize", files.len());
+                files
+            } else {
+                // Single file mode
+                let tmin_file = std::env::var("FUZZ_TMIN_FILE").unwrap();
+                let crash_id = std::env::var("FUZZ_TMIN_CRASH_ID").unwrap_or_default();
+                vec![(crash_id, std::path::PathBuf::from(tmin_file))]
+            };
+
+            let crashes_dir = std::env::var("FUZZ_CRASHES_DIR").unwrap_or_else(|_| "crashes".into());
+
+            // Setup fixture once — reused across all crash files.
+            // No tracing needed: tmin only checks for violation, not coverage.
+            let template_fixture = #fixture_name::setup();
+
+            // Helper: suppress stderr during a closure (avoids verbose invariant output during trials)
+            fn with_stderr_suppressed<F: FnOnce() -> R, R>(f: F) -> R {
+                extern "C" {
+                    fn dup(fd: i32) -> i32;
+                    fn dup2(fd1: i32, fd2: i32) -> i32;
+                    fn open(path: *const u8, flags: i32) -> i32;
+                    fn close(fd: i32) -> i32;
+                }
+                const O_WRONLY: i32 = 1;
+                unsafe {
+                    let devnull = open(b"/dev/null\0".as_ptr(), O_WRONLY);
+                    if devnull < 0 { return f(); } // fallback: don't suppress
+                    let saved = dup(2);
+                    dup2(devnull, 2);
+                    close(devnull);
+                    let result = f();
+                    dup2(saved, 2);
+                    close(saved);
+                    result
+                }
+            }
+
+            // Helper: execute an action sequence on a fresh clone, return whether it crashes
+            let crashes = |actions: &[#action_ty], template: &#fixture_name| -> bool {
+                let mut fixture = template.clone();
+                crucible_test_context::clear_action_history();
+                crucible_test_context::clear_violation_tracking();
+                let _ = crucible_test_context::take_violation();
+                with_stderr_suppressed(|| #fn_name(&mut fixture, actions.to_vec()));
+                crucible_test_context::has_violation()
+            };
+
+            let total = crash_files.len();
+            let start_time = std::time::Instant::now();
+
+            for (idx, (crash_id, crash_path)) in crash_files.iter().enumerate() {
+                let tmin_file = crash_path.to_str().unwrap();
+                eprintln!("\n[TMIN] [{}/{}] {}", idx + 1, total, crash_id);
+
+                let crash_bytes = match std::fs::read(tmin_file) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[TMIN] ERROR: failed to read {}: {}", tmin_file, e);
+                        continue;
+                    }
+                };
+                let fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&crash_bytes);
+                let original_count = fuzz_input.actions.len();
+
+                if original_count == 0 {
+                    eprintln!("[TMIN] Skipping: no actions");
+                    continue;
+                }
+                eprint!("[TMIN] {} actions", original_count);
+
+                // Verify crash reproduces
+                let mut actions = fuzz_input.actions;
+                if !crashes(&actions, &template_fixture) {
+                    eprintln!(" — does not reproduce, skipping");
+                    continue;
+                }
+
+                // Truncate post-violation actions
+                let violation_idx = crucible_test_context::get_violation_action_index();
+                if let Some(vi) = violation_idx {
+                    if vi + 1 < actions.len() {
+                        actions.truncate(vi + 1);
+                    }
+                }
+
+                // Multi-pass forward removal (loop until convergence)
+                let mut pass = 1;
+                loop {
+                    let len_before_pass = actions.len();
+                    let mut i = 0;
+                    while i < actions.len() {
+                        let removed = actions.remove(i);
+                        if actions.is_empty() || !crashes(&actions, &template_fixture) {
+                            actions.insert(i, removed);
+                            i += 1;
+                        } else {
+                            // action removed successfully, don't increment i
+                        }
+                    }
+                    if actions.len() == len_before_pass {
+                        break;
+                    }
+                    pass += 1;
+                }
+
+                let removed_count = original_count - actions.len();
+                if removed_count == 0 {
+                    eprintln!(" → already minimal");
+                } else {
+                    eprintln!(" → {} actions ({} removed, {} passes)",
+                        actions.len(), removed_count, pass);
+
+                    // Write minimized crash binary
+                    let minimized = crucible_fuzzer::FuzzInput::new(actions.clone());
+                    std::fs::write(tmin_file, &minimized.to_bytes())
+                        .expect("failed to write minimized crash");
+
+                    // Update .meta.json — re-execute to capture clean action history
+                    crucible_test_context::clear_action_history();
+                    crucible_test_context::clear_violation_tracking();
+                    {
+                        let mut fixture = template_fixture.clone();
+                        with_stderr_suppressed(|| #fn_name(&mut fixture, actions));
+                    }
+                    if !crash_id.is_empty() {
+                        crucible_test_context::write_crash_metadata_for_id(&crashes_dir, crash_id, None);
+                    }
+                }
+            }
+
+            let elapsed = start_time.elapsed();
+            eprintln!("\n[TMIN] Done. {} crashes in {:.1}s ({:.1}/s)",
+                total, elapsed.as_secs_f64(), total as f64 / elapsed.as_secs_f64());
             std::process::exit(0);
         }
     }
