@@ -1129,6 +1129,191 @@ fn test_small_int_multi_action_sequence_roundtrip() {
 }
 
 // ============================================================================
+// mutate_i64 overflow regression tests (signed range arithmetic)
+// ============================================================================
+
+#[test]
+fn test_mutate_i64_full_range_no_overflow() {
+    // Regression: mutate_i64(val, i64::MIN, i64::MAX, rng) panicked with
+    // "attempt to subtract with overflow" because hi - lo overflows i64.
+    // This is the exact range the macro generates for bare i64 fields.
+    let mut rng = make_rng(800);
+    let mut val = 0i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i64::MIN, i64::MAX, &mut rng);
+        assert!(
+            val >= i64::MIN && val < i64::MAX,
+            "mutate_i64 full range out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_min_to_zero_no_overflow() {
+    // hi - lo = 0 - i64::MIN overflows i64
+    let mut rng = make_rng(801);
+    let mut val = -1i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i64::MIN, 0, &mut rng);
+        assert!(
+            val >= i64::MIN && val < 0,
+            "mutate_i64 [MIN, 0) out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_min_to_one_no_overflow() {
+    // hi - lo = 1 - i64::MIN overflows i64
+    let mut rng = make_rng(802);
+    let mut val = 0i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i64::MIN, 1, &mut rng);
+        assert!(
+            val >= i64::MIN && val < 1,
+            "mutate_i64 [MIN, 1) out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_extreme_val_delta_no_overflow() {
+    // Regression: (*val + delta) overflowed before clamp when val near i64::MAX.
+    // The arithmetic branch adds deltas like +1, +8 etc.
+    let mut rng = make_rng(803);
+    let mut val = i64::MAX - 1;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i64::MIN, i64::MAX, &mut rng);
+        assert!(
+            val >= i64::MIN && val < i64::MAX,
+            "mutate_i64 extreme delta out of bounds: val={}",
+            val
+        );
+    }
+
+    // Also test near i64::MIN
+    val = i64::MIN + 1;
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i64::MIN, i64::MAX, &mut rng);
+        assert!(
+            val >= i64::MIN && val < i64::MAX,
+            "mutate_i64 extreme delta (min) out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_as_i8_range_no_overflow() {
+    // Matches macro codegen: cast i8 to i64, mutate with i8 bounds, cast back
+    let mut rng = make_rng(810);
+    let mut val = 0i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i8::MIN as i64, i8::MAX as i64 + 1, &mut rng);
+        assert!(
+            val >= i8::MIN as i64 && val <= i8::MAX as i64,
+            "mutate_i64 as i8 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_as_i16_range_no_overflow() {
+    let mut rng = make_rng(811);
+    let mut val = 0i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i16::MIN as i64, i16::MAX as i64 + 1, &mut rng);
+        assert!(
+            val >= i16::MIN as i64 && val <= i16::MAX as i64,
+            "mutate_i64 as i16 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i64_as_i32_range_no_overflow() {
+    let mut rng = make_rng(812);
+    let mut val = 0i64;
+
+    for _ in 0..10_000 {
+        mutate_i64(&mut val, i32::MIN as i64, i32::MAX as i64 + 1, &mut rng);
+        assert!(
+            val >= i32::MIN as i64 && val <= i32::MAX as i64,
+            "mutate_i64 as i32 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u64_as_u8_range() {
+    // Matches macro codegen: cast u8 to u64, mutate with u8 bounds, cast back
+    let mut rng = make_rng(820);
+    let mut val = 0u64;
+
+    for _ in 0..10_000 {
+        mutate_u64(&mut val, 0, u8::MAX as u64 + 1, &mut rng);
+        assert!(
+            val <= u8::MAX as u64,
+            "mutate_u64 as u8 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u64_as_u16_range() {
+    let mut rng = make_rng(821);
+    let mut val = 0u64;
+
+    for _ in 0..10_000 {
+        mutate_u64(&mut val, 0, u16::MAX as u64 + 1, &mut rng);
+        assert!(
+            val <= u16::MAX as u64,
+            "mutate_u64 as u16 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u64_as_u32_range() {
+    let mut rng = make_rng(822);
+    let mut val = 0u64;
+
+    for _ in 0..10_000 {
+        mutate_u64(&mut val, 0, u32::MAX as u64 + 1, &mut rng);
+        assert!(
+            val <= u32::MAX as u64,
+            "mutate_u64 as u32 out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u64_full_range() {
+    let mut rng = make_rng(823);
+    let mut val = 0u64;
+
+    for _ in 0..10_000 {
+        mutate_u64(&mut val, 0, u64::MAX, &mut rng);
+        assert!(val < u64::MAX, "mutate_u64 full range out of bounds: val={}", val);
+    }
+}
+
+// ============================================================================
 // Sequence mutator off-by-one tests (Fix 2)
 // ============================================================================
 

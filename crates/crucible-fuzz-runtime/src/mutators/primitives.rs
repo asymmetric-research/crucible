@@ -145,20 +145,22 @@ pub fn mutate_i64<R: Rand>(val: &mut i64, lo: i64, hi: i64, rng: &mut R) {
     if hi <= lo {
         return;
     }
+    // Compute range as u64 to avoid signed overflow (e.g., lo=i64::MIN, hi=0)
+    let range = (hi as u64).wrapping_sub(lo as u64);
     let choice = rand_below(rng, 100);
     if choice < 40 {
         // Boundary values (zero-alloc)
         if let Some(v) = pick_interesting_i64(lo, hi, rng) {
             *val = v;
         } else {
-            *val = lo + (rng.next() as i64).abs() % (hi - lo);
+            *val = lo.wrapping_add((rng.next() % range) as i64);
         }
     } else if choice < 70 {
         let delta_choices: &[i64] = &[-1, 1, -2, 2, -4, 4, -8, 8];
         let idx = rand_below(rng, delta_choices.len());
         let delta = delta_choices[idx];
-        *val = (*val + delta).clamp(lo, hi - 1);
+        *val = (*val as i128 + delta as i128).clamp(lo as i128, (hi as i128) - 1) as i64;
     } else {
-        *val = lo + (rng.next() as i64).abs() % (hi - lo);
+        *val = lo.wrapping_add((rng.next() % range) as i64);
     }
 }
