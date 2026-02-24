@@ -224,6 +224,16 @@ impl IterationTaintLog {
         self.records.push(record);
     }
 
+    /// Number of taint records collected so far.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Whether taint log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
     /// Clear all records (called at start of each iteration).
     pub fn clear(&mut self) {
         self.records.clear();
@@ -429,6 +439,143 @@ pub fn build_taint_record_from_captured(
         programs: meta.programs,
         diffs,
     }
+}
+
+// ============================================================================
+// Per-Action Taint Summary Builder
+// ============================================================================
+
+use crate::{ActionTaintSummary, AccountChangeSummary, AccountChangeKind};
+
+/// Build a taint summary from TxTaintRecords in a range of the iteration log.
+///
+/// `start_idx..end_idx` covers the transactions produced by a single action dispatch.
+/// Returns `None` if taint tracking is disabled (no records and no diffs).
+pub fn build_action_taint_summary(
+    log: &IterationTaintLog,
+    start_idx: usize,
+    end_idx: usize,
+) -> Option<ActionTaintSummary> {
+    let tx_count = end_idx.saturating_sub(start_idx);
+
+    // If no transactions were recorded and we're not collecting diffs, skip
+    if tx_count == 0 && !log.collects_diffs() {
+        return None;
+    }
+
+    let mut written = FastHashSet::default();
+    let mut read = FastHashSet::default();
+
+    for record in log.records.get(start_idx..end_idx).unwrap_or(&[]) {
+        for pk in &record.write_accounts {
+            written.insert(*pk);
+        }
+        for pk in &record.read_accounts {
+            read.insert(*pk);
+        }
+    }
+
+    // Remove written accounts from read set (if you write it, it's not read-only)
+    for pk in &written {
+        read.remove(pk);
+    }
+
+    let written_accounts: Vec<String> = written.iter().map(|pk| pk.to_string()).collect();
+    let read_accounts: Vec<String> = read.iter().map(|pk| pk.to_string()).collect();
+
+    // Build account change details if diffs are available
+    let account_changes = if log.collects_diffs() {
+        build_account_changes(log, start_idx, end_idx)
+    } else {
+        None
+    };
+
+    Some(ActionTaintSummary {
+        tx_count,
+        written_accounts,
+        read_accounts,
+        account_changes,
+    })
+}
+
+/// Merge per-tx AccountDiffs into per-account change summaries.
+/// For each account, uses the first pre-state and last post-state across all txs.
+fn build_account_changes(
+    log: &IterationTaintLog,
+    start_idx: usize,
+    end_idx: usize,
+) -> Option<Vec<AccountChangeSummary>> {
+    use solana_pubkey::Pubkey;
+    use solana_account::Account;
+
+    // Collect first pre and last post per pubkey
+    let mut first_pre: FastHashMap<Pubkey, Option<Account>> = FastHashMap::default();
+    let mut last_post: FastHashMap<Pubkey, Option<Account>> = FastHashMap::default();
+
+    for record in log.records.get(start_idx..end_idx).unwrap_or(&[]) {
+        if let Some(ref diffs) = record.diffs {
+            for diff in diffs {
+                first_pre.entry(diff.pubkey).or_insert_with(|| diff.pre.clone());
+                last_post.insert(diff.pubkey, diff.post.clone());
+            }
+        }
+    }
+
+    if first_pre.is_empty() {
+        return None;
+    }
+
+    let mut changes = Vec::new();
+    for (pubkey, pre) in &first_pre {
+        let post = last_post.get(pubkey).cloned().flatten();
+        let pre_ref = pre.as_ref();
+
+        // Determine change kind
+        let kind = match (pre_ref, &post) {
+            (None, Some(_)) => AccountChangeKind::Created,
+            (Some(_), None) => AccountChangeKind::Deleted,
+            _ => AccountChangeKind::Modified,
+        };
+
+        // Compute lamports
+        let pre_lamports = pre_ref.map(|a| a.lamports).unwrap_or(0);
+        let post_lamports = post.as_ref().map(|a| a.lamports).unwrap_or(0);
+
+        // Build a temporary AccountDiff to reuse changed_data_ranges()
+        let temp_diff = AccountDiff {
+            pubkey: *pubkey,
+            pre: pre.clone(),
+            post: post.clone(),
+        };
+
+        // Skip unchanged accounts
+        if !temp_diff.is_changed() {
+            continue;
+        }
+
+        let changed_ranges = temp_diff.changed_data_ranges();
+
+        // Try semantic diff via schema registry
+        let field_diffs = if let (Some(pre_acc), Some(post_acc)) = (pre_ref, &post) {
+            crate::schema::lookup_diff_fn(&post_acc.data)
+                .and_then(|diff_fn| {
+                    let deltas = diff_fn(&pre_acc.data, &post_acc.data);
+                    if deltas.is_empty() { None } else { Some(deltas) }
+                })
+        } else {
+            None
+        };
+
+        changes.push(AccountChangeSummary {
+            pubkey: pubkey.to_string(),
+            kind,
+            lamports: (pre_lamports, post_lamports),
+            changed_ranges,
+            field_diffs,
+        });
+    }
+
+    if changes.is_empty() { None } else { Some(changes) }
 }
 
 // ============================================================================
@@ -699,5 +846,496 @@ mod tests {
         let cloned = tracker.clone();
         assert_eq!(cloned.dirty_count(), 0);
         assert!(!cloned.is_clock_dirty());
+    }
+
+    // -------------------------------------------------------------------------
+    // build_action_taint_summary tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_taint_summary_empty_log() {
+        let log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+        // No txs and no diffs → None
+        let result = build_action_taint_summary(&log, 0, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_taint_summary_single_tx() {
+        let pk_write = Pubkey::new_unique();
+        let pk_read = Pubkey::new_unique();
+        let pk_prog = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![pk_read, pk_prog],
+            write_accounts: vec![pk_write],
+            programs: vec![pk_prog],
+            diffs: None,
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        assert_eq!(summary.tx_count, 1);
+        assert_eq!(summary.written_accounts.len(), 1);
+        assert!(summary.written_accounts.contains(&pk_write.to_string()));
+        // pk_read and pk_prog should be in read set (not in write set)
+        assert!(summary.read_accounts.contains(&pk_read.to_string()));
+        assert!(summary.account_changes.is_none());
+    }
+
+    #[test]
+    fn test_taint_summary_multi_tx() {
+        let pk_a = Pubkey::new_unique();
+        let pk_b = Pubkey::new_unique();
+        let pk_c = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+
+        // Tx 0: writes A, reads B
+        log.push(TxTaintRecord {
+            read_accounts: vec![pk_b],
+            write_accounts: vec![pk_a],
+            programs: vec![],
+            diffs: None,
+        });
+
+        // Tx 1: writes B, reads C
+        log.push(TxTaintRecord {
+            read_accounts: vec![pk_c],
+            write_accounts: vec![pk_b],
+            programs: vec![],
+            diffs: None,
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 2).unwrap();
+        assert_eq!(summary.tx_count, 2);
+        // A and B are written
+        assert!(summary.written_accounts.contains(&pk_a.to_string()));
+        assert!(summary.written_accounts.contains(&pk_b.to_string()));
+        // B is written so not in read set; C is only read
+        assert!(!summary.read_accounts.contains(&pk_b.to_string()));
+        assert!(summary.read_accounts.contains(&pk_c.to_string()));
+    }
+
+    #[test]
+    fn test_taint_summary_with_diffs() {
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let pre_account = Account {
+            lamports: 100,
+            data: vec![1, 2, 3, 4],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let post_account = Account {
+            lamports: 200,
+            data: vec![1, 9, 3, 4],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        };
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: Some(pre_account),
+                post: Some(post_account),
+            }]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        assert_eq!(summary.tx_count, 1);
+        let changes = summary.account_changes.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].lamports, (100, 200));
+        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
+        // Byte 1 changed
+        assert!(changes[0].changed_ranges.contains(&(1, 1)));
+    }
+
+    #[test]
+    fn test_taint_summary_range_slicing() {
+        // log has 3 records, but we only look at index 1..2
+        let pk_before = Pubkey::new_unique();
+        let pk_target = Pubkey::new_unique();
+        let pk_after = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk_before],
+            programs: vec![],
+            diffs: None,
+        });
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk_target],
+            programs: vec![],
+            diffs: None,
+        });
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk_after],
+            programs: vec![],
+            diffs: None,
+        });
+
+        let summary = build_action_taint_summary(&log, 1, 2).unwrap();
+        assert_eq!(summary.tx_count, 1);
+        assert!(summary.written_accounts.contains(&pk_target.to_string()));
+        assert!(!summary.written_accounts.contains(&pk_before.to_string()));
+        assert!(!summary.written_accounts.contains(&pk_after.to_string()));
+    }
+
+    #[test]
+    fn test_taint_log_len() {
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+        assert_eq!(log.len(), 0);
+        assert!(log.is_empty());
+
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![],
+            programs: vec![],
+            diffs: None,
+        });
+        assert_eq!(log.len(), 1);
+        assert!(!log.is_empty());
+    }
+
+    #[test]
+    fn test_taint_summary_created_account() {
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: None,
+                post: Some(Account {
+                    lamports: 1_000_000,
+                    data: vec![0; 32],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            }]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        let changes = summary.account_changes.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(changes[0].kind, AccountChangeKind::Created));
+        assert_eq!(changes[0].lamports, (0, 1_000_000));
+    }
+
+    #[test]
+    fn test_taint_summary_deleted_account() {
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: Some(Account {
+                    lamports: 500,
+                    data: vec![1, 2, 3],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+                post: None,
+            }]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        let changes = summary.account_changes.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(changes[0].kind, AccountChangeKind::Deleted));
+        assert_eq!(changes[0].lamports, (500, 0));
+    }
+
+    #[test]
+    fn test_taint_summary_overlapping_writes_across_txs() {
+        // Same account written in two txs — should merge first pre / last post
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+
+        // Tx 0: account goes 100 -> 200 lamports, data[0] changes 1 -> 5
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: Some(Account {
+                    lamports: 100,
+                    data: vec![1, 2, 3],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+                post: Some(Account {
+                    lamports: 200,
+                    data: vec![5, 2, 3],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            }]),
+        });
+
+        // Tx 1: account goes 200 -> 300 lamports, data[2] changes 3 -> 9
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: Some(Account {
+                    lamports: 200,
+                    data: vec![5, 2, 3],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+                post: Some(Account {
+                    lamports: 300,
+                    data: vec![5, 2, 9],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            }]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 2).unwrap();
+        assert_eq!(summary.tx_count, 2);
+        let changes = summary.account_changes.unwrap();
+        assert_eq!(changes.len(), 1); // Only one account
+        // Should use first pre (100) and last post (300)
+        assert_eq!(changes[0].lamports, (100, 300));
+        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
+        // data[0]: 1->5 and data[2]: 3->9 are both changed relative to first pre vs last post
+        assert!(changes[0].changed_ranges.contains(&(0, 1)));
+        assert!(changes[0].changed_ranges.contains(&(2, 1)));
+    }
+
+    #[test]
+    fn test_taint_summary_unchanged_account_skipped() {
+        // Account is in diffs but pre == post (unchanged) — should be filtered out
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let account = Account {
+            lamports: 100,
+            data: vec![1, 2, 3],
+            owner,
+            executable: false,
+            rent_epoch: 0,
+        };
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk],
+            programs: vec![],
+            diffs: Some(vec![AccountDiff {
+                pubkey: pk,
+                pre: Some(account.clone()),
+                post: Some(account),
+            }]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        // account_changes should be None since the only account was unchanged
+        assert!(summary.account_changes.is_none());
+    }
+
+    #[test]
+    fn test_taint_summary_zero_tx_with_diffs_enabled() {
+        // No txs but collect_diffs is true → should return Some with tx_count=0
+        let log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+
+        let summary = build_action_taint_summary(&log, 0, 0).unwrap();
+        assert_eq!(summary.tx_count, 0);
+        assert!(summary.written_accounts.is_empty());
+        assert!(summary.read_accounts.is_empty());
+        assert!(summary.account_changes.is_none());
+    }
+
+    #[test]
+    fn test_taint_summary_write_removes_from_read_set() {
+        // Account appears in both read and write sets across txs —
+        // should be in written_accounts only (removed from read_accounts)
+        let pk_both = Pubkey::new_unique();
+        let pk_read_only = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+
+        // Tx 0: reads pk_both and pk_read_only
+        log.push(TxTaintRecord {
+            read_accounts: vec![pk_both, pk_read_only],
+            write_accounts: vec![],
+            programs: vec![],
+            diffs: None,
+        });
+
+        // Tx 1: writes pk_both
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk_both],
+            programs: vec![],
+            diffs: None,
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 2).unwrap();
+        // pk_both was written, so it should NOT be in read_accounts
+        assert!(summary.written_accounts.contains(&pk_both.to_string()));
+        assert!(!summary.read_accounts.contains(&pk_both.to_string()));
+        // pk_read_only should only be in read_accounts
+        assert!(summary.read_accounts.contains(&pk_read_only.to_string()));
+        assert!(!summary.written_accounts.contains(&pk_read_only.to_string()));
+    }
+
+    #[test]
+    fn test_taint_summary_multiple_accounts_in_diffs() {
+        // Two different accounts modified in same tx
+        let pk_a = Pubkey::new_unique();
+        let pk_b = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: true,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![],
+            write_accounts: vec![pk_a, pk_b],
+            programs: vec![],
+            diffs: Some(vec![
+                AccountDiff {
+                    pubkey: pk_a,
+                    pre: Some(Account {
+                        lamports: 100,
+                        data: vec![1, 2],
+                        owner,
+                        executable: false,
+                        rent_epoch: 0,
+                    }),
+                    post: Some(Account {
+                        lamports: 200,
+                        data: vec![1, 2],
+                        owner,
+                        executable: false,
+                        rent_epoch: 0,
+                    }),
+                },
+                AccountDiff {
+                    pubkey: pk_b,
+                    pre: Some(Account {
+                        lamports: 50,
+                        data: vec![0, 0, 0],
+                        owner,
+                        executable: false,
+                        rent_epoch: 0,
+                    }),
+                    post: Some(Account {
+                        lamports: 50,
+                        data: vec![0, 1, 0],
+                        owner,
+                        executable: false,
+                        rent_epoch: 0,
+                    }),
+                },
+            ]),
+        });
+
+        let summary = build_action_taint_summary(&log, 0, 1).unwrap();
+        let changes = summary.account_changes.unwrap();
+        assert_eq!(changes.len(), 2);
+
+        // Find each account's change
+        let change_a = changes.iter().find(|c| c.pubkey == pk_a.to_string()).unwrap();
+        let change_b = changes.iter().find(|c| c.pubkey == pk_b.to_string()).unwrap();
+
+        // Account A: only lamports changed
+        assert_eq!(change_a.lamports, (100, 200));
+        assert!(change_a.changed_ranges.is_empty()); // data unchanged
+
+        // Account B: only data[1] changed
+        assert_eq!(change_b.lamports, (50, 50));
+        assert_eq!(change_b.changed_ranges, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn test_taint_summary_out_of_bounds_range() {
+        // If start_idx == end_idx (empty range), should behave like no txs
+        let mut log = IterationTaintLog {
+            records: Vec::new(),
+            collect_diffs: false,
+        };
+        log.push(TxTaintRecord {
+            read_accounts: vec![Pubkey::new_unique()],
+            write_accounts: vec![Pubkey::new_unique()],
+            programs: vec![],
+            diffs: None,
+        });
+
+        // Range 5..5 is empty, beyond log size — should return None
+        let result = build_action_taint_summary(&log, 5, 5);
+        assert!(result.is_none());
     }
 }

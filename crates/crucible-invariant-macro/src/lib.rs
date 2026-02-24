@@ -1069,11 +1069,24 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 // Track total actions dispatched for monitor's actions/exec metric
                 crucible_test_context::increment_action_count();
 
+                // Capture taint log index before dispatch (action may produce 0..N txs)
+                let taint_start = fixture.ctx.taint_log.len();
+
                 // Execute the action and get success status
                 let success = fixture.__dispatch_action(action);
 
-                // Full record with params for crash metadata and replay output
-                crucible_test_context::push_action_record(action_name_str, action_params, success);
+                // Capture taint log index after dispatch
+                let taint_end = fixture.ctx.taint_log.len();
+
+                // Build per-action taint summary from the transactions this action produced
+                let taint = crucible_test_context::snapshot::build_action_taint_summary(
+                    &fixture.ctx.taint_log, taint_start, taint_end,
+                );
+
+                // Full record with params and taint for crash metadata and replay output
+                crucible_test_context::push_action_record_with_taint(
+                    action_name_str, action_params, success, taint,
+                );
 
                 #fn_body
 

@@ -6,6 +6,7 @@ target/
 crashes/
 *.lcov
 coverage.html/
+.fuzz-cache/
 
 # Claude Code context file
 CLAUDE.md

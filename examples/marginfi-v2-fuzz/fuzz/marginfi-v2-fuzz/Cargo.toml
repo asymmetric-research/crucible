@@ -27,6 +27,7 @@ crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
 
 # pyth-solana-receiver-sdk removed - types redefined locally in main.rs
 anyhow = "1.0"
+ctor = "0.6"
 fixed = "1.28"
 fixed-macro = "1.2"
 bytemuck = "1.14"

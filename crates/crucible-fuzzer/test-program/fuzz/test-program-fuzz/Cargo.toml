@@ -22,6 +22,7 @@ ctrlc = "3.4"
 solana-pubkey = "3.0"
 solana-keypair = "3.0"
 solana-signer = "3.0"
+litesvm = { version = "0.9.0", features = ["register-tracing"] }
 
 # Staking program types
 staking = { path = "../../../../../examples/staking/programs/staking", features = ["no-entrypoint"] }

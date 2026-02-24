@@ -3,6 +3,10 @@ name = "crucible-test-context"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+rpc-clone = ["dep:solana-rpc-client", "dep:solana-rpc-client-api"]
+
 [dependencies]
 litesvm.workspace = true
 anchor-lang.workspace = true
@@ -34,8 +38,11 @@ rustc-hash = "2.0"
 addr2line = "0.24"
 gimli = { version = "0.31", default-features = false, features = ["read"] }
 object = { version = "0.36", default-features = false, features = ["read"] }
+solana-rpc-client = { workspace = true, optional = true }
+solana-rpc-client-api = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = "3.10"
 criterion = "0.5"
 
 [[bench]]
