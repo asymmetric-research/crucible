@@ -100,6 +100,7 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
     let state = codegen::state::generate(&idl);
     let types = codegen::types::generate(&idl, use_bincode);
     let discriminators = codegen::discriminators::generate(&idl);
+    let schemas = codegen::schemas::generate(&idl);
 
     Ok(quote! {
         /// Generated from IDL for fuzzing purposes.
@@ -113,6 +114,13 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
             #state
             #types
             #discriminators
+            #schemas
+        }
+
+        /// Auto-register account schemas at binary startup for field-level diffs.
+        #[::ctor::ctor]
+        fn __crucible_register_schemas() {
+            #module_name::register_schemas();
         }
     })
 }
@@ -206,6 +214,7 @@ mod tests {
         let state = codegen::state::generate(&idl);
         let types = codegen::types::generate(&idl, use_bincode);
         let discriminators = codegen::discriminators::generate(&idl);
+        let schemas = codegen::schemas::generate(&idl);
 
         quote! {
             #program_id
@@ -214,6 +223,7 @@ mod tests {
             #state
             #types
             #discriminators
+            #schemas
         }
     }
 
@@ -1447,6 +1457,238 @@ mod tests {
     // -----------------------------------------------------------------------
     // InstructionData: verify data() method emits discriminator + payload
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Schema generation: end-to-end tests on real IDLs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_schema_marginfi_all_5_zero_copy_accounts() {
+        // Marginfi has 5 accounts, all zero-copy (repr: {kind: "c"})
+        let idl = parse_test_idl("anchor_marginfi.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        // All 5 should be registered
+        assert!(output.contains("\"Bank\""), "should have Bank schema");
+        assert!(output.contains("\"FeeState\""), "should have FeeState schema");
+        assert!(output.contains("\"MarginfiAccount\""), "should have MarginfiAccount schema");
+        assert!(output.contains("\"MarginfiGroup\""), "should have MarginfiGroup schema");
+        assert!(output.contains("\"StakedSettings\""), "should have StakedSettings schema");
+
+        let schema_count = output.matches("AccountSchema").count();
+        assert_eq!(schema_count, 5,
+            "marginfi should have 5 AccountSchema entries, got {}", schema_count);
+
+        assert!(output.contains("register_account_schemas"), "should register schemas");
+    }
+
+    #[test]
+    fn test_schema_marginfi_bank_field_names() {
+        // Verify Bank account has the expected field names in its diff closure
+        let idl = parse_test_idl("anchor_marginfi.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        // Key primitive fields
+        assert!(output.contains("\"mint_decimals\""), "Bank should diff mint_decimals (u8)");
+        assert!(output.contains("\"last_update\""), "Bank should diff last_update (i64)");
+        assert!(output.contains("\"flags\""), "Bank should diff flags (u64)");
+        assert!(output.contains("\"emissions_rate\""), "Bank should diff emissions_rate (u64)");
+        assert!(output.contains("\"lending_position_count\""), "Bank should diff lending_position_count (i32)");
+        assert!(output.contains("\"borrowing_position_count\""), "Bank should diff borrowing_position_count (i32)");
+
+        // Pubkey fields
+        assert!(output.contains("\"mint\""), "Bank should diff mint (Pubkey)");
+        assert!(output.contains("\"group\""), "Bank should diff group (Pubkey)");
+        assert!(output.contains("\"liquidity_vault\""), "Bank should diff liquidity_vault (Pubkey)");
+        assert!(output.contains("\"emissions_mint\""), "Bank should diff emissions_mint (Pubkey)");
+
+        // Defined type fields (WrappedI80F48, BankConfig, etc.)
+        assert!(output.contains("\"asset_share_value\""), "Bank should diff asset_share_value (WrappedI80F48)");
+        assert!(output.contains("\"total_liability_shares\""), "Bank should diff total_liability_shares (WrappedI80F48)");
+        assert!(output.contains("\"total_asset_shares\""), "Bank should diff total_asset_shares (WrappedI80F48)");
+        assert!(output.contains("\"config\""), "Bank should diff config (BankConfig)");
+
+        // Padding fields should be excluded
+        assert!(!output.contains("\"_pad0\""), "Bank should skip _pad0");
+        assert!(!output.contains("\"_pad1\""), "Bank should skip _pad1");
+        assert!(!output.contains("\"_pad2\""), "Bank should skip _pad2");
+        assert!(!output.contains("\"_padding_0\""), "Bank should skip _padding_0");
+    }
+
+    #[test]
+    fn test_schema_marginfi_discriminator_bytes() {
+        // Verify Bank discriminator bytes match the IDL
+        let idl = parse_test_idl("anchor_marginfi.json");
+        let bank_acc = idl.accounts.iter().find(|a| a.name == "Bank").unwrap();
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        // Bank discriminator: [142, 49, 166, 242, 50, 66, 97, 188]
+        assert_eq!(bank_acc.discriminator, vec![142, 49, 166, 242, 50, 66, 97, 188]);
+        assert!(output.contains("142u8"), "should have Bank disc byte 142");
+        assert!(output.contains("188u8"), "should have Bank disc byte 188");
+    }
+
+    #[test]
+    fn test_schema_whirlpool_mixed_zero_copy_and_borsh() {
+        // Whirlpool has 12 accounts: 2 zero-copy (Oracle, TickArray), 10 borsh
+        let idl = parse_test_idl("anchor_whirlpool.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        // Only zero-copy accounts should be registered
+        assert!(output.contains("\"Oracle\""), "should have Oracle schema (zero-copy)");
+        assert!(output.contains("\"TickArray\""), "should have TickArray schema (zero-copy)");
+
+        // Borsh accounts should NOT be registered
+        assert!(!output.contains("\"Whirlpool\""), "Whirlpool (borsh) should not have schema");
+        assert!(!output.contains("\"Position\""), "Position (borsh) should not have schema");
+        assert!(!output.contains("\"FeeTier\""), "FeeTier (borsh) should not have schema");
+        assert!(!output.contains("\"AdaptiveFeeTier\""), "AdaptiveFeeTier (borsh) should not have schema");
+
+        let schema_count = output.matches("AccountSchema").count();
+        assert_eq!(schema_count, 2,
+            "whirlpool should have 2 AccountSchema entries (only zero-copy), got {}", schema_count);
+    }
+
+    #[test]
+    fn test_schema_whirlpool_oracle_fields() {
+        // Oracle has: whirlpool (Pubkey), trade_enable_timestamp (u64),
+        // adaptive_fee_constants/variables (Defined), reserved ([u8; 128] → skip)
+        let idl = parse_test_idl("anchor_whirlpool.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        // Pubkey field
+        assert!(output.contains("\"whirlpool\""), "Oracle should diff whirlpool (Pubkey)");
+        // u64 field
+        assert!(output.contains("\"trade_enable_timestamp\""), "Oracle should diff trade_enable_timestamp (u64)");
+        // Defined type fields
+        assert!(output.contains("\"adaptive_fee_constants\""), "Oracle should diff adaptive_fee_constants");
+        assert!(output.contains("\"adaptive_fee_variables\""), "Oracle should diff adaptive_fee_variables");
+        // [u8; 128] should be skipped (too large)
+        assert!(!output.contains("\"reserved\""), "Oracle should skip reserved ([u8; 128])");
+    }
+
+    #[test]
+    fn test_schema_whirlpool_tickarray_skips_tick_array() {
+        // TickArray has: start_tick_index (i32), ticks ([Tick; 88]), whirlpool (Pubkey)
+        // [Tick; 88] is a non-u8 array → should be skipped
+        let idl = parse_test_idl("anchor_whirlpool.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        assert!(output.contains("\"start_tick_index\""), "TickArray should diff start_tick_index (i32)");
+        assert!(output.contains("\"whirlpool\""), "TickArray should diff whirlpool (Pubkey)");
+        // [Tick; 88] should be skipped (non-u8 defined-type array)
+        assert!(!output.contains("\"ticks\""), "TickArray should skip ticks ([Tick; 88])");
+    }
+
+    #[test]
+    fn test_schema_no_accounts_codama_stake() {
+        // Stake program IDL has 0 accounts → noop register_schemas
+        let idl = parse_test_idl("codama_stake.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        assert!(output.contains("register_schemas"), "should generate register_schemas");
+        assert!(!output.contains("register_account_schemas"),
+            "stake (0 accounts) should not call register_account_schemas");
+    }
+
+    #[test]
+    fn test_schema_no_accounts_codama_system() {
+        let idl = parse_test_idl("codama_system.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+        assert!(!output.contains("register_account_schemas"),
+            "system (0 accounts) should not call register_account_schemas");
+    }
+
+    #[test]
+    fn test_schema_no_accounts_codama_token() {
+        let idl = parse_test_idl("codama_token.json");
+        let output = codegen::schemas::generate(&idl).to_string();
+        assert!(!output.contains("register_account_schemas"),
+            "token (0 accounts) should not call register_account_schemas");
+    }
+
+    #[test]
+    fn test_schema_shank_bubblegum_borsh_only() {
+        // Bubblegum has 2 accounts (TreeConfig, Voucher), both borsh → noop
+        let idl = parse_test_idl("shank_bubblegum.json");
+        assert!(!idl.accounts.is_empty(), "bubblegum should have accounts");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        assert!(!output.contains("register_account_schemas"),
+            "bubblegum (all borsh) should not call register_account_schemas");
+        assert!(!output.contains("\"TreeConfig\""), "TreeConfig (borsh) should not have schema");
+        assert!(!output.contains("\"Voucher\""), "Voucher (borsh) should not have schema");
+    }
+
+    #[test]
+    fn test_schema_shank_candy_guard_borsh_only() {
+        // CandyGuard has 2 accounts (FreezeEscrow, CandyGuard), both borsh → noop
+        let idl = parse_test_idl("shank_candy_guard.json");
+        assert!(!idl.accounts.is_empty(), "candy_guard should have accounts");
+        let output = codegen::schemas::generate(&idl).to_string();
+
+        assert!(!output.contains("register_account_schemas"),
+            "candy_guard (all borsh) should not call register_account_schemas");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema syntax validation on real IDLs (end-to-end through full pipeline)
+    // The existing test_syntax_valid_* tests above already validate that the
+    // full pipeline including schemas produces valid Rust syntax for all IDLs.
+    // These additional tests verify schema-specific generation in isolation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_schema_syntax_marginfi_standalone() {
+        // Parse just the schema output for marginfi and validate syntax
+        let idl = parse_test_idl("anchor_marginfi.json");
+        let tokens = codegen::schemas::generate(&idl);
+
+        // Build stubs for all 5 account types referenced by state::XXX
+        let stubs = quote::quote! {
+            pub struct Bank;
+            impl Bank { pub const DISCRIMINATOR_LEN: usize = 8; }
+            pub struct FeeState;
+            impl FeeState { pub const DISCRIMINATOR_LEN: usize = 8; }
+            pub struct MarginfiAccount;
+            impl MarginfiAccount { pub const DISCRIMINATOR_LEN: usize = 8; }
+            pub struct MarginfiGroup;
+            impl MarginfiGroup { pub const DISCRIMINATOR_LEN: usize = 8; }
+            pub struct StakedSettings;
+            impl StakedSettings { pub const DISCRIMINATOR_LEN: usize = 8; }
+        };
+        let wrapped = quote::quote! {
+            mod test_wrapper {
+                mod state { #stubs }
+                #tokens
+            }
+        };
+        syn::parse2::<syn::File>(wrapped).unwrap_or_else(|e| {
+            panic!("Marginfi schema code is not valid Rust syntax: {}", e);
+        });
+    }
+
+    #[test]
+    fn test_schema_syntax_whirlpool_standalone() {
+        let idl = parse_test_idl("anchor_whirlpool.json");
+        let tokens = codegen::schemas::generate(&idl);
+
+        let stubs = quote::quote! {
+            pub struct Oracle;
+            impl Oracle { pub const DISCRIMINATOR_LEN: usize = 8; }
+            pub struct TickArray;
+            impl TickArray { pub const DISCRIMINATOR_LEN: usize = 8; }
+        };
+        let wrapped = quote::quote! {
+            mod test_wrapper {
+                mod state { #stubs }
+                #tokens
+            }
+        };
+        syn::parse2::<syn::File>(wrapped).unwrap_or_else(|e| {
+            panic!("Whirlpool schema code is not valid Rust syntax: {}", e);
+        });
+    }
 
     #[test]
     fn test_instruction_data_method_contains_discriminator_prepend() {

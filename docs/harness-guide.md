@@ -1,6 +1,6 @@
 # Writing Solana/Anchor Fuzz Harnesses
 
-This guide covers critical practices for writing effective fuzz harnesses for Solana programs built with Anchor. **First read the [README](../README.md)** for the framework API and examples.
+This guide covers critical practices for writing effective fuzz harnesses for Solana programs built with Anchor. **First read the [API Reference](api-reference.md) and [Writing Tests](writing-tests.md)** for the framework API and examples.
 
 ---
 

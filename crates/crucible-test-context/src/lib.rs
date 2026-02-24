@@ -47,7 +47,11 @@ pub use crate::mock_oracles::{
 mod account_builders;
 mod instruction_builder;
 mod program_builder;
+pub mod schema;
 pub mod snapshot;
+
+// Re-export schema types for generated code (register_schemas())
+pub use schema::{AccountSchema, register_account_schemas};
 mod transaction_builder;
 
 // Coverage analysis and visualization
@@ -62,6 +66,12 @@ pub use litesvm::InvocationInspectCallback;
 
 // Re-export serde_json for generated code
 pub use serde_json;
+
+// RPC account cloning (optional, requires `rpc-clone` feature)
+#[cfg(feature = "rpc-clone")]
+pub mod rpc_clone;
+#[cfg(feature = "rpc-clone")]
+pub use rpc_clone::AccountCloner;
 
 // ============================================================================
 // Global Action Counter (for monitor: actions/exec metric)
@@ -139,6 +149,58 @@ pub struct ActionRecord {
     /// Error code from the last transaction (e.g., Custom(6051) → Some(6051))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<u32>,
+    /// Per-action taint summary (only with FUZZ_TAINT=1 or FUZZ_TAINT_DIFFS=1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taint: Option<ActionTaintSummary>,
+}
+
+// ============================================================================
+// Per-Action Taint Types
+// ============================================================================
+
+/// Summary of account reads/writes for a single action dispatch.
+/// One action may produce 0..N transactions via send_batch().
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActionTaintSummary {
+    /// How many transactions this action produced
+    pub tx_count: usize,
+    /// Accounts written (base58 pubkeys)
+    pub written_accounts: Vec<String>,
+    /// Accounts read (base58 pubkeys)
+    pub read_accounts: Vec<String>,
+    /// Per-account change details (only with FUZZ_TAINT_DIFFS=1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_changes: Option<Vec<AccountChangeSummary>>,
+}
+
+/// Byte-level and optional semantic diff for a single account.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountChangeSummary {
+    pub pubkey: String,
+    pub kind: AccountChangeKind,
+    /// (pre_lamports, post_lamports)
+    pub lamports: (u64, u64),
+    /// Byte ranges that changed: (offset, len)
+    pub changed_ranges: Vec<(usize, usize)>,
+    /// Semantic field diffs (Phase 2 — only when IDL schema registered)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_diffs: Option<Vec<FieldDelta>>,
+}
+
+/// Whether an account was created, modified, or deleted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AccountChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+/// A single field-level semantic diff (Phase 2).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FieldDelta {
+    pub field: String,
+    pub old_value: String,
+    pub new_value: String,
 }
 
 /// Complete crash metadata for .meta.json files
@@ -183,6 +245,16 @@ pub fn get_current_iteration() -> u64 {
 
 /// Push an action record to the history and update cumulative stats.
 pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) {
+    push_action_record_with_taint(name, params, success, None);
+}
+
+/// Push an action record with optional taint summary.
+pub fn push_action_record_with_taint(
+    name: &str,
+    params: serde_json::Value,
+    success: bool,
+    taint: Option<ActionTaintSummary>,
+) {
     let error_code = take_last_error_code();
     // Record in per-iteration history (for crash metadata)
     ACTION_HISTORY.with(|h| {
@@ -191,6 +263,7 @@ pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) 
             params,
             success,
             error_code,
+            taint,
         });
     });
 }
@@ -207,6 +280,7 @@ pub fn push_action_record_lite(name: &str, success: bool) {
             params: serde_json::Value::Null,
             success,
             error_code,
+            taint: None,
         });
     });
 }
@@ -303,6 +377,62 @@ pub fn print_action_sequence() {
             eprintln!("  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
         } else {
             eprintln!("  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
+        }
+
+        // Print taint info if available
+        if let Some(ref taint) = record.taint {
+            if !taint.written_accounts.is_empty() {
+                // Format account changes
+                if let Some(ref changes) = taint.account_changes {
+                    for change in changes {
+                        let short_key = &change.pubkey[..8.min(change.pubkey.len())];
+                        let type_prefix = change.pubkey.as_str(); // full key as fallback
+                        // Try to get type name from schema registry using discriminator
+                        let label = short_key;
+
+                        let mut parts = Vec::new();
+
+                        // Lamports change
+                        let (pre_l, post_l) = change.lamports;
+                        if pre_l != post_l {
+                            let delta = post_l as i128 - pre_l as i128;
+                            let sign = if delta >= 0 { "+" } else { "" };
+                            parts.push(format!("{}{}lamports", sign, delta));
+                        }
+
+                        // Field diffs (Phase 2) take priority over byte ranges
+                        if let Some(ref field_diffs) = change.field_diffs {
+                            for fd in field_diffs {
+                                parts.push(format!("{}: {} -> {}", fd.field, fd.old_value, fd.new_value));
+                            }
+                        } else if !change.changed_ranges.is_empty() {
+                            // Byte ranges
+                            let ranges_str: Vec<String> = change.changed_ranges.iter()
+                                .map(|(off, len)| format!("data[{}..{}]", off, off + len))
+                                .collect();
+                            parts.push(ranges_str.join(", "));
+                        }
+
+                        let kind_str = match change.kind {
+                            AccountChangeKind::Created => "created",
+                            AccountChangeKind::Modified => "modified",
+                            AccountChangeKind::Deleted => "deleted",
+                        };
+
+                        if parts.is_empty() {
+                            eprintln!("     {}...({}) {}", label, kind_str, type_prefix);
+                        } else {
+                            eprintln!("     {}...({})", label, parts.join(", "));
+                        }
+                    }
+                } else {
+                    // No detailed diffs, just show account list
+                    let short_keys: Vec<String> = taint.written_accounts.iter()
+                        .map(|k| format!("{}...", &k[..8.min(k.len())]))
+                        .collect();
+                    eprintln!("     wrote: {}", short_keys.join(", "));
+                }
+            }
         }
     }
 
@@ -1256,19 +1386,36 @@ impl TestContext {
 
     pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
         let program_data = std::fs::read(program_path)?;
+        self.add_program_from_bytes(program_id, &program_data)
+    }
 
+    /// Load a program from raw ELF bytes into the SVM.
+    ///
+    /// Same as `add_program()` but takes `&[u8]` instead of a file path.
+    /// Runs coverage analysis and stores program data for debuggable SVM reloading.
+    pub fn add_program_from_bytes(&mut self, program_id: &Pubkey, program_data: &[u8]) -> Result<()> {
         // Run static analysis to get total edge and instruction count for coverage percentages
-        if let Some((total_edges, total_instructions)) = Self::analyze_program_coverage(&program_data) {
+        if let Some((total_edges, total_instructions)) = Self::analyze_program_coverage(program_data) {
             self.program_coverage_totals.insert(*program_id, (total_edges, total_instructions));
         }
 
-        self.svm.add_program(program_id.clone(), &program_data);
+        self.svm.add_program(program_id.clone(), program_data)
+            .map_err(|e| anyhow::anyhow!("failed to load program {}: {:?}", program_id, e))?;
         // Store program data for reloading into debuggable SVMs
         std::sync::Arc::make_mut(&mut self.programs).push(ProgramData {
             program_id: *program_id,
-            data: program_data,
+            data: program_data.to_vec(),
         });
         Ok(())
+    }
+
+    /// Create an `AccountCloner` for fetching accounts from a Solana RPC endpoint.
+    ///
+    /// Accounts are cached to `.fuzz-cache/accounts/` by default.
+    /// Requires the `rpc-clone` feature.
+    #[cfg(feature = "rpc-clone")]
+    pub fn clone_from_rpc(&mut self, rpc_url: &str) -> AccountCloner<'_> {
+        AccountCloner::new(self, rpc_url)
     }
 
     pub fn from_svm(svm: LiteSVM) -> Self {
@@ -1864,13 +2011,17 @@ impl TestContext {
             }
         }
 
-        // Build taint record from captured metadata (only for successful txs)
-        if outcome.is_success() {
-            let taint = snapshot::build_taint_record_from_captured(
-                &self.svm, captured, pre_state.as_ref(),
-            );
-            self.taint_log.push(taint);
-        }
+        // Build taint record from captured metadata.
+        // Record for all outcomes (success + failure) so taint summaries
+        // include accounts that were *declared* writable even if the tx failed.
+        // Diffs are only meaningful for successful txs (pre_state for failures
+        // would show no change since the tx was reverted).
+        let taint = snapshot::build_taint_record_from_captured(
+            &self.svm,
+            captured,
+            if outcome.is_success() { pre_state.as_ref() } else { None },
+        );
+        self.taint_log.push(taint);
 
         // Clear signers queue (pending_instructions already taken via std::mem::take)
         self.pending_signers.clear();
@@ -1961,6 +2112,234 @@ mod tests {
 
         clear_action_history();
         assert!(get_action_history().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Action history with taint tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_action_record_with_taint() {
+        clear_action_history();
+
+        let taint = ActionTaintSummary {
+            tx_count: 2,
+            written_accounts: vec!["Abc123".to_string(), "Def456".to_string()],
+            read_accounts: vec!["Ghi789".to_string()],
+            account_changes: None,
+        };
+
+        push_action_record_with_taint(
+            "action_deposit",
+            serde_json::json!({"amount": 100}),
+            true,
+            Some(taint),
+        );
+
+        let history = get_action_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].name, "action_deposit");
+        assert!(history[0].success);
+
+        let taint = history[0].taint.as_ref().expect("taint should be present");
+        assert_eq!(taint.tx_count, 2);
+        assert_eq!(taint.written_accounts.len(), 2);
+        assert_eq!(taint.read_accounts.len(), 1);
+        assert!(taint.account_changes.is_none());
+
+        clear_action_history();
+    }
+
+    #[test]
+    fn test_action_record_without_taint() {
+        clear_action_history();
+
+        push_action_record_with_taint(
+            "action_withdraw",
+            serde_json::json!({}),
+            false,
+            None,
+        );
+
+        let history = get_action_history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].taint.is_none());
+
+        clear_action_history();
+    }
+
+    #[test]
+    fn test_action_record_with_detailed_taint() {
+        clear_action_history();
+
+        let changes = vec![
+            AccountChangeSummary {
+                pubkey: "Account111".to_string(),
+                kind: AccountChangeKind::Modified,
+                lamports: (1_000_000, 500_000),
+                changed_ranges: vec![(8, 8), (24, 16)],
+                field_diffs: None,
+            },
+            AccountChangeSummary {
+                pubkey: "Account222".to_string(),
+                kind: AccountChangeKind::Created,
+                lamports: (0, 2_000_000),
+                changed_ranges: vec![(0, 100)],
+                field_diffs: Some(vec![FieldDelta {
+                    field: "balance".to_string(),
+                    old_value: "0".to_string(),
+                    new_value: "2000000".to_string(),
+                }]),
+            },
+        ];
+
+        let taint = ActionTaintSummary {
+            tx_count: 1,
+            written_accounts: vec!["Account111".to_string(), "Account222".to_string()],
+            read_accounts: vec![],
+            account_changes: Some(changes),
+        };
+
+        push_action_record_with_taint(
+            "action_deposit",
+            serde_json::json!({"amount": 2000000}),
+            true,
+            Some(taint),
+        );
+
+        let history = get_action_history();
+        let taint = history[0].taint.as_ref().unwrap();
+        let changes = taint.account_changes.as_ref().unwrap();
+        assert_eq!(changes.len(), 2);
+
+        // First account: Modified
+        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
+        assert_eq!(changes[0].lamports, (1_000_000, 500_000));
+        assert_eq!(changes[0].changed_ranges.len(), 2);
+        assert!(changes[0].field_diffs.is_none());
+
+        // Second account: Created with field diffs
+        assert!(matches!(changes[1].kind, AccountChangeKind::Created));
+        let field_diffs = changes[1].field_diffs.as_ref().unwrap();
+        assert_eq!(field_diffs.len(), 1);
+        assert_eq!(field_diffs[0].field, "balance");
+        assert_eq!(field_diffs[0].old_value, "0");
+        assert_eq!(field_diffs[0].new_value, "2000000");
+
+        clear_action_history();
+    }
+
+    #[test]
+    fn test_crash_metadata_includes_taint() {
+        clear_action_history();
+        set_current_test_name("taint_test");
+        set_current_iteration(42);
+
+        let taint = ActionTaintSummary {
+            tx_count: 1,
+            written_accounts: vec!["Abc".to_string()],
+            read_accounts: vec![],
+            account_changes: None,
+        };
+
+        push_action_record_with_taint(
+            "action_a",
+            serde_json::json!({"x": 1}),
+            true,
+            Some(taint),
+        );
+
+        push_action_record("action_b", serde_json::json!({}), false);
+
+        let meta = build_crash_metadata(None);
+        assert_eq!(meta.actions.len(), 2);
+        assert!(meta.actions[0].taint.is_some());
+        assert!(meta.actions[1].taint.is_none());
+
+        // Verify serialization round-trip
+        let json_str = serde_json::to_string_pretty(&meta).unwrap();
+        let deserialized: CrashMetadata = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.actions.len(), 2);
+        assert!(deserialized.actions[0].taint.is_some());
+        let taint = deserialized.actions[0].taint.as_ref().unwrap();
+        assert_eq!(taint.tx_count, 1);
+        assert_eq!(taint.written_accounts, vec!["Abc"]);
+
+        clear_action_history();
+    }
+
+    #[test]
+    fn test_taint_serde_skip_serializing_if_none() {
+        // Verify that None fields are omitted from JSON output
+        let record = ActionRecord {
+            name: "test".to_string(),
+            params: serde_json::json!({}),
+            success: true,
+            error_code: None,
+            taint: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(!json.contains("taint"), "taint:null should be omitted from JSON");
+        assert!(!json.contains("error_code"), "error_code:null should be omitted from JSON");
+
+        // With taint present
+        let record_with_taint = ActionRecord {
+            name: "test".to_string(),
+            params: serde_json::json!({}),
+            success: true,
+            error_code: None,
+            taint: Some(ActionTaintSummary {
+                tx_count: 1,
+                written_accounts: vec![],
+                read_accounts: vec![],
+                account_changes: None,
+            }),
+        };
+        let json = serde_json::to_string(&record_with_taint).unwrap();
+        assert!(json.contains("taint"), "taint field should be present when Some");
+        assert!(!json.contains("account_changes"), "None account_changes should be omitted");
+    }
+
+    #[test]
+    fn test_taint_types_serde_roundtrip() {
+        let summary = ActionTaintSummary {
+            tx_count: 3,
+            written_accounts: vec!["Abc".to_string(), "Def".to_string()],
+            read_accounts: vec!["Ghi".to_string()],
+            account_changes: Some(vec![
+                AccountChangeSummary {
+                    pubkey: "Abc".to_string(),
+                    kind: AccountChangeKind::Modified,
+                    lamports: (100, 200),
+                    changed_ranges: vec![(8, 16)],
+                    field_diffs: Some(vec![FieldDelta {
+                        field: "total".to_string(),
+                        old_value: "100".to_string(),
+                        new_value: "200".to_string(),
+                    }]),
+                },
+                AccountChangeSummary {
+                    pubkey: "Xyz".to_string(),
+                    kind: AccountChangeKind::Deleted,
+                    lamports: (500, 0),
+                    changed_ranges: vec![],
+                    field_diffs: None,
+                },
+            ]),
+        };
+
+        let json = serde_json::to_string_pretty(&summary).unwrap();
+        let deserialized: ActionTaintSummary = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.tx_count, 3);
+        assert_eq!(deserialized.written_accounts.len(), 2);
+        assert_eq!(deserialized.read_accounts.len(), 1);
+        let changes = deserialized.account_changes.unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
+        assert!(matches!(changes[1].kind, AccountChangeKind::Deleted));
+        let fd = changes[0].field_diffs.as_ref().unwrap();
+        assert_eq!(fd[0].field, "total");
     }
 
     // -------------------------------------------------------------------------

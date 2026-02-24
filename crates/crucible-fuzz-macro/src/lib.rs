@@ -11,6 +11,7 @@ mod coverage;
 mod modes;
 mod multicore;
 mod singlecore;
+mod stateful;
 
 /// Extract the inner type T from Vec<T>
 fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
@@ -416,6 +417,16 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         action_type_tokens.as_ref(),
     );
 
+    let stateful_code = stateful::stateful_mode(
+        &mod_name,
+        fixture_name,
+        fn_name,
+        fixture_param_name,
+        &feature_name,
+        structured,
+        action_type_tokens.as_ref(),
+    );
+
     // Conditionally include Unstructured import
     let unstructured_import = if structured {
         quote! {}
@@ -486,6 +497,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             #coverage_only_code
             #cmin_code
             #tmin_code
+            #stateful_code
             #multicore_code
             #singlecore_code
         }

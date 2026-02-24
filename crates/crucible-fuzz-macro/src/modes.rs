@@ -179,7 +179,20 @@ pub fn replay_mode(
             #fn_name(#(#call_args),*);
 
             // Check for crash/violation
-            if let Some(msg) = crucible_test_context::take_violation() {
+            let violation_msg = crucible_test_context::take_violation();
+
+            // Rewrite .meta.json with latest action history (includes taint data)
+            {
+                let input_path_buf = std::path::PathBuf::from(input_path);
+                if let (Some(parent), Some(filename)) = (input_path_buf.parent(), input_path_buf.file_name()) {
+                    let crash_id = filename.to_string_lossy().to_string();
+                    let crashes_dir = parent.to_string_lossy().to_string();
+                    crucible_test_context::write_crash_metadata_for_id(&crashes_dir, &crash_id, None);
+                    eprintln!("[REPLAY] Updated {}.meta.json", crash_id);
+                }
+            }
+
+            if let Some(msg) = violation_msg {
                 eprintln!("[REPLAY] CRASH REPRODUCED!");
                 eprintln!("[REPLAY] Violation: {}", msg);
                 crucible_test_context::print_action_sequence();

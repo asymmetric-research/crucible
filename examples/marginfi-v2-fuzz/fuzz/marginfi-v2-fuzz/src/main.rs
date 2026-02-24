@@ -138,10 +138,10 @@ impl MarginfiFixture {
     pub fn setup() -> Self {
         let mut ctx = TestContext::new();
         let program_id = marginfi::ID;
-        
+
         ctx.add_program(&program_id, "../../marginfi.so")
             .expect("Failed to load marginfi program");
-        
+
         fixture_helpers::initialize_state(&mut ctx, &program_id)
     }
 

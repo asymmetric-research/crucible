@@ -70,6 +70,15 @@ enum Commands {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
+        /// ItyFuzz-style stateful fuzzing: single action per iteration with state pool
+        #[arg(long)]
+        stateful: bool,
+        /// Track per-action read/write account sets (cheap)
+        #[arg(long)]
+        taint: bool,
+        /// Track per-action byte-level account diffs (implies --taint)
+        #[arg(long)]
+        taint_diffs: bool,
         /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
         #[arg(long)]
         symbols: Option<PathBuf>,
@@ -88,6 +97,9 @@ enum Commands {
         /// Actually replay the crash (requires compiled binary)
         #[arg(long)]
         replay: bool,
+        /// Batch-regenerate .meta.json for all crashes (requires --replay)
+        #[arg(long)]
+        regen: bool,
     },
     /// Minimize a crash to smallest reproducing action sequence
     Tmin {
@@ -143,6 +155,43 @@ struct ActionRecord {
     name: String,
     params: serde_json::Value,
     success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    taint: Option<ActionTaintSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ActionTaintSummary {
+    tx_count: usize,
+    written_accounts: Vec<String>,
+    read_accounts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_changes: Option<Vec<AccountChangeSummary>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AccountChangeSummary {
+    pubkey: String,
+    kind: AccountChangeKind,
+    lamports: (u64, u64),
+    changed_ranges: Vec<(usize, usize)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field_diffs: Option<Vec<FieldDelta>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum AccountChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FieldDelta {
+    field: String,
+    old_value: String,
+    new_value: String,
 }
 
 // ============================================================================
@@ -170,6 +219,9 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            stateful,
+            taint,
+            taint_diffs,
             symbols,
         } => fuzz_run(
             &program_name,
@@ -187,6 +239,9 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            stateful,
+            taint,
+            taint_diffs,
             symbols,
         ),
         Commands::List { program_name } => fuzz_list(program_name.as_deref()),
@@ -194,7 +249,8 @@ fn main() -> Result<()> {
             program_name,
             crash_file,
             replay,
-        } => fuzz_show(&program_name, crash_file.as_deref(), replay),
+            regen,
+        } => fuzz_show(&program_name, crash_file.as_deref(), replay, regen),
         Commands::Tmin {
             program_name,
             test_name,
@@ -230,7 +286,7 @@ fn fuzz_init(program_name: &str) -> Result<()> {
     // Create fuzz/ directory and .gitignore
     if !fuzz_dir.exists() {
         create_dir_all(&fuzz_dir)?;
-        fs::write(fuzz_dir.join(".gitignore"), "*/target/\n*/crashes/\n")
+        fs::write(fuzz_dir.join(".gitignore"), "*/target/\n*/crashes/\n.fuzz-cache/\n")
             .context("Failed to create .gitignore")?;
     }
 
@@ -323,6 +379,7 @@ arbitrary = {{ version = "1", features = ["derive"] }}
 # Utilities
 anyhow = "1.0"
 bytemuck = "1.14"
+ctor = "0.6"
 
 [features]
 invariant_test = []
@@ -445,6 +502,9 @@ fn fuzz_run(
     stop_on_crash: bool,
     max_actions: usize,
     no_tracing: bool,
+    stateful: bool,
+    taint: bool,
+    taint_diffs: bool,
     symbols: Option<PathBuf>,
 ) -> Result<()> {
     let cwd = current_dir()?;
@@ -510,6 +570,8 @@ fn fuzz_run(
     if let Some(ref input_path) = input {
         let abs_path = resolve_path(&cwd, input_path);
         cmd.env("FUZZ_INPUT_FILE", abs_path);
+        // Auto-enable taint diffs on input replay for rich output
+        cmd.env("FUZZ_TAINT_DIFFS", "1");
         println!("[FUZZ] Replaying input: {}", input_path.display());
     }
 
@@ -536,6 +598,20 @@ fn fuzz_run(
     if no_tracing {
         cmd.env("FUZZ_NO_TRACING", "1");
         println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
+    }
+
+    if stateful {
+        cmd.env("FUZZ_STATEFUL", "1");
+        println!("[FUZZ] Stateful mode: ItyFuzz-style single action per iteration with state pool");
+    }
+
+    if taint_diffs {
+        // --taint-diffs implies --taint (FUZZ_TAINT_DIFFS enables both)
+        cmd.env("FUZZ_TAINT_DIFFS", "1");
+        println!("[FUZZ] Taint diffs enabled: per-action byte-level account diffs");
+    } else if taint {
+        cmd.env("FUZZ_TAINT", "1");
+        println!("[FUZZ] Taint enabled: per-action read/write account tracking");
     }
 
     if let Some(ref symbols_path) = symbols {
@@ -665,7 +741,11 @@ fn list_program_tests(fuzz_dir: &Path, program_name: &str) -> Result<()> {
 // Show Command
 // ============================================================================
 
-fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool) -> Result<()> {
+fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, regen: bool) -> Result<()> {
+    if regen && !replay {
+        bail!("--regen requires --replay. Usage: crucible show {} --replay --regen", program_name);
+    }
+
     let cwd = current_dir()?;
 
     let (fuzz_dir, display_name) = if program_name == "." {
@@ -690,6 +770,7 @@ fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool) -> Resu
     };
 
     match crash_file {
+        None if replay && regen => regen_crashes(&fuzz_dir, &display_name),
         None => list_crashes(&fuzz_dir, &display_name),
         Some(crash_name) if !replay => show_crash_metadata(&fuzz_dir, &display_name, crash_name),
         Some(crash_name) => replay_crash(&fuzz_dir, &display_name, crash_name),
@@ -877,11 +958,72 @@ fn show_crash_metadata(fuzz_dir: &Path, program_name: &str, crash_name: &str) ->
                 String::new()
             };
 
-            let status = if action.success { "OK" } else { "FAIL" };
+            let status = if action.success {
+                "OK".to_string()
+            } else if let Some(code) = action.error_code {
+                format!("FAIL({})", code)
+            } else {
+                "FAIL".to_string()
+            };
+
             if params_str.is_empty() {
                 println!("  {}. {} -> {}", i + 1, action.name, status);
             } else {
                 println!("  {}. {}({}) -> {}", i + 1, action.name, params_str, status);
+            }
+
+            // Print taint info if available
+            if let Some(ref taint) = action.taint {
+                if let Some(ref changes) = taint.account_changes {
+                    for change in changes {
+                        let short_key = &change.pubkey[..8.min(change.pubkey.len())];
+                        let mut parts = Vec::new();
+
+                        // Lamports change
+                        let (pre_l, post_l) = change.lamports;
+                        if pre_l != post_l {
+                            let delta = post_l as i128 - pre_l as i128;
+                            let sign = if delta >= 0 { "+" } else { "" };
+                            parts.push(format!("{}{}lamports", sign, delta));
+                        }
+
+                        // Field diffs take priority over byte ranges
+                        if let Some(ref field_diffs) = change.field_diffs {
+                            for fd in field_diffs {
+                                parts.push(format!(
+                                    "{}: {} -> {}",
+                                    fd.field, fd.old_value, fd.new_value
+                                ));
+                            }
+                        } else if !change.changed_ranges.is_empty() {
+                            let ranges_str: Vec<String> = change
+                                .changed_ranges
+                                .iter()
+                                .map(|(off, len)| format!("data[{}..{}]", off, off + len))
+                                .collect();
+                            parts.push(ranges_str.join(", "));
+                        }
+
+                        let kind_str = match change.kind {
+                            AccountChangeKind::Created => "created",
+                            AccountChangeKind::Modified => "modified",
+                            AccountChangeKind::Deleted => "deleted",
+                        };
+
+                        if parts.is_empty() {
+                            println!("     {}...({}) {}", short_key, kind_str, change.pubkey);
+                        } else {
+                            println!("     {}...({})", short_key, parts.join(", "));
+                        }
+                    }
+                } else if !taint.written_accounts.is_empty() {
+                    let short_keys: Vec<String> = taint
+                        .written_accounts
+                        .iter()
+                        .map(|k| format!("{}...", &k[..8.min(k.len())]))
+                        .collect();
+                    println!("     wrote: {}", short_keys.join(", "));
+                }
             }
         }
         println!("================================\n");
@@ -1039,6 +1181,8 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
     let status = Command::new(&binary_path)
         .current_dir(fuzz_dir)
         .env("FUZZ_INPUT_FILE", &crash_path)
+        // Auto-enable full taint diffs on replay for rich crash output
+        .env("FUZZ_TAINT_DIFFS", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -1191,6 +1335,115 @@ fn fuzz_tmin(
                 status.code()
             );
         }
+    }
+
+    Ok(())
+}
+
+fn regen_crashes(fuzz_dir: &Path, program_name: &str) -> Result<()> {
+    let crashes_dir = fuzz_dir.join("crashes");
+    if !crashes_dir.exists() {
+        bail!(
+            "No crashes directory found at: {}\nRun the fuzzer first to generate crashes.",
+            crashes_dir.display()
+        );
+    }
+
+    // Find the binary (try release then debug)
+    let binary_path = find_fuzz_binary(fuzz_dir, program_name, "release")
+        .or_else(|_| find_fuzz_binary(fuzz_dir, program_name, "debug"))?;
+
+    // Iterate all test subdirectories in crashes/
+    let mut total_ok = 0usize;
+    let mut total_fail = 0usize;
+    let mut total_count = 0usize;
+
+    let mut test_dirs: Vec<_> = fs::read_dir(&crashes_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    test_dirs.sort_by_key(|e| e.file_name());
+
+    for test_entry in &test_dirs {
+        let test_dir = test_entry.path();
+        let test_name = test_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Collect crash binary files (skip metadata/hidden)
+        let mut crash_files: Vec<(String, PathBuf)> = Vec::new();
+        for entry in fs::read_dir(&test_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.')
+                    || name.ends_with(".metadata")
+                    || name.ends_with(".meta.json")
+                {
+                    continue;
+                }
+                if path.is_file() {
+                    crash_files.push((name.to_string(), path));
+                }
+            }
+        }
+
+        if crash_files.is_empty() {
+            continue;
+        }
+
+        crash_files.sort_by(|a, b| a.0.cmp(&b.0));
+        println!(
+            "\n[REGEN] {} — {} crash(es)",
+            test_name,
+            crash_files.len()
+        );
+
+        for (idx, (crash_id, crash_path)) in crash_files.iter().enumerate() {
+            total_count += 1;
+            print!(
+                "[REGEN] {}/{} {}... ",
+                idx + 1,
+                crash_files.len(),
+                crash_id
+            );
+
+            let status = Command::new(&binary_path)
+                .current_dir(fuzz_dir)
+                .env("FUZZ_INPUT_FILE", crash_path)
+                .env("FUZZ_TAINT_DIFFS", "1")
+                .env("FUZZ_CRASHES_DIR", &test_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            match status {
+                Ok(s) => {
+                    // Exit code 1 = crash reproduced (expected), 0 = no crash (still OK, metadata updated)
+                    if s.success() || s.code() == Some(1) {
+                        println!("OK");
+                        total_ok += 1;
+                    } else {
+                        println!("FAIL (exit {})", s.code().unwrap_or(-1));
+                        total_fail += 1;
+                    }
+                }
+                Err(e) => {
+                    println!("FAIL ({})", e);
+                    total_fail += 1;
+                }
+            }
+        }
+    }
+
+    if total_count == 0 {
+        println!("No crash files found in: {}", crashes_dir.display());
+    } else {
+        println!(
+            "\n[REGEN] Done. {} OK, {} failed out of {} total",
+            total_ok, total_fail, total_count
+        );
     }
 
     Ok(())
