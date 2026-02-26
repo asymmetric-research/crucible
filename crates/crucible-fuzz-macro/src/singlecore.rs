@@ -136,6 +136,18 @@ pub fn singlecore_mode(
                 #mod_name::set_success_pattern(__pattern);
             }
 
+            // Drain repaired inputs from success-seeking and write to corpus directory
+            if let Some(ref __corpus_dir) = corpus_out_dir {
+                for __repaired_bytes in crucible_test_context::drain_repaired_inputs() {
+                    let __hash = hash_std(&__repaired_bytes);
+                    let __path = format!("{}/repaired_{:016x}", __corpus_dir, __hash);
+                    let _ = std::fs::write(&__path, &__repaired_bytes);
+                }
+            } else {
+                // In-memory mode: discard repaired inputs (they still helped the current iteration)
+                let _ = crucible_test_context::drain_repaired_inputs();
+            }
+
             let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {

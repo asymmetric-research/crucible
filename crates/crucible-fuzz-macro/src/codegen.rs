@@ -157,10 +157,19 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                 let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                 let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
                 let total_actions = crucible_test_context::TOTAL_ACTIONS_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed);
+                let total_ok = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED.load(std::sync::atomic::Ordering::Relaxed);
                 let execs_for_avg = #mod_name::TOTAL_EXECUTIONS.load(std::sync::atomic::Ordering::Relaxed);
                 let avg_actions = if execs_for_avg > 0 { total_actions as f64 / execs_for_avg as f64 } else { 0.0 };
-                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}",
-                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions);
+                let ok_pct = if total_actions > 0 { (total_ok as f64 / total_actions as f64) * 100.0 } else { 0.0 };
+                let discovered = crucible_test_context::succeeded_variant_count();
+                let total_variants = crucible_test_context::TOTAL_ACTION_VARIANTS.load(std::sync::atomic::Ordering::Relaxed);
+                let discovered_str = if total_variants > 0 {
+                    format!(", discovered: {}/{} actions", discovered, total_variants)
+                } else {
+                    String::new()
+                };
+                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}",
+                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str);
 
                 // Write CSV stats row if enabled
                 if let Some(ref csv) = __csv_ref {

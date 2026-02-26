@@ -49,10 +49,12 @@ enum FieldTypeKind {
     U16,
     U32,
     U64,
+    U128,
     I8,
     I16,
     I32,
     I64,
+    I128,
     Usize,
     Bool,
     Option(Box<FieldTypeKind>),
@@ -96,10 +98,12 @@ fn classify_field_type(ty: &Type) -> FieldTypeKind {
                 "u16" => FieldTypeKind::U16,
                 "u32" => FieldTypeKind::U32,
                 "u64" => FieldTypeKind::U64,
+                "u128" => FieldTypeKind::U128,
                 "i8" => FieldTypeKind::I8,
                 "i16" => FieldTypeKind::I16,
                 "i32" => FieldTypeKind::I32,
                 "i64" => FieldTypeKind::I64,
+                "i128" => FieldTypeKind::I128,
                 "usize" => FieldTypeKind::Usize,
                 "bool" => FieldTypeKind::Bool,
                 _ => FieldTypeKind::U64,
@@ -111,13 +115,18 @@ fn classify_field_type(ty: &Type) -> FieldTypeKind {
 
 fn field_byte_size(kind: &FieldTypeKind, max_len: Option<usize>) -> usize {
     match kind {
-        FieldTypeKind::Vec(_) => {
+        FieldTypeKind::Vec(inner) => {
             let ml = max_len.unwrap_or(8);
-            (1 + ml) * 8
+            let elem_size = match inner.as_ref() {
+                FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
+                _ => 8,
+            };
+            8 + ml * elem_size // 8-byte length prefix + elements
         }
         FieldTypeKind::U8 | FieldTypeKind::I8 | FieldTypeKind::Bool => 1,
         FieldTypeKind::U16 | FieldTypeKind::I16 => 2,
         FieldTypeKind::U32 | FieldTypeKind::I32 => 4,
+        FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
         _ => 8,
     }
 }
@@ -133,15 +142,22 @@ fn gen_inner_random_expr(
     match (inner_kind, constraint) {
         // u64 — direct, no cast needed
         (FieldTypeKind::U64, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let lo = c.start as u64;
+            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) }
         }
         (FieldTypeKind::U64, None) => quote! { rng.next() },
-        // u8/u16/u32 — generate as u64 then cast to target type
-        (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, Some(c)) => {
+        // u128 — dedicated function, full 128-bit range
+        (FieldTypeKind::U128, Some(c)) => {
             let lo = c.start;
             let hi = if c.inclusive { c.end + 1 } else { c.end };
+            quote! { crucible_fuzzer::gen_range_u128(rng, #lo, #hi) }
+        }
+        (FieldTypeKind::U128, None) => quote! { ((rng.next() as u128) << 64) | (rng.next() as u128) },
+        // u8/u16/u32 — generate as u64 then cast to target type
+        (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, Some(c)) => {
+            let lo = c.start as u64;
+            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             let ty = inner_ty.expect("small unsigned needs inner_ty");
             quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
         }
@@ -151,15 +167,22 @@ fn gen_inner_random_expr(
         }
         // i64 — direct with cast
         (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let lo = c.start as u64;
+            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as i64 }
         }
         (FieldTypeKind::I64, None) => quote! { rng.next() as i64 },
-        // i8/i16/i32 — generate as u64 then cast to target type
-        (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
+        // i128 — generate as u128 then cast
+        (FieldTypeKind::I128, Some(c)) => {
             let lo = c.start;
             let hi = if c.inclusive { c.end + 1 } else { c.end };
+            quote! { crucible_fuzzer::gen_range_u128(rng, #lo, #hi) as i128 }
+        }
+        (FieldTypeKind::I128, None) => quote! { (((rng.next() as u128) << 64) | (rng.next() as u128)) as i128 },
+        // i8/i16/i32 — generate as u64 then cast to target type
+        (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
+            let lo = c.start as u64;
+            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             let ty = inner_ty.expect("small signed needs inner_ty");
             quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
         }
@@ -191,20 +214,29 @@ fn gen_inner_mutate_stmt(
     match (inner_kind, constraint) {
         // u64 — direct call
         (FieldTypeKind::U64, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let lo = c.start as u64;
+            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             quote! { crucible_fuzzer::mutate_u64(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::U64, None) => {
             quote! { crucible_fuzzer::mutate_u64(#ref_tok, 0, u64::MAX, rng); }
+        }
+        // u128 — direct call
+        (FieldTypeKind::U128, Some(c)) => {
+            let lo = c.start;
+            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            quote! { crucible_fuzzer::mutate_u128(#ref_tok, #lo, #hi, rng); }
+        }
+        (FieldTypeKind::U128, None) => {
+            quote! { crucible_fuzzer::mutate_u128(#ref_tok, 0, u128::MAX, rng); }
         }
         // u8/u16/u32 — widen to u64, mutate, narrow back
         (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, c) => {
             let ty = inner_ty.expect("small unsigned needs inner_ty");
             let (lo, hi) = match c {
                 Some(c) => {
-                    let lo = c.start;
-                    let hi = if c.inclusive { c.end + 1 } else { c.end };
+                    let lo = c.start as u64;
+                    let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
                     (quote! { #lo }, quote! { #hi })
                 }
                 None => (quote! { 0u64 }, quote! { (#ty::MAX as u64) + 1 }),
@@ -225,6 +257,15 @@ fn gen_inner_mutate_stmt(
         }
         (FieldTypeKind::I64, None) => {
             quote! { crucible_fuzzer::mutate_i64(#ref_tok, i64::MIN, i64::MAX, rng); }
+        }
+        // i128 — direct call
+        (FieldTypeKind::I128, Some(c)) => {
+            let lo = c.start as i128;
+            let hi = if c.inclusive { c.end as i128 + 1 } else { c.end as i128 };
+            quote! { crucible_fuzzer::mutate_i128(#ref_tok, #lo, #hi, rng); }
+        }
+        (FieldTypeKind::I128, None) => {
+            quote! { crucible_fuzzer::mutate_i128(#ref_tok, i128::MIN, i128::MAX, rng); }
         }
         // i8/i16/i32 — widen to i64, mutate, narrow back
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, c) => {
@@ -370,11 +411,13 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
 
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
-        let elem_bytes = match inner_kind.as_ref() {
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! { (*__item as u64).to_le_bytes() },
-            FieldTypeKind::Usize => quote! { (*__item as u64).to_le_bytes() },
-            FieldTypeKind::Bool => quote! { (if *__item { 1u64 } else { 0u64 }).to_le_bytes() },
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! { (*__item as u64).to_le_bytes() },
+        let (elem_bytes, pad_bytes) = match inner_kind.as_ref() {
+            FieldTypeKind::U128 => (quote! { (*__item as u128).to_le_bytes() }, quote! { 0u128.to_le_bytes() }),
+            FieldTypeKind::I128 => (quote! { (*__item as u128).to_le_bytes() }, quote! { 0u128.to_le_bytes() }),
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
+            FieldTypeKind::Usize => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
+            FieldTypeKind::Bool => (quote! { (if *__item { 1u64 } else { 0u64 }).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
             _ => unreachable!(),
         };
         return quote! {
@@ -383,7 +426,7 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
                 buf.extend_from_slice(&#elem_bytes);
             }
             for _ in #name.len()..#ml {
-                buf.extend_from_slice(&0u64.to_le_bytes());
+                buf.extend_from_slice(&#pad_bytes);
             }
         };
     }
@@ -393,10 +436,11 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
         other => (other, false),
     };
 
-    // Expression that converts a value ref to u64 bytes.
-    // `val_tok` is the token referring to the value.
+    // Expression that converts a value to le bytes.
     let to_bytes = |val_tok: proc_macro2::TokenStream, kind: &FieldTypeKind| -> proc_macro2::TokenStream {
         match kind {
+            FieldTypeKind::U128 => quote! { (#val_tok as u128).to_le_bytes() },
+            FieldTypeKind::I128 => quote! { (#val_tok as u128).to_le_bytes() },
             FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Usize => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Bool => quote! { (if #val_tok { 1u64 } else { 0u64 }).to_le_bytes() },
@@ -407,10 +451,14 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
 
     if is_option {
         let some_bytes = to_bytes(quote! { *__v }, inner_kind);
+        let none_bytes = match inner_kind {
+            FieldTypeKind::U128 | FieldTypeKind::I128 => quote! { u128::MAX.to_le_bytes() },
+            _ => quote! { u64::MAX.to_le_bytes() },
+        };
         quote! {
             match #name {
                 Some(__v) => buf.extend_from_slice(&#some_bytes),
-                None => buf.extend_from_slice(&u64::MAX.to_le_bytes()),
+                None => buf.extend_from_slice(&#none_bytes),
             }
         }
     } else {
@@ -425,29 +473,51 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
 
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
-        let raw_to_val = match inner_kind.as_ref() {
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
-                let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
-                quote! { __raw as #inner_ty }
+        let is_128 = matches!(inner_kind.as_ref(), FieldTypeKind::U128 | FieldTypeKind::I128);
+        let elem_size: usize = if is_128 { 16 } else { 8 };
+        let (read_raw, raw_to_val) = if is_128 {
+            let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
+            (
+                quote! { u128::from_le_bytes(bytes[*cursor..*cursor + 16].try_into().ok()?) },
+                quote! { __raw as #inner_ty },
+            )
+        } else {
+            match inner_kind.as_ref() {
+                FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                    let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
+                    (
+                        quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
+                        quote! { __raw as #inner_ty },
+                    )
+                }
+                FieldTypeKind::Usize => (
+                    quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
+                    quote! { __raw as usize },
+                ),
+                FieldTypeKind::Bool => (
+                    quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
+                    quote! { __raw != 0 },
+                ),
+                FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                    let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
+                    (
+                        quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
+                        quote! { __raw as #inner_ty },
+                    )
+                }
+                _ => unreachable!(),
             }
-            FieldTypeKind::Usize => quote! { __raw as usize },
-            FieldTypeKind::Bool => quote! { __raw != 0 },
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
-                let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
-                quote! { __raw as #inner_ty }
-            }
-            _ => unreachable!(),
         };
         return quote! {
             let __vec_len = (u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize).min(#ml);
             *cursor += 8;
             let mut #name = Vec::with_capacity(__vec_len);
             for __i in 0usize..#ml {
-                let __raw = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
+                let __raw = #read_raw;
                 if __i < __vec_len {
                     #name.push(#raw_to_val);
                 }
-                *cursor += 8;
+                *cursor += #elem_size;
             }
         };
     }
@@ -457,31 +527,48 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
         other => (other, false),
     };
 
-    let raw_to_val = |kind: &FieldTypeKind| -> proc_macro2::TokenStream {
-        match kind {
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
-                let inner_ty = extract_option_inner(ty).unwrap_or(ty);
-                quote! { __raw as #inner_ty }
-            }
-            FieldTypeKind::Usize => quote! { __raw as usize },
-            FieldTypeKind::Bool => quote! { __raw != 0 },
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
-                let inner_ty = extract_option_inner(ty).unwrap_or(ty);
-                quote! { __raw as #inner_ty }
-            }
-            FieldTypeKind::Option(_) | FieldTypeKind::Vec(_) => unreachable!(),
-        }
-    };
-
     if is_option {
-        let val_expr = raw_to_val(inner_kind);
-        quote! {
-            let __raw = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
-            let #name = if __raw == u64::MAX { None } else { Some(#val_expr) };
-            *cursor += 8;
+        match inner_kind {
+            FieldTypeKind::U128 | FieldTypeKind::I128 => {
+                let inner_ty = extract_option_inner(ty).unwrap_or(ty);
+                quote! {
+                    let __raw = u128::from_le_bytes(bytes[*cursor..*cursor + 16].try_into().ok()?);
+                    let #name = if __raw == u128::MAX { None } else { Some(__raw as #inner_ty) };
+                    *cursor += 16;
+                }
+            }
+            _ => {
+                let raw_to_val = match inner_kind {
+                    FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                        let inner_ty = extract_option_inner(ty).unwrap_or(ty);
+                        quote! { __raw as #inner_ty }
+                    }
+                    FieldTypeKind::Usize => quote! { __raw as usize },
+                    FieldTypeKind::Bool => quote! { __raw != 0 },
+                    FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                        let inner_ty = extract_option_inner(ty).unwrap_or(ty);
+                        quote! { __raw as #inner_ty }
+                    }
+                    FieldTypeKind::Option(_) | FieldTypeKind::Vec(_) => unreachable!(),
+                    FieldTypeKind::U128 | FieldTypeKind::I128 => unreachable!("handled above"),
+                };
+                quote! {
+                    let __raw = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
+                    let #name = if __raw == u64::MAX { None } else { Some(#raw_to_val) };
+                    *cursor += 8;
+                }
+            }
         }
     } else {
         match inner_kind {
+            FieldTypeKind::U128 => quote! {
+                let #name = u128::from_le_bytes(bytes[*cursor..*cursor + 16].try_into().ok()?) as #ty;
+                *cursor += 16;
+            },
+            FieldTypeKind::I128 => quote! {
+                let #name = u128::from_le_bytes(bytes[*cursor..*cursor + 16].try_into().ok()?) as #ty;
+                *cursor += 16;
+            },
             FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! {
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
                 *cursor += 8;
@@ -1054,6 +1141,19 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
             crucible_test_context::set_total_actions(capped_len);
             // Set test name for metadata
             crucible_test_context::set_current_test_name(#test_name_str);
+            // Set total variant count for monitor display (idempotent)
+            crucible_test_context::TOTAL_ACTION_VARIANTS.store(
+                <#mod_name::#enum_name as crucible_fuzzer::FuzzAction>::variant_count(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
+            // Success-seeking: retry budget and repaired action tracking
+            let __seek_retries: usize = std::env::var("FUZZ_SEEK_RETRIES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(32);
+            let mut __repaired_actions: Vec<#mod_name::#enum_name> = Vec::with_capacity(capped_len);
+            let mut __any_repaired = false;
 
             for (i, mut action) in actions.into_iter().take(max_actions).enumerate() {
                 action.constrain_in_place();
@@ -1062,18 +1162,46 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                     eprintln!("[FUZZ] Action {}: {:?}", i, action);
                 }
 
-                // Record action name and params before dispatch (action is moved)
-                let action_name_str = action.action_name();
-                let action_params = action.to_json_params();
+                let variant_idx = crucible_fuzzer::FuzzAction::variant_index(&action);
+                let ever_succeeded = crucible_test_context::has_variant_succeeded(variant_idx);
 
-                // Track total actions dispatched for monitor's actions/exec metric
-                crucible_test_context::increment_action_count();
+                // Note: tx counting is now done in send_batch() at the transaction level
 
                 // Capture taint log index before dispatch (action may produce 0..N txs)
                 let taint_start = fixture.ctx.taint_log.len();
 
                 // Execute the action and get success status
-                let success = fixture.__dispatch_action(action);
+                let mut success = fixture.__dispatch_action(action.clone());
+
+                // Success-seeking: retry failing actions for variants that have never succeeded.
+                // Failed SVM transactions don't modify state, so retries are safe without restore.
+                if !success && !ever_succeeded && __seek_retries > 0 {
+                    let mut __rng = crucible_fuzzer::StdRand::with_seed(
+                        (crucible_test_context::get_current_iteration() as u64)
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(i as u64)
+                    );
+                    for _retry in 0..__seek_retries {
+                        let mut mutated = action.clone();
+                        crucible_fuzzer::FuzzAction::mutate(&mut mutated, &mut __rng);
+                        mutated.constrain_in_place();
+                        if fixture.__dispatch_action(mutated.clone()) {
+                            action = mutated;
+                            success = true;
+                            __any_repaired = true;
+                            break;
+                        }
+                    }
+                }
+
+                if success {
+                    crucible_test_context::mark_variant_succeeded(variant_idx);
+                }
+
+                // Record action after potential repair (captures successful params)
+                let action_name_str = action.action_name();
+                let action_params = action.to_json_params();
+                __repaired_actions.push(action);
 
                 // Capture taint log index after dispatch
                 let taint_end = fixture.ctx.taint_log.len();
@@ -1096,6 +1224,13 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                     break;
                 }
             }
+
+            // Save repaired input if any action was fixed via success-seeking
+            if __any_repaired {
+                let repaired = crucible_fuzzer::FuzzInput::new(__repaired_actions);
+                crucible_test_context::push_repaired_input(repaired.to_bytes());
+            }
+
             fixture.__auto_flush();
         }
     };

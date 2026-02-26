@@ -81,10 +81,27 @@ pub use rpc_clone::AccountCloner;
 /// Used with TOTAL_EXECUTIONS to compute average actions per execution.
 pub static TOTAL_ACTIONS_DISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Global counter of total actions that succeeded across all iterations.
+/// Used by monitor to display success rate (ok/total).
+pub static TOTAL_ACTIONS_SUCCEEDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total number of action variants available (set once at startup).
+/// Used by monitor to display "discovered: N/M actions".
+pub static TOTAL_ACTION_VARIANTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Increment the global action counter by one.
+/// Also increments the thread-local per-iteration counter for accurate
+/// multicore exec/sec reporting (global atomic has cross-thread noise).
 #[inline]
 pub fn increment_action_count() {
     TOTAL_ACTIONS_DISPATCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    ITERATION_DISPATCH_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// Increment the global succeeded action counter by one.
+#[inline]
+pub fn increment_action_success_count() {
+    TOTAL_ACTIONS_SUCCEEDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ============================================================================
@@ -108,6 +125,35 @@ thread_local! {
     static VIOLATION_ACTION_INDEX: RefCell<Option<usize>> = RefCell::new(None);
     // Error code passthrough from tx_result_to_outcome to push_action_record
     static LAST_ERROR_CODE: Cell<Option<u32>> = const { Cell::new(None) };
+    // Per-iteration action dispatch count (thread-local, no cross-thread noise).
+    // Reset before each fn_name() call, read after to get accurate per-iteration count.
+    static ITERATION_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
+    // Success-seeking: tracks which action variant indices have ever succeeded
+    static SUCCEEDED_VARIANTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    // Success-seeking: queue of repaired inputs (serialized bytes) to be added to corpus
+    static REPAIRED_INPUTS: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
+    // Cached env var: FUZZ_DEBUG (checked once per thread, avoids syscall on every send_batch)
+    static FUZZ_DEBUG: Cell<bool> = Cell::new(false);
+}
+
+// Sentinel: has FUZZ_DEBUG TLS been initialized on this thread?
+thread_local! {
+    static FUZZ_DEBUG_INIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Check FUZZ_DEBUG env var (cached per-thread after first call).
+#[inline]
+fn is_fuzz_debug() -> bool {
+    FUZZ_DEBUG_INIT.with(|init| {
+        if !init.get() {
+            let val = std::env::var("FUZZ_DEBUG").is_ok();
+            FUZZ_DEBUG.with(|c| c.set(val));
+            init.set(true);
+            val
+        } else {
+            FUZZ_DEBUG.with(|c| c.get())
+        }
+    })
 }
 
 #[doc(hidden)]
@@ -256,6 +302,7 @@ pub fn push_action_record_with_taint(
     taint: Option<ActionTaintSummary>,
 ) {
     let error_code = take_last_error_code();
+    // Note: success counting is now done in send_batch() at the transaction level
     // Record in per-iteration history (for crash metadata)
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
@@ -274,6 +321,7 @@ pub fn push_action_record_with_taint(
 /// `backfill_action_params` only when needed (crash/violation).
 pub fn push_action_record_lite(name: &str, success: bool) {
     let error_code = take_last_error_code();
+    // Note: success counting is now done in send_batch() at the transaction level
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
             name: name.to_string(),
@@ -305,6 +353,19 @@ pub fn clear_action_history() {
     ACTION_HISTORY.with(|h| h.borrow_mut().clear());
 }
 
+/// Reset the per-iteration dispatch counter (call before fn_name).
+#[inline]
+pub fn reset_iteration_dispatch_count() {
+    ITERATION_DISPATCH_COUNT.with(|c| c.set(0));
+}
+
+/// Get the per-iteration dispatch count (call after fn_name).
+/// Returns at least 1 to avoid zero-counting iterations.
+#[inline]
+pub fn get_iteration_dispatch_count() -> u64 {
+    ITERATION_DISPATCH_COUNT.with(|c| c.get().max(1))
+}
+
 /// Set the total number of actions in the current sequence (for early exit tracking)
 pub fn set_total_actions(count: usize) {
     TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow_mut() = count);
@@ -331,6 +392,35 @@ pub fn clear_violation_tracking() {
     VIOLATION_ACTION_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
+// ============================================================================
+// Success-Seeking Mutation State
+// ============================================================================
+
+/// Check if a given action variant index has ever succeeded.
+pub fn has_variant_succeeded(variant_idx: usize) -> bool {
+    SUCCEEDED_VARIANTS.with(|s| s.borrow().contains(&variant_idx))
+}
+
+/// Mark an action variant index as having succeeded at least once.
+pub fn mark_variant_succeeded(variant_idx: usize) {
+    SUCCEEDED_VARIANTS.with(|s| { s.borrow_mut().insert(variant_idx); });
+}
+
+/// Get the number of action variants that have ever succeeded.
+pub fn succeeded_variant_count() -> usize {
+    SUCCEEDED_VARIANTS.with(|s| s.borrow().len())
+}
+
+/// Push a repaired input (serialized bytes) to the TLS queue for corpus addition.
+pub fn push_repaired_input(bytes: Vec<u8>) {
+    REPAIRED_INPUTS.with(|q| q.borrow_mut().push(bytes));
+}
+
+/// Drain all repaired inputs from the TLS queue, returning ownership.
+pub fn drain_repaired_inputs() -> Vec<Vec<u8>> {
+    REPAIRED_INPUTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
 /// Build crash metadata from current state
 pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
     let timestamp = chrono_lite_timestamp();
@@ -344,21 +434,26 @@ pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
 }
 
 /// Print the action sequence to stderr (for debugging crashes)
-pub fn print_action_sequence() {
+/// Format the current action sequence from TLS history into a string.
+/// Must be called on the same thread that executed the actions (reads TLS).
+pub fn format_action_sequence() -> String {
+    use std::fmt::Write;
+
     let history = get_action_history();
     let total_actions = TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow());
     let violation_idx = get_violation_action_index();
 
     if history.is_empty() && total_actions == 0 {
-        return;
+        return String::new();
     }
 
     let executed = history.len();
     let skipped = total_actions.saturating_sub(executed);
 
-    eprintln!("\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===", executed, skipped);
+    let mut out = String::new();
+    let _ = writeln!(out, "\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===", executed, skipped);
+
     for (i, record) in history.iter().enumerate() {
-        // Format params as key=value pairs
         let params_str = if let serde_json::Value::Object(map) = &record.params {
             map.iter()
                 .map(|(k, v)| format!("{}={}", k, format_json_value(v)))
@@ -369,30 +464,22 @@ pub fn print_action_sequence() {
         };
 
         let status = if record.success { "OK" } else { "FAIL" };
-
-        // Mark the action that triggered the violation
         let violation_marker = if violation_idx == Some(i) { " [VIOLATION]" } else { "" };
 
         if params_str.is_empty() {
-            eprintln!("  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
+            let _ = writeln!(out, "  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
         } else {
-            eprintln!("  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
+            let _ = writeln!(out, "  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
         }
 
-        // Print taint info if available
         if let Some(ref taint) = record.taint {
             if !taint.written_accounts.is_empty() {
-                // Format account changes
                 if let Some(ref changes) = taint.account_changes {
                     for change in changes {
-                        let short_key = &change.pubkey[..8.min(change.pubkey.len())];
-                        let type_prefix = change.pubkey.as_str(); // full key as fallback
-                        // Try to get type name from schema registry using discriminator
-                        let label = short_key;
+                        let label = &change.pubkey[..8.min(change.pubkey.len())];
 
                         let mut parts = Vec::new();
 
-                        // Lamports change
                         let (pre_l, post_l) = change.lamports;
                         if pre_l != post_l {
                             let delta = post_l as i128 - pre_l as i128;
@@ -400,13 +487,11 @@ pub fn print_action_sequence() {
                             parts.push(format!("{}{}lamports", sign, delta));
                         }
 
-                        // Field diffs (Phase 2) take priority over byte ranges
                         if let Some(ref field_diffs) = change.field_diffs {
                             for fd in field_diffs {
                                 parts.push(format!("{}: {} -> {}", fd.field, fd.old_value, fd.new_value));
                             }
                         } else if !change.changed_ranges.is_empty() {
-                            // Byte ranges
                             let ranges_str: Vec<String> = change.changed_ranges.iter()
                                 .map(|(off, len)| format!("data[{}..{}]", off, off + len))
                                 .collect();
@@ -420,28 +505,34 @@ pub fn print_action_sequence() {
                         };
 
                         if parts.is_empty() {
-                            eprintln!("     {}...({}) {}", label, kind_str, type_prefix);
+                            let _ = writeln!(out, "     {}...({}) {}", label, kind_str, change.pubkey);
                         } else {
-                            eprintln!("     {}...({})", label, parts.join(", "));
+                            let _ = writeln!(out, "     {}...({})", label, parts.join(", "));
                         }
                     }
                 } else {
-                    // No detailed diffs, just show account list
                     let short_keys: Vec<String> = taint.written_accounts.iter()
                         .map(|k| format!("{}...", &k[..8.min(k.len())]))
                         .collect();
-                    eprintln!("     wrote: {}", short_keys.join(", "));
+                    let _ = writeln!(out, "     wrote: {}", short_keys.join(", "));
                 }
             }
         }
     }
 
-    // Show skipped actions
     if skipped > 0 {
-        eprintln!("  ... {} action(s) not executed (stopped on violation)", skipped);
+        let _ = writeln!(out, "  ... {} action(s) not executed (stopped on violation)", skipped);
     }
 
-    eprintln!("================================\n");
+    let _ = writeln!(out, "================================");
+    out
+}
+
+pub fn print_action_sequence() {
+    let s = format_action_sequence();
+    if !s.is_empty() {
+        eprint!("{}", s);
+    }
 }
 
 /// Format a JSON value for display (compact format)
@@ -461,6 +552,32 @@ fn format_json_value(v: &serde_json::Value) -> String {
                 .collect();
             format!("{{{}}}", items.join(", "))
         }
+    }
+}
+
+/// Format the most recent action from TLS history as a one-line summary.
+/// e.g. "action_deposit(user=0, amount=500) -> OK"
+/// Returns empty string if no action in history.
+pub fn format_last_action_oneline() -> String {
+    let history = get_action_history();
+    match history.last() {
+        Some(record) => {
+            let params_str = if let serde_json::Value::Object(map) = &record.params {
+                map.iter()
+                    .map(|(k, v)| format!("{}={}", k, format_json_value(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                String::new()
+            };
+            let status = if record.success { "OK" } else { "FAIL" };
+            if params_str.is_empty() {
+                format!("{} -> {}", record.name, status)
+            } else {
+                format!("{}({}) -> {}", record.name, params_str, status)
+            }
+        }
+        None => String::new(),
     }
 }
 
@@ -1232,7 +1349,7 @@ pub struct TestContext {
     /// Arc-wrapped so cloning doesn't deep-copy program binaries (~1-2MB each).
     programs: std::sync::Arc<Vec<ProgramData>>,
     /// Account pubkeys that have been set (for copying to debuggable SVMs)
-    tracked_accounts: HashSet<Pubkey>,
+    tracked_accounts: Arc<HashSet<Pubkey>>,
     /// Total CFG edges and instructions per program (for coverage percentage calculation)
     /// Value is (total_edges, total_instructions)
     program_coverage_totals: HashMap<Pubkey, (usize, usize)>,
@@ -1301,7 +1418,7 @@ impl TestContext {
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
-            tracked_accounts: HashSet::new(),
+            tracked_accounts: Arc::new(HashSet::new()),
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
@@ -1320,7 +1437,7 @@ impl TestContext {
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
-            tracked_accounts: HashSet::new(),
+            tracked_accounts: Arc::new(HashSet::new()),
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
@@ -1424,7 +1541,7 @@ impl TestContext {
             pending_instructions: Vec::new(),
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
-            tracked_accounts: HashSet::new(),
+            tracked_accounts: Arc::new(HashSet::new()),
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
@@ -1481,7 +1598,7 @@ impl TestContext {
     /// Track an account pubkey so it gets copied when cloning with invocation callback.
     /// Called internally by account builders.
     pub fn track_account(&mut self, pubkey: Pubkey) {
-        self.tracked_accounts.insert(pubkey);
+        Arc::make_mut(&mut self.tracked_accounts).insert(pubkey);
     }
 
     /// Get count of tracked accounts (for debugging)
@@ -1542,7 +1659,7 @@ impl TestContext {
         // Merge dirty tracker accounts into tracked set so CPI-created accounts
         // (e.g., PDAs created by Initialize instructions) are included in the snapshot
         for pubkey in self.dirty_tracker.dirty_accounts() {
-            self.tracked_accounts.insert(*pubkey);
+            Arc::make_mut(&mut self.tracked_accounts).insert(*pubkey);
         }
         self.snapshot = Some(snapshot::SvmSnapshot::take(&self.svm, &self.tracked_accounts));
         // Clear the dirty tracker so it's fresh for the first iteration
@@ -1781,7 +1898,7 @@ impl TestContext {
 
     // Write account directly to SVM
     pub fn write_account(&mut self, address: &Pubkey, account: Account) -> Result<()> {
-        self.tracked_accounts.insert(*address);
+        Arc::make_mut(&mut self.tracked_accounts).insert(*address);
         self.dirty_tracker.mark_account_dirty(address);
         let _ = self.svm.set_account(*address, account);
         Ok(())
@@ -1884,7 +2001,7 @@ impl TestContext {
             ));
         }
         account.data[discriminator_len..discriminator_len + bytes.len()].copy_from_slice(bytes);
-        self.tracked_accounts.insert(*address);
+        Arc::make_mut(&mut self.tracked_accounts).insert(*address);
         self.dirty_tracker.mark_account_dirty(address);
         let _ = self.svm.set_account(*address, account);
         Ok(())
@@ -1948,7 +2065,7 @@ impl TestContext {
             return Ok(None);
         }
 
-        let debug = std::env::var("FUZZ_DEBUG").is_ok();
+        let debug = is_fuzz_debug();
         let num_ixs = self.pending_instructions.len();
 
         // Deduplicate signers while preserving order (first = fee payer)
@@ -1989,6 +2106,12 @@ impl TestContext {
         )?;
 
         let outcome = tx_result_to_outcome(result);
+
+        // Track tx success/failure for monitor display (works for all modes)
+        increment_action_count();
+        if outcome.is_success() {
+            increment_action_success_count();
+        }
 
         if debug {
             match &outcome {
@@ -2881,6 +3004,1213 @@ mod tests {
         // Clone should share program data via Arc
         let cloned = ctx.clone();
         assert_eq!(ctx.programs_count(), cloned.programs_count());
+    }
+
+    // =========================================================================
+    // parse_error_code — TransactionError → Custom(N)
+    // =========================================================================
+
+    #[test]
+    fn parse_error_code_custom() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::Custom(6051));
+        assert_eq!(parse_error_code(&err), Some(6051));
+    }
+
+    #[test]
+    fn parse_error_code_custom_zero() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(1, InstructionError::Custom(0));
+        assert_eq!(parse_error_code(&err), Some(0));
+    }
+
+    #[test]
+    fn parse_error_code_custom_large() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::Custom(u32::MAX));
+        assert_eq!(parse_error_code(&err), Some(u32::MAX));
+    }
+
+    #[test]
+    fn parse_error_code_non_custom_instruction_error() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::GenericError);
+        assert_eq!(parse_error_code(&err), None);
+    }
+
+    #[test]
+    fn parse_error_code_non_instruction_error() {
+        let err = TransactionError::AccountInUse;
+        assert_eq!(parse_error_code(&err), None);
+    }
+
+    // =========================================================================
+    // parse_instruction_index — TransactionError → instruction index
+    // =========================================================================
+
+    #[test]
+    fn parse_instruction_index_basic() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::Custom(42));
+        assert_eq!(parse_instruction_index(&err), Some(0));
+    }
+
+    #[test]
+    fn parse_instruction_index_nonzero() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(3, InstructionError::GenericError);
+        assert_eq!(parse_instruction_index(&err), Some(3));
+    }
+
+    #[test]
+    fn parse_instruction_index_max_u8() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(255, InstructionError::Custom(1));
+        assert_eq!(parse_instruction_index(&err), Some(255));
+    }
+
+    #[test]
+    fn parse_instruction_index_non_instruction_error() {
+        let err = TransactionError::AccountInUse;
+        assert_eq!(parse_instruction_index(&err), None);
+    }
+
+    // =========================================================================
+    // format_action_sequence — TLS action history formatting
+    // =========================================================================
+
+    /// Helper: clear all TLS state used by format_action_sequence / format_last_action_oneline
+    fn clear_format_tls() {
+        clear_action_history();
+        clear_violation_tracking();
+    }
+
+    #[test]
+    fn format_action_sequence_empty() {
+        clear_format_tls();
+        let out = format_action_sequence();
+        assert!(out.is_empty(), "expected empty for no history: {:?}", out);
+    }
+
+    #[test]
+    fn format_action_sequence_single_ok() {
+        clear_format_tls();
+        set_total_actions(1);
+        push_action_record("action_deposit", serde_json::json!({"amount": 500}), true);
+
+        let out = format_action_sequence();
+        assert!(out.contains("1 executed, 0 skipped"), "header: {out}");
+        assert!(out.contains("action_deposit(amount=500) -> OK"), "body: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_single_fail() {
+        clear_format_tls();
+        set_total_actions(1);
+        push_action_record("action_withdraw", serde_json::json!({}), false);
+
+        let out = format_action_sequence();
+        assert!(out.contains("action_withdraw -> FAIL"), "body: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_multiple_params() {
+        clear_format_tls();
+        set_total_actions(3);
+        push_action_record("action_deposit", serde_json::json!({"user": 0, "amount": 100}), true);
+        push_action_record("action_borrow", serde_json::json!({"user": 1}), true);
+        push_action_record("action_repay", serde_json::json!({}), false);
+
+        let out = format_action_sequence();
+        assert!(out.contains("3 executed, 0 skipped"), "header: {out}");
+        assert!(out.contains("1. action_deposit("), "first: {out}");
+        assert!(out.contains("2. action_borrow(user=1) -> OK"), "second: {out}");
+        assert!(out.contains("3. action_repay -> FAIL"), "third: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_with_violation_marker() {
+        clear_format_tls();
+        set_total_actions(3);
+        push_action_record("action_a", serde_json::json!({}), true);
+        push_action_record("action_b", serde_json::json!({}), true);
+        // Action at index 1 triggered the violation
+        set_violation_action_index(1);
+
+        let out = format_action_sequence();
+        assert!(out.contains("2 executed, 1 skipped"), "header: {out}");
+        assert!(!out.contains("1. action_a") || !out.contains("[VIOLATION]") || out.contains("action_a -> OK\n") || !out.matches("[VIOLATION]").count() > 1,
+            "violation should only be on action_b");
+        assert!(out.contains("action_b -> OK [VIOLATION]"), "violation marker: {out}");
+        assert!(out.contains("1 action(s) not executed"), "skipped: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_skipped_actions() {
+        clear_format_tls();
+        set_total_actions(10);
+        push_action_record("action_only", serde_json::json!({}), true);
+
+        let out = format_action_sequence();
+        assert!(out.contains("1 executed, 9 skipped"), "header: {out}");
+        assert!(out.contains("9 action(s) not executed"), "footer: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_no_params_no_parens() {
+        clear_format_tls();
+        set_total_actions(1);
+        // Null params (from push_action_record_lite)
+        ACTION_HISTORY.with(|h| {
+            h.borrow_mut().push(ActionRecord {
+                name: "action_foo".to_string(),
+                params: serde_json::Value::Null,
+                success: true,
+                error_code: None,
+                taint: None,
+            });
+        });
+
+        let out = format_action_sequence();
+        // Should NOT have parentheses for null params
+        assert!(out.contains("action_foo -> OK"), "body: {out}");
+        assert!(!out.contains("action_foo("), "should not have parens: {out}");
+    }
+
+    // =========================================================================
+    // format_last_action_oneline — last action summary
+    // =========================================================================
+
+    #[test]
+    fn format_last_action_oneline_empty() {
+        clear_format_tls();
+        let out = format_last_action_oneline();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn format_last_action_oneline_success_with_params() {
+        clear_format_tls();
+        push_action_record("action_deposit", serde_json::json!({"amount": 42}), true);
+
+        let out = format_last_action_oneline();
+        assert_eq!(out, "action_deposit(amount=42) -> OK");
+    }
+
+    #[test]
+    fn format_last_action_oneline_fail_no_params() {
+        clear_format_tls();
+        push_action_record("action_withdraw", serde_json::json!({}), false);
+
+        let out = format_last_action_oneline();
+        assert_eq!(out, "action_withdraw -> FAIL");
+    }
+
+    #[test]
+    fn format_last_action_oneline_returns_last() {
+        clear_format_tls();
+        push_action_record("action_first", serde_json::json!({}), true);
+        push_action_record("action_second", serde_json::json!({"x": 1}), false);
+
+        let out = format_last_action_oneline();
+        assert!(out.starts_with("action_second"), "should return last: {out}");
+        assert!(out.contains("FAIL"), "last was failure: {out}");
+    }
+
+    #[test]
+    fn format_last_action_oneline_null_params() {
+        clear_format_tls();
+        ACTION_HISTORY.with(|h| {
+            h.borrow_mut().push(ActionRecord {
+                name: "action_lite".to_string(),
+                params: serde_json::Value::Null,
+                success: true,
+                error_code: None,
+                taint: None,
+            });
+        });
+
+        let out = format_last_action_oneline();
+        assert_eq!(out, "action_lite -> OK");
+    }
+
+    // =========================================================================
+    // format_json_value — compact JSON formatting (tested via format_action_sequence)
+    // =========================================================================
+
+    #[test]
+    fn format_action_sequence_nested_params() {
+        clear_format_tls();
+        set_total_actions(1);
+        push_action_record(
+            "action_complex",
+            serde_json::json!({"arr": [1, 2], "flag": true, "label": "hi"}),
+            true,
+        );
+
+        let out = format_action_sequence();
+        assert!(out.contains("arr=[1, 2]"), "array param: {out}");
+        assert!(out.contains("flag=true"), "bool param: {out}");
+        assert!(out.contains("label=\"hi\""), "string param: {out}");
+    }
+
+    // =========================================================================
+    // write_crash_metadata — file I/O
+    // =========================================================================
+
+    #[test]
+    fn write_crash_metadata_creates_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().to_str().unwrap();
+
+        // Set up TLS state
+        clear_format_tls();
+        set_current_test_name("my_test");
+        set_current_iteration(42);
+        push_action_record("action_a", serde_json::json!({"x": 1}), true);
+
+        let input_bytes = b"crash_input_data";
+        let hash: u64 = 0xDEADBEEF;
+        write_crash_metadata(crash_dir, hash, Some(999), input_bytes);
+
+        let crash_id = format!("crash_{:016x}", hash);
+
+        // Check input file exists and matches
+        let input_path = tmp.path().join(&crash_id);
+        assert!(input_path.exists(), "input file should exist");
+        assert_eq!(std::fs::read(&input_path).unwrap(), input_bytes);
+
+        // Check metadata file exists and is valid JSON
+        let meta_path = tmp.path().join(format!("{}.meta.json", crash_id));
+        assert!(meta_path.exists(), "meta file should exist");
+        let meta_str = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+
+        assert_eq!(meta["test_name"], "my_test");
+        assert_eq!(meta["iteration"], 42);
+        assert_eq!(meta["seed"], 999);
+        assert_eq!(meta["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(meta["actions"][0]["name"], "action_a");
+    }
+
+    #[test]
+    fn write_crash_metadata_no_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().to_str().unwrap();
+
+        clear_format_tls();
+        set_current_test_name("test2");
+
+        write_crash_metadata(crash_dir, 0x1234, None, b"data");
+
+        let meta_path = tmp.path().join("crash_0000000000001234.meta.json");
+        let meta_str = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+
+        // seed should be absent (skip_serializing_if = None)
+        assert!(meta.get("seed").is_none() || meta["seed"].is_null(),
+            "seed should be absent or null: {:?}", meta.get("seed"));
+    }
+
+    // =========================================================================
+    // write_crash_metadata_for_id — update metadata in place
+    // =========================================================================
+
+    #[test]
+    fn write_crash_metadata_for_id_creates_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().to_str().unwrap();
+
+        clear_format_tls();
+        set_current_test_name("tmin_test");
+        set_current_iteration(7);
+        push_action_record("action_min", serde_json::json!({}), false);
+
+        write_crash_metadata_for_id(crash_dir, "crash_abc", Some(55));
+
+        let meta_path = tmp.path().join("crash_abc.meta.json");
+        assert!(meta_path.exists(), "meta file should exist");
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+
+        assert_eq!(meta["test_name"], "tmin_test");
+        assert_eq!(meta["seed"], 55);
+        assert_eq!(meta["actions"][0]["name"], "action_min");
+        assert_eq!(meta["actions"][0]["success"], false);
+    }
+
+    // =========================================================================
+    // IntoActionSuccess trait
+    // =========================================================================
+
+    #[test]
+    fn into_action_success_unit() {
+        assert!(().into_success());
+    }
+
+    #[test]
+    fn into_action_success_result_ok() {
+        let r: Result<(), String> = Ok(());
+        assert!(r.into_success());
+    }
+
+    #[test]
+    fn into_action_success_result_err() {
+        let r: Result<(), &str> = Err("boom");
+        assert!(!r.into_success());
+    }
+
+    #[test]
+    fn into_action_success_bool() {
+        assert!(true.into_success());
+        assert!(!false.into_success());
+    }
+
+    // =========================================================================
+    // Action history helpers
+    // =========================================================================
+
+    #[test]
+    fn action_history_push_and_clear() {
+        clear_action_history();
+        push_action_record("a1", serde_json::json!({}), true);
+        push_action_record("a2", serde_json::json!({"k": "v"}), false);
+        let h = get_action_history();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].name, "a1");
+        assert!(h[0].success);
+        assert_eq!(h[1].name, "a2");
+        assert!(!h[1].success);
+
+        clear_action_history();
+        assert!(get_action_history().is_empty());
+    }
+
+    #[test]
+    fn backfill_action_params_updates_entry() {
+        clear_action_history();
+        push_action_record_lite("action_x", true);
+        let h = get_action_history();
+        assert!(h[0].params.is_null(), "lite record should have null params");
+
+        backfill_action_params(0, serde_json::json!({"filled": true}));
+        let h = get_action_history();
+        assert_eq!(h[0].params["filled"], true);
+    }
+
+    #[test]
+    fn backfill_action_params_out_of_bounds_noop() {
+        clear_action_history();
+        push_action_record_lite("a", true);
+        // Should not panic on out-of-bounds index
+        backfill_action_params(99, serde_json::json!({"x": 1}));
+        let h = get_action_history();
+        assert!(h[0].params.is_null(), "original should be unchanged");
+    }
+
+    // =========================================================================
+    // Violation tracking (index + clearing)
+    // =========================================================================
+
+    #[test]
+    fn violation_action_index_only_records_first() {
+        clear_violation_tracking();
+        set_violation_action_index(3);
+        set_violation_action_index(7); // should be ignored
+        assert_eq!(get_violation_action_index(), Some(3));
+    }
+
+    #[test]
+    fn clear_violation_tracking_resets_all() {
+        set_total_actions(10);
+        set_violation_action_index(5);
+        clear_violation_tracking();
+
+        assert_eq!(get_violation_action_index(), None);
+        // total_actions is internal, but format_action_sequence will show 0 skipped
+        clear_action_history();
+        let out = format_action_sequence();
+        assert!(out.is_empty(), "should be empty after full clear");
+    }
+
+    // =========================================================================
+    // Success-seeking helpers
+    // =========================================================================
+
+    #[test]
+    fn succeeded_variants_tracking() {
+        // Clear state
+        SUCCEEDED_VARIANTS.with(|s| s.borrow_mut().clear());
+
+        assert!(!has_variant_succeeded(0));
+        assert!(!has_variant_succeeded(1));
+        assert_eq!(succeeded_variant_count(), 0);
+
+        mark_variant_succeeded(0);
+        assert!(has_variant_succeeded(0));
+        assert!(!has_variant_succeeded(1));
+        assert_eq!(succeeded_variant_count(), 1);
+
+        mark_variant_succeeded(0); // duplicate
+        assert_eq!(succeeded_variant_count(), 1);
+
+        mark_variant_succeeded(5);
+        assert_eq!(succeeded_variant_count(), 2);
+    }
+
+    // =========================================================================
+    // Dispatch counting
+    // =========================================================================
+
+    #[test]
+    fn dispatch_count_reset_and_increment() {
+        reset_iteration_dispatch_count();
+        // min is 1 even when 0 dispatches
+        assert_eq!(get_iteration_dispatch_count(), 1);
+
+        increment_action_count();
+        increment_action_count();
+        assert_eq!(get_iteration_dispatch_count(), 2);
+
+        reset_iteration_dispatch_count();
+        assert_eq!(get_iteration_dispatch_count(), 1);
+    }
+
+    // =========================================================================
+    // build_crash_metadata
+    // =========================================================================
+
+    #[test]
+    fn build_crash_metadata_captures_tls() {
+        clear_format_tls();
+        set_current_test_name("crash_test");
+        set_current_iteration(99);
+        push_action_record("act_a", serde_json::json!({"p": 1}), true);
+        push_action_record("act_b", serde_json::json!({}), false);
+
+        let meta = build_crash_metadata(Some(12345));
+        assert_eq!(meta.test_name, "crash_test");
+        assert_eq!(meta.iteration, 99);
+        assert_eq!(meta.seed, Some(12345));
+        assert_eq!(meta.actions.len(), 2);
+        assert_eq!(meta.actions[0].name, "act_a");
+        assert!(meta.actions[0].success);
+        assert_eq!(meta.actions[1].name, "act_b");
+        assert!(!meta.actions[1].success);
+    }
+
+    #[test]
+    fn build_crash_metadata_no_test_name() {
+        clear_format_tls();
+        CURRENT_TEST_NAME.with(|t| *t.borrow_mut() = None);
+
+        let meta = build_crash_metadata(None);
+        assert_eq!(meta.test_name, "unknown");
+        assert!(meta.seed.is_none());
+    }
+
+    // =========================================================================
+    // GenericAccountBuilder
+    // =========================================================================
+
+    #[test]
+    fn generic_builder_create_basic() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let addr = ctx.create_account()
+            .pubkey(pk)
+            .owner(owner)
+            .lamports(1_000_000)
+            .size(128)
+            .create()
+            .unwrap();
+
+        assert_eq!(addr, pk);
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.owner, owner);
+        assert_eq!(acc.lamports, 1_000_000);
+        assert_eq!(acc.data.len(), 128);
+        assert!(!acc.executable);
+    }
+
+    #[test]
+    fn generic_builder_with_data() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let data = vec![1, 2, 3, 4, 5];
+
+        ctx.create_account()
+            .pubkey(pk)
+            .lamports(1)
+            .data(&data)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.data, data);
+    }
+
+    #[test]
+    fn generic_builder_default_address_errors() {
+        let mut ctx = TestContext::new();
+        let err = ctx.create_account()
+            .lamports(100)
+            .create()
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Address must be set"),
+            "expected address error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn generic_builder_tracks_account() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let before = ctx.tracked_accounts_count();
+
+        ctx.create_account()
+            .pubkey(pk)
+            .create()
+            .unwrap();
+
+        assert_eq!(ctx.tracked_accounts_count(), before + 1);
+    }
+
+    // =========================================================================
+    // MintAccountBuilder
+    // =========================================================================
+
+    #[test]
+    fn mint_builder_create_basic() {
+        let mut ctx = TestContext::new();
+        let mint_pk = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+
+        let addr = ctx.create_mint()
+            .pubkey(mint_pk)
+            .mint_authority(authority)
+            .decimals(6)
+            .supply(1_000_000)
+            .create()
+            .unwrap();
+
+        assert_eq!(addr, mint_pk);
+
+        let acc = ctx.svm.get_account(&mint_pk).unwrap();
+        assert_eq!(acc.owner, spl_token::id());
+        assert_eq!(acc.data.len(), spl_token::state::Mint::LEN);
+
+        // Deserialize and verify packed state
+        let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
+        assert_eq!(mint.decimals, 6);
+        assert_eq!(mint.supply, 1_000_000);
+        assert_eq!(mint.mint_authority, COption::Some(authority));
+        assert!(mint.is_initialized);
+    }
+
+    #[test]
+    fn mint_builder_default_is_initialized() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_mint()
+            .pubkey(pk)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
+        assert!(mint.is_initialized, "default mint should be initialized");
+    }
+
+    #[test]
+    fn mint_builder_freeze_authority() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let freeze_auth = Pubkey::new_unique();
+
+        ctx.create_mint()
+            .pubkey(pk)
+            .freeze_authority(Some(freeze_auth))
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
+        assert_eq!(mint.freeze_authority, COption::Some(freeze_auth));
+    }
+
+    #[test]
+    fn mint_builder_freeze_authority_none() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_mint()
+            .pubkey(pk)
+            .freeze_authority(None)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
+        assert_eq!(mint.freeze_authority, COption::None);
+    }
+
+    #[test]
+    fn mint_builder_default_address_errors() {
+        let mut ctx = TestContext::new();
+        let err = ctx.create_mint()
+            .decimals(9)
+            .create()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Address must be set"), "expected address error: {}", err);
+    }
+
+    #[test]
+    fn mint_builder_has_rent_exempt_lamports() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_mint()
+            .pubkey(pk)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let rent = Rent::default();
+        let min_lamports = rent.minimum_balance(spl_token::state::Mint::LEN);
+        assert_eq!(acc.lamports, min_lamports, "mint should have rent-exempt lamports by default");
+    }
+
+    // =========================================================================
+    // TokenAccountBuilder
+    // =========================================================================
+
+    #[test]
+    fn token_builder_create_basic() {
+        let mut ctx = TestContext::new();
+        let token_pk = Pubkey::new_unique();
+        let mint_pk = Pubkey::new_unique();
+        let owner_pk = Pubkey::new_unique();
+
+        let addr = ctx.create_token_account()
+            .pubkey(token_pk)
+            .mint(mint_pk)
+            .token_owner(owner_pk)
+            .amount(500)
+            .create()
+            .unwrap();
+
+        assert_eq!(addr, token_pk);
+
+        let acc = ctx.svm.get_account(&token_pk).unwrap();
+        assert_eq!(acc.owner, spl_token::id());
+        assert_eq!(acc.data.len(), spl_token::state::Account::LEN);
+
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.mint, mint_pk);
+        assert_eq!(token.owner, owner_pk);
+        assert_eq!(token.amount, 500);
+        assert_eq!(token.state, spl_token::state::AccountState::Initialized);
+    }
+
+    #[test]
+    fn token_builder_missing_mint_errors() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let err = ctx.create_token_account()
+            .pubkey(pk)
+            .token_owner(owner)
+            .create()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Mint must be set"), "expected mint error: {}", err);
+    }
+
+    #[test]
+    fn token_builder_missing_owner_errors() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+
+        let err = ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .create()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Owner must be set"), "expected owner error: {}", err);
+    }
+
+    #[test]
+    fn token_builder_default_address_errors() {
+        let mut ctx = TestContext::new();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let err = ctx.create_token_account()
+            .mint(mint)
+            .token_owner(owner)
+            .create()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Address must be set"), "expected address error: {}", err);
+    }
+
+    #[test]
+    fn token_builder_delegate() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let delegate = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .delegate(Some(delegate))
+            .delegated_amount(100)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.delegate, COption::Some(delegate));
+        assert_eq!(token.delegated_amount, 100);
+    }
+
+    #[test]
+    fn token_builder_close_authority() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let close_auth = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .close_authority(Some(close_auth))
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.close_authority, COption::Some(close_auth));
+    }
+
+    #[test]
+    fn token_builder_is_native() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .is_native(Some(1_000_000))
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.is_native, COption::Some(1_000_000));
+    }
+
+    #[test]
+    fn token_builder_has_rent_exempt_lamports() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let rent = Rent::default();
+        let min_lamports = rent.minimum_balance(spl_token::state::Account::LEN);
+        assert_eq!(acc.lamports, min_lamports, "token account should have rent-exempt lamports by default");
+    }
+
+    // =========================================================================
+    // AccountBuilderBase trait — shared builder methods
+    // =========================================================================
+
+    #[test]
+    fn builder_rent_epoch() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_account()
+            .pubkey(pk)
+            .lamports(1)
+            .rent_epoch(42)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.rent_epoch, 42);
+    }
+
+    #[test]
+    fn builder_lamports_override_on_mint() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        // Override default rent-exempt lamports
+        ctx.create_mint()
+            .pubkey(pk)
+            .lamports(999)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.lamports, 999);
+    }
+
+    // =========================================================================
+    // Account builder — deeper edge cases
+    // =========================================================================
+
+    #[test]
+    fn generic_builder_overwrite_same_pubkey() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        // First create
+        ctx.create_account()
+            .pubkey(pk)
+            .lamports(100)
+            .data(&[1, 2, 3])
+            .create()
+            .unwrap();
+        let acc1 = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc1.data, vec![1, 2, 3]);
+
+        // Second create overwrites
+        ctx.create_account()
+            .pubkey(pk)
+            .lamports(200)
+            .data(&[4, 5])
+            .create()
+            .unwrap();
+        let acc2 = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc2.data, vec![4, 5]);
+        assert_eq!(acc2.lamports, 200);
+    }
+
+    #[test]
+    fn mint_builder_zero_decimals() {
+        // NFT use case: 0 decimals is valid
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_mint()
+            .pubkey(pk)
+            .decimals(0)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
+        assert_eq!(mint.decimals, 0);
+    }
+
+    #[test]
+    fn token_builder_max_amount() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .amount(u64::MAX)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.amount, u64::MAX);
+    }
+
+    #[test]
+    fn token_builder_frozen_state() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        ctx.create_token_account()
+            .pubkey(pk)
+            .mint(mint)
+            .token_owner(owner)
+            .state(spl_token::state::AccountState::Frozen)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let token = spl_token::state::Account::unpack(&acc.data).unwrap();
+        assert_eq!(token.state, spl_token::state::AccountState::Frozen);
+    }
+
+    #[test]
+    fn builder_chaining_order_independent() {
+        let mut ctx = TestContext::new();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+
+        // Order 1: mint → pubkey → token_owner → amount
+        ctx.create_token_account()
+            .mint(mint)
+            .pubkey(pk1)
+            .token_owner(owner)
+            .amount(42)
+            .create()
+            .unwrap();
+
+        // Order 2: amount → token_owner → pubkey → mint
+        ctx.create_token_account()
+            .amount(42)
+            .token_owner(owner)
+            .pubkey(pk2)
+            .mint(mint)
+            .create()
+            .unwrap();
+
+        let acc1 = ctx.svm.get_account(&pk1).unwrap();
+        let acc2 = ctx.svm.get_account(&pk2).unwrap();
+        let token1 = spl_token::state::Account::unpack(&acc1.data).unwrap();
+        let token2 = spl_token::state::Account::unpack(&acc2.data).unwrap();
+
+        assert_eq!(token1.mint, token2.mint);
+        assert_eq!(token1.owner, token2.owner);
+        assert_eq!(token1.amount, token2.amount);
+    }
+
+    #[test]
+    fn generic_builder_zero_length_data_with_lamports() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_account()
+            .pubkey(pk)
+            .lamports(1_000_000)
+            .size(0) // zero-length data
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.lamports, 1_000_000);
+        assert!(acc.data.is_empty());
+    }
+
+    // =========================================================================
+    // format_action_sequence — deeper edge cases
+    // =========================================================================
+
+    #[test]
+    fn format_action_sequence_violation_at_index_0() {
+        clear_format_tls();
+        set_total_actions(2);
+        push_action_record("action_first", serde_json::json!({}), false);
+        push_action_record("action_second", serde_json::json!({}), true);
+        set_violation_action_index(0);
+
+        let out = format_action_sequence();
+        assert!(out.contains("action_first -> FAIL [VIOLATION]"), "violation should be on first: {out}");
+        assert!(!out.contains("action_second -> OK [VIOLATION]"), "second should not have marker: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_deeply_nested_params() {
+        clear_format_tls();
+        set_total_actions(1);
+        push_action_record(
+            "action_nested",
+            serde_json::json!({"a": {"b": {"c": 1}}}),
+            true,
+        );
+
+        let out = format_action_sequence();
+        // format_json_value should recurse into nested objects
+        assert!(out.contains("a={"), "nested object: {out}");
+        assert!(out.contains("c: 1"), "deeply nested value: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_total_0_with_actions() {
+        // Inconsistent state: total_actions = 0 but history has entries
+        clear_format_tls();
+        // Don't call set_total_actions — defaults to 0
+        push_action_record("orphan", serde_json::json!({}), true);
+
+        let out = format_action_sequence();
+        // Should still format (total_actions=0 but history non-empty → skipped = 0 - 1 = saturating_sub → 0)
+        assert!(out.contains("1 executed, 0 skipped"), "should handle mismatch: {out}");
+    }
+
+    #[test]
+    fn format_action_sequence_many_actions() {
+        clear_format_tls();
+        set_total_actions(50);
+        for i in 0..50 {
+            push_action_record(
+                &format!("action_{}", i),
+                serde_json::json!({"i": i}),
+                i % 3 != 0,
+            );
+        }
+
+        let out = format_action_sequence();
+        assert!(out.contains("50 executed, 0 skipped"), "header: {out}");
+        assert!(out.contains("1. action_0"), "first: {out}");
+        assert!(out.contains("50. action_49"), "last: {out}");
+    }
+
+    #[test]
+    fn format_last_action_oneline_multiple_params_ordering() {
+        clear_format_tls();
+        // serde_json::json! with ordered keys
+        push_action_record(
+            "action_multi",
+            serde_json::json!({"amount": 100, "user": 2}),
+            true,
+        );
+        let out = format_last_action_oneline();
+        // Should have both params
+        assert!(out.contains("amount=100"), "amount: {out}");
+        assert!(out.contains("user=2"), "user: {out}");
+        assert!(out.contains("-> OK"), "status: {out}");
+    }
+
+    // =========================================================================
+    // parse_error_code — additional variant coverage
+    // =========================================================================
+
+    #[test]
+    fn parse_error_code_anchor_custom_6000() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::Custom(6000));
+        assert_eq!(parse_error_code(&err), Some(6000));
+    }
+
+    #[test]
+    fn parse_error_code_insufficient_funds() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(0, InstructionError::InsufficientFunds);
+        assert_eq!(parse_error_code(&err), None, "InsufficientFunds has no Custom(N)");
+    }
+
+    #[test]
+    fn parse_error_code_account_already_initialized() {
+        use solana_instruction::error::InstructionError;
+        let err = TransactionError::InstructionError(2, InstructionError::AccountAlreadyInitialized);
+        assert_eq!(parse_error_code(&err), None);
+        // But instruction index should still parse
+        assert_eq!(parse_instruction_index(&err), Some(2));
+    }
+
+    // =========================================================================
+    // Snapshot — deeper edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_snapshot_multiple_writes_same_account() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        // Initial state
+        ctx.write_account(&pk, Account {
+            lamports: 100,
+            data: vec![1],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ctx.dirty_tracker.mark_account_dirty(&pk);
+
+        ctx.take_snapshot();
+
+        // Write #1 during iteration
+        ctx.write_account(&pk, Account {
+            lamports: 200,
+            data: vec![2],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ctx.dirty_tracker.mark_account_dirty(&pk);
+
+        // Write #2 during iteration
+        ctx.write_account(&pk, Account {
+            lamports: 300,
+            data: vec![3],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ctx.dirty_tracker.mark_account_dirty(&pk);
+
+        // Restore should go back to snapshot state (lamports=100, data=[1])
+        ctx.restore_snapshot();
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.lamports, 100, "restore should use snapshot value, not intermediate");
+        assert_eq!(acc.data, vec![1]);
+    }
+
+    #[test]
+    fn test_snapshot_large_account_data_integrity() {
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        // Create a large account (10KB)
+        let original_data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+        ctx.write_account(&pk, Account {
+            lamports: 1_000_000,
+            data: original_data.clone(),
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ctx.dirty_tracker.mark_account_dirty(&pk);
+
+        ctx.take_snapshot();
+
+        // Modify during iteration
+        ctx.write_account(&pk, Account {
+            lamports: 1_000_000,
+            data: vec![0xFF; 10_000],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }).unwrap();
+        ctx.dirty_tracker.mark_account_dirty(&pk);
+
+        ctx.restore_snapshot();
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(acc.data, original_data, "10KB data should be perfectly restored");
     }
 }
 

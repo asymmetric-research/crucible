@@ -70,6 +70,12 @@ enum Commands {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
+        /// ItyFuzz-style stateful fuzzing: single action per iteration with state pool
+        #[arg(long)]
+        stateful: bool,
+        /// Maximum state depth (action chain length) in stateful mode (default: 15)
+        #[arg(long)]
+        max_depth: Option<u32>,
         /// Track per-action read/write account sets (cheap)
         #[arg(long)]
         taint: bool,
@@ -216,6 +222,8 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            stateful,
+            max_depth,
             taint,
             taint_diffs,
             symbols,
@@ -235,6 +243,8 @@ fn main() -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            stateful,
+            max_depth,
             taint,
             taint_diffs,
             symbols,
@@ -497,6 +507,8 @@ fn fuzz_run(
     stop_on_crash: bool,
     max_actions: usize,
     no_tracing: bool,
+    stateful: bool,
+    max_depth: Option<u32>,
     taint: bool,
     taint_diffs: bool,
     symbols: Option<PathBuf>,
@@ -594,6 +606,16 @@ fn fuzz_run(
         println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
     }
 
+    if stateful {
+        cmd.env("FUZZ_STATEFUL", "1");
+        println!("[FUZZ] Stateful mode: ItyFuzz-style single action per iteration with state pool");
+    }
+
+    if let Some(depth) = max_depth {
+        cmd.env("FUZZ_MAX_DEPTH", depth.to_string());
+        println!("[FUZZ] Max state depth: {}", depth);
+    }
+
     if taint_diffs {
         // --taint-diffs implies --taint (FUZZ_TAINT_DIFFS enables both)
         cmd.env("FUZZ_TAINT_DIFFS", "1");
@@ -621,7 +643,10 @@ fn fuzz_run(
 
     let status = cmd.status().context("Failed to run cargo")?;
     if !status.success() {
-        bail!("Fuzz command failed");
+        match status.code() {
+            Some(code) => bail!("Fuzz command failed with exit code {}", code),
+            None => bail!("Fuzz command killed by signal"),
+        }
     }
 
     Ok(())

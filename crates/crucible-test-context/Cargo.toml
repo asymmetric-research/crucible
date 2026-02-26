@@ -43,8 +43,4 @@ solana-rpc-client-api = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
-criterion = "0.5"
-
-[[bench]]
-name = "snapshot_bench"
-harness = false
+solana-instruction = "3.1"

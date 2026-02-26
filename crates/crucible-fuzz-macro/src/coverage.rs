@@ -34,8 +34,9 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             h
         }
 
-        /// Convert hitcount to AFL-style bucket (0-8)
-        /// Different buckets trigger different bits in shared bitmap for corpus growth
+        /// Convert hitcount to bucket for shared bitmap corpus growth.
+        /// 13 buckets (50% more granular than AFL's 9) to reduce coverage plateaus
+        /// in stateful fuzzing where action sequences hit the same edges at different depths.
         #[inline]
         fn to_bucket(count: u8) -> u8 {
             match count {
@@ -43,11 +44,15 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
                 1 => 1,
                 2 => 2,
                 3 => 3,
-                4..=7 => 4,
-                8..=15 => 5,
-                16..=31 => 6,
-                32..=127 => 7,
-                _ => 8,
+                4..=5 => 4,
+                6..=7 => 5,
+                8..=11 => 6,
+                12..=15 => 7,
+                16..=23 => 8,
+                24..=31 => 9,
+                32..=63 => 10,
+                64..=127 => 11,
+                _ => 12,
             }
         }
 
@@ -140,6 +145,13 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         pub fn is_force_interesting() -> bool {
             FORCE_INTERESTING.with(|f| f.get())
         }
+
+        // Atomic mirror of COVERAGE_STATE.total_edges for lock-free reads in the
+        // stateful hot path. Updated in process_trace() whenever the Mutex-guarded
+        // total_edges changes. Stateful mode reads this instead of locking the Mutex
+        // twice per iteration per worker.
+        pub static TOTAL_EDGES_ATOMIC: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
 
         // Runtime stats tracking
         pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -442,7 +454,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                 let edge_set = state.edges.entry(program_hash).or_default();
                 let old_edge_count = edge_set.len();
                 edge_set.extend(&local_edges);
-                state.total_edges += edge_set.len() - old_edge_count;
+                let new_edges = edge_set.len() - old_edge_count;
+                state.total_edges += new_edges;
+                // Mirror to atomic for lock-free reads in stateful hot path
+                if new_edges > 0 {
+                    TOTAL_EDGES_ATOMIC.store(state.total_edges, std::sync::atomic::Ordering::Relaxed);
+                }
 
                 // Track branch PCs and update cached total
                 let branch_set = state.branch_pcs.entry(program_hash).or_default();

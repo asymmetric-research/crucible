@@ -32,6 +32,15 @@ pub use crucible_fuzz_runtime::{
     rand_below,
 };
 pub use crucible_fuzz_runtime::FuzzRand;
+pub use crucible_fuzz_runtime::StdRand;
 pub use crucible_fuzz_runtime::SuccessTrimStage;
 pub use crucible_fuzz_runtime::SuccessPatternMetadata;
+
+// Re-export mimalloc for use as default global allocator in generated harnesses.
+// mimalloc dramatically improves multi-threaded performance by eliminating
+// allocator contention that the default system allocator suffers from.
+pub use mimalloc::MiMalloc;
+
+// Re-export libc for signal handling in generated harness code.
+pub extern crate libc;
 

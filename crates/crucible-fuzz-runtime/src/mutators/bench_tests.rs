@@ -1,7 +1,7 @@
 use crate::action::FuzzAction;
 use crate::input::FuzzInput;
 use crate::mutators::primitives::{
-    gen_range_u64, gen_range_usize, mutate_bool, mutate_i64, mutate_u64, mutate_usize, rand_below,
+    gen_range_u64, gen_range_u128, gen_range_usize, mutate_bool, mutate_i64, mutate_i128, mutate_u64, mutate_u128, mutate_usize, rand_below,
 };
 use crate::test_helpers::{TestAction, SmallIntTestAction};
 use libafl_bolts::rands::{Rand, RomuDuoJrRand};
@@ -1370,3 +1370,1342 @@ fn test_sequence_at_max_actions_no_growth() {
     }
 }
 
+// ============================================================================
+// 128-bit mutator tests (gen_range_u128, mutate_u128, mutate_i128)
+// ============================================================================
+
+#[test]
+fn test_gen_range_u128_basic() {
+    let mut rng = make_rng(900);
+    for _ in 0..10_000 {
+        let val = gen_range_u128(&mut rng, 0, 1000);
+        assert!(val < 1000, "gen_range_u128 out of range: {}", val);
+    }
+}
+
+#[test]
+fn test_gen_range_u128_degenerate() {
+    let mut rng = make_rng(901);
+    // hi <= lo should return lo
+    assert_eq!(gen_range_u128(&mut rng, 5, 5), 5);
+    assert_eq!(gen_range_u128(&mut rng, 10, 3), 10);
+}
+
+#[test]
+fn test_gen_range_u128_large_range() {
+    let mut rng = make_rng(902);
+    // Range spanning most of u128 — should not overflow
+    for _ in 0..1_000 {
+        let val = gen_range_u128(&mut rng, 0, u128::MAX);
+        assert!(val < u128::MAX, "gen_range_u128 full range out of bounds: {}", val);
+    }
+}
+
+#[test]
+fn test_gen_range_u128_distribution() {
+    let mut rng = make_rng(903);
+    let mut buckets = [0u32; 10];
+    let n = 100_000;
+    for _ in 0..n {
+        let val = gen_range_u128(&mut rng, 0, 1000);
+        let bucket = (val / 100) as usize;
+        if bucket < 10 {
+            buckets[bucket] += 1;
+        }
+    }
+    // Each bucket should have roughly 10% — allow 5-15%
+    for (i, &count) in buckets.iter().enumerate() {
+        let pct = (count as f64 / n as f64) * 100.0;
+        assert!(
+            pct > 5.0 && pct < 15.0,
+            "gen_range_u128 bucket {} has {:.1}% (expected ~10%)",
+            i,
+            pct
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u128_stays_in_range() {
+    let mut rng = make_rng(910);
+    let lo = 10u128;
+    let hi = 1000u128;
+    let mut val = 500u128;
+
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, lo, hi, &mut rng);
+        assert!(
+            val >= lo && val < hi,
+            "mutate_u128 out of range: val={}, range=[{}, {})",
+            val, lo, hi
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u128_hits_interesting_values() {
+    let mut rng = make_rng(911);
+    let mut seen = HashSet::new();
+    let mut val = 50u128;
+
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, 0, 1000, &mut rng);
+        seen.insert(val);
+    }
+
+    assert!(seen.contains(&0), "mutate_u128 never produced 0");
+    assert!(seen.contains(&1), "mutate_u128 never produced 1");
+    assert!(seen.contains(&2), "mutate_u128 never produced 2");
+    assert!(seen.contains(&999), "mutate_u128 never produced hi-1=999");
+    assert!(seen.contains(&255), "mutate_u128 never produced (1<<8)-1=255");
+    assert!(seen.len() > 50, "mutate_u128 too few distinct values: {}", seen.len());
+}
+
+#[test]
+fn test_mutate_u128_arithmetic_delta() {
+    let mut rng = make_rng(912);
+    let mut deltas_seen = HashSet::new();
+    let base = 500u128;
+
+    for _ in 0..50_000 {
+        let mut val = base;
+        mutate_u128(&mut val, 0, 1000, &mut rng);
+        let delta = val as i128 - base as i128;
+        if delta.abs() <= 32 && delta != 0 {
+            deltas_seen.insert(delta);
+        }
+    }
+
+    assert!(
+        deltas_seen.contains(&1) && deltas_seen.contains(&-1),
+        "mutate_u128 arithmetic never produced ±1. Seen: {:?}",
+        deltas_seen
+    );
+}
+
+#[test]
+fn test_mutate_u128_narrow_range() {
+    let mut rng = make_rng(913);
+    let mut val = 5u128;
+    for _ in 0..1000 {
+        mutate_u128(&mut val, 5, 7, &mut rng);
+        assert!(val >= 5 && val < 7, "mutate_u128 narrow range out of bounds: {}", val);
+    }
+}
+
+#[test]
+fn test_mutate_u128_single_value_range() {
+    let mut rng = make_rng(914);
+    let mut val = 42u128;
+    for _ in 0..100 {
+        mutate_u128(&mut val, 42, 43, &mut rng);
+        assert_eq!(val, 42, "mutate_u128 single-value range should always produce 42");
+    }
+}
+
+#[test]
+fn test_mutate_u128_full_range() {
+    let mut rng = make_rng(915);
+    let mut val = u128::MAX / 2;
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, 0, u128::MAX, &mut rng);
+        assert!(val < u128::MAX, "mutate_u128 full range out of bounds: val={}", val);
+    }
+}
+
+#[test]
+fn test_mutate_u128_degenerate_range_noop() {
+    let mut rng = make_rng(916);
+    let mut val = 99u128;
+    mutate_u128(&mut val, 100, 100, &mut rng); // hi <= lo
+    assert_eq!(val, 99, "mutate_u128 should be noop when hi <= lo");
+}
+
+#[test]
+fn test_mutate_u128_large_offset() {
+    // Test with lo far from zero (like Solana token amounts)
+    let mut rng = make_rng(917);
+    let lo = 1_000_000_000_000u128; // 1 trillion
+    let hi = 10_000_000_000_000u128; // 10 trillion
+    let mut val = 5_000_000_000_000u128;
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, lo, hi, &mut rng);
+        assert!(
+            val >= lo && val < hi,
+            "mutate_u128 large offset out of range: val={}, range=[{}, {})",
+            val, lo, hi
+        );
+    }
+}
+
+// --- mutate_i128 tests ---
+
+#[test]
+fn test_mutate_i128_stays_in_range() {
+    let mut rng = make_rng(920);
+    let mut val = 0i128;
+    for _ in 0..10_000 {
+        mutate_i128(&mut val, -100, 100, &mut rng);
+        assert!(
+            val >= -100 && val < 100,
+            "mutate_i128 out of range: val={}, expected [-100, 100)",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i128_hits_boundaries() {
+    let mut rng = make_rng(921);
+    let mut val = 0i128;
+    let mut seen = HashSet::new();
+
+    for _ in 0..10_000 {
+        mutate_i128(&mut val, -50, 50, &mut rng);
+        seen.insert(val);
+    }
+
+    assert!(seen.contains(&-50), "mutate_i128 never hit lo boundary (-50)");
+    assert!(seen.contains(&49), "mutate_i128 never hit hi-1 (49)");
+    assert!(seen.contains(&0), "mutate_i128 never hit 0");
+    assert!(seen.contains(&-1), "mutate_i128 never hit -1");
+    assert!(seen.contains(&1), "mutate_i128 never hit 1");
+}
+
+#[test]
+fn test_mutate_i128_negative_only_range() {
+    let mut rng = make_rng(922);
+    let mut val = -10i128;
+    for _ in 0..5_000 {
+        mutate_i128(&mut val, -100, -1, &mut rng);
+        assert!(
+            val >= -100 && val < -1,
+            "mutate_i128 out of negative range: val={}, expected [-100, -1)",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i128_full_range_no_overflow() {
+    // Regression test: i128::MIN to i128::MAX range must not overflow
+    let mut rng = make_rng(923);
+    let mut val = 0i128;
+    for _ in 0..10_000 {
+        mutate_i128(&mut val, i128::MIN, i128::MAX, &mut rng);
+        assert!(
+            val >= i128::MIN && val < i128::MAX,
+            "mutate_i128 full range out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i128_min_to_zero() {
+    let mut rng = make_rng(924);
+    let mut val = i128::MIN / 2;
+    for _ in 0..5_000 {
+        mutate_i128(&mut val, i128::MIN, 0, &mut rng);
+        assert!(
+            val >= i128::MIN && val < 0,
+            "mutate_i128 [MIN, 0) out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i128_extreme_val_delta() {
+    // Start at boundary values and ensure arithmetic delta doesn't overflow
+    let mut rng = make_rng(925);
+    let mut val = i128::MAX - 1;
+    for _ in 0..5_000 {
+        mutate_i128(&mut val, i128::MIN, i128::MAX, &mut rng);
+        assert!(
+            val >= i128::MIN && val < i128::MAX,
+            "mutate_i128 extreme delta (max) out of bounds: val={}",
+            val
+        );
+    }
+
+    let mut val = i128::MIN;
+    for _ in 0..5_000 {
+        mutate_i128(&mut val, i128::MIN, i128::MAX, &mut rng);
+        assert!(
+            val >= i128::MIN && val < i128::MAX,
+            "mutate_i128 extreme delta (min) out of bounds: val={}",
+            val
+        );
+    }
+}
+
+#[test]
+fn test_mutate_i128_degenerate_range_noop() {
+    let mut rng = make_rng(926);
+    let mut val = 42i128;
+    mutate_i128(&mut val, 50, 50, &mut rng); // hi <= lo
+    assert_eq!(val, 42, "mutate_i128 should be noop when hi <= lo");
+}
+
+#[test]
+fn test_mutate_i128_single_value_range() {
+    let mut rng = make_rng(927);
+    let mut val = 7i128;
+    for _ in 0..100 {
+        mutate_i128(&mut val, 7, 8, &mut rng);
+        assert_eq!(val, 7, "mutate_i128 single-value range should always produce 7");
+    }
+}
+
+// ============================================================================
+// SequenceMutator — comprehensive unit tests
+// ============================================================================
+
+mod sequence_mutator_tests {
+    use crate::action::FuzzAction;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::TestAction;
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{MutationResult, Mutator};
+    use libafl::state::{NopState, HasRand};
+    use libafl_bolts::rands::Rand;
+
+    fn make_state() -> NopState<BytesInput> {
+        NopState::<BytesInput>::new()
+    }
+
+    fn make_input(actions: Vec<TestAction>) -> BytesInput {
+        BytesInput::new(FuzzInput::new(actions).to_bytes())
+    }
+
+    fn decode(input: &BytesInput) -> FuzzInput<TestAction> {
+        FuzzInput::<TestAction>::from_bytes(input.as_ref())
+    }
+
+    #[test]
+    fn empty_input_gets_one_action_inserted() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+        let mut input = make_input(vec![]);
+
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Mutated);
+
+        let decoded = decode(&input);
+        assert_eq!(decoded.actions.len(), 1);
+    }
+
+    #[test]
+    fn single_action_some_mutations_skip() {
+        // Swap requires >=2, shuffle requires >=3 — single action should skip those
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+        let mut skip_count = 0;
+
+        for _ in 0..500 {
+            let action = TestAction::random(state.rand_mut());
+            let mut input = make_input(vec![action]);
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+            if result == MutationResult::Skipped {
+                skip_count += 1;
+            }
+            // Should never crash, action count should be 0..=2
+            let decoded = decode(&input);
+            assert!(decoded.actions.len() <= 2);
+        }
+        // Some skips expected (swap on single element, shuffle on <3)
+        assert!(skip_count > 0, "expected some skipped mutations on single-action input");
+    }
+
+    #[test]
+    fn max_actions_cap_enforced_when_mutated() {
+        let max = 4;
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(max);
+
+        for _ in 0..1000 {
+            // Start with 1..=max+2 actions (some above cap)
+            let count = 1 + (state.rand_mut().next() as usize % (max + 2));
+            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(state.rand_mut())).collect();
+            let mut input = make_input(actions);
+
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+            // Only check cap when mutation actually happened (Skipped doesn't rewrite)
+            if result == MutationResult::Mutated {
+                let decoded = decode(&input);
+                assert!(
+                    decoded.actions.len() <= max,
+                    "got {} actions, max was {}",
+                    decoded.actions.len(),
+                    max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_integrity_after_mutation() {
+        // After mutation, re-encoding and re-decoding should produce identical actions
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(8);
+
+        for _ in 0..500 {
+            let count = 1 + (state.rand_mut().next() as usize % 6);
+            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(state.rand_mut())).collect();
+            let mut input = make_input(actions);
+
+            let _ = mutator.mutate(&mut state, &mut input);
+
+            let decoded = decode(&input);
+            let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+            let re_decoded = FuzzInput::<TestAction>::from_bytes(&re_encoded);
+
+            assert_eq!(decoded.actions.len(), re_decoded.actions.len());
+            for (a, b) in decoded.actions.iter().zip(re_decoded.actions.iter()) {
+                assert_eq!(a, b, "roundtrip mismatch after mutation");
+            }
+        }
+    }
+
+    #[test]
+    fn all_mutation_types_reachable() {
+        // With enough iterations, all 7 mutation types should fire at least once
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+
+        let mut saw_shrink = false;   // delete (len decreased)
+        let mut saw_grow = false;     // insert/dup/repeat (len increased)
+        let mut saw_same_len = false; // swap/shuffle (len unchanged)
+
+        for _ in 0..2000 {
+            let count = 3 + (state.rand_mut().next() as usize % 4); // 3..6 actions
+            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(state.rand_mut())).collect();
+            let orig_len = actions.len();
+            let mut input = make_input(actions);
+
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+            if result == MutationResult::Skipped {
+                continue;
+            }
+
+            let new_len = decode(&input).actions.len();
+            if new_len < orig_len { saw_shrink = true; }
+            if new_len > orig_len { saw_grow = true; }
+            if new_len == orig_len { saw_same_len = true; }
+
+            if saw_shrink && saw_grow && saw_same_len { break; }
+        }
+
+        assert!(saw_shrink, "never saw shrink mutation (delete/truncate)");
+        assert!(saw_grow, "never saw growth mutation (insert/dup/repeat)");
+        assert!(saw_same_len, "never saw same-length mutation (swap/shuffle)");
+    }
+
+    #[test]
+    fn post_exec_is_noop() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+        assert!(mutator.post_exec(&mut state, None).is_ok());
+    }
+
+    #[test]
+    fn name_is_correct() {
+        use libafl_bolts::Named;
+        let mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+        assert_eq!(mutator.name().as_ref(), "SequenceMutator");
+    }
+}
+
+// ============================================================================
+// ParamMutator — comprehensive unit tests
+// ============================================================================
+
+mod param_mutator_tests {
+    use crate::action::FuzzAction;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::TestAction;
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{MutationResult, Mutator};
+    use libafl::state::{NopState, HasRand};
+    use libafl_bolts::rands::Rand;
+
+    fn make_state() -> NopState<BytesInput> {
+        NopState::<BytesInput>::new()
+    }
+
+    fn make_input(actions: Vec<TestAction>) -> BytesInput {
+        BytesInput::new(FuzzInput::new(actions).to_bytes())
+    }
+
+    fn decode(input: &BytesInput) -> FuzzInput<TestAction> {
+        FuzzInput::<TestAction>::from_bytes(input.as_ref())
+    }
+
+    #[test]
+    fn empty_input_skipped() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+        let mut input = make_input(vec![]);
+
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Skipped);
+    }
+
+    #[test]
+    fn single_action_mutated() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+
+        let action = TestAction::OneField { amount: 42 };
+        let mut input = make_input(vec![action]);
+        let orig_bytes = input.as_ref().to_vec();
+
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Mutated);
+
+        // Bytes should differ (mutation happened)
+        assert_ne!(input.as_ref(), &orig_bytes[..], "bytes should change after param mutation");
+    }
+
+    #[test]
+    fn preserves_action_count() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+
+        for _ in 0..200 {
+            let count = 1 + (state.rand_mut().next() as usize % 6);
+            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(state.rand_mut())).collect();
+            let orig_count = actions.len();
+            let mut input = make_input(actions);
+
+            let _ = mutator.mutate(&mut state, &mut input);
+            let decoded = decode(&input);
+            assert_eq!(decoded.actions.len(), orig_count, "ParamMutator should never change action count");
+        }
+    }
+
+    #[test]
+    fn preserves_variant_types() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+
+        for _ in 0..200 {
+            let count = 2 + (state.rand_mut().next() as usize % 4);
+            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(state.rand_mut())).collect();
+            let orig_variants: Vec<usize> = actions.iter().map(|a| a.variant_index()).collect();
+            let mut input = make_input(actions);
+
+            let _ = mutator.mutate(&mut state, &mut input);
+            let decoded = decode(&input);
+            let new_variants: Vec<usize> = decoded.actions.iter().map(|a| a.variant_index()).collect();
+            assert_eq!(orig_variants, new_variants, "ParamMutator should never change variant types");
+        }
+    }
+
+    #[test]
+    fn roundtrip_after_mutation() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+
+        for _ in 0..300 {
+            let actions: Vec<TestAction> = (0..4).map(|_| TestAction::random(state.rand_mut())).collect();
+            let mut input = make_input(actions);
+            let _ = mutator.mutate(&mut state, &mut input);
+
+            let decoded = decode(&input);
+            let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+            assert_eq!(input.as_ref(), &re_encoded[..], "roundtrip should be stable after param mutation");
+        }
+    }
+
+    #[test]
+    fn nofields_variant_unchanged() {
+        // NoFields has no parameters to mutate, so mutation should be a no-op on the fields
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+
+        let mut input = make_input(vec![TestAction::NoFields]);
+        let orig_bytes = input.as_ref().to_vec();
+
+        // Even after multiple mutations, NoFields stays identical
+        for _ in 0..50 {
+            let _ = mutator.mutate(&mut state, &mut input);
+        }
+        assert_eq!(input.as_ref(), &orig_bytes[..]);
+    }
+
+    #[test]
+    fn post_exec_is_noop() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+        assert!(mutator.post_exec(&mut state, None).is_ok());
+    }
+
+    #[test]
+    fn name_is_correct() {
+        use libafl_bolts::Named;
+        let mutator = crate::mutators::params::ParamMutator::<TestAction>::new();
+        assert_eq!(mutator.name().as_ref(), "ParamMutator");
+    }
+}
+
+// ============================================================================
+// CrossoverMutator — unit tests (requires corpus for full test)
+// ============================================================================
+
+mod crossover_mutator_tests {
+    use libafl_bolts::Named;
+    use libafl::corpus::{Corpus, InMemoryCorpus, Testcase};
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{MutationResult, Mutator};
+    use libafl::state::{StdState, HasCorpus, HasRand};
+    use libafl_bolts::rands::StdRand;
+
+    use crate::action::FuzzAction;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::TestAction;
+
+    /// Create a state with an in-memory corpus containing the given inputs.
+    fn make_corpus_state(inputs: Vec<Vec<u8>>) -> StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, InMemoryCorpus<BytesInput>> {
+        let mut corpus = InMemoryCorpus::<BytesInput>::new();
+        for bytes in inputs {
+            let tc = Testcase::new(BytesInput::new(bytes));
+            corpus.add(tc).unwrap();
+        }
+        StdState::new(
+            StdRand::with_seed(42),
+            corpus,
+            InMemoryCorpus::new(), // solutions corpus
+            &mut (),
+            &mut (),
+        ).unwrap()
+    }
+
+    #[test]
+    fn name_is_correct() {
+        let mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+        assert_eq!(mutator.name().as_ref(), "CrossoverMutator");
+    }
+
+    #[test]
+    fn max_actions_stored() {
+        let mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(42);
+        assert_eq!(mutator.max_actions, 42);
+    }
+
+    #[test]
+    fn crossover_splices_from_corpus() {
+        let mut rng = libafl_bolts::rands::RomuDuoJrRand::with_seed(99);
+        // Build a donor with 3 distinct actions
+        let donor_actions: Vec<TestAction> = (0..3).map(|_| TestAction::random(&mut rng)).collect();
+        let donor_bytes = FuzzInput::new(donor_actions).to_bytes();
+
+        let mut state = make_corpus_state(vec![donor_bytes]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+        // Start with a 2-action input
+        let target_actions: Vec<TestAction> = (0..2).map(|_| TestAction::random(state.rand_mut())).collect();
+        let mut input = BytesInput::new(FuzzInput::new(target_actions).to_bytes());
+
+        let original_len = FuzzInput::<TestAction>::from_bytes(input.as_ref()).actions.len();
+
+        // Run crossover — should splice at least 1 action from donor
+        let mut saw_growth = false;
+        for _ in 0..100 {
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+            if result == MutationResult::Mutated {
+                let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+                if decoded.actions.len() > original_len {
+                    saw_growth = true;
+                    break;
+                }
+            }
+            // Reset input for next attempt
+            let reset_actions: Vec<TestAction> = (0..2).map(|_| TestAction::random(state.rand_mut())).collect();
+            input = BytesInput::new(FuzzInput::new(reset_actions).to_bytes());
+        }
+        assert!(saw_growth, "crossover should eventually grow input by splicing from corpus");
+    }
+
+    #[test]
+    fn crossover_respects_max_actions() {
+        let mut rng = libafl_bolts::rands::RomuDuoJrRand::with_seed(88);
+        let max_actions = 5;
+
+        // Build a large donor (8 actions)
+        let donor: Vec<TestAction> = (0..8).map(|_| TestAction::random(&mut rng)).collect();
+        let donor_bytes = FuzzInput::new(donor).to_bytes();
+
+        let mut state = make_corpus_state(vec![donor_bytes]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(max_actions);
+
+        for _ in 0..200 {
+            // Start with 4 actions (near cap)
+            let target: Vec<TestAction> = (0..4).map(|_| TestAction::random(state.rand_mut())).collect();
+            let mut input = BytesInput::new(FuzzInput::new(target).to_bytes());
+
+            let _ = mutator.mutate(&mut state, &mut input);
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            assert!(
+                decoded.actions.len() <= max_actions,
+                "crossover exceeded max_actions: {} > {}",
+                decoded.actions.len(),
+                max_actions
+            );
+        }
+    }
+
+    #[test]
+    fn crossover_empty_corpus_skips() {
+        let mut state = make_corpus_state(vec![]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+        let actions = vec![TestAction::NoFields];
+        let mut input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Skipped, "empty corpus should skip");
+    }
+
+    #[test]
+    fn crossover_empty_donor_skips() {
+        // Donor with 0 actions
+        let empty_donor = FuzzInput::<TestAction>::new(vec![]).to_bytes();
+        let mut state = make_corpus_state(vec![empty_donor]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+        let actions = vec![TestAction::NoFields];
+        let mut input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Skipped, "empty donor should skip");
+    }
+
+    #[test]
+    fn crossover_into_empty_target() {
+        let mut rng = libafl_bolts::rands::RomuDuoJrRand::with_seed(77);
+        let donor: Vec<TestAction> = (0..3).map(|_| TestAction::random(&mut rng)).collect();
+        let donor_bytes = FuzzInput::new(donor).to_bytes();
+
+        let mut state = make_corpus_state(vec![donor_bytes]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+        // Target is empty
+        let mut input = BytesInput::new(FuzzInput::<TestAction>::new(vec![]).to_bytes());
+        let result = mutator.mutate(&mut state, &mut input).unwrap();
+        assert_eq!(result, MutationResult::Mutated);
+
+        let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+        assert!(!decoded.actions.is_empty(), "crossover into empty should produce at least 1 action");
+    }
+
+    #[test]
+    fn crossover_output_roundtrips() {
+        let mut rng = libafl_bolts::rands::RomuDuoJrRand::with_seed(66);
+        let donor: Vec<TestAction> = (0..5).map(|_| TestAction::random(&mut rng)).collect();
+        let donor_bytes = FuzzInput::new(donor).to_bytes();
+
+        let mut state = make_corpus_state(vec![donor_bytes]);
+        let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+        for _ in 0..100 {
+            let target: Vec<TestAction> = (0..3).map(|_| TestAction::random(state.rand_mut())).collect();
+            let mut input = BytesInput::new(FuzzInput::new(target).to_bytes());
+            let _ = mutator.mutate(&mut state, &mut input);
+
+            // Verify roundtrip
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+            assert_eq!(
+                input.as_ref(), &re_encoded[..],
+                "crossover output should roundtrip cleanly"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// ActionGenerator — unit tests
+// ============================================================================
+
+mod generator_tests {
+    use crate::action::FuzzAction;
+    use crate::generator::ActionGenerator;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::TestAction;
+    use libafl::generators::Generator;
+    use libafl::inputs::BytesInput;
+    use libafl::state::NopState;
+
+    fn make_state() -> NopState<BytesInput> {
+        NopState::<BytesInput>::new()
+    }
+
+    #[test]
+    fn generates_within_bounds() {
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(2, 5);
+
+        for _ in 0..500 {
+            let input = gen.generate(&mut state).unwrap();
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            assert!(
+                decoded.actions.len() >= 2 && decoded.actions.len() <= 5,
+                "generated {} actions, expected 2..=5",
+                decoded.actions.len()
+            );
+        }
+    }
+
+    #[test]
+    fn min_equals_max_generates_exact() {
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(3, 3);
+
+        for _ in 0..100 {
+            let input = gen.generate(&mut state).unwrap();
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            assert_eq!(decoded.actions.len(), 3);
+        }
+    }
+
+    #[test]
+    fn generated_inputs_roundtrip() {
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(1, 8);
+
+        for _ in 0..200 {
+            let input = gen.generate(&mut state).unwrap();
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+            assert_eq!(input.as_ref(), &re_encoded[..], "generated input roundtrip mismatch");
+        }
+    }
+
+    #[test]
+    fn covers_all_variants() {
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(1, 8);
+        let mut seen = std::collections::HashSet::new();
+
+        for _ in 0..1000 {
+            let input = gen.generate(&mut state).unwrap();
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            for action in &decoded.actions {
+                seen.insert(action.variant_index());
+            }
+            if seen.len() == TestAction::variant_count() { break; }
+        }
+        assert_eq!(
+            seen.len(),
+            TestAction::variant_count(),
+            "generator should eventually produce all {} variants, saw {:?}",
+            TestAction::variant_count(),
+            seen
+        );
+    }
+
+    #[test]
+    fn single_action_range() {
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(1, 1);
+
+        let input = gen.generate(&mut state).unwrap();
+        let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+        assert_eq!(decoded.actions.len(), 1);
+    }
+}
+
+// ============================================================================
+// FuzzAction trait — unit tests on TestAction / SmallIntTestAction
+// ============================================================================
+
+mod fuzz_action_tests {
+    use crate::action::FuzzAction;
+    use crate::test_helpers::{TestAction, SmallIntTestAction};
+    use libafl_bolts::rands::RomuDuoJrRand;
+
+    fn make_rng(seed: u64) -> RomuDuoJrRand {
+        RomuDuoJrRand::with_seed(seed)
+    }
+
+    #[test]
+    fn variant_count_matches_variants() {
+        assert_eq!(TestAction::variant_count(), 6);
+        assert_eq!(SmallIntTestAction::variant_count(), 5);
+    }
+
+    #[test]
+    fn random_variant_produces_correct_index() {
+        let mut rng = make_rng(42);
+        for vi in 0..TestAction::variant_count() {
+            let action = TestAction::random_variant(vi, &mut rng);
+            assert_eq!(action.variant_index(), vi, "variant_index mismatch for variant {vi}");
+        }
+    }
+
+    #[test]
+    fn random_variant_wraps_around() {
+        let mut rng = make_rng(42);
+        // Passing variant_count should wrap to 0
+        let action = TestAction::random_variant(TestAction::variant_count(), &mut rng);
+        assert_eq!(action.variant_index(), 0);
+    }
+
+    #[test]
+    fn action_names_unique() {
+        let mut rng = make_rng(42);
+        let mut names = std::collections::HashSet::new();
+        for vi in 0..TestAction::variant_count() {
+            let action = TestAction::random_variant(vi, &mut rng);
+            names.insert(action.action_name());
+        }
+        assert_eq!(names.len(), TestAction::variant_count(), "all variants should have unique names");
+    }
+
+    #[test]
+    fn serialize_deserialize_roundtrip_all_variants() {
+        let mut rng = make_rng(99);
+        for vi in 0..TestAction::variant_count() {
+            for _ in 0..50 {
+                let action = TestAction::random_variant(vi, &mut rng);
+                let mut buf = Vec::new();
+                action.serialize_fields(&mut buf);
+                assert_eq!(
+                    buf.len(),
+                    TestAction::field_byte_count(vi),
+                    "field byte count mismatch for variant {vi}"
+                );
+                let mut cursor = 0;
+                let deserialized = TestAction::deserialize_fields(vi, &buf, &mut cursor).unwrap();
+                assert_eq!(action, deserialized, "roundtrip mismatch for variant {vi}");
+                assert_eq!(cursor, buf.len(), "cursor should consume all bytes for variant {vi}");
+            }
+        }
+    }
+
+    #[test]
+    fn serialize_deserialize_small_int_roundtrip() {
+        let mut rng = make_rng(77);
+        for vi in 0..SmallIntTestAction::variant_count() {
+            for _ in 0..50 {
+                let action = SmallIntTestAction::random_variant(vi, &mut rng);
+                let mut buf = Vec::new();
+                action.serialize_fields(&mut buf);
+                assert_eq!(
+                    buf.len(),
+                    SmallIntTestAction::field_byte_count(vi),
+                    "field byte count mismatch for SmallInt variant {vi}"
+                );
+                let mut cursor = 0;
+                let deserialized = SmallIntTestAction::deserialize_fields(vi, &buf, &mut cursor).unwrap();
+                assert_eq!(action, deserialized, "roundtrip mismatch for SmallInt variant {vi}");
+            }
+        }
+    }
+
+    #[test]
+    fn deserialize_truncated_returns_none() {
+        for vi in 0..TestAction::variant_count() {
+            if TestAction::field_byte_count(vi) > 0 {
+                let mut cursor = 0;
+                let result = TestAction::deserialize_fields(vi, &[], &mut cursor);
+                assert!(result.is_none(), "variant {vi} should return None on empty data");
+            }
+        }
+    }
+
+    #[test]
+    fn deserialize_invalid_variant_returns_none() {
+        let mut cursor = 0;
+        assert!(TestAction::deserialize_fields(99, &[], &mut cursor).is_none());
+    }
+
+    #[test]
+    fn mutate_changes_fields() {
+        let mut rng = make_rng(42);
+        let original = TestAction::OneField { amount: 5000 };
+        let mut changed = false;
+        for _ in 0..100 {
+            let mut action = original.clone();
+            action.mutate(&mut rng);
+            if action != original {
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed, "mutate should eventually change OneField's amount");
+    }
+
+    #[test]
+    fn mutate_preserves_variant() {
+        let mut rng = make_rng(42);
+        for vi in 0..TestAction::variant_count() {
+            let mut action = TestAction::random_variant(vi, &mut rng);
+            for _ in 0..50 {
+                action.mutate(&mut rng);
+                assert_eq!(
+                    action.variant_index(),
+                    vi,
+                    "mutate should never change variant type"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_byte_count_zero_for_nofields() {
+        assert_eq!(TestAction::field_byte_count(0), 0);
+    }
+
+    #[test]
+    fn field_byte_count_out_of_range_is_zero() {
+        assert_eq!(TestAction::field_byte_count(999), 0);
+    }
+
+    #[test]
+    fn vec_field_serialization_pads_to_max_len() {
+        // VecField with 0 items should still produce VEC_BYTE_SIZE bytes (padded)
+        let action = TestAction::VecField { items: vec![] };
+        let mut buf = Vec::new();
+        action.serialize_fields(&mut buf);
+        assert_eq!(buf.len(), 40, "empty vec should pad to max vec byte size");
+
+        let action = TestAction::VecField { items: vec![10, 20] };
+        let mut buf = Vec::new();
+        action.serialize_fields(&mut buf);
+        assert_eq!(buf.len(), 40, "partial vec should pad to max vec byte size");
+    }
+
+    // =========================================================================
+    // Deserialize with cursor offset (multi-action sequences)
+    // =========================================================================
+
+    #[test]
+    fn deserialize_at_offset_in_buffer() {
+        // Simulate two actions packed sequentially: deserialize the second one
+        let mut rng = make_rng(55);
+        let a1 = TestAction::random_variant(1, &mut rng); // OneField
+        let a2 = TestAction::random_variant(2, &mut rng); // TwoFields
+
+        let mut buf = Vec::new();
+        a1.serialize_fields(&mut buf);
+        let cursor_after_a1 = buf.len();
+        a2.serialize_fields(&mut buf);
+
+        // Deserialize from the offset
+        let mut cursor = cursor_after_a1;
+        let deserialized = TestAction::deserialize_fields(2, &buf, &mut cursor).unwrap();
+        assert_eq!(deserialized, a2, "deserialize at offset should produce correct action");
+        assert_eq!(cursor, buf.len(), "cursor should advance to end");
+    }
+
+    // =========================================================================
+    // VecField with crafted serialized length
+    // =========================================================================
+
+    #[test]
+    fn deserialize_vec_with_oversized_length() {
+        // Craft a buffer where the u64 length field is larger than VEC_MAX_LEN
+        // The deserialize should clamp to VEC_MAX_LEN (4)
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // absurd length
+        // Pad with enough data for VEC_MAX_LEN elements (4 * 8 bytes each)
+        for i in 0..4u64 {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        // Pad to VEC_BYTE_SIZE (8 + 4*8 = 40)
+        while buf.len() < 40 {
+            buf.push(0);
+        }
+
+        let mut cursor = 0;
+        let result = TestAction::deserialize_fields(5, &buf, &mut cursor); // variant 5 = VecField
+        assert!(result.is_some(), "oversized length should be clamped, not fail");
+        if let Some(TestAction::VecField { items }) = result {
+            assert_eq!(items.len(), 4, "should clamp to VEC_MAX_LEN=4");
+        }
+    }
+
+    // =========================================================================
+    // SmallInt mutation preserves type bounds
+    // =========================================================================
+
+    #[test]
+    fn small_int_mutate_stays_in_type_bounds() {
+        let mut rng = make_rng(33);
+        for _ in 0..5_000 {
+            for vi in 0..SmallIntTestAction::variant_count() {
+                let mut action = SmallIntTestAction::random_variant(vi, &mut rng);
+                action.mutate(&mut rng);
+                // Roundtrip: serialize → deserialize must succeed
+                let mut buf = Vec::new();
+                action.serialize_fields(&mut buf);
+                let mut cursor = 0;
+                let rt = SmallIntTestAction::deserialize_fields(vi, &buf, &mut cursor);
+                assert!(rt.is_some(), "SmallInt variant {} failed roundtrip after mutate", vi);
+                assert_eq!(rt.unwrap(), action, "SmallInt variant {} roundtrip mismatch after mutate", vi);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ParamMutator — SmallInt edge cases
+// ============================================================================
+
+mod param_mutator_smallint_tests {
+    use crate::action::FuzzAction;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::SmallIntTestAction;
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{MutationResult, Mutator};
+    use libafl::state::{NopState, HasRand};
+    use libafl_bolts::rands::Rand;
+
+    fn make_state() -> NopState<BytesInput> {
+        NopState::<BytesInput>::new()
+    }
+
+    #[test]
+    fn param_mutator_smallint_roundtrip() {
+        // Run ParamMutator on SmallIntTestAction and verify outputs always roundtrip
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<SmallIntTestAction>::new();
+
+        for _ in 0..500 {
+            let actions: Vec<SmallIntTestAction> = (0..4)
+                .map(|_| SmallIntTestAction::random(state.rand_mut()))
+                .collect();
+            let mut input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+
+            if result == MutationResult::Mutated {
+                let decoded = FuzzInput::<SmallIntTestAction>::from_bytes(input.as_ref());
+                let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+                assert_eq!(
+                    input.as_ref(), &re_encoded[..],
+                    "ParamMutator<SmallInt> output should roundtrip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn param_mutator_smallint_preserves_variant_types() {
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<SmallIntTestAction>::new();
+
+        for _ in 0..200 {
+            let actions: Vec<SmallIntTestAction> = (0..SmallIntTestAction::variant_count())
+                .map(|vi| SmallIntTestAction::random_variant(vi, state.rand_mut()))
+                .collect();
+            let original_variants: Vec<usize> = actions.iter().map(|a| a.variant_index()).collect();
+            let mut input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+            let _ = mutator.mutate(&mut state, &mut input);
+
+            let decoded = FuzzInput::<SmallIntTestAction>::from_bytes(input.as_ref());
+            let new_variants: Vec<usize> = decoded.actions.iter().map(|a| a.variant_index()).collect();
+            assert_eq!(original_variants, new_variants, "ParamMutator should preserve SmallInt variant types");
+        }
+    }
+
+    #[test]
+    fn param_mutator_smallint_changes_fields() {
+        // Verify mutation actually changes field values over many iterations
+        let mut state = make_state();
+        let mut mutator = crate::mutators::params::ParamMutator::<SmallIntTestAction>::new();
+
+        let mut changed_count = 0;
+        for _ in 0..500 {
+            // Use variant with u8 field (variant 0)
+            let actions = vec![SmallIntTestAction::random_variant(0, state.rand_mut())];
+            let original_bytes = FuzzInput::new(actions.clone()).to_bytes();
+            let mut input = BytesInput::new(original_bytes.clone());
+            let result = mutator.mutate(&mut state, &mut input).unwrap();
+            if result == MutationResult::Mutated && input.as_ref() != &original_bytes[..] {
+                changed_count += 1;
+            }
+        }
+        assert!(changed_count > 0, "ParamMutator<SmallInt> should change field values");
+    }
+}
+
+// ============================================================================
+// mutate_u128 — upper-half regression tests (val > i128::MAX)
+// ============================================================================
+
+#[test]
+fn test_mutate_u128_upper_half_stays_in_range() {
+    // Regression: when val > i128::MAX, the old code cast `*val as i128` which wraps negative.
+    let mut rng = make_rng(930);
+    let lo = u128::MAX / 2 + 1; // Just above i128::MAX
+    let hi = u128::MAX;
+    let mut val = lo + 100;
+
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, lo, hi, &mut rng);
+        assert!(
+            val >= lo && val < hi,
+            "mutate_u128 upper-half out of range: val={}, range=[{}, {})",
+            val, lo, hi
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u128_near_max_arithmetic_no_overflow() {
+    // Start at u128::MAX - 1 and mutate in [u128::MAX - 100, u128::MAX)
+    let mut rng = make_rng(931);
+    let lo = u128::MAX - 100;
+    let hi = u128::MAX;
+    let mut val = u128::MAX - 1;
+
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, lo, hi, &mut rng);
+        assert!(
+            val >= lo && val < hi,
+            "mutate_u128 near-MAX out of range: val={}, range=[{}, {})",
+            val, lo, hi
+        );
+    }
+}
+
+#[test]
+fn test_mutate_u128_cross_i128_boundary() {
+    // Range spans the i128::MAX boundary
+    let mut rng = make_rng(932);
+    let lo = (u128::MAX / 2) - 50; // 50 below i128::MAX
+    let hi = (u128::MAX / 2) + 50; // 50 above i128::MAX
+    let mut val = u128::MAX / 2;
+
+    for _ in 0..10_000 {
+        mutate_u128(&mut val, lo, hi, &mut rng);
+        assert!(
+            val >= lo && val < hi,
+            "mutate_u128 cross-boundary out of range: val={}, range=[{}, {})",
+            val, lo, hi
+        );
+    }
+}
+
+#[test]
+fn test_gen_range_u128_covers_upper_64_bits() {
+    // Verify the 128-bit RNG construction actually uses the upper 64 bits
+    let mut rng = make_rng(933);
+    let mut saw_upper_bits = false;
+    for _ in 0..10_000 {
+        let val = gen_range_u128(&mut rng, 0, u128::MAX);
+        if val > (u64::MAX as u128) {
+            saw_upper_bits = true;
+            break;
+        }
+    }
+    assert!(saw_upper_bits, "gen_range_u128 should produce values above u64::MAX");
+}
+
+// ============================================================================
+// SequenceMutator — additional edge cases
+// ============================================================================
+
+#[test]
+fn test_sequence_mutator_max_actions_1() {
+    // Degenerate case: max_actions=1 means only delete+insert or noop
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::Mutator;
+    use libafl::state::{NopState, HasRand};
+
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(1);
+
+    for _ in 0..200 {
+        let actions = vec![TestAction::random(state.rand_mut())];
+        let mut input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+        let _ = mutator.mutate(&mut state, &mut input);
+        let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+        assert!(
+            decoded.actions.len() <= 1,
+            "max_actions=1 should never grow beyond 1, got {}",
+            decoded.actions.len()
+        );
+    }
+}
+
+#[test]
+fn test_sequence_mutator_stability_across_iterations() {
+    // Run mutator many times on the same input — should not corrupt state
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{MutationResult, Mutator};
+    use libafl::state::{NopState, HasRand};
+
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(8);
+
+    let actions: Vec<TestAction> = (0..4).map(|_| TestAction::random(state.rand_mut())).collect();
+    let original = FuzzInput::new(actions).to_bytes();
+
+    for _ in 0..500 {
+        let mut input = BytesInput::new(original.clone());
+        let result = mutator.mutate(&mut state, &mut input);
+        assert!(result.is_ok(), "mutator should never error");
+
+        // Verify output always roundtrips
+        let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+        let re_encoded = FuzzInput::new(decoded.actions).to_bytes();
+        assert_eq!(input.as_ref(), &re_encoded[..], "mutated output must roundtrip");
+    }
+}
+
+// ============================================================================
+// Generator — additional edge cases
+// ============================================================================
+
+mod generator_edge_tests {
+    use crate::action::FuzzAction;
+    use crate::generator::ActionGenerator;
+    use crate::input::FuzzInput;
+    use crate::test_helpers::TestAction;
+    use libafl::generators::Generator;
+    use libafl::inputs::BytesInput;
+    use libafl::state::{NopState, HasRand};
+
+    fn make_state() -> NopState<BytesInput> {
+        NopState::<BytesInput>::new()
+    }
+
+    #[test]
+    fn generator_deterministic_with_same_seed() {
+        let mut state1 = make_state();
+        let mut state2 = make_state();
+        // Both NopState get the same default seed
+        let mut gen1 = ActionGenerator::<TestAction>::new(2, 5);
+        let mut gen2 = ActionGenerator::<TestAction>::new(2, 5);
+
+        // Seed both states identically
+        *state1.rand_mut() = libafl_bolts::rands::RomuDuoJrRand::with_seed(123);
+        *state2.rand_mut() = libafl_bolts::rands::RomuDuoJrRand::with_seed(123);
+
+        for _ in 0..50 {
+            let out1 = gen1.generate(&mut state1).unwrap();
+            let out2 = gen2.generate(&mut state2).unwrap();
+            assert_eq!(
+                out1.as_ref(), out2.as_ref(),
+                "same seed should produce identical generator output"
+            );
+        }
+    }
+
+    #[test]
+    fn generator_large_max() {
+        // max=100 — should not panic or produce unreasonable byte sizes
+        let mut state = make_state();
+        let mut gen = ActionGenerator::<TestAction>::new(1, 100);
+
+        for _ in 0..50 {
+            let input = gen.generate(&mut state).unwrap();
+            let decoded = FuzzInput::<TestAction>::from_bytes(input.as_ref());
+            assert!(decoded.actions.len() >= 1 && decoded.actions.len() <= 100);
+        }
+    }
+}
