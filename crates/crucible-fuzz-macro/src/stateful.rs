@@ -72,7 +72,10 @@ pub fn stateful_mode(
 
             eprintln!("[STATEFUL] ItyFuzz-style stateful fuzzing mode");
 
-            // Parse pool capacity from env or default to 100_000
+            // Parse pool capacity from env or default to 10_000.
+            // Smaller pools focus exploration: each state gets picked more often,
+            // enabling deeper chain building. With 100K pool and 1 action/iter,
+            // each state averages <1 pick, preventing productive depth exploration.
             let pool_capacity: usize = std::env::var("FUZZ_STATE_POOL_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -123,9 +126,21 @@ pub fn stateful_mode(
                 libc::signal(libc::SIGTERM, __signal_handler as libc::sighandler_t);
             }
 
-            // Coverage map for FuzzCallback (display only, not driving exploration)
+            // Coverage map for FuzzCallback — also used for hitcount-based novelty detection.
+            // After each iteration the map is scanned: if any byte's bucketed hitcount
+            // exceeds the corresponding virgin_map entry, we treat this as new coverage.
+            // This mirrors LibAFL's MaxMapFeedback and prevents the coverage plateau
+            // that occurs when only new unique edges (not hitcount changes) are detected.
             let mut __stateful_coverage_map = vec![0u8; #mod_name::MAP_SIZE];
             let __stateful_cov_ptr = __stateful_coverage_map.as_mut_ptr();
+            // Virgin map: tracks the maximum bucketed hitcount seen for each map position.
+            // Initialized to 0 (no coverage seen). Updated after each iteration.
+            let mut __virgin_map = vec![0u8; #mod_name::MAP_SIZE];
+            // State coverage bitmap: tracks (slot_bucket, lamports_bucket) transitions
+            // as additional coverage signals. 8KB = 65536 bits, indexed by hashing
+            // (pubkey_prefix, bucket_value) pairs. A new bit = new state coverage.
+            const __STATE_COV_SIZE: usize = 1 << 16; // 64KB — same size as edge coverage map
+            let mut __state_cov_bitmap = vec![0u8; __STATE_COV_SIZE];
 
             // Setup fixture (always with tracing initially for coverage baseline)
             #template_setup_code
@@ -142,7 +157,7 @@ pub fn stateful_mode(
             // SVM swap trick (same as singlecore): move real SVM out of template
             let mut __real_svm = std::mem::replace(
                 &mut template_fixture.ctx.svm,
-                litesvm::LiteSVM::new(),
+                crucible_test_context::litesvm::LiteSVM::new(),
             );
 
             // Create initial snapshot capturing ALL accounts (not just dirty-tracked ones).
@@ -159,7 +174,7 @@ pub fn stateful_mode(
             // and switch to the traced SVM every `trace_interval` iterations.
             // When trace_interval == 0 (--no-tracing), only the fast SVM is used.
             // When trace_interval == 1, only the traced SVM is used (old behavior).
-            let mut __traced_svm: Option<litesvm::LiteSVM> = if trace_interval != 1 {
+            let mut __traced_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval != 1 {
                 // Keep the traced SVM for periodic coverage collection
                 Some(__real_svm.clone())
             } else {
@@ -168,9 +183,9 @@ pub fn stateful_mode(
 
             // Create fast (non-debuggable) SVM by restoring snapshot into a fresh SVM.
             // This avoids re-running setup() which would produce different keypairs/addresses.
-            let __fast_svm: Option<litesvm::LiteSVM> = if trace_interval != 1 {
+            let __fast_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval != 1 {
                 std::env::remove_var("ANCHOR_FUZZ_DEBUGGABLE");
-                let mut fast = litesvm::LiteSVM::new();
+                let mut fast = crucible_test_context::litesvm::LiteSVM::new();
                 initial_snapshot.restore_full(&mut fast);
                 // Restore ANCHOR_FUZZ_DEBUGGABLE so traced SVM clones work correctly
                 std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
@@ -230,7 +245,7 @@ fn stateful_singlecore_body(
         let mut state_pool = StatePool::new(pool_capacity, max_depth);
         // Initial pool entry: empty delta (state is identical to initial_snapshot)
         let initial_clock = initial_snapshot.clock().clone();
-        state_pool.try_add(0, SvmSnapshot::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), false);
+        state_pool.try_add(0, SvmSnapshot::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), 0, true);
 
         // Action success tracking: learns which actions work from which state classes
         let mut action_stats = crucible_test_context::snapshot::ActionStatsMap::new(
@@ -329,8 +344,7 @@ fn stateful_singlecore_body(
 
                     // Check success
                     let __seed_ok = __seed_panic.is_ok() && {
-                        let h = crucible_test_context::get_action_history();
-                        h.first().map(|r| r.success).unwrap_or(false)
+                        crucible_test_context::get_first_action_success().unwrap_or(false)
                     };
 
                     if !__seed_ok {
@@ -360,7 +374,7 @@ fn stateful_singlecore_body(
 
                     // Fingerprint
                     let __fp = compute_state_fingerprint_from_snapshot(
-                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker,
+                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
                     );
 
                     __current_depth += 1;
@@ -379,7 +393,7 @@ fn stateful_singlecore_body(
                     if __fp != 0 && state_pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, false,
+                        __fs, 0, true,
                     ) {
                         __parent_idx = Some(state_pool.len() - 1);
                         __seeded += 1;
@@ -400,9 +414,9 @@ fn stateful_singlecore_body(
 
         eprintln!("[STATEFUL] Starting stateful fuzzing loop...\n");
 
-        let __do_profile = std::env::var("FUZZ_PROFILE").is_ok();
         let mut __phase_pick_ns: u64 = 0;
         let mut __phase_restore_ns: u64 = 0;
+        let mut __phase_action_gen_ns: u64 = 0;
         let mut __phase_execute_ns: u64 = 0;
         let mut __phase_fingerprint_ns: u64 = 0;
         let mut __phase_save_ns: u64 = 0;
@@ -410,6 +424,15 @@ fn stateful_singlecore_body(
         let mut __phase_cleanup_ns: u64 = 0;
         let mut __phase_total_ns: u64 = 0;
         let mut __profiled_iters: u64 = 0;
+        let __profile_interval: u64 = 64;
+        let mut __single_action_buf: Vec<u8> = Vec::with_capacity(64);
+
+        // Batched picks: compute weights once per batch, O(1) per iteration instead of O(n).
+        const __BATCH_SIZE: usize = 64;
+        type __PickTuple = (std::sync::Arc<SvmSnapshot>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+        let mut __pick_batch: Vec<__PickTuple> = Vec::with_capacity(__BATCH_SIZE);
+        let mut __rng_vals: Vec<u64> = Vec::with_capacity(__BATCH_SIZE);
+        let mut __crossover_buf: Vec<(usize, std::sync::Arc<Vec<u8>>)> = Vec::with_capacity(16);
 
         loop {
             if SIGNAL_STOP.load(std::sync::atomic::Ordering::Relaxed) { break; }
@@ -438,31 +461,39 @@ fn stateful_singlecore_body(
                 }
             }
 
-            let __iter_start = std::time::Instant::now();
+            let __do_profile = (iteration % __profile_interval) == 0;
+            let __iter_start = if __do_profile { Some(std::time::Instant::now()) } else { None };
 
-            // 1. Pick an active state using power-schedule weighting
-            let __t = std::time::Instant::now();
-            let state_idx = match state_pool.pick_weighted(rng.next()) {
-                Some(idx) => idx,
-                None => {
-                    // All states crashed — nothing left to explore
+            // 1. Refill batch when empty (amortizes O(n) weight computation over BATCH_SIZE iterations)
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
+            if __pick_batch.is_empty() {
+                __rng_vals.clear();
+                for _ in 0..__BATCH_SIZE {
+                    __rng_vals.push(rng.next());
+                }
+                state_pool.pick_weighted_batch(&__rng_vals, &mut __pick_batch);
+                // Refresh crossover candidates (weighted: prefer high-power states)
+                __crossover_buf.clear();
+                for _ in 0..16usize {
+                    if let Some(idx) = state_pool.pick_weighted(rng.next()) {
+                        if let Some(entry) = state_pool.get(idx) {
+                            if let Some(vi) = entry.action_variant {
+                                __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
+                            }
+                        }
+                    }
+                }
+                if __pick_batch.is_empty() {
                     eprintln!("[STATEFUL] All active states exhausted (all led to crashes). Stopping.");
                     break;
                 }
-            };
-            let (parent_depth, parent_action_bytes, parent_fingerprint, parent_variant, parent_field_bytes, __picked_fixture_state) =
-                state_pool.get(state_idx)
-                    .map(|s| (s.depth, s.action_bytes.clone(), s.fingerprint, s.action_variant, s.action_field_bytes.clone(), s.fixture_state.clone()))
-                    .unwrap_or((0, std::sync::Arc::new(0u32.to_le_bytes().to_vec()), 0, None, std::sync::Arc::new(Vec::new()), None));
-            if __do_profile { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
+            }
+            let (delta_arc, parent_depth, state_idx, parent_action_bytes, parent_variant, parent_field_bytes, parent_fingerprint, __picked_fixture_state) =
+                __pick_batch.pop().unwrap();
+            if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
 
             // 2. Selective restore with dual-SVM support.
-            let __t = std::time::Instant::now();
-
-            // Extract delta for picked state
-            let delta_arc = state_pool.get(state_idx)
-                .map(|entry| entry.delta.clone())
-                .unwrap_or_else(|| std::sync::Arc::new(SvmSnapshot::empty(initial_snapshot.clock().clone())));
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
 
             // Dual-SVM flags:
             // is_traced_iter: true when we should swap to the traced SVM (only trace_interval > 1)
@@ -490,52 +521,53 @@ fn stateful_singlecore_body(
                 divergent_keys.clear();
                 divergent_keys.extend(delta_arc.accounts().keys().copied());
             }
-            if __do_profile { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
+            if let Some(__t) = __t { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
 
-            // 3. Generate an action using guided selection:
-            //    - 10% pure random (epsilon exploration via ActionStatsMap)
-            //    - If stats available: weighted by per-state-class success rates
-            //    - 15% of guided picks: mutate parent's action (local parameter search)
-            //    - 25% of guided picks: same variant as parent, fresh random params
-            //    - 60% of guided picks: weighted variant selection from stats
-            let __t = std::time::Instant::now();
+            // 3. Generate a single action using guided selection.
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
             let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
             let __replay_roll = rng.next() % 100;
-            let action = if __replay_roll < 15 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                // 15%: Mutate parent's action (same variant, perturbed params)
-                let vi = parent_variant.unwrap() as usize;
-                let mut cursor = 0usize;
-                match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(vi, &parent_field_bytes, &mut cursor) {
-                    Some(mut a) => {
-                        <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                        a
+            let action = if __replay_roll < 45 && !__crossover_buf.is_empty() {
+                // 45%: Success crossover — reuse action from a random pool state
+                let __ci = rng.next() as usize % __crossover_buf.len();
+                let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                if !cross_fields.is_empty() {
+                    let mut cursor = 0usize;
+                    match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
+                        Some(mut a) => {
+                            if rng.next() % 2 == 0 {
+                                <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
+                            }
+                            a
+                        }
+                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
                     }
-                    None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                } else {
+                    <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
                 }
-            } else if __replay_roll < 40 && parent_variant.is_some() {
-                // 25%: Same variant as parent, fresh random params
+            } else if __replay_roll < 55 && parent_variant.is_some() {
+                // 10%: Same variant as parent, fresh random params
                 <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(
                     parent_variant.unwrap() as usize, &mut rng,
                 )
             } else {
-                // 60%: Guided variant selection (epsilon-greedy from ActionStatsMap)
+                // Guided variant selection (epsilon-greedy from ActionStatsMap)
                 match action_stats.pick_variant(__state_class, rng.next(), rng.next()) {
                     Some(vi) => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(vi, &mut rng),
                     None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
                 }
             };
 
-            // Serialize the single action for storage
-            let single_action_bytes = {
-                let mut buf = Vec::new();
-                buf.extend_from_slice(&(action.variant_index() as u16).to_le_bytes());
-                action.serialize_fields(&mut buf);
-                buf
-            };
+            let __action_variant_idx = action.variant_index();
+            __single_action_buf.clear();
+            __single_action_buf.extend_from_slice(&(__action_variant_idx as u16).to_le_bytes());
+            action.serialize_fields(&mut __single_action_buf);
+            if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
 
-            // 5. Execute the single action using the existing invariant test function
+            // 5. Execute the action(s) using the existing invariant test function
             //    Restore fixture from pool state (correct mutable fields for this state),
             //    then swap in the real SVM.
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
             let mut #fixture_param_name = if let Some(ref arc) = __picked_fixture_state {
                 arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed").0.clone()
             } else {
@@ -545,6 +577,9 @@ fn stateful_singlecore_body(
 
             // Set up coverage callback only when tracing is active this iteration
             if has_tracing {
+                // Clear coverage map so hitcount buckets are per-iteration, not accumulated.
+                // Without this, buckets saturate and no new coverage is ever detected.
+                unsafe { std::ptr::write_bytes(__stateful_cov_ptr, 0, #mod_name::MAP_SIZE); }
                 let callback = #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE);
                 #fixture_param_name.ctx.set_invocation_callback(callback);
             }
@@ -559,18 +594,69 @@ fn stateful_singlecore_body(
                 #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed)
             } else { 0 };
 
-            // Execute with a single-element action vec (reuses all invariant/dispatch/taint logic)
+            // Execute action (reuses all invariant/dispatch/taint logic)
             crucible_test_context::reset_iteration_dispatch_count();
             let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                #fn_name(&mut #fixture_param_name, vec![action.clone()]);
+                #fn_name(&mut #fixture_param_name, vec![action]);
             }));
             let __actions_this_iter = crucible_test_context::get_iteration_dispatch_count();
-            if __do_profile { __phase_execute_ns += __t.elapsed().as_nanos() as u64; }
+            if let Some(__t) = __t { __phase_execute_ns += __t.elapsed().as_nanos() as u64; }
 
-            // Check if this action produced new edge coverage
-            let __new_coverage = if has_tracing {
-                #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed) > __edges_before
-            } else { false };
+            // Check if this action produced new coverage:
+            // 1. New unique edge (TOTAL_EDGES_ATOMIC increased)
+            // 2. New hitcount bucket on the AFL map (same edge hit at novel frequency)
+            // Both signals drive state saving — (2) is critical for avoiding the plateau
+            // where all unique edges are found but deeper state sequences remain unexplored.
+            let mut __novel_bits: u32 = if has_tracing {
+                let mut bits: u32 = 0;
+                // New unique edges count as novel bits
+                let new_edges = #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed) - __edges_before;
+                bits += new_edges as u32;
+                // Scan coverage map for new hitcount buckets (O(MAP_SIZE) but fast — ~10µs for 64KB)
+                unsafe {
+                    let map = std::slice::from_raw_parts(__stateful_cov_ptr, #mod_name::MAP_SIZE);
+                    let mut i = 0usize;
+                    while i + 8 <= #mod_name::MAP_SIZE {
+                        let chunk = *(map.as_ptr().add(i) as *const u64);
+                        if chunk != 0 {
+                            for j in 0..8 {
+                                let pos = i + j;
+                                let hitcount = map[pos];
+                                if hitcount != 0 {
+                                    let bucket = #mod_name::to_bucket(hitcount);
+                                    if bucket > __virgin_map[pos] {
+                                        __virgin_map[pos] = bucket;
+                                        bits += 1;
+                                    }
+                                }
+                            }
+                        }
+                        i += 8;
+                    }
+                    while i < #mod_name::MAP_SIZE {
+                        let hitcount = map[i];
+                        if hitcount != 0 {
+                            let bucket = #mod_name::to_bucket(hitcount);
+                            if bucket > __virgin_map[i] {
+                                __virgin_map[i] = bucket;
+                                bits += 1;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+                bits
+            } else { 0u32 };
+
+            // State coverage: lamports/slot differential bucket transitions as additional coverage signals.
+            // Uses local bitmap (single-core, no thread contention).
+            __novel_bits += crucible_test_context::snapshot::check_state_coverage(
+                &#fixture_param_name.ctx.svm,
+                &#fixture_param_name.ctx.dirty_tracker,
+                &*initial_snapshot,
+                &mut __state_cov_bitmap,
+            );
+            let __new_coverage = __novel_bits > 0;
 
             // Count actual SVM executions (includes success-seeking retries)
             #mod_name::TOTAL_EXECUTIONS.fetch_add(__actions_this_iter, std::sync::atomic::Ordering::Relaxed);
@@ -581,7 +667,7 @@ fn stateful_singlecore_body(
             }
 
             // Check for violation BEFORE swapping SVM back
-            let __t = std::time::Instant::now();
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
             let violation = crucible_test_context::take_violation();
 
             if let Some(ref msg) = violation {
@@ -592,12 +678,12 @@ fn stateful_singlecore_body(
                         crash_bytes[0..4].try_into().unwrap()
                     );
                     crash_bytes[0..4].copy_from_slice(&(old_count + 1).to_le_bytes());
-                    crash_bytes.extend_from_slice(&single_action_bytes);
+                    crash_bytes.extend_from_slice(&__single_action_buf);
                 }
 
                 // Dedup by action variant sequence (coarse: same action types = same crash class)
                 let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
-                __variant_seq.push(action.variant_index() as u16);
+                __variant_seq.push(__action_variant_idx as u16);
                 let input_hash = libafl_bolts::hash_std(
                     &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
                 );
@@ -628,23 +714,33 @@ fn stateful_singlecore_body(
                 // removed from the active pool to prevent toxic states from wasting cycles.
                 state_pool.record_violation(state_idx);
             }
-            if __do_profile { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
+            if let Some(__t) = __t { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
 
             // 6. Compute fingerprint and potentially add to pool (only if no violation and no panic)
-            let __action_variant_idx = action.variant_index();
+            //
+            // Dual-criterion pool insertion:
+            // (a) Coverage-novel: new edges/buckets. Fingerprint uniqueness hack bypasses dedup.
+            // (b) State-novel: succeeded action with novel fingerprint (16-bit binned dedup).
+            //     Enables depth exploration even after edge coverage saturates.
+            //     Failed actions never enter pool (error states are dead ends).
             let __action_succeeded = if violation.is_none() && __panic_result.is_ok() {
-                let history = crucible_test_context::get_action_history();
-                let succeeded = history.first().map(|r| r.success).unwrap_or(false);
+                let succeeded = crucible_test_context::get_first_action_success().unwrap_or(false);
 
                 // Record success/failure in action stats for this state class
                 action_stats.record(__state_class, __action_variant_idx, succeeded);
 
-                if succeeded {
-                    let __t = std::time::Instant::now();
+                if __new_coverage || succeeded {
+                    let __t_fp = if __do_profile { Some(std::time::Instant::now()) } else { None };
                     let mut fingerprint = compute_state_fingerprint_from_snapshot(
                         &#fixture_param_name.ctx.svm,
                         &#fixture_param_name.ctx.dirty_tracker,
+                        &*initial_snapshot,
                     );
+                    // Clock-only changes (e.g., advance_slots): incorporate parent state
+                    // so identical time advances from different parents don't collide.
+                    if #fixture_param_name.ctx.dirty_tracker.dirty_accounts().is_empty() {
+                        fingerprint = fingerprint ^ parent_fingerprint.wrapping_mul(0x517cc1b727220a95);
+                    }
                     // Coverage-driven: if this action discovered new edges, make fingerprint
                     // unique so the state is always saved (bypasses fingerprint dedup).
                     if __new_coverage {
@@ -652,10 +748,10 @@ fn stateful_singlecore_body(
                             .wrapping_mul(0x9e3779b97f4a7c15)
                             .wrapping_add(iteration);
                     }
-                    if __do_profile { __phase_fingerprint_ns += __t.elapsed().as_nanos() as u64; }
+                    if let Some(__t) = __t_fp { __phase_fingerprint_ns += __t.elapsed().as_nanos() as u64; }
 
                     if fingerprint != 0 {
-                        let __t = std::time::Instant::now();
+                        let __t_save = if __do_profile { Some(std::time::Instant::now()) } else { None };
                         // Create delta: clone parent delta + overlay dirty accounts
                         let new_delta = SvmSnapshot::take_delta(
                             &#fixture_param_name.ctx.svm,
@@ -670,12 +766,12 @@ fn stateful_singlecore_body(
                                 accumulated_bytes[0..4].try_into().unwrap()
                             );
                             accumulated_bytes[0..4].copy_from_slice(&(count + 1).to_le_bytes());
-                            accumulated_bytes.extend_from_slice(&single_action_bytes);
+                            accumulated_bytes.extend_from_slice(&__single_action_buf);
                         }
 
                         // Extract field bytes for parent-action replay (skip 2-byte variant header)
-                        let __field_bytes = if single_action_bytes.len() > 2 {
-                            single_action_bytes[2..].to_vec()
+                        let __field_bytes = if __single_action_buf.len() > 2 {
+                            __single_action_buf[2..].to_vec()
                         } else {
                             Vec::new()
                         };
@@ -699,11 +795,12 @@ fn stateful_singlecore_body(
                             Some(__action_variant_idx as u16),
                             __field_bytes,
                             __fixture_for_storage,
-                            __new_coverage,
+                            __novel_bits,
+                            succeeded,
                         ) {
                             novel_states += 1;
                         }
-                        if __do_profile { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
+                        if let Some(__t) = __t_save { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
                     }
                 }
                 succeeded
@@ -714,20 +811,26 @@ fn stateful_singlecore_body(
             };
 
             // 7. Update divergent_keys, prev_delta_arc, and prev_exec_dirty for next iteration
-            let __t = std::time::Instant::now();
+            // IMPORTANT: Always track dirty accounts regardless of action success/failure.
+            // Failed actions can still create/delete/modify accounts, and if we don't track
+            // those in divergent_keys, restore_selective_from will skip restoring them,
+            // causing state leakage across iterations.
+            let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
             if is_traced_iter {
-                // Traced SVM: update its own divergent tracking
-                if __action_succeeded {
-                    traced_divergent.extend(#fixture_param_name.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                }
+                // Traced SVM: always update divergent tracking
+                traced_divergent.extend(#fixture_param_name.ctx.dirty_tracker.dirty_accounts().iter().copied());
             } else {
                 // Fast SVM (or always-traced): update delta optimization state
                 prev_exec_dirty.clear();
+                prev_exec_dirty.extend(#fixture_param_name.ctx.dirty_tracker.dirty_accounts().iter().copied());
+                divergent_keys.extend(prev_exec_dirty.iter().copied());
                 if __action_succeeded {
-                    prev_exec_dirty.extend(#fixture_param_name.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                    divergent_keys.extend(prev_exec_dirty.iter().copied());
+                    prev_delta_arc = Some(delta_arc);
+                } else {
+                    // Force simple restore_selective next iteration — the delta from a failed
+                    // action shouldn't be used as an optimization base.
+                    prev_delta_arc = None;
                 }
-                prev_delta_arc = Some(delta_arc);
             }
 
             // 8. Swap SVM back out of fixture
@@ -739,7 +842,7 @@ fn stateful_singlecore_body(
                 }
             }
             // fixture is dropped here
-            if __do_profile { __phase_cleanup_ns += __t.elapsed().as_nanos() as u64; }
+            if let Some(__t) = __t { __phase_cleanup_ns += __t.elapsed().as_nanos() as u64; }
 
             // On panic: resume unwinding
             if let Err(__panic_payload) = __panic_result {
@@ -747,8 +850,8 @@ fn stateful_singlecore_body(
             }
 
             // 9. Rate-limited monitor output
-            if __do_profile {
-                __phase_total_ns += __iter_start.elapsed().as_nanos() as u64;
+            if let Some(__t) = __iter_start {
+                __phase_total_ns += __t.elapsed().as_nanos() as u64;
                 __profiled_iters += 1;
             }
 
@@ -801,25 +904,35 @@ fn stateful_singlecore_body(
                     branches, total_branches,
                 );
 
-                if __do_profile && __profiled_iters > 0 {
+                if __profiled_iters > 0 {
                     let total = __phase_total_ns;
+                    let n = __profiled_iters;
                     let pct = |ns: u64| -> f64 { if total > 0 { (ns as f64 / total as f64) * 100.0 } else { 0.0 } };
+                    let avg = |ns: u64| -> u64 { ns / n / 1000 }; // avg µs per iter
                     let other_ns = total.saturating_sub(
-                        __phase_pick_ns + __phase_restore_ns + __phase_execute_ns
-                        + __phase_fingerprint_ns + __phase_save_ns
+                        __phase_pick_ns + __phase_restore_ns + __phase_action_gen_ns
+                        + __phase_execute_ns + __phase_fingerprint_ns + __phase_save_ns
                         + __phase_crash_ns + __phase_cleanup_ns
                     );
-                    let avg_us = total / __profiled_iters / 1000;
+                    let avg_us = total / n / 1000;
                     eprintln!(
-                        "[PROFILE] pick: {:.1}% | restore: {:.1}% | execute: {:.1}% | \
-                         fingerprint: {:.1}% | save: {:.1}% | crash: {:.1}% | cleanup: {:.1}% | other: {:.1}% (avg: {}µs/iter)",
-                        pct(__phase_pick_ns), pct(__phase_restore_ns), pct(__phase_execute_ns),
-                        pct(__phase_fingerprint_ns), pct(__phase_save_ns),
-                        pct(__phase_crash_ns), pct(__phase_cleanup_ns), pct(other_ns),
+                        "[PROFILE] pick: {:.1}% ({}µs) | restore: {:.1}% ({}µs) | action_gen: {:.1}% ({}µs) | \
+                         execute: {:.1}% ({}µs) | fingerprint: {:.1}% ({}µs) | save: {:.1}% ({}µs) | \
+                         crash: {:.1}% ({}µs) | cleanup: {:.1}% ({}µs) | other: {:.1}% ({}µs) — avg: {}µs/iter",
+                        pct(__phase_pick_ns), avg(__phase_pick_ns),
+                        pct(__phase_restore_ns), avg(__phase_restore_ns),
+                        pct(__phase_action_gen_ns), avg(__phase_action_gen_ns),
+                        pct(__phase_execute_ns), avg(__phase_execute_ns),
+                        pct(__phase_fingerprint_ns), avg(__phase_fingerprint_ns),
+                        pct(__phase_save_ns), avg(__phase_save_ns),
+                        pct(__phase_crash_ns), avg(__phase_crash_ns),
+                        pct(__phase_cleanup_ns), avg(__phase_cleanup_ns),
+                        pct(other_ns), avg(other_ns),
                         avg_us,
                     );
                     __phase_pick_ns = 0;
                     __phase_restore_ns = 0;
+                    __phase_action_gen_ns = 0;
                     __phase_execute_ns = 0;
                     __phase_fingerprint_ns = 0;
                     __phase_save_ns = 0;
@@ -884,15 +997,17 @@ fn stateful_multicore_body(
         // Cast back to *mut u8 inside each worker scope.
         let mut _shared_edge_bitmap_owner = vec![0u8; #mod_name::SHARED_EDGE_BITMAP_SIZE];
         let mut _shared_branch_bitmap_owner = vec![0u8; #mod_name::SHARED_BRANCH_BITMAP_SIZE];
+        let mut _shared_state_cov_bitmap_owner = vec![0u8; crucible_test_context::snapshot::STATE_COV_BITMAP_SIZE];
         let shared_edge_addr: usize = _shared_edge_bitmap_owner.as_mut_ptr() as usize;
         let shared_branch_addr: usize = _shared_branch_bitmap_owner.as_mut_ptr() as usize;
+        let shared_state_cov_addr: usize = _shared_state_cov_bitmap_owner.as_mut_ptr() as usize;
 
         // Unsafe Send wrapper for ALL non-Send data: fixture (Rc<Keypair>) and
         // LiteSVM (Rc<RefCell<LogCollector>> in type params). Each worker gets
         // its own independent clone — all cloning happens sequentially on the
         // main thread before any spawn().
         // Fields: (fixture, fast_svm, Option<traced_svm>)
-        struct __SendableWorkerState(#fixture_name, litesvm::LiteSVM, Option<litesvm::LiteSVM>);
+        struct __SendableWorkerState(#fixture_name, crucible_test_context::litesvm::LiteSVM, Option<crucible_test_context::litesvm::LiteSVM>);
         unsafe impl Send for __SendableWorkerState {}
 
         let state_pool = Arc::new(RwLock::new(StatePool::new(pool_capacity, max_depth)));
@@ -901,7 +1016,7 @@ fn stateful_multicore_body(
         {
             let initial_clock = initial_snapshot.clock().clone();
             let mut pool = state_pool.write().unwrap();
-            pool.try_add(0, SvmSnapshot::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), false);
+            pool.try_add(0, SvmSnapshot::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), 0, true);
         }
 
         // Shared atomics
@@ -915,6 +1030,10 @@ fn stateful_multicore_body(
         let shared_discovered: Arc<Vec<std::sync::atomic::AtomicU8>> = Arc::new(
             (0..256).map(|_| std::sync::atomic::AtomicU8::new(0)).collect()
         );
+        // Lock-free bitmap for fingerprint novelty pre-checking.
+        // Workers check this BEFORE doing expensive save-phase work (take_delta,
+        // fixture clone). Eliminates ~99.8% of wasted mutex acquisitions.
+        let fingerprint_bitmap = Arc::new(crucible_test_context::snapshot::FingerprintBitmap::new());
         // Serializes fixture cloning (Rc::clone is not thread-safe) WITHOUT
         // blocking pool operations. Decoupled from RwLock so workers can
         // flush novel states and pick batches while one worker clones fixtures.
@@ -994,8 +1113,7 @@ fn stateful_multicore_body(
 
                     // Check success
                     let __seed_ok = __seed_panic.is_ok() && {
-                        let h = crucible_test_context::get_action_history();
-                        h.first().map(|r| r.success).unwrap_or(false)
+                        crucible_test_context::get_first_action_success().unwrap_or(false)
                     };
 
                     if !__seed_ok {
@@ -1024,7 +1142,7 @@ fn stateful_multicore_body(
 
                     // Fingerprint
                     let __fp = compute_state_fingerprint_from_snapshot(
-                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker,
+                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
                     );
 
                     __current_depth += 1;
@@ -1043,7 +1161,7 @@ fn stateful_multicore_body(
                     if __fp != 0 && pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, false,
+                        __fs, 0, true,
                     ) {
                         __parent_idx = Some(pool.len() - 1);
                         __seeded += 1;
@@ -1073,7 +1191,7 @@ fn stateful_multicore_body(
             // Create traced SVM for this worker if dual-SVM mode is active
             let worker_traced = if trace_interval > 1 {
                 // ANCHOR_FUZZ_DEBUGGABLE is set, so LiteSVM::new() creates debuggable SVM
-                let mut svm = litesvm::LiteSVM::new();
+                let mut svm = crucible_test_context::litesvm::LiteSVM::new();
                 initial_snapshot.restore_full(&mut svm);
                 Some(svm)
             } else {
@@ -1093,28 +1211,33 @@ fn stateful_multicore_body(
             let stop = stop_flag.clone();
             let crash_dir = crash_dir.clone();
             let fixture_clone_lock = fixture_clone_mutex.clone();
+            let fp_bitmap = fingerprint_bitmap.clone();
             let discovered_bitmap = shared_discovered.clone();
             let worker_seed = seed + worker_id as u64;
             let w_edge_addr = shared_edge_addr;
             let w_branch_addr = shared_branch_addr;
+            let w_state_cov_addr = shared_state_cov_addr;
 
             let handle = std::thread::Builder::new()
                 .name(format!("stateful-worker-{}", worker_id))
                 .spawn(move || {
                     let shared_edge_ptr = w_edge_addr as *mut u8;
                     let shared_branch_ptr = w_branch_addr as *mut u8;
+                    let shared_state_cov_ptr = w_state_cov_addr as *mut u8;
                     // Force capture of the WHOLE __SendableWorkerState value.
                     // In Rust 2021+, closures use precise field captures: `worker_state.0`
                     // would capture just the EternalFixture field (which is !Send), bypassing
                     // the `unsafe impl Send for __SendableWorkerState` wrapper. By rebinding
                     // the whole struct first, we ensure the closure captures the Send wrapper.
                     let worker_state = worker_state;
+                    // ManuallyDrop prevents Rc refcount decrements on the worker thread.
+                    // Fixture Rcs are shared with pool entries (via Arc<FixtureWrapper>),
+                    // so dropping here would race. Process exit reclaims all memory.
                     let mut worker_fixture = std::mem::ManuallyDrop::new(worker_state.0);
                     let mut worker_svm = std::mem::ManuallyDrop::new(worker_state.1);
-                    // Traced SVM for periodic coverage (ManuallyDrop for Rc safety)
                     let mut worker_traced_svm = worker_state.2.map(|svm| std::mem::ManuallyDrop::new(svm));
 
-                    // Per-worker coverage map (display only)
+                    // Per-worker coverage map + virgin map for hitcount novelty detection
                     let mut worker_cov_map = vec![0u8; #mod_name::MAP_SIZE];
                     let worker_cov_ptr = worker_cov_map.as_mut_ptr();
 
@@ -1143,18 +1266,27 @@ fn stateful_multicore_body(
                     // Reuse rng_vals allocation across batch refills (C4)
                     let mut rng_vals: Vec<u64> = Vec::with_capacity(BATCH_SIZE);
                     let mut local_batch: Vec<PickTuple> = Vec::with_capacity(BATCH_SIZE);
+                    // Success crossover: (variant_idx, field_bytes) from random pool states, refreshed each batch
+                    let mut __crossover_buf: Vec<(usize, std::sync::Arc<Vec<u8>>)> = Vec::with_capacity(16);
+                    // Pre-cloned fixtures for the current batch
+                    let mut fixture_batch: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE);
+                    // Deferred fixture drops: Rc::drop must not race with Rc::clone across threads.
+                    // Instead of dropping __iter_fixture immediately (outside mutex), we defer it
+                    // and clear the list inside the mutex alongside the next batch of clones.
+                    let mut pending_fixture_drops: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE + 1);
                     // Accumulated results to flush after each batch
-                    // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, coverage_novel)
-                    let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, bool)> = Vec::new();
+                    // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, novelty_bits, succeeded)
+                    let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, bool)> = Vec::new();
                     // Crash info: (action_variant, msg, current_action_desc, parent_state_idx, crash_bytes)
                     let mut pending_crashes: Vec<(u16, String, String, usize, Vec<u8>)> = Vec::new();
                     // Track pending violations: state indices that need record_violation() in the flush
                     let mut pending_violations: Vec<usize> = Vec::new();
                     // Thread-local seen variant hashes to skip duplicate crash accumulation
                     let mut seen_variant_hashes: crucible_test_context::FastHashSet<u64> = crucible_test_context::FastHashSet::default();
+                    let mut __single_action_buf: Vec<u8> = Vec::with_capacity(64);
 
                     loop {
-                        if stop.load(Ordering::Relaxed) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
+                        if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
 
                         // Refill batch when empty
                         if local_batch.is_empty() {
@@ -1163,9 +1295,10 @@ fn stateful_multicore_body(
                             let mut __crash_outputs: Vec<(String, Vec<String>, String, u64, Vec<u8>)> = Vec::new();
                             if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() {
                                 if let Ok(mut pool) = pool.try_write() {
-                                    for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel) in pending_novel.drain(..) {
-                                        if pool.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel) {
+                                    for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, succ) in pending_novel.drain(..) {
+                                        if pool.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, succ) {
                                             novel.fetch_add(1, Ordering::Relaxed);
+                                            fp_bitmap.mark(fp);
                                         }
                                     }
                                     // Record violations against parent states
@@ -1184,14 +1317,17 @@ fn stateful_multicore_body(
                                             let parent_descs = pool.reconstruct_action_descriptions(parent_idx);
                                             __crash_outputs.push((msg, parent_descs, current_desc, vh, crash_bytes));
                                             if stop_on_crash {
-                                                stop.store(true, Ordering::Relaxed);
+                                                eprintln!("[STATEFUL W{}] First crash found, signaling stop (--stop-on-crash).", worker_id);
+                                                stop.store(true, Ordering::SeqCst);
                                             }
                                         }
                                     }
                                 } else {
-                                    // Couldn't get write lock — discard non-critical pending state additions
-                                    // Keep pending_crashes and pending_violations — they'll flush next batch
-                                    pending_novel.clear();
+                                    // Couldn't get write lock — keep pending_novel for retry next batch.
+                                    // Cap to prevent unbounded growth if write lock is always contended.
+                                    if pending_novel.len() > 2048 {
+                                        pending_novel.drain(..pending_novel.len() - 1024);
+                                    }
                                 }
                             }
                             // Crash disk I/O outside write lock (Fix 3)
@@ -1228,29 +1364,62 @@ fn stateful_multicore_body(
                                     rng_vals.push(rng.next());
                                 }
                                 p.pick_weighted_batch(&rng_vals, &mut local_batch);
+                                // Pick crossover candidates (weighted: prefer high-power states)
+                                __crossover_buf.clear();
+                                for _ in 0..16usize {
+                                    if let Some(idx) = p.pick_weighted(rng.next()) {
+                                        if let Some(entry) = p.get(idx) {
+                                            if let Some(vi) = entry.action_variant {
+                                                __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
+                                            }
+                                        }
+                                    }
+                                }
                                 // Read lock released here — pool is free for other workers
                             }
 
                             if local_batch.is_empty() {
                                 break; // Pool exhausted
                             }
+
+                            // Batch fixture clones under mutex. Also drop previous iteration's
+                            // fixtures here so Rc::drop and Rc::clone are serialized (no data race).
+                            // Use try_lock to avoid blocking: if contended, fall back to template fixture.
+                            {
+                                fixture_batch.clear();
+                                match fixture_clone_lock.try_lock() {
+                                    Ok(_guard) => {
+                                        // 1. Drop deferred fixtures (Rc refcount decrements — safe under mutex)
+                                        pending_fixture_drops.clear();
+                                        // 2. Clone new batch (Rc refcount increments — safe under mutex)
+                                        for (_, _, _, _, _, _, _, fixture_arc) in local_batch.iter() {
+                                            if let Some(ref arc) = fixture_arc {
+                                                let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
+                                                fixture_batch.push(wrapper.0.clone());
+                                            } else {
+                                                fixture_batch.push((*worker_fixture).clone());
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Mutex contended — use template fixture for all picks.
+                                        // This avoids blocking the entire worker on fixture clones.
+                                        // Trade-off: mutable fixture state (e.g., tracked accounts) may be
+                                        // stale, but SVM state is correctly restored from snapshots.
+                                        for _ in 0..local_batch.len() {
+                                            fixture_batch.push((*worker_fixture).clone());
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         local_iter += 1;
 
-                        // Pop one state from local batch (no lock needed)
-                        let (delta_arc, parent_depth, state_idx, parent_action_bytes, parent_variant, parent_field_bytes, parent_fingerprint, fixture_arc) =
+                        // Pop one state + pre-cloned fixture from local batch (no lock needed)
+                        let (delta_arc, parent_depth, state_idx, parent_action_bytes, parent_variant, parent_field_bytes, parent_fingerprint, _fixture_arc) =
                             local_batch.pop().unwrap();
-                        // Fix 1: Per-iteration fixture clone (hold mutex for ~10µs instead of ~5ms for 512 clones)
-                        let mut __iter_fixture = {
-                            let _guard = fixture_clone_lock.lock().unwrap();
-                            if let Some(ref arc) = fixture_arc {
-                                let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
-                                wrapper.0.clone()
-                            } else {
-                                (*worker_fixture).clone()
-                            }
-                        };
+                        let mut __iter_fixture = fixture_batch.pop().unwrap();
 
                         // 2. Selective restore with dual-SVM support
                         let is_traced_iter = worker_traced_svm.is_some() && (local_iter % trace_interval == 0);
@@ -1279,19 +1448,26 @@ fn stateful_multicore_body(
                         // 3. Generate action using guided selection (same strategy as singlecore)
                         let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
                         let __replay_roll = rng.next() % 100;
-                        let action = if __replay_roll < 15 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                            // 15%: Mutate parent's action
-                            let vi = parent_variant.unwrap() as usize;
-                            let mut cursor = 0usize;
-                            match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(vi, &parent_field_bytes, &mut cursor) {
-                                Some(mut a) => {
-                                    <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                    a
+                        let action = if __replay_roll < 45 && !__crossover_buf.is_empty() {
+                            // 45%: Success crossover — reuse action from a random pool state
+                            let __ci = rng.next() as usize % __crossover_buf.len();
+                            let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                            if !cross_fields.is_empty() {
+                                let mut cursor = 0usize;
+                                match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
+                                    Some(mut a) => {
+                                        if rng.next() % 2 == 0 {
+                                            <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
+                                        }
+                                        a
+                                    }
+                                    None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
                                 }
-                                None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                            } else {
+                                <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
                             }
-                        } else if __replay_roll < 40 && parent_variant.is_some() {
-                            // 25%: Same variant as parent, fresh random params
+                        } else if __replay_roll < 55 && parent_variant.is_some() {
+                            // 10%: Same variant as parent, fresh random params
                             <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(
                                 parent_variant.unwrap() as usize, &mut rng,
                             )
@@ -1303,12 +1479,10 @@ fn stateful_multicore_body(
                             }
                         };
 
-                        let single_action_bytes = {
-                            let mut buf = Vec::new();
-                            buf.extend_from_slice(&(action.variant_index() as u16).to_le_bytes());
-                            action.serialize_fields(&mut buf);
-                            buf
-                        };
+                        let __action_variant_idx = action.variant_index();
+                        __single_action_buf.clear();
+                        __single_action_buf.extend_from_slice(&(__action_variant_idx as u16).to_le_bytes());
+                        action.serialize_fields(&mut __single_action_buf);
 
                         // 4. Execute — use per-iteration fixture clone (correct mutable state).
                         //    Swap SVM into fixture, run test, swap back.
@@ -1316,6 +1490,8 @@ fn stateful_multicore_body(
 
                         // Set coverage callback only when tracing is active this iteration
                         if has_tracing {
+                            // Clear coverage map so hitcount buckets are per-iteration
+                            unsafe { std::ptr::write_bytes(worker_cov_ptr, 0, #mod_name::MAP_SIZE); }
                             let callback = #mod_name::FuzzCallback::with_shared_memory(
                                 worker_cov_ptr, #mod_name::MAP_SIZE,
                                 shared_edge_ptr, shared_branch_ptr,
@@ -1329,17 +1505,29 @@ fn stateful_multicore_body(
                         crucible_test_context::clear_violation_tracking();
 
                         crucible_test_context::reset_iteration_dispatch_count();
-                        let actions_vec = vec![action.clone()];
                         let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            #fn_name(&mut __iter_fixture, actions_vec);
+                            #fn_name(&mut __iter_fixture, vec![action]);
                         }));
                         let __actions_this_iter = crucible_test_context::get_iteration_dispatch_count();
 
-                        // Flush thread-local bitmap buffers and check for new coverage (only on traced iterations)
-                        let __new_coverage = if has_tracing {
+                        // Flush thread-local bitmap buffers and check for new coverage.
+                        // Uses shared bitmaps (atomic fetch_or) as single source of truth
+                        // for coverage novelty — same as stateless multicore (SharedBitmapFeedback).
+                        let mut __novel_bits: u32 = if has_tracing {
                             #mod_name::flush_local_bitmap_buffers(shared_edge_ptr, shared_branch_ptr);
-                            #mod_name::found_new_coverage()
-                        } else { false };
+                            if #mod_name::found_new_coverage() { 1 } else { 0 }
+                        } else { 0u32 };
+                        // State coverage: lamports/slot differential bucket transitions via shared atomic bitmap
+                        __novel_bits += unsafe {
+                            crucible_test_context::snapshot::check_state_coverage_atomic(
+                                &__iter_fixture.ctx.svm,
+                                &__iter_fixture.ctx.dirty_tracker,
+                                &*worker_initial,
+                                shared_state_cov_ptr,
+                                crucible_test_context::snapshot::STATE_COV_BITMAP_SIZE,
+                            )
+                        };
+                        let __new_coverage = __novel_bits > 0;
 
                         // Count actual SVM executions (includes success-seeking retries)
                         #mod_name::TOTAL_EXECUTIONS.fetch_add(__actions_this_iter, Ordering::Relaxed);
@@ -1353,7 +1541,7 @@ fn stateful_multicore_body(
                             pending_violations.push(state_idx);
 
                             // Quick local dedup: skip if we've seen this variant from this state before
-                            let __cur_variant = action.variant_index() as u16;
+                            let __cur_variant = __action_variant_idx as u16;
                             let __local_key = libafl_bolts::hash_std(
                                 &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
                             );
@@ -1365,7 +1553,7 @@ fn stateful_multicore_body(
                                         crash_bytes[0..4].try_into().unwrap()
                                     );
                                     crash_bytes[0..4].copy_from_slice(&(old_count + 1).to_le_bytes());
-                                    crash_bytes.extend_from_slice(&single_action_bytes);
+                                    crash_bytes.extend_from_slice(&__single_action_buf);
                                 }
                                 // Store action variant for coarse dedup (computed inside lock later)
                                 let current_desc = crucible_test_context::format_last_action_oneline();
@@ -1374,20 +1562,25 @@ fn stateful_multicore_body(
                         }
 
                         // 5. Fingerprint + add to pool (accumulated locally)
-                        let __action_variant_idx = action.variant_index();
+                        // Dual-criterion: coverage-novel OR succeeded (state-novel via 16-bit dedup)
                         let __action_succeeded = if violation.is_none() && __panic_result.is_ok() {
-                            let history = crucible_test_context::get_action_history();
-                            let succeeded = history.first().map(|r| r.success).unwrap_or(false);
+                            let succeeded = crucible_test_context::get_first_action_success().unwrap_or(false);
 
                             // Record in per-worker action stats
                             action_stats.record(__state_class, __action_variant_idx, succeeded);
 
-                            if succeeded {
+                            if __new_coverage || succeeded {
                                 let mut fingerprint = compute_state_fingerprint_from_snapshot(
                                     &__iter_fixture.ctx.svm,
                                     &__iter_fixture.ctx.dirty_tracker,
+                                    &*worker_initial,
                                 );
 
+                                // Clock-only changes (e.g., advance_slots): incorporate parent state
+                                // so identical time advances from different parents don't collide.
+                                if __iter_fixture.ctx.dirty_tracker.dirty_accounts().is_empty() {
+                                    fingerprint = fingerprint ^ parent_fingerprint.wrapping_mul(0x517cc1b727220a95);
+                                }
                                 // Coverage-driven: bypass fingerprint dedup for states with new edges
                                 if __new_coverage {
                                     fingerprint = fingerprint
@@ -1395,7 +1588,9 @@ fn stateful_multicore_body(
                                         .wrapping_add(local_iter);
                                 }
 
-                                if fingerprint != 0 {
+                                // Skip expensive save work if bitmap says fingerprint already seen.
+                                // coverage_novel states bypass this (always save for coverage).
+                                if fingerprint != 0 && (__new_coverage || !fp_bitmap.is_seen(fingerprint)) {
                                     let new_delta = SvmSnapshot::take_delta(
                                         &__iter_fixture.ctx.svm,
                                         &delta_arc,
@@ -1408,20 +1603,24 @@ fn stateful_multicore_body(
                                             accumulated_bytes[0..4].try_into().unwrap()
                                         );
                                         accumulated_bytes[0..4].copy_from_slice(&(count + 1).to_le_bytes());
-                                        accumulated_bytes.extend_from_slice(&single_action_bytes);
+                                        accumulated_bytes.extend_from_slice(&__single_action_buf);
                                     }
 
-                                    let __field_bytes = if single_action_bytes.len() > 2 {
-                                        single_action_bytes[2..].to_vec()
+                                    let __field_bytes = if __single_action_buf.len() > 2 {
+                                        __single_action_buf[2..].to_vec()
                                     } else {
                                         Vec::new()
                                     };
 
                                     // Store fixture alongside novel state (SVM swapped out = cheap clone).
-                                    // Single-threaded within this worker, so Rc::clone is safe.
+                                    // Use try_lock to avoid blocking: if another worker holds the mutex,
+                                    // skip fixture storage (None). State will use template_fixture fallback.
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
                                     let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                                        Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone())));
+                                        match fixture_clone_lock.try_lock() {
+                                            Ok(_guard) => Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone()))),
+                                            Err(_) => None, // Skip fixture storage — reduces contention
+                                        };
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
 
                                     let action_desc = crucible_test_context::format_last_action_oneline();
@@ -1429,7 +1628,7 @@ fn stateful_multicore_body(
                                         fingerprint, new_delta, parent_depth + 1,
                                         Some(state_idx), accumulated_bytes, action_desc,
                                         Some(__action_variant_idx as u16), __field_bytes,
-                                        __fixture_for_storage, __new_coverage,
+                                        __fixture_for_storage, __novel_bits, succeeded,
                                     ));
                                 }
                             }
@@ -1440,19 +1639,21 @@ fn stateful_multicore_body(
                         };
 
                         // 6. Update divergent_keys, prev_delta_arc, and prev_exec_dirty
+                        // IMPORTANT: Always track dirty accounts regardless of success/failure.
+                        // Failed actions can still create/delete/modify accounts.
                         if is_traced_iter {
-                            // Traced SVM: update its own divergent tracking
-                            if __action_succeeded {
-                                traced_divergent.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                            }
+                            // Traced SVM: always update divergent tracking
+                            traced_divergent.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
                         } else {
                             // Fast SVM: update delta optimization state
                             prev_exec_dirty.clear();
+                            prev_exec_dirty.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
+                            divergent_keys.extend(prev_exec_dirty.iter().copied());
                             if __action_succeeded {
-                                prev_exec_dirty.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                                divergent_keys.extend(prev_exec_dirty.iter().copied());
+                                prev_delta_arc = Some(delta_arc);
+                            } else {
+                                prev_delta_arc = None;
                             }
-                            prev_delta_arc = Some(delta_arc);
                         }
 
                         // 7. Swap SVM back out of per-iteration fixture
@@ -1463,11 +1664,20 @@ fn stateful_multicore_body(
                                 std::mem::swap(&mut *worker_svm, &mut **traced);
                             }
                         }
-                        // __iter_fixture is dropped here (per-iteration clone)
+                        // Defer fixture drop: Rc::drop must happen under mutex to avoid
+                        // racing with Rc::clone on other threads. Cleared at next batch refill.
+                        pending_fixture_drops.push(__iter_fixture);
 
-                        if let Err(__panic_payload) = __panic_result {
-                            std::panic::resume_unwind(__panic_payload);
+                        // Note: panics from invariant violations are already captured via take_violation().
+                        // Do NOT resume_unwind in spawned worker threads — it causes SIGABRT.
+                        if __panic_result.is_err() && violation.is_none() {
+                            eprintln!("[WORKER] Unexpected panic in worker thread (not a violation)");
                         }
+                    }
+                    // Worker exiting — drain pending drops under mutex for Rc safety
+                    {
+                        let _guard = fixture_clone_lock.lock().unwrap();
+                        pending_fixture_drops.clear();
                     }
                 })
                 .expect("failed to spawn worker thread");
@@ -1480,6 +1690,7 @@ fn stateful_multicore_body(
             // Extract raw pointers for worker 0 (main thread)
             let shared_edge_ptr = shared_edge_addr as *mut u8;
             let shared_branch_ptr = shared_branch_addr as *mut u8;
+            let shared_state_cov_ptr = shared_state_cov_addr as *mut u8;
 
             let pool = state_pool.clone();
             let iters = shared_iters.clone();
@@ -1492,11 +1703,11 @@ fn stateful_multicore_body(
             let mut w0_fixture = template_fixture;
             let mut w0_svm = __real_svm;
             // Traced SVM for Worker 0 (take from outer scope)
-            let mut w0_traced_svm: Option<litesvm::LiteSVM> = if trace_interval > 1 {
+            let mut w0_traced_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval > 1 {
                 __traced_svm.take()
                     .or_else(|| {
                         // Fallback: create a new debuggable SVM from snapshot
-                        let mut svm = litesvm::LiteSVM::new();
+                        let mut svm = crucible_test_context::litesvm::LiteSVM::new();
                         initial_snapshot.restore_full(&mut svm);
                         Some(svm)
                     })
@@ -1504,10 +1715,9 @@ fn stateful_multicore_body(
                 None
             };
 
-            // Per-worker coverage map
+            // Per-worker coverage map + virgin map for hitcount novelty detection
             let mut worker_cov_map = vec![0u8; #mod_name::MAP_SIZE];
             let worker_cov_ptr = worker_cov_map.as_mut_ptr();
-
             let mut rng = StdRand::with_seed(seed);
             let mut local_iter: u64 = 0;
             let mut last_print_time = std::time::Instant::now();
@@ -1521,9 +1731,9 @@ fn stateful_multicore_body(
             let mut traced_divergent: crucible_test_context::FastHashSet<solana_pubkey::Pubkey> =
                 crucible_test_context::FastHashSet::default();
 
-            let __do_profile = std::env::var("FUZZ_PROFILE").is_ok();
             let mut __phase_pick_ns: u64 = 0;
             let mut __phase_restore_ns: u64 = 0;
+            let mut __phase_action_gen_ns: u64 = 0;
             let mut __phase_execute_ns: u64 = 0;
             let mut __phase_fingerprint_ns: u64 = 0;
             let mut __phase_save_ns: u64 = 0;
@@ -1531,6 +1741,8 @@ fn stateful_multicore_body(
             let mut __phase_cleanup_ns: u64 = 0;
             let mut __phase_total_ns: u64 = 0;
             let mut __profiled_iters: u64 = 0;
+            let __profile_interval: u64 = 64;
+            let mut __single_action_buf: Vec<u8> = Vec::with_capacity(64);
 
             // Per-worker action stats
             let mut action_stats = crucible_test_context::snapshot::ActionStatsMap::new(
@@ -1540,26 +1752,31 @@ fn stateful_multicore_body(
             // Batched pool access (same pattern as spawned workers):
             // Pick BATCH_SIZE states under one read lock (pick_count is atomic),
             // process locally, flush results with one write lock per batch.
-            const BATCH_SIZE: usize = 64;
+            const BATCH_SIZE: usize = 512;
             // (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
             type PickTuple = (std::sync::Arc<SvmSnapshot>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
             // Reuse rng_vals allocation across batch refills (C4)
             let mut rng_vals: Vec<u64> = Vec::with_capacity(BATCH_SIZE);
             let mut local_batch: Vec<PickTuple> = Vec::with_capacity(BATCH_SIZE);
-            // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, coverage_novel)
-            let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, bool)> = Vec::new();
+            // Success crossover: (variant_idx, field_bytes) from random pool states, refreshed each batch
+            let mut __crossover_buf: Vec<(usize, std::sync::Arc<Vec<u8>>)> = Vec::with_capacity(16);
+            // Pre-cloned fixtures for the current batch
+            let mut w0_fixture_batch: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE);
+            // Deferred fixture drops: serialized with clones under mutex to prevent Rc races
+            let mut w0_pending_drops: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE + 1);
+            // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, coverage_novel, succeeded)
+            let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, bool)> = Vec::new();
             let mut pending_crashes: Vec<(u16, String, String, usize, Vec<u8>)> = Vec::new();
             // Track pending violations: state indices that need record_violation() in the flush
             let mut pending_violations: Vec<usize> = Vec::new();
             // Thread-local seen variant hashes to skip duplicate crash accumulation
             let mut seen_variant_hashes: crucible_test_context::FastHashSet<u64> = crucible_test_context::FastHashSet::default();
-
             // Cache pool stats for monitor (updated at batch boundaries, avoids extra read locks)
             let mut cached_pool_len: usize = 1;
             let mut cached_pool_active: usize = 1;
 
             loop {
-                if stop.load(Ordering::Relaxed) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
+                if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
 
                 local_iter += 1;
 
@@ -1578,19 +1795,21 @@ fn stateful_multicore_body(
                     }
                 }
 
-                let __iter_start = std::time::Instant::now();
+                let __do_profile = (local_iter % __profile_interval) == 0;
+                let __iter_start = if __do_profile { Some(std::time::Instant::now()) } else { None };
 
                 // 1. Refill batch when empty
-                let __t = std::time::Instant::now();
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 if local_batch.is_empty() {
                     // Flush pending writes from previous batch
                     // Fix 3: Collect crash outputs inside lock, write to disk outside
                     let mut __crash_outputs: Vec<(String, Vec<String>, String, u64, Vec<u8>)> = Vec::new();
                     if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() {
                         if let Ok(mut p) = pool.try_write() {
-                            for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel) in pending_novel.drain(..) {
-                                if p.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel) {
+                            for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, succ) in pending_novel.drain(..) {
+                                if p.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, succ) {
                                     novel.fetch_add(1, Ordering::Relaxed);
+                                    fingerprint_bitmap.mark(fp);
                                 }
                             }
                             // Record violations against parent states
@@ -1609,16 +1828,19 @@ fn stateful_multicore_body(
                                     let parent_descs = p.reconstruct_action_descriptions(parent_idx);
                                     __crash_outputs.push((msg, parent_descs, current_desc, vh, crash_bytes));
                                     if stop_on_crash {
-                                        stop.store(true, Ordering::Relaxed);
+                                        eprintln!("[STATEFUL W0] First crash found, signaling stop (--stop-on-crash).");
+                                        stop.store(true, Ordering::SeqCst);
                                     }
                                 }
                             }
                             cached_pool_len = p.len();
                             cached_pool_active = p.active_count();
                         } else {
-                            // Couldn't get write lock — discard non-critical pending state additions
-                            // Keep pending_crashes and pending_violations — they'll flush next batch
-                            pending_novel.clear();
+                            // Couldn't get write lock — keep pending_novel for retry next batch.
+                            // Cap to prevent unbounded growth if write lock is always contended.
+                            if pending_novel.len() > 2048 {
+                                pending_novel.drain(..pending_novel.len() - 1024);
+                            }
                         }
                     }
                     // Crash disk I/O outside write lock (Fix 3)
@@ -1657,6 +1879,17 @@ fn stateful_multicore_body(
                             rng_vals.push(rng.next());
                         }
                         p.pick_weighted_batch(&rng_vals, &mut local_batch);
+                        // Pick crossover candidates (weighted: prefer high-power states)
+                        __crossover_buf.clear();
+                        for _ in 0..16usize {
+                            if let Some(idx) = p.pick_weighted(rng.next()) {
+                                if let Some(entry) = p.get(idx) {
+                                    if let Some(vi) = entry.action_variant {
+                                        __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
+                                    }
+                                }
+                            }
+                        }
                         // Read lock released here — pool is free for other workers
                     }
 
@@ -1665,25 +1898,34 @@ fn stateful_multicore_body(
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
+
+                    // Batch fixture clones + deferred drops under ONE mutex lock.
+                    // Serializes all Rc operations (clone + drop) to prevent data races.
+                    {
+                        let _guard = fixture_clone_mutex.lock().unwrap();
+                        // 1. Drop deferred fixtures from previous batch
+                        w0_pending_drops.clear();
+                        // 2. Clone new batch
+                        w0_fixture_batch.clear();
+                        for (_, _, _, _, _, _, _, fixture_arc) in local_batch.iter() {
+                            if let Some(ref arc) = fixture_arc {
+                                let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
+                                w0_fixture_batch.push(wrapper.0.clone());
+                            } else {
+                                w0_fixture_batch.push(w0_fixture.clone());
+                            }
+                        }
+                    }
                 }
 
-                // Pop one state from local batch (no lock needed)
-                let (delta_arc, parent_depth, state_idx, parent_action_bytes, parent_variant, parent_field_bytes, parent_fingerprint, fixture_arc) =
+                // Pop one state + pre-cloned fixture from local batch (no lock needed)
+                let (delta_arc, parent_depth, state_idx, parent_action_bytes, parent_variant, parent_field_bytes, parent_fingerprint, _fixture_arc) =
                     local_batch.pop().unwrap();
-                // Fix 1: Per-iteration fixture clone (hold mutex for ~10µs instead of ~5ms for 64 clones)
-                let mut __iter_fixture = {
-                    let _guard = fixture_clone_mutex.lock().unwrap();
-                    if let Some(ref arc) = fixture_arc {
-                        let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
-                        wrapper.0.clone()
-                    } else {
-                        w0_fixture.clone()
-                    }
-                };
-                if __do_profile { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
+                let mut __iter_fixture = w0_fixture_batch.pop().unwrap();
+                if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 2. Selective restore with dual-SVM support
-                let __t = std::time::Instant::now();
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 let is_traced_iter = w0_traced_svm.is_some() && (local_iter % trace_interval == 0);
                 let has_tracing = trace_interval == 1 || is_traced_iter;
 
@@ -1706,23 +1948,31 @@ fn stateful_multicore_body(
                     divergent_keys.clear();
                     divergent_keys.extend(delta_arc.accounts().keys().copied());
                 }
-                if __do_profile { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
+                if let Some(__t) = __t { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 3. Generate action using guided selection
-                let __t = std::time::Instant::now();
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
                 let __replay_roll = rng.next() % 100;
-                let action = if __replay_roll < 15 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                    let vi = parent_variant.unwrap() as usize;
-                    let mut cursor = 0usize;
-                    match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(vi, &parent_field_bytes, &mut cursor) {
-                        Some(mut a) => {
-                            <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                            a
+                let action = if __replay_roll < 45 && !__crossover_buf.is_empty() {
+                    // 45%: Success crossover — reuse action from a random pool state
+                    let __ci = rng.next() as usize % __crossover_buf.len();
+                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                    if !cross_fields.is_empty() {
+                        let mut cursor = 0usize;
+                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
+                            Some(mut a) => {
+                                if rng.next() % 2 == 0 {
+                                    <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
+                                }
+                                a
+                            }
+                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
                         }
-                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                    } else {
+                        <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
                     }
-                } else if __replay_roll < 40 && parent_variant.is_some() {
+                } else if __replay_roll < 55 && parent_variant.is_some() {
                     <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(
                         parent_variant.unwrap() as usize, &mut rng,
                     )
@@ -1733,19 +1983,21 @@ fn stateful_multicore_body(
                     }
                 };
 
-                let single_action_bytes = {
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&(action.variant_index() as u16).to_le_bytes());
-                    action.serialize_fields(&mut buf);
-                    buf
-                };
+                let __action_variant_idx = action.variant_index();
+                __single_action_buf.clear();
+                __single_action_buf.extend_from_slice(&(__action_variant_idx as u16).to_le_bytes());
+                action.serialize_fields(&mut __single_action_buf);
+                if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 4. Execute — use per-iteration fixture clone (correct mutable state).
                 //    Swap SVM into fixture, run test, swap back.
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
 
                 // Set coverage callback only when tracing is active this iteration
                 if has_tracing {
+                    // Clear coverage map so hitcount buckets are per-iteration
+                    unsafe { std::ptr::write_bytes(worker_cov_ptr, 0, #mod_name::MAP_SIZE); }
                     let callback = #mod_name::FuzzCallback::with_shared_memory(
                         worker_cov_ptr, #mod_name::MAP_SIZE,
                         shared_edge_ptr, shared_branch_ptr,
@@ -1759,18 +2011,29 @@ fn stateful_multicore_body(
                 crucible_test_context::clear_violation_tracking();
 
                 crucible_test_context::reset_iteration_dispatch_count();
-                let actions_vec = vec![action.clone()];
                 let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #fn_name(&mut __iter_fixture, actions_vec);
+                    #fn_name(&mut __iter_fixture, vec![action]);
                 }));
                 let __actions_this_iter = crucible_test_context::get_iteration_dispatch_count();
-                if __do_profile { __phase_execute_ns += __t.elapsed().as_nanos() as u64; }
 
-                // Flush thread-local bitmap buffers and check for new coverage (only on traced iterations)
-                let __new_coverage = if has_tracing {
+                // Flush thread-local bitmap buffers and check for new coverage.
+                // Uses shared bitmaps (atomic fetch_or) as single source of truth.
+                let mut __novel_bits: u32 = if has_tracing {
                     #mod_name::flush_local_bitmap_buffers(shared_edge_ptr, shared_branch_ptr);
-                    #mod_name::found_new_coverage()
-                } else { false };
+                    if #mod_name::found_new_coverage() { 1 } else { 0 }
+                } else { 0u32 };
+                // State coverage: lamports/slot differential bucket transitions via shared atomic bitmap
+                __novel_bits += unsafe {
+                    crucible_test_context::snapshot::check_state_coverage_atomic(
+                        &__iter_fixture.ctx.svm,
+                        &__iter_fixture.ctx.dirty_tracker,
+                        &*w0_initial,
+                        shared_state_cov_ptr,
+                        crucible_test_context::snapshot::STATE_COV_BITMAP_SIZE,
+                    )
+                };
+                let __new_coverage = __novel_bits > 0;
+                if let Some(__t) = __t { __phase_execute_ns += __t.elapsed().as_nanos() as u64; }
 
                 // Count actual SVM executions (includes success-seeking retries)
                 #mod_name::TOTAL_EXECUTIONS.fetch_add(__actions_this_iter, Ordering::Relaxed);
@@ -1782,7 +2045,7 @@ fn stateful_multicore_body(
                 }
 
                 // Check for violation — accumulate locally (flushed at batch boundary)
-                let __t = std::time::Instant::now();
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 let violation = crucible_test_context::take_violation();
 
                 if let Some(ref msg) = violation {
@@ -1790,7 +2053,7 @@ fn stateful_multicore_body(
                     pending_violations.push(state_idx);
 
                     // Quick local dedup: skip if we've seen this variant from this state before
-                    let __cur_variant = action.variant_index() as u16;
+                    let __cur_variant = __action_variant_idx as u16;
                     let __local_key = libafl_bolts::hash_std(
                         &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
                     );
@@ -1801,40 +2064,47 @@ fn stateful_multicore_body(
                                 crash_bytes[0..4].try_into().unwrap()
                             );
                             crash_bytes[0..4].copy_from_slice(&(old_count + 1).to_le_bytes());
-                            crash_bytes.extend_from_slice(&single_action_bytes);
+                            crash_bytes.extend_from_slice(&__single_action_buf);
                         }
                         // Store action variant for coarse dedup (computed inside lock later)
                         let current_desc = crucible_test_context::format_last_action_oneline();
                         pending_crashes.push((__cur_variant, msg.clone(), current_desc, state_idx, crash_bytes));
                     }
                 }
-                if __do_profile { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
+                if let Some(__t) = __t { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 5. Fingerprint + add to pool (accumulated locally)
-                let __action_variant_idx = action.variant_index();
+                // Dual-criterion: coverage-novel OR succeeded (state-novel via 16-bit dedup)
                 let __action_succeeded = if violation.is_none() && __panic_result.is_ok() {
-                    let history = crucible_test_context::get_action_history();
-                    let succeeded = history.first().map(|r| r.success).unwrap_or(false);
+                    let succeeded = crucible_test_context::get_first_action_success().unwrap_or(false);
 
                     // Record in per-worker action stats
                     action_stats.record(__state_class, __action_variant_idx, succeeded);
 
-                    if succeeded {
-                        let __t = std::time::Instant::now();
+                    if __new_coverage || succeeded {
+                        let __t_fp = if __do_profile { Some(std::time::Instant::now()) } else { None };
                         let mut fingerprint = compute_state_fingerprint_from_snapshot(
                             &__iter_fixture.ctx.svm,
                             &__iter_fixture.ctx.dirty_tracker,
+                            &*w0_initial,
                         );
+                        // Clock-only changes (e.g., advance_slots): incorporate parent state
+                        // so identical time advances from different parents don't collide.
+                        if __iter_fixture.ctx.dirty_tracker.dirty_accounts().is_empty() {
+                            fingerprint = fingerprint ^ parent_fingerprint.wrapping_mul(0x517cc1b727220a95);
+                        }
                         // Coverage-driven: bypass fingerprint dedup for states with new edges
                         if __new_coverage {
                             fingerprint = fingerprint
                                 .wrapping_mul(0x9e3779b97f4a7c15)
                                 .wrapping_add(local_iter);
                         }
-                        if __do_profile { __phase_fingerprint_ns += __t.elapsed().as_nanos() as u64; }
+                        if let Some(__t) = __t_fp { __phase_fingerprint_ns += __t.elapsed().as_nanos() as u64; }
 
-                        if fingerprint != 0 {
-                            let __t = std::time::Instant::now();
+                        // Skip expensive save work if bitmap says fingerprint already seen.
+                        // coverage_novel states bypass this (always save for coverage).
+                        if fingerprint != 0 && (__new_coverage || !fingerprint_bitmap.is_seen(fingerprint)) {
+                            let __t_save = if __do_profile { Some(std::time::Instant::now()) } else { None };
                             let new_delta = SvmSnapshot::take_delta(
                                 &__iter_fixture.ctx.svm,
                                 &delta_arc,
@@ -1847,19 +2117,23 @@ fn stateful_multicore_body(
                                     accumulated_bytes[0..4].try_into().unwrap()
                                 );
                                 accumulated_bytes[0..4].copy_from_slice(&(count + 1).to_le_bytes());
-                                accumulated_bytes.extend_from_slice(&single_action_bytes);
+                                accumulated_bytes.extend_from_slice(&__single_action_buf);
                             }
 
-                            let __field_bytes = if single_action_bytes.len() > 2 {
-                                single_action_bytes[2..].to_vec()
+                            let __field_bytes = if __single_action_buf.len() > 2 {
+                                __single_action_buf[2..].to_vec()
                             } else {
                                 Vec::new()
                             };
 
                             // Store fixture alongside novel state (SVM swapped out = cheap clone)
+                            // Use try_lock to avoid blocking: if contended, skip fixture storage.
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
                             let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                                Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone())));
+                                match fixture_clone_mutex.try_lock() {
+                                    Ok(_guard) => Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone()))),
+                                    Err(_) => None,
+                                };
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
 
                             let action_desc = crucible_test_context::format_last_action_oneline();
@@ -1867,9 +2141,9 @@ fn stateful_multicore_body(
                                 fingerprint, new_delta, parent_depth + 1,
                                 Some(state_idx), accumulated_bytes, action_desc,
                                 Some(__action_variant_idx as u16), __field_bytes,
-                                __fixture_for_storage, __new_coverage,
+                                __fixture_for_storage, __novel_bits, succeeded,
                             ));
-                            if __do_profile { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
+                            if let Some(__t) = __t_save { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
                         }
                     }
                     succeeded
@@ -1879,20 +2153,22 @@ fn stateful_multicore_body(
                 };
 
                 // 6. Update divergent_keys, prev_delta_arc, and prev_exec_dirty
-                let __t = std::time::Instant::now();
+                // IMPORTANT: Always track dirty accounts regardless of success/failure.
+                // Failed actions can still create/delete/modify accounts.
+                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 if is_traced_iter {
-                    // Traced SVM: update its own divergent tracking
-                    if __action_succeeded {
-                        traced_divergent.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                    }
+                    // Traced SVM: always update divergent tracking
+                    traced_divergent.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
                 } else {
                     // Fast SVM: update delta optimization state
                     prev_exec_dirty.clear();
+                    prev_exec_dirty.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
+                    divergent_keys.extend(prev_exec_dirty.iter().copied());
                     if __action_succeeded {
-                        prev_exec_dirty.extend(__iter_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied());
-                        divergent_keys.extend(prev_exec_dirty.iter().copied());
+                        prev_delta_arc = Some(delta_arc);
+                    } else {
+                        prev_delta_arc = None;
                     }
-                    prev_delta_arc = Some(delta_arc);
                 }
 
                 // 7. Swap SVM back out of per-iteration fixture
@@ -1903,16 +2179,17 @@ fn stateful_multicore_body(
                         std::mem::swap(&mut w0_svm, traced);
                     }
                 }
-                // __iter_fixture is dropped here (per-iteration clone)
-                if __do_profile { __phase_cleanup_ns += __t.elapsed().as_nanos() as u64; }
+                // Defer fixture drop: Rc::drop must happen under mutex (next batch refill)
+                w0_pending_drops.push(__iter_fixture);
+                if let Some(__t) = __t { __phase_cleanup_ns += __t.elapsed().as_nanos() as u64; }
 
                 if let Err(__panic_payload) = __panic_result {
                     std::panic::resume_unwind(__panic_payload);
                 }
 
                 // 8. Rate-limited monitor output (worker 0 only)
-                if __do_profile {
-                    __phase_total_ns += __iter_start.elapsed().as_nanos() as u64;
+                if let Some(__t) = __iter_start {
+                    __phase_total_ns += __t.elapsed().as_nanos() as u64;
                     __profiled_iters += 1;
                 }
 
@@ -1976,25 +2253,35 @@ fn stateful_multicore_body(
                         num_cores,
                     );
 
-                    if __do_profile && __profiled_iters > 0 {
+                    if __profiled_iters > 0 {
                         let total = __phase_total_ns;
+                        let n = __profiled_iters;
                         let pct = |ns: u64| -> f64 { if total > 0 { (ns as f64 / total as f64) * 100.0 } else { 0.0 } };
+                        let avg = |ns: u64| -> u64 { ns / n / 1000 }; // avg µs per iter
                         let other_ns = total.saturating_sub(
-                            __phase_pick_ns + __phase_restore_ns + __phase_execute_ns
-                            + __phase_fingerprint_ns + __phase_save_ns
+                            __phase_pick_ns + __phase_restore_ns + __phase_action_gen_ns
+                            + __phase_execute_ns + __phase_fingerprint_ns + __phase_save_ns
                             + __phase_crash_ns + __phase_cleanup_ns
                         );
-                        let avg_us = total / __profiled_iters / 1000;
+                        let avg_us = total / n / 1000;
                         eprintln!(
-                            "[PROFILE] pick: {:.1}% | restore: {:.1}% | execute: {:.1}% | \
-                             fingerprint: {:.1}% | save: {:.1}% | crash: {:.1}% | cleanup: {:.1}% | other: {:.1}% (avg: {}µs/iter)",
-                            pct(__phase_pick_ns), pct(__phase_restore_ns), pct(__phase_execute_ns),
-                            pct(__phase_fingerprint_ns), pct(__phase_save_ns),
-                            pct(__phase_crash_ns), pct(__phase_cleanup_ns), pct(other_ns),
+                            "[PROFILE] pick: {:.1}% ({}µs) | restore: {:.1}% ({}µs) | action_gen: {:.1}% ({}µs) | \
+                             execute: {:.1}% ({}µs) | fingerprint: {:.1}% ({}µs) | save: {:.1}% ({}µs) | \
+                             crash: {:.1}% ({}µs) | cleanup: {:.1}% ({}µs) | other: {:.1}% ({}µs) — avg: {}µs/iter",
+                            pct(__phase_pick_ns), avg(__phase_pick_ns),
+                            pct(__phase_restore_ns), avg(__phase_restore_ns),
+                            pct(__phase_action_gen_ns), avg(__phase_action_gen_ns),
+                            pct(__phase_execute_ns), avg(__phase_execute_ns),
+                            pct(__phase_fingerprint_ns), avg(__phase_fingerprint_ns),
+                            pct(__phase_save_ns), avg(__phase_save_ns),
+                            pct(__phase_crash_ns), avg(__phase_crash_ns),
+                            pct(__phase_cleanup_ns), avg(__phase_cleanup_ns),
+                            pct(other_ns), avg(other_ns),
                             avg_us,
                         );
                         __phase_pick_ns = 0;
                         __phase_restore_ns = 0;
+                        __phase_action_gen_ns = 0;
                         __phase_execute_ns = 0;
                         __phase_fingerprint_ns = 0;
                         __phase_save_ns = 0;

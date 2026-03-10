@@ -788,6 +788,8 @@ fn test_show_replay_no_binary() {
     fs::create_dir_all(&crashes_dir).unwrap();
     fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
 
+    // Cargo.toml has the "test" feature so build --features test will attempt to compile,
+    // but the binary won't actually work as a fuzz harness.
     fs::write(
         fuzz_dir.join("Cargo.toml"),
         r#"[package]
@@ -795,6 +797,8 @@ name = "my_prog_fuzz"
 version = "0.1.0"
 edition = "2021"
 [workspace]
+[features]
+test = []
 "#,
     ).unwrap();
     fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
@@ -804,12 +808,62 @@ edition = "2021"
 
     let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_replay", "--replay"]);
 
-    assert!(!output.status.success(), "replay should fail without binary");
+    // Replay may fail because the binary doesn't produce meaningful output,
+    // or succeed with "completed without crash". Either way it should not panic.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // The build should be attempted with --features test (the test directory name)
+    assert!(
+        combined.contains("Building with --features test") || combined.contains("Build failed"),
+        "replay should attempt to build with correct feature. got:\nstdout: {}\nstderr: {}", stdout, stderr
+    );
+}
+
+/// Verify that --replay infers the test name from the crash directory
+/// and passes it as a build feature.
+#[test]
+fn test_show_replay_infers_test_feature() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    // Create fuzz structure with TWO test directories
+    let fuzz_dir = temp.path().join("fuzz/my_prog");
+    let crashes_dir_a = fuzz_dir.join("crashes/invariant_test_a");
+    let crashes_dir_b = fuzz_dir.join("crashes/invariant_test_b");
+    fs::create_dir_all(&crashes_dir_a).unwrap();
+    fs::create_dir_all(&crashes_dir_b).unwrap();
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "my_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[features]
+invariant_test_a = []
+invariant_test_b = []
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    // Put crash in test_b directory
+    fs::write(crashes_dir_b.join("crash_abc123"), b"crash bytes").unwrap();
+
+    let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_abc123", "--replay"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // Should build with --features invariant_test_b (NOT invariant_test_a)
     assert!(
-        stderr.contains("binary not found") || stderr.contains("Build it first"),
-        "error should indicate binary needs to be built"
+        combined.contains("Building with --features invariant_test_b"),
+        "should build with feature from crash directory. got:\nstdout: {}\nstderr: {}", stdout, stderr
     );
 }
 
@@ -2392,6 +2446,113 @@ fn test_e2e_stop_on_crash_multicore() {
         );
     } else {
         eprintln!("[STOP-ON-CRASH-MC] No crash found within timeout - test-program bug may be hard to trigger");
+    }
+}
+
+/// Test that --stop-on-crash works in stateful single-core mode
+#[test]
+#[ignore]
+fn test_e2e_stop_on_crash_stateful() {
+    if !ensure_test_program_built() { return; }
+
+    let temp = TempDir::new().unwrap();
+    let crashes_dir = temp.path().join("crashes");
+
+    let start = std::time::Instant::now();
+
+    let (stdout, stderr, _) = common::run_test_program_fuzz_with_timeout(
+        &[
+            ("FUZZ_TIMEOUT_SECS", "120"),
+            ("FUZZ_STOP_ON_CRASH", "1"),
+            ("FUZZ_STATEFUL", "1"),
+            ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
+        ],
+        150,
+    );
+
+    let elapsed = start.elapsed();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    if stderr == "TIMEOUT" {
+        eprintln!("[STOP-ON-CRASH-STATEFUL] Hard timeout reached - stop-on-crash may not be working");
+        return;
+    }
+
+    let crash_files = common::count_crash_files(&crashes_dir);
+
+    eprintln!("[STOP-ON-CRASH-STATEFUL] Elapsed: {}s, Crashes: {}", elapsed.as_secs(), crash_files);
+
+    if crash_files > 0 {
+        assert!(
+            elapsed.as_secs() < 100,
+            "Stateful stop-on-crash should exit after finding crash. Took {}s. Output: {}",
+            elapsed.as_secs(), combined
+        );
+
+        assert!(
+            combined.contains("stop-on-crash") || combined.contains("signaling stop"),
+            "Should show stop-on-crash message. Output: {}", combined
+        );
+    } else {
+        eprintln!("[STOP-ON-CRASH-STATEFUL] No crash found within timeout");
+    }
+}
+
+/// Test that --stop-on-crash works in stateful multi-core mode (all workers stop)
+#[test]
+#[ignore]
+fn test_e2e_stop_on_crash_stateful_multicore() {
+    if !ensure_test_program_built() { return; }
+
+    let temp = TempDir::new().unwrap();
+    let crashes_dir = temp.path().join("crashes");
+
+    let start = std::time::Instant::now();
+
+    let (stdout, stderr, _) = common::run_test_program_fuzz_with_timeout(
+        &[
+            ("FUZZ_TIMEOUT_SECS", "120"),
+            ("FUZZ_STOP_ON_CRASH", "1"),
+            ("FUZZ_STATEFUL", "1"),
+            ("FUZZ_CORES", "4"),
+            ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
+        ],
+        150,
+    );
+
+    let elapsed = start.elapsed();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    if stderr == "TIMEOUT" {
+        eprintln!("[STOP-ON-CRASH-STATEFUL-MC] Hard timeout reached - stop-on-crash not stopping all cores");
+        // This IS a failure in multicore - if stop-on-crash can't stop all threads, it's broken
+        panic!("Stateful multicore stop-on-crash failed: process did not exit within 150s");
+    }
+
+    let crash_files = common::count_crash_files(&crashes_dir);
+
+    eprintln!("[STOP-ON-CRASH-STATEFUL-MC] Elapsed: {}s, Crashes: {}", elapsed.as_secs(), crash_files);
+
+    if crash_files > 0 {
+        assert!(
+            elapsed.as_secs() < 100,
+            "Stateful multicore stop-on-crash should exit quickly. Took {}s. Output: {}",
+            elapsed.as_secs(), combined
+        );
+
+        assert!(
+            combined.contains("stop-on-crash") || combined.contains("signaling stop"),
+            "Should show stop-on-crash message. Output: {}", combined
+        );
+
+        // Should have minimal crashes (stopped after first)
+        assert!(
+            crash_files <= 3,  // Allow small race condition with multiple workers
+            "Stop-on-crash should stop after first crash. Got {} crashes. Output: {}",
+            crash_files, combined
+        );
+    } else {
+        eprintln!("[STOP-ON-CRASH-STATEFUL-MC] No crash found within timeout");
     }
 }
 

@@ -38,7 +38,7 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         /// 13 buckets (50% more granular than AFL's 9) to reduce coverage plateaus
         /// in stateful fuzzing where action sequences hit the same edges at different depths.
         #[inline]
-        fn to_bucket(count: u8) -> u8 {
+        pub fn to_bucket(count: u8) -> u8 {
             match count {
                 0 => 0,
                 1 => 1,
@@ -100,36 +100,87 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(true));
         }
 
-        // Thread-local buffers for bitmap updates to reduce atomic contention in multi-core mode.
-        // Updates are accumulated locally and flushed periodically instead of on every transaction.
+        // Thread-local bitmaps that mirror the shared bitmaps for O(1) accumulation.
+        // Each byte position is directly indexed instead of appended to a Vec.
+        // Dirty position sets enable O(dirty) flush instead of O(bitmap_size) scan.
         thread_local! {
-            pub static LOCAL_EDGE_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
-            pub static LOCAL_BRANCH_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+            static LOCAL_EDGE_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_EDGE_BITMAP_SIZE]);
+            static LOCAL_BRANCH_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_BRANCH_BITMAP_SIZE]);
+            static LOCAL_EDGE_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(512));
+            static LOCAL_BRANCH_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(256));
         }
 
         /// Flush thread-local bitmap buffers to shared memory.
-        /// Called periodically from the harness (e.g., every 50 iterations) to reduce atomic contention.
+        /// Iterates only dirty positions — O(dirty) atomic ops, no merge step.
         pub fn flush_local_bitmap_buffers(shared_edge_ptr: *mut u8, shared_branch_ptr: *mut u8) {
-            LOCAL_EDGE_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_edge_ptr, &buffer, SHARED_EDGE_BITMAP_SIZE);
-                    buffer.clear();
-                }
+            LOCAL_EDGE_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_EDGE_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_edge_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
             });
-            LOCAL_BRANCH_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_branch_ptr, &buffer, SHARED_BRANCH_BITMAP_SIZE);
-                    buffer.clear();
-                }
+            LOCAL_BRANCH_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_BRANCH_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_branch_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
             });
         }
 
         /// Clear thread-local bitmap buffers without flushing (used when resetting for new iteration).
         pub fn clear_local_bitmap_buffers() {
-            LOCAL_EDGE_BUFFER.with(|buf| buf.borrow_mut().clear());
-            LOCAL_BRANCH_BUFFER.with(|buf| buf.borrow_mut().clear());
+            LOCAL_EDGE_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                LOCAL_EDGE_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    for &pos in dirty.iter() { bm[pos as usize] = 0; }
+                });
+                dirty.clear();
+            });
+            LOCAL_BRANCH_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                LOCAL_BRANCH_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    for &pos in dirty.iter() { bm[pos as usize] = 0; }
+                });
+                dirty.clear();
+            });
         }
 
         // Force-accept mode for initial corpus loading
@@ -429,16 +480,38 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     }
                 }
 
-                // Multi-core mode: accumulate updates in thread-local buffers
-                // Buffers are flushed periodically from the harness to reduce atomic contention
+                // Multi-core mode: merge updates into thread-local bitmaps (O(1) per update)
+                // Dirty positions are tracked for O(dirty) flush later
                 if self.shared_edge_bitmap.is_some() {
-                    LOCAL_EDGE_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(edge_bitmap_updates.iter().cloned());
+                    LOCAL_EDGE_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_EDGE_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &edge_bitmap_updates {
+                                if byte_pos < SHARED_EDGE_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
                 if self.shared_branch_bitmap.is_some() {
-                    LOCAL_BRANCH_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(branch_bitmap_updates.iter().cloned());
+                    LOCAL_BRANCH_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_BRANCH_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &branch_bitmap_updates {
+                                if byte_pos < SHARED_BRANCH_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
 

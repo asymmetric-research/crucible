@@ -7,7 +7,7 @@ pub mod mutators;
 pub(crate) mod test_helpers;
 
 pub use action::FuzzAction;
-pub use input::FuzzInput;
+pub use input::{FuzzInput, ParseInfo};
 pub use generator::ActionGenerator;
 pub use mutators::{
     gen_range_u64, gen_range_u128, gen_range_usize, mutate_u64, mutate_u128, mutate_i128, mutate_usize, mutate_bool, mutate_i64,

@@ -866,6 +866,33 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str) -> Result<()> {
         }
     }
 
+    // Deduplicate: remove raw crashes whose content matches a crash with metadata
+    {
+        use std::collections::HashSet;
+        use std::hash::{Hash, Hasher};
+
+        let mut meta_content_hashes: HashSet<u64> = HashSet::new();
+        for (crash_id, test_name, _meta) in &crashes_with_meta {
+            let crash_path = crashes_dir.join(test_name).join(crash_id);
+            if let Ok(bytes) = fs::read(&crash_path) {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                meta_content_hashes.insert(hasher.finish());
+            }
+        }
+
+        raw_crashes.retain(|(filename, test_name, _size)| {
+            let crash_path = crashes_dir.join(test_name).join(filename);
+            if let Ok(bytes) = fs::read(&crash_path) {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                !meta_content_hashes.contains(&hasher.finish())
+            } else {
+                true // keep if we can't read it
+            }
+        });
+    }
+
     if crashes_with_meta.is_empty() && raw_crashes.is_empty() {
         println!(
             "No crashes found for {} in: {}",
@@ -1108,6 +1135,7 @@ fn format_json_compact(v: &serde_json::Value) -> String {
 fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result<()> {
     let crashes_dir = fuzz_dir.join("crashes");
     let mut crash_path = None;
+    let mut test_name: Option<String> = None;
     let mut found_metadata_only = false;
     let mut available_inputs: Vec<String> = Vec::new();
 
@@ -1118,9 +1146,16 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
                 continue;
             }
 
+            let dir_name = test_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
             let candidate = test_dir.join(crash_name);
             if candidate.exists() && candidate.is_file() {
                 crash_path = Some(candidate);
+                test_name = Some(dir_name);
                 break;
             }
 
@@ -1128,8 +1163,12 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
                 let candidate = test_dir.join(format!("{}{}", crash_name, ext));
                 if candidate.exists() && candidate.is_file() {
                     crash_path = Some(candidate);
+                    test_name = Some(dir_name.clone());
                     break;
                 }
+            }
+            if crash_path.is_some() {
+                break;
             }
 
             let meta_path = test_dir.join(format!("{}.meta.json", crash_name));
@@ -1186,6 +1225,35 @@ fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str) -> Result
         }
     })?;
 
+    // Rebuild binary with the correct test feature to ensure action enum matches.
+    // Without this, the binary may have been last compiled for a different test,
+    // causing action variant indices to be misinterpreted during deserialization.
+    let test_feature = test_name.as_deref().unwrap_or("");
+    if !test_feature.is_empty() {
+        println!("[REPLAY] Building with --features {} ...", test_feature);
+        // Try release first, fall back to debug
+        let build_status = Command::new("cargo")
+            .current_dir(fuzz_dir)
+            .env("RUSTUP_TOOLCHAIN", "stable")
+            .args(["build", "--release", "--features", test_feature])
+            .status()
+            .context("Failed to build fuzz harness for replay")?;
+
+        if !build_status.success() {
+            // Try debug build
+            let build_status = Command::new("cargo")
+                .current_dir(fuzz_dir)
+                .env("RUSTUP_TOOLCHAIN", "stable")
+                .args(["build", "--features", test_feature])
+                .status()
+                .context("Failed to build fuzz harness for replay")?;
+
+            if !build_status.success() {
+                bail!("Failed to build fuzz harness with --features {}", test_feature);
+            }
+        }
+    }
+
     let binary_path = find_fuzz_binary(fuzz_dir, program_name, "release")
         .or_else(|_| find_fuzz_binary(fuzz_dir, program_name, "debug"))?;
 
@@ -1231,6 +1299,38 @@ fn fuzz_tmin(
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
+
+    // Auto-detect: if test_name looks like a crash ID and no crash_file was given,
+    // search all test directories for it. Allows: crucible tmin stake crash_abc123
+    let (test_name, crash_file) = if crash_file.is_none() && !all && test_name.starts_with("crash_") {
+        let crashes_root = fuzz_dir.join("crashes");
+        let mut found_test = None;
+        if crashes_root.is_dir() {
+            if let Ok(entries) = fs::read_dir(&crashes_root) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if entry.path().join(test_name).exists() {
+                            found_test = Some(entry.file_name().to_string_lossy().to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        match found_test {
+            Some(t) => (t, Some(test_name.to_string())),
+            None => bail!(
+                "Could not find crash '{}' in any test directory under: {}\n\
+                 Usage: crucible tmin {} <test_name> {} --release",
+                test_name, crashes_root.display(), program_name, test_name
+            ),
+        }
+    } else {
+        (test_name.to_string(), crash_file.map(|s| s.to_string()))
+    };
+    let test_name = &test_name;
+    let crash_file = crash_file.as_deref();
+
     let crashes_dir = fuzz_dir.join("crashes").join(test_name);
 
     if !crashes_dir.exists() {

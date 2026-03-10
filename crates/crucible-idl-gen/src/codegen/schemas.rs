@@ -46,12 +46,12 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
                         if pre_data.len() < disc_len + size || post_data.len() < disc_len + size {
                             return vec![];
                         }
-                        let pre: &state::#type_ident = bytemuck::from_bytes(
+                        let Ok(pre) = bytemuck::try_from_bytes::<state::#type_ident>(
                             &pre_data[disc_len..disc_len + size]
-                        );
-                        let post: &state::#type_ident = bytemuck::from_bytes(
+                        ) else { return vec![]; };
+                        let Ok(post) = bytemuck::try_from_bytes::<state::#type_ident>(
                             &post_data[disc_len..disc_len + size]
-                        );
+                        ) else { return vec![]; };
                         let mut deltas = vec![];
                         #(#field_comparisons)*
                         deltas

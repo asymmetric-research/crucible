@@ -270,7 +270,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         let action_ty = action_type.as_ref().unwrap();
         quote! {
             println!("Crash Input (structured):");
-            let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&bytes);
+            let (__fuzz_input, __parse_info) = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes_with_info(&bytes);
+            if __parse_info.actual_count < __parse_info.expected_count {
+                println!("[WARN] Deserialized {}/{} actions — harness may have changed since crash was recorded",
+                    __parse_info.actual_count, __parse_info.expected_count);
+            }
             println!("Actions ({} total):", __fuzz_input.actions.len());
             for (i, action) in __fuzz_input.actions.iter().enumerate() {
                 println!("  {}: {:?}", i, action);

@@ -8,9 +8,9 @@ edition = "2021"
 
 [dependencies]
 # Fuzzing framework
-crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
-crucible-test-context = { path = "../../../../crates/crucible-test-context" }
-crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
+crucible-fuzzer = { path = "/opt/crucible/crates/crucible-fuzzer" }
+crucible-test-context = { path = "/opt/crucible/crates/crucible-test-context" }
+crucible-idl-gen = { path = "/opt/crucible/crates/crucible-idl-gen" }
 anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 
 # Solana v3.x (required for litesvm 0.9.0)
@@ -26,6 +26,10 @@ solana-instruction = "3.1"
 libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
 libafl_bolts = { version = "0.15.1", features = ["std"] }
 arbitrary = { version = "1", features = ["derive"] }
+
+# LiteSVM + ctor (required for workspace-isolated harness)
+litesvm = { version = "0.9.0", features = ["register-tracing"] }
+ctor = "0.6"
 
 # Utilities
 anyhow = "1.0"

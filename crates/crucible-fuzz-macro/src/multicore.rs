@@ -523,7 +523,7 @@ pub fn multicore_mode(
                 let __pristine_svm = std::cell::RefCell::new(template_fixture.ctx.svm.clone());
                 let __saved_svm = std::cell::RefCell::new(std::mem::replace(
                     &mut template_fixture.ctx.svm,
-                    litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::new(),
                 ));
 
                 // Periodic full SVM reset interval (0 = disabled)
@@ -592,13 +592,9 @@ pub fn multicore_mode(
 
                 let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
                     // Check file-based stop signal (set by any worker on --stop-on-crash or timeout)
-                    // Rate-limit this check to every 100 iterations to avoid filesystem overhead
+                    // Check every iteration — stat() is cheap and stop-on-crash must be responsive
                     let current_iter = iteration_counter.load(std::sync::atomic::Ordering::Relaxed);
-                    let global_stop = if current_iter % 100 == 0 {
-                        stop_signal_for_harness.exists()
-                    } else {
-                        false
-                    };
+                    let global_stop = stop_signal_for_harness.exists();
 
                     if global_stop || should_stop {
                         // Exit cleanly - don't panic, as LibAFL's InProcessExecutor
@@ -676,13 +672,6 @@ pub fn multicore_mode(
                         #mod_name::set_success_pattern(__pattern);
                     }
 
-                    // Drain repaired inputs from success-seeking and write to shared corpus directory
-                    for __repaired_bytes in crucible_test_context::drain_repaired_inputs() {
-                        let __hash = hash_std(&__repaired_bytes);
-                        let __path = format!("{}/repaired_{:016x}", shared_corpus_dir_for_client, __hash);
-                        let _ = std::fs::write(&__path, &__repaired_bytes);
-                    }
-
                     // Flush discovered variants to shared bitmap (rate-limited to every 64 iterations)
                     if current_iteration % 64 == 0 {
                         let __total_variants = crucible_test_context::TOTAL_ACTION_VARIANTS
@@ -758,8 +747,8 @@ pub fn multicore_mode(
                             eprintln!("[FUZZ] First crash found. Worker {} signaling stop (--stop-on-crash).", worker_id);
                             // Create stop signal file to notify all workers
                             let _ = std::fs::write(&stop_signal_for_harness, b"stop");
-                            should_stop = true;
-                            // Return Crash to record it, then next iteration will panic and stop
+                            // Exit immediately so other workers see the stop file
+                            std::process::exit(0);
                         }
 
                         ExitKind::Crash
@@ -834,7 +823,7 @@ pub fn multicore_mode(
                     *__pristine_svm.borrow_mut() = __new_fixture.ctx.svm.clone();
                     *__saved_svm.borrow_mut() = std::mem::replace(
                         &mut __new_fixture.ctx.svm,
-                        litesvm::LiteSVM::new(),
+                        crucible_test_context::litesvm::LiteSVM::new(),
                     );
                 }
 

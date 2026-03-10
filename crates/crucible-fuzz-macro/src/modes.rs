@@ -136,6 +136,26 @@ pub fn replay_mode(
         }
     };
 
+    // Partial deserialization warning (only meaningful for structured mode)
+    // Uses __raw_bytes (not input_bytes) since deser_block moves input_bytes
+    let partial_deser_warning = if structured {
+        quote! {
+            // Detect partial deserialization (harness may have changed since crash)
+            let __expected_actions = if __raw_bytes.len() >= 4 {
+                let raw = u32::from_le_bytes(__raw_bytes[0..4].try_into().unwrap()) as usize;
+                raw.min(256)
+            } else { 0 };
+            let __actual_actions = param_1.len();
+            if __actual_actions < __expected_actions {
+                eprintln!("[REPLAY] [WARN] Only deserialized {}/{} actions", __actual_actions, __expected_actions);
+                eprintln!("[REPLAY] The harness has likely changed since this crash was recorded");
+                eprintln!("[REPLAY] Crash may not reproduce correctly");
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         // === SINGLE INPUT REPLAY MODE ===
         // Replay a specific input file and report the outcome
@@ -172,6 +192,8 @@ pub fn replay_mode(
             // Parse input and run test
             #deser_block
 
+            #partial_deser_warning
+
             // Clear any previous action sequence
             crucible_test_context::clear_action_history();
 
@@ -181,24 +203,24 @@ pub fn replay_mode(
             // Check for crash/violation
             let violation_msg = crucible_test_context::take_violation();
 
-            // Rewrite .meta.json with latest action history (includes taint data)
-            {
-                let input_path_buf = std::path::PathBuf::from(input_path);
-                if let (Some(parent), Some(filename)) = (input_path_buf.parent(), input_path_buf.file_name()) {
-                    let crash_id = filename.to_string_lossy().to_string();
-                    let crashes_dir = parent.to_string_lossy().to_string();
-                    crucible_test_context::write_crash_metadata_for_id(&crashes_dir, &crash_id, None);
-                    eprintln!("[REPLAY] Updated {}.meta.json", crash_id);
-                }
-            }
-
             if let Some(msg) = violation_msg {
+                // Only update metadata when crash actually reproduces
+                {
+                    let input_path_buf = std::path::PathBuf::from(input_path);
+                    if let (Some(parent), Some(filename)) = (input_path_buf.parent(), input_path_buf.file_name()) {
+                        let crash_id = filename.to_string_lossy().to_string();
+                        let crashes_dir = parent.to_string_lossy().to_string();
+                        crucible_test_context::write_crash_metadata_for_id(&crashes_dir, &crash_id, None);
+                        eprintln!("[REPLAY] Updated {}.meta.json", crash_id);
+                    }
+                }
                 eprintln!("[REPLAY] CRASH REPRODUCED!");
                 eprintln!("[REPLAY] Violation: {}", msg);
                 crucible_test_context::print_action_sequence();
                 std::process::exit(1);
             } else {
                 eprintln!("[REPLAY] Test completed without crash");
+                eprintln!("[REPLAY] Original .meta.json preserved (crash did not reproduce)");
                 eprintln!("[REPLAY] Note: If you expected a crash, the input may be from a different harness version");
                 crucible_test_context::print_action_sequence();
                 std::process::exit(0);

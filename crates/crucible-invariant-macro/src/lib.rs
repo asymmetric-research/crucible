@@ -8,6 +8,37 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crucible_macro_utils::{RangeConstraint, MaxLenConstraint};
 
+/// Expand `include!("file.rs")` macro invocations inside an impl block by reading
+/// the referenced files relative to CARGO_MANIFEST_DIR and parsing them as impl items.
+fn expand_include_items(items: &[ImplItem]) -> Vec<syn::ImplItemFn> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let src_dir = std::path::PathBuf::from(&manifest_dir).join("src");
+    let mut expanded = Vec::new();
+    for item in items {
+        if let ImplItem::Macro(mac) = item {
+            if mac.mac.path.is_ident("include") {
+                // Parse the include argument as a string literal
+                if let Ok(lit) = mac.mac.parse_body::<syn::LitStr>() {
+                    let file_path = src_dir.join(lit.value());
+                    if let Ok(content) = std::fs::read_to_string(&file_path) {
+                        // Parse file contents as a sequence of impl items
+                        // Wrap in a dummy impl block to parse
+                        let wrapped = format!("impl Dummy {{ {} }}", content);
+                        if let Ok(parsed) = syn::parse_str::<ItemImpl>(&wrapped) {
+                            for inner in parsed.items {
+                                if let ImplItem::Fn(method) = inner {
+                                    expanded.push(method);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    expanded
+}
+
 static FALLBACK_MAIN_EMITTED: AtomicBool = AtomicBool::new(false);
 
 fn read_cargo_features() -> Vec<String> {
@@ -648,56 +679,91 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
     let mut max_lens: HashMap<(String, String), MaxLenConstraint> = HashMap::new();
     let mut has_after_action = false;
 
-    for item in &mut input.items {
-        // Each function
-        if let ImplItem::Fn(method) = item {
-            let method_name = method.sig.ident.to_string();
-
-            // Check for after_action callback
-            if method_name == "after_action" {
-                has_after_action = true;
-            }
-
-            if method_name.starts_with("action_") {
-                let action_name = &method_name[7..];
-                let action_ident = format_ident!("{}", to_pascal_case(action_name));
-
-                let mut params = Vec::new();
-                // Each parameter for the action
-                for arg in &mut method.sig.inputs {
-                    if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg {
-                        if let syn::Pat::Ident(pat_ident) = &**pat {
-                            if pat_ident.ident != "self" {
-                                // Check for range constraint before stripping
-                                if let Some(range_attr) = attrs.iter().find(|a| a.path().is_ident("range")) {
-                                    if let Ok(constraint) = RangeConstraint::from_attr(range_attr) {
-                                        constraints.insert(
-                                            (action_ident.to_string(), pat_ident.ident.to_string()),
-                                            constraint
-                                        );
-                                    }
-                                }
-                                // Check for max_len constraint
-                                if let Some(ml_attr) = attrs.iter().find(|a| a.path().is_ident("max_len")) {
-                                    if let Ok(ml) = MaxLenConstraint::from_attr(ml_attr) {
-                                        max_lens.insert(
-                                            (action_ident.to_string(), pat_ident.ident.to_string()),
-                                            ml
-                                        );
-                                    }
-                                }
-                                // Strip custom attributes from original impl
-                                attrs.retain(|a| !a.path().is_ident("range") && !a.path().is_ident("max_len"));
-                                params.push((pat_ident.ident.clone(), ty.clone()));
+    // Expand include!() macros to discover actions defined in external files.
+    // Also replace include!() items in the impl block with their expanded content,
+    // because the compiler won't re-expand include!() in proc macro output.
+    // Replace include!() macro items with expanded methods in the impl block
+    let mut new_items: Vec<ImplItem> = Vec::new();
+    let manifest_dir_str = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let src_dir_path = std::path::PathBuf::from(&manifest_dir_str).join("src");
+    for item in input.items.drain(..) {
+        if let ImplItem::Macro(ref mac) = item {
+            if mac.mac.path.is_ident("include") {
+                if let Ok(lit) = mac.mac.parse_body::<syn::LitStr>() {
+                    let file_path = src_dir_path.join(lit.value());
+                    if let Ok(content) = std::fs::read_to_string(&file_path) {
+                        let wrapped = format!("impl Dummy {{ {} }}", content);
+                        if let Ok(parsed) = syn::parse_str::<ItemImpl>(&wrapped) {
+                            for inner in parsed.items {
+                                new_items.push(inner);
                             }
+                            continue;
                         }
                     }
                 }
-
-                actions.push((action_ident, method.sig.ident.clone(), params));
             }
         }
+        new_items.push(item);
     }
+    input.items = new_items;
+
+    // Helper closure to process a method and extract action info
+    fn process_method(
+        method: &mut syn::ImplItemFn,
+        actions: &mut Vec<(Ident, Ident, Vec<(Ident, Box<Type>)>)>,
+        constraints: &mut HashMap<(String, String), RangeConstraint>,
+        max_lens: &mut HashMap<(String, String), MaxLenConstraint>,
+        has_after_action: &mut bool,
+    ) {
+        let method_name = method.sig.ident.to_string();
+
+        if method_name == "after_action" {
+            *has_after_action = true;
+        }
+
+        if method_name.starts_with("action_") {
+            let action_name = &method_name[7..];
+            let action_ident = format_ident!("{}", to_pascal_case(action_name));
+
+            let mut params = Vec::new();
+            for arg in &mut method.sig.inputs {
+                if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg {
+                    if let syn::Pat::Ident(pat_ident) = &**pat {
+                        if pat_ident.ident != "self" {
+                            if let Some(range_attr) = attrs.iter().find(|a| a.path().is_ident("range")) {
+                                if let Ok(constraint) = RangeConstraint::from_attr(range_attr) {
+                                    constraints.insert(
+                                        (action_ident.to_string(), pat_ident.ident.to_string()),
+                                        constraint
+                                    );
+                                }
+                            }
+                            if let Some(ml_attr) = attrs.iter().find(|a| a.path().is_ident("max_len")) {
+                                if let Ok(ml) = MaxLenConstraint::from_attr(ml_attr) {
+                                    max_lens.insert(
+                                        (action_ident.to_string(), pat_ident.ident.to_string()),
+                                        ml
+                                    );
+                                }
+                            }
+                            attrs.retain(|a| !a.path().is_ident("range") && !a.path().is_ident("max_len"));
+                            params.push((pat_ident.ident.clone(), ty.clone()));
+                        }
+                    }
+                }
+            }
+
+            actions.push((action_ident, method.sig.ident.clone(), params));
+        }
+    }
+
+    for item in &mut input.items {
+        if let ImplItem::Fn(method) = item {
+            process_method(method, &mut actions, &mut constraints, &mut max_lens, &mut has_after_action);
+        }
+    }
+
+    // (include!() methods are already expanded into input.items above)
 
     if actions.is_empty() {
         panic!("No action_* methods found in impl block. Methods must be named action_something()");
@@ -1147,14 +1213,6 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 std::sync::atomic::Ordering::Relaxed,
             );
 
-            // Success-seeking: retry budget and repaired action tracking
-            let __seek_retries: usize = std::env::var("FUZZ_SEEK_RETRIES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(32);
-            let mut __repaired_actions: Vec<#mod_name::#enum_name> = Vec::with_capacity(capped_len);
-            let mut __any_repaired = false;
-
             for (i, mut action) in actions.into_iter().take(max_actions).enumerate() {
                 action.constrain_in_place();
 
@@ -1163,57 +1221,19 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 let variant_idx = crucible_fuzzer::FuzzAction::variant_index(&action);
-                let ever_succeeded = crucible_test_context::has_variant_succeeded(variant_idx);
-
-                // Note: tx counting is now done in send_batch() at the transaction level
-
-                // Capture taint log index before dispatch (action may produce 0..N txs)
-                let taint_start = fixture.ctx.taint_log.len();
 
                 // Execute the action and get success status
-                let mut success = fixture.__dispatch_action(action.clone());
-
-                // Success-seeking: retry failing actions for variants that have never succeeded.
-                // Failed SVM transactions don't modify state, so retries are safe without restore.
-                if !success && !ever_succeeded && __seek_retries > 0 {
-                    let mut __rng = crucible_fuzzer::StdRand::with_seed(
-                        (crucible_test_context::get_current_iteration() as u64)
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(i as u64)
-                    );
-                    for _retry in 0..__seek_retries {
-                        let mut mutated = action.clone();
-                        crucible_fuzzer::FuzzAction::mutate(&mut mutated, &mut __rng);
-                        mutated.constrain_in_place();
-                        if fixture.__dispatch_action(mutated.clone()) {
-                            action = mutated;
-                            success = true;
-                            __any_repaired = true;
-                            break;
-                        }
-                    }
-                }
+                let success = fixture.__dispatch_action(action.clone());
 
                 if success {
                     crucible_test_context::mark_variant_succeeded(variant_idx);
                 }
 
-                // Record action after potential repair (captures successful params)
+                // Record action with params for crash output
                 let action_name_str = action.action_name();
                 let action_params = action.to_json_params();
-                __repaired_actions.push(action);
-
-                // Capture taint log index after dispatch
-                let taint_end = fixture.ctx.taint_log.len();
-
-                // Build per-action taint summary from the transactions this action produced
-                let taint = crucible_test_context::snapshot::build_action_taint_summary(
-                    &fixture.ctx.taint_log, taint_start, taint_end,
-                );
-
-                // Full record with params and taint for crash metadata and replay output
                 crucible_test_context::push_action_record_with_taint(
-                    action_name_str, action_params, success, taint,
+                    action_name_str, action_params, success, None,
                 );
 
                 #fn_body
@@ -1223,12 +1243,6 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                     crucible_test_context::set_violation_action_index(i);
                     break;
                 }
-            }
-
-            // Save repaired input if any action was fixed via success-seeking
-            if __any_repaired {
-                let repaired = crucible_fuzzer::FuzzInput::new(__repaired_actions);
-                crucible_test_context::push_repaired_input(repaired.to_bytes());
             }
 
             fixture.__auto_flush();

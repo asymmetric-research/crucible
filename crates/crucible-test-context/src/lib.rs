@@ -63,6 +63,8 @@ pub use coverage::{extract_functions, generate_bytecode_lcov, generate_source_lc
 pub use coverage::{DwarfSourceMap, SourceLocation, build_dwarf_source_map};
 
 pub use litesvm::InvocationInspectCallback;
+// Re-export litesvm for generated code (stateful mode creates placeholder SVMs)
+pub use litesvm;
 
 // Re-export serde_json for generated code
 pub use serde_json;
@@ -130,8 +132,6 @@ thread_local! {
     static ITERATION_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
     // Success-seeking: tracks which action variant indices have ever succeeded
     static SUCCEEDED_VARIANTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-    // Success-seeking: queue of repaired inputs (serialized bytes) to be added to corpus
-    static REPAIRED_INPUTS: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
     // Cached env var: FUZZ_DEBUG (checked once per thread, avoids syscall on every send_batch)
     static FUZZ_DEBUG: Cell<bool> = Cell::new(false);
 }
@@ -348,6 +348,13 @@ pub fn get_action_history() -> Vec<ActionRecord> {
     ACTION_HISTORY.with(|h| h.borrow().clone())
 }
 
+/// Check if the first action in history succeeded.
+/// Avoids cloning the entire history Vec — O(1) instead of O(n).
+#[inline]
+pub fn get_first_action_success() -> Option<bool> {
+    ACTION_HISTORY.with(|h| h.borrow().first().map(|r| r.success))
+}
+
 /// Clear the action history (called at start of each iteration)
 pub fn clear_action_history() {
     ACTION_HISTORY.with(|h| h.borrow_mut().clear());
@@ -409,16 +416,6 @@ pub fn mark_variant_succeeded(variant_idx: usize) {
 /// Get the number of action variants that have ever succeeded.
 pub fn succeeded_variant_count() -> usize {
     SUCCEEDED_VARIANTS.with(|s| s.borrow().len())
-}
-
-/// Push a repaired input (serialized bytes) to the TLS queue for corpus addition.
-pub fn push_repaired_input(bytes: Vec<u8>) {
-    REPAIRED_INPUTS.with(|q| q.borrow_mut().push(bytes));
-}
-
-/// Drain all repaired inputs from the TLS queue, returning ownership.
-pub fn drain_repaired_inputs() -> Vec<Vec<u8>> {
-    REPAIRED_INPUTS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// Build crash metadata from current state
@@ -4103,6 +4100,80 @@ mod tests {
         assert!(out.contains("amount=100"), "amount: {out}");
         assert!(out.contains("user=2"), "user: {out}");
         assert!(out.contains("-> OK"), "status: {out}");
+    }
+
+    // =========================================================================
+    // Regression: push_action_record_with_taint preserves params in output
+    // (was broken when push_action_record_lite was used instead, dropping params)
+    // =========================================================================
+
+    #[test]
+    fn action_record_with_taint_includes_params_in_sequence() {
+        clear_format_tls();
+        set_total_actions(3);
+        // Simulate what the invariant macro now does: push_action_record_with_taint with params
+        push_action_record_with_taint(
+            "delegate_stake",
+            serde_json::json!({"authority": null, "stake_account": 1340788527u64, "vote_account": 640494879u64}),
+            true,
+            None,
+        );
+        push_action_record_with_taint(
+            "advance_slots",
+            serde_json::json!({"slots": 54177}),
+            true,
+            None,
+        );
+        push_action_record_with_taint(
+            "withdraw",
+            serde_json::json!({"stake_account": 3, "lamports": 1000, "leave_reserve": true}),
+            false,
+            None,
+        );
+
+        let out = format_action_sequence();
+        // All params must appear in the output
+        assert!(out.contains("authority=null"), "authority param missing: {out}");
+        assert!(out.contains("stake_account=1340788527"), "stake_account param missing: {out}");
+        assert!(out.contains("vote_account=640494879"), "vote_account param missing: {out}");
+        assert!(out.contains("slots=54177"), "slots param missing: {out}");
+        assert!(out.contains("leave_reserve=true"), "leave_reserve param missing: {out}");
+        assert!(out.contains("lamports=1000"), "lamports param missing: {out}");
+        // Status markers
+        assert!(out.contains("delegate_stake(") && out.contains(") -> OK"), "delegate_stake format: {out}");
+        assert!(out.contains("withdraw(") && out.contains(") -> FAIL"), "withdraw format: {out}");
+    }
+
+    #[test]
+    fn action_record_with_taint_params_in_oneline() {
+        clear_format_tls();
+        push_action_record_with_taint(
+            "move_lamports",
+            serde_json::json!({"dest_account": 42, "lamports": null, "stake_account": 99}),
+            true,
+            None,
+        );
+
+        let out = format_last_action_oneline();
+        assert!(out.contains("move_lamports("), "should have parens: {out}");
+        assert!(out.contains("dest_account=42"), "dest_account: {out}");
+        assert!(out.contains("lamports=null"), "lamports null: {out}");
+        assert!(out.contains("stake_account=99"), "stake_account: {out}");
+        assert!(out.contains("-> OK"), "status: {out}");
+    }
+
+    #[test]
+    fn action_record_lite_omits_params_regression() {
+        // Verify that push_action_record_lite (the old path) does NOT include params.
+        // This test documents the regression that was fixed.
+        clear_format_tls();
+        set_total_actions(1);
+        push_action_record_lite("delegate_stake", true);
+
+        let out = format_action_sequence();
+        // Lite records have no params — should NOT have parentheses
+        assert!(out.contains("delegate_stake -> OK"), "should have no params: {out}");
+        assert!(!out.contains("delegate_stake("), "should not have parens: {out}");
     }
 
     // =========================================================================
