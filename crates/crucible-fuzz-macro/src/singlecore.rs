@@ -58,6 +58,7 @@ pub fn singlecore_mode(
         #[allow(unused_mut)]
         let mut template_fixture = template_fixture;
         template_fixture.ctx.take_snapshot();
+        (*template_fixture.self_b.as_mut().unwrap()).ctx.take_snapshot();
         if verbose {
             eprintln!("[FUZZ] Snapshot taken ({} tracked accounts)",
                 template_fixture.ctx.tracked_accounts_count());
@@ -72,6 +73,10 @@ pub fn singlecore_mode(
             &mut template_fixture.ctx.svm,
             litesvm::LiteSVM::new(),
         ));
+
+        let __saved_svm_b = std::cell::RefCell::new(std::mem::replace(
+                        &mut template_fixture.self_b.as_mut().unwrap().ctx.svm,
+                        litesvm::LiteSVM::new(),));
 
         // Periodic full SVM reset interval (0 = disabled)
         let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
@@ -117,9 +122,11 @@ pub fn singlecore_mode(
 
             // Clone template for clean non-SVM state (cheap: empty SVM + Arc programs)
             let mut #fixture_param_name = template_fixture.clone();
+            #fixture_param_name.self_b = Some(Box::new((**(template_fixture.self_b.as_ref().unwrap())).clone()));
 
             // Swap real SVM into the clone
             std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
+            std::mem::swap(&mut (&mut *#fixture_param_name.self_b.as_mut().unwrap()).ctx.svm, &mut *__saved_svm_b.borrow_mut());
 
             let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
             #fixture_param_name.ctx.set_invocation_callback(callback);
@@ -146,12 +153,20 @@ pub fn singlecore_mode(
             if let Some(ref snap) = template_fixture.ctx.snapshot {
                 snap.restore(&mut #fixture_param_name.ctx.svm, &#fixture_param_name.ctx.dirty_tracker);
             }
+            if let Some(ref snap) = template_fixture.self_b.as_ref().unwrap().ctx.snapshot {
+                let __ctx_b = &mut #fixture_param_name.self_b.as_mut().unwrap().ctx;
+                let (__svm_b, __dirty_b) = (&mut __ctx_b.svm, &__ctx_b.dirty_tracker);
+                snap.restore(__svm_b, __dirty_b);
+            }
             // Clear all tracked dirty state after restore
             #fixture_param_name.ctx.dirty_tracker.clear();
             #fixture_param_name.ctx.taint_log.clear();
+            #fixture_param_name.self_b.as_mut().unwrap().ctx.dirty_tracker.clear();
+            #fixture_param_name.self_b.as_mut().unwrap().ctx.taint_log.clear();
 
             // Swap restored SVM back for next iteration
             std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
+            std::mem::swap(&mut #fixture_param_name.self_b.as_mut().unwrap().ctx.svm, &mut *__saved_svm_b.borrow_mut());
             // fixture is dropped here (cheap: only empty SVM + small fields)
 
             // On panic: resume unwinding so the default panic handler prints
