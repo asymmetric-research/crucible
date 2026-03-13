@@ -40,6 +40,7 @@ gimli = { version = "0.31", default-features = false, features = ["read"] }
 object = { version = "0.36", default-features = false, features = ["read"] }
 solana-rpc-client = { workspace = true, optional = true }
 solana-rpc-client-api = { workspace = true, optional = true }
+solana-sysvar = { version = "3.1.1", features = ["bincode"] }
 
 [dev-dependencies]
 tempfile = "3.10"

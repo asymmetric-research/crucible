@@ -13,14 +13,21 @@
 //! - **IterationTaintLog** — collects TxTaintRecords across an iteration
 
 use crate::{FastHashMap, FastHashSet};
+use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
-use anchor_lang::prelude::Clock;
 use litesvm::LiteSVM;
-use solana_account::Account;
-use solana_pubkey::Pubkey;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
+use solana_account::{Account, ReadableAccount};
+use solana_pubkey::Pubkey;
+use solana_sysvar::epoch_rewards::EpochRewards;
+use solana_sysvar::fees::Fees;
+use solana_sysvar::last_restart_slot::LastRestartSlot;
+use solana_sysvar::recent_blockhashes::RecentBlockhashes;
+use solana_sysvar::rent::Rent;
+use solana_sysvar::slot_hashes::SysvarId;
+
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 // ============================================================================
 // DirtyTracker — zero-alloc hot path
@@ -262,8 +269,7 @@ impl Clone for IterationTaintLog {
 pub struct SvmSnapshot {
     /// Account data at snapshot time. FxHash for fast lookups during restore.
     accounts: FastHashMap<Pubkey, Account>,
-    /// Full Clock sysvar at snapshot time.
-    clock: Clock,
+    sysvars: Vec<(Pubkey, Option<Vec<u8>>)>,
 }
 
 impl SvmSnapshot {
@@ -276,8 +282,9 @@ impl SvmSnapshot {
                 accounts.insert(*pubkey, account);
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+
+        let sysvars = SvmSnapshot::take_sysvars(svm);
+        Self { accounts, sysvars }
     }
 
     /// Restore only dirty accounts from snapshot. Returns count of accounts restored.
@@ -307,9 +314,9 @@ impl SvmSnapshot {
             }
             count += 1;
         }
-        if dirty.is_clock_dirty() {
-            svm.set_sysvar(&self.clock);
-        }
+
+        count += self.restore_sysvars(svm);
+
         count
     }
 
@@ -320,11 +327,7 @@ impl SvmSnapshot {
 
     /// Take a full snapshot by cloning a base snapshot's accounts then overwriting
     /// dirty ones from the current SVM. Captures the complete state after an action.
-    pub fn take_full(
-        svm: &LiteSVM,
-        base_snapshot: &SvmSnapshot,
-        dirty: &DirtyTracker,
-    ) -> Self {
+    pub fn take_full(svm: &LiteSVM, base_snapshot: &SvmSnapshot, dirty: &DirtyTracker) -> Self {
         let mut accounts = base_snapshot.accounts.clone();
         // Overwrite dirty accounts with current SVM state
         for pubkey in dirty.dirty_accounts() {
@@ -335,8 +338,10 @@ impl SvmSnapshot {
                 accounts.remove(pubkey);
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+
+        let sysvars = SvmSnapshot::take_sysvars(svm);
+
+        Self { accounts, sysvars }
     }
 
     /// Snapshot ALL accounts in the SVM, not just tracked ones.
@@ -355,8 +360,9 @@ impl SvmSnapshot {
                 accounts.insert(*pubkey, account);
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+        let sysvars = SvmSnapshot::take_sysvars(svm);
+
+        Self { accounts, sysvars }
     }
 
     /// Restore ALL accounts in snapshot to the SVM (full state restore).
@@ -365,13 +371,66 @@ impl SvmSnapshot {
         for (pubkey, account) in &self.accounts {
             let _ = svm.set_account(*pubkey, account.clone());
         }
-        svm.set_sysvar(&self.clock);
-        self.accounts.len()
+        self.accounts.len() + self.restore_sysvars(svm)
     }
 
     /// Get a reference to the internal accounts map.
     pub fn accounts(&self) -> &FastHashMap<Pubkey, Account> {
         &self.accounts
+    }
+
+    fn take_sysvars(svm: &LiteSVM) -> Vec<(Pubkey, Option<Vec<u8>>)> {
+        [
+            Clock::id(),
+            EpochRewards::id(),
+            EpochSchedule::id(),
+            Fees::id(),
+            LastRestartSlot::id(),
+            RecentBlockhashes::id(),
+            Rent::id(),
+            SlotHashes::id(),
+            SlotHistory::id(),
+            StakeHistory::id(),
+        ]
+        .iter()
+        .map(|sysvar| {
+            (
+                *sysvar,
+                svm.accounts_db()
+                    .get_account_ref(&sysvar)
+                    .map(|a| a.data().to_vec()),
+            )
+        })
+        .collect()
+    }
+
+    fn restore_sysvars(&self, svm: &mut LiteSVM) -> usize {
+        for (sysvar, data) in &self.sysvars {
+            if let Some(account_data) = data {
+                svm.set_account(
+                    *sysvar,
+                    Account {
+                        lamports: 1,
+                        owner: Pubkey::from_str_const(
+                            "Sysvar1111111111111111111111111111111111111",
+                        ),
+                        data: account_data.clone(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            } else {
+                svm.set_account(
+                    *sysvar,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+        }
+        self.sysvars.len()
     }
 }
 
@@ -431,25 +490,17 @@ pub fn compute_state_fingerprint(
         for (offset, len) in diff.changed_data_ranges() {
             let range_end = offset + len;
             let hash_val = match len {
-                1 if range_end <= post_data.len() => {
-                    log2_bucket(post_data[offset] as u64) as u64
-                }
+                1 if range_end <= post_data.len() => log2_bucket(post_data[offset] as u64) as u64,
                 2 if range_end <= post_data.len() => {
-                    let val = u16::from_le_bytes(
-                        post_data[offset..range_end].try_into().unwrap(),
-                    );
+                    let val = u16::from_le_bytes(post_data[offset..range_end].try_into().unwrap());
                     log2_bucket(val as u64) as u64
                 }
                 4 if range_end <= post_data.len() => {
-                    let val = u32::from_le_bytes(
-                        post_data[offset..range_end].try_into().unwrap(),
-                    );
+                    let val = u32::from_le_bytes(post_data[offset..range_end].try_into().unwrap());
                     log2_bucket(val as u64) as u64
                 }
                 8 if range_end <= post_data.len() => {
-                    let val = u64::from_le_bytes(
-                        post_data[offset..range_end].try_into().unwrap(),
-                    );
+                    let val = u64::from_le_bytes(post_data[offset..range_end].try_into().unwrap());
                     log2_bucket(val) as u64
                 }
                 _ => {
@@ -750,7 +801,7 @@ pub fn build_taint_record_from_captured(
 // Per-Action Taint Summary Builder
 // ============================================================================
 
-use crate::{ActionTaintSummary, AccountChangeSummary, AccountChangeKind};
+use crate::{AccountChangeKind, AccountChangeSummary, ActionTaintSummary};
 
 /// Build a taint summary from TxTaintRecords in a range of the iteration log.
 ///
@@ -810,8 +861,8 @@ fn build_account_changes(
     start_idx: usize,
     end_idx: usize,
 ) -> Option<Vec<AccountChangeSummary>> {
-    use solana_pubkey::Pubkey;
     use solana_account::Account;
+    use solana_pubkey::Pubkey;
 
     // Collect first pre and last post per pubkey
     let mut first_pre: FastHashMap<Pubkey, Option<Account>> = FastHashMap::default();
@@ -820,7 +871,9 @@ fn build_account_changes(
     for record in log.records.get(start_idx..end_idx).unwrap_or(&[]) {
         if let Some(ref diffs) = record.diffs {
             for diff in diffs {
-                first_pre.entry(diff.pubkey).or_insert_with(|| diff.pre.clone());
+                first_pre
+                    .entry(diff.pubkey)
+                    .or_insert_with(|| diff.pre.clone());
                 last_post.insert(diff.pubkey, diff.post.clone());
             }
         }
@@ -862,11 +915,14 @@ fn build_account_changes(
 
         // Try semantic diff via schema registry
         let field_diffs = if let (Some(pre_acc), Some(post_acc)) = (pre_ref, &post) {
-            crate::schema::lookup_diff_fn(&post_acc.data)
-                .and_then(|diff_fn| {
-                    let deltas = diff_fn(&pre_acc.data, &post_acc.data);
-                    if deltas.is_empty() { None } else { Some(deltas) }
-                })
+            crate::schema::lookup_diff_fn(&post_acc.data).and_then(|diff_fn| {
+                let deltas = diff_fn(&pre_acc.data, &post_acc.data);
+                if deltas.is_empty() {
+                    None
+                } else {
+                    Some(deltas)
+                }
+            })
         } else {
             None
         };
@@ -880,7 +936,11 @@ fn build_account_changes(
         });
     }
 
-    if changes.is_empty() { None } else { Some(changes) }
+    if changes.is_empty() {
+        None
+    } else {
+        Some(changes)
+    }
 }
 
 // ============================================================================
@@ -1462,7 +1522,7 @@ mod tests {
         assert_eq!(summary.tx_count, 2);
         let changes = summary.account_changes.unwrap();
         assert_eq!(changes.len(), 1); // Only one account
-        // Should use first pre (100) and last post (300)
+                                      // Should use first pre (100) and last post (300)
         assert_eq!(changes[0].lamports, (100, 300));
         assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
         // data[0]: 1->5 and data[2]: 3->9 are both changed relative to first pre vs last post
@@ -1613,8 +1673,14 @@ mod tests {
         assert_eq!(changes.len(), 2);
 
         // Find each account's change
-        let change_a = changes.iter().find(|c| c.pubkey == pk_a.to_string()).unwrap();
-        let change_b = changes.iter().find(|c| c.pubkey == pk_b.to_string()).unwrap();
+        let change_a = changes
+            .iter()
+            .find(|c| c.pubkey == pk_a.to_string())
+            .unwrap();
+        let change_b = changes
+            .iter()
+            .find(|c| c.pubkey == pk_b.to_string())
+            .unwrap();
 
         // Account A: only lamports changed
         assert_eq!(change_a.lamports, (100, 200));

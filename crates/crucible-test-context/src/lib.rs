@@ -1,10 +1,11 @@
+use anchor_lang::prelude::sysvar::SysvarId;
+use litesvm::LiteSVM;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::collections::{HashSet, HashMap};
-use litesvm::LiteSVM;
 
 // Fast hashing for hot-path coverage collections (10-50x faster than SipHash for integers)
-pub use rustc_hash::{FxHashMap, FxHashSet, FxBuildHasher};
+pub use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 /// Type alias for fast HashSet (uses FxHash)
 pub type FastHashSet<T> = FxHashSet<T>;
@@ -12,37 +13,29 @@ pub type FastHashSet<T> = FxHashSet<T>;
 pub type FastHashMap<K, V> = FxHashMap<K, V>;
 use solana_account::Account;
 use solana_keypair::Keypair;
-use solana_signer::Signer;
 use solana_pubkey::Pubkey;
+use solana_signer::Signer;
 use solana_transaction_error::TransactionError;
 
 // Re-export types from anchor-lang for anchor program interactions
-use anchor_lang::prelude::{Clock, Rent};
-use anchor_lang::solana_program::instruction::Instruction;
-use anchor_lang::solana_program::system_program;
-use anchor_lang::{
-    AnchorDeserialize,
-    AnchorSerialize,
-    Discriminator,
-};
-use spl_token::solana_program::program_option::COption;
-use anchor_lang::solana_program::program_pack::Pack;
-use anyhow::Result;
-pub use crate::account_builders::MintAccountBuilder;
+pub use crate::account_builders::AccountBuilderBase;
 pub use crate::account_builders::GenericAccountBuilder;
+pub use crate::account_builders::MintAccountBuilder;
 pub use crate::account_builders::TokenAccountBuilder;
 pub use crate::instruction_builder::InstructionBuilder;
-pub use crate::transaction_builder::TransactionBuilder;
-pub use crate::program_builder::ProgramBuilder;
-pub use crate::account_builders::AccountBuilderBase;
 pub use crate::mock_oracles::{
-    MockPythOracleBuilder,
-    PriceUpdateV2,
-    PriceFeedMessage,
-    VerificationLevel,
-    DEFAULT_PYTH_RECEIVER_ID,
-    PYTH_DISCRIMINATOR,
+    MockPythOracleBuilder, PriceFeedMessage, PriceUpdateV2, VerificationLevel,
+    DEFAULT_PYTH_RECEIVER_ID, PYTH_DISCRIMINATOR,
 };
+pub use crate::program_builder::ProgramBuilder;
+pub use crate::transaction_builder::TransactionBuilder;
+use anchor_lang::prelude::{Clock, Rent};
+use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::program_pack::Pack;
+use anchor_lang::solana_program::system_program;
+use anchor_lang::{AnchorDeserialize, AnchorSerialize, Discriminator};
+use anyhow::Result;
+use spl_token::solana_program::program_option::COption;
 
 mod account_builders;
 mod instruction_builder;
@@ -51,16 +44,22 @@ pub mod schema;
 pub mod snapshot;
 
 // Re-export schema types for generated code (register_schemas())
-pub use schema::{AccountSchema, register_account_schemas};
+pub use schema::{register_account_schemas, AccountSchema};
 mod transaction_builder;
 
 // Coverage analysis and visualization
 pub mod coverage;
 
 // Re-export coverage types for backward compatibility
-pub use coverage::{FunctionInfo, ReachableAnalysis, CoverageStats, CoverageWriteStats, CachedFunctionInfo, CachedProgramAnalysis};
-pub use coverage::{extract_functions, generate_bytecode_lcov, generate_source_lcov, generate_coverage_html, build_cached_analysis, generate_coverage_html_cached};
-pub use coverage::{DwarfSourceMap, SourceLocation, build_dwarf_source_map};
+pub use coverage::{
+    build_cached_analysis, extract_functions, generate_bytecode_lcov, generate_coverage_html,
+    generate_coverage_html_cached, generate_source_lcov,
+};
+pub use coverage::{build_dwarf_source_map, DwarfSourceMap, SourceLocation};
+pub use coverage::{
+    CachedFunctionInfo, CachedProgramAnalysis, CoverageStats, CoverageWriteStats, FunctionInfo,
+    ReachableAnalysis,
+};
 
 pub use litesvm::InvocationInspectCallback;
 
@@ -79,7 +78,8 @@ pub use rpc_clone::AccountCloner;
 
 /// Global counter of total actions dispatched across all iterations.
 /// Used with TOTAL_EXECUTIONS to compute average actions per execution.
-pub static TOTAL_ACTIONS_DISPATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TOTAL_ACTIONS_DISPATCHED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Increment the global action counter by one.
 #[inline]
@@ -91,8 +91,8 @@ pub fn increment_action_count() {
 // Thread-Local State
 // ============================================================================
 
+use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
-use serde::{Serialize, Deserialize};
 
 thread_local! {
     // Invariant violation tracking for fuzz_assert! macros
@@ -356,7 +356,10 @@ pub fn print_action_sequence() {
     let executed = history.len();
     let skipped = total_actions.saturating_sub(executed);
 
-    eprintln!("\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===", executed, skipped);
+    eprintln!(
+        "\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===",
+        executed, skipped
+    );
     for (i, record) in history.iter().enumerate() {
         // Format params as key=value pairs
         let params_str = if let serde_json::Value::Object(map) = &record.params {
@@ -371,12 +374,29 @@ pub fn print_action_sequence() {
         let status = if record.success { "OK" } else { "FAIL" };
 
         // Mark the action that triggered the violation
-        let violation_marker = if violation_idx == Some(i) { " [VIOLATION]" } else { "" };
+        let violation_marker = if violation_idx == Some(i) {
+            " [VIOLATION]"
+        } else {
+            ""
+        };
 
         if params_str.is_empty() {
-            eprintln!("  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
+            eprintln!(
+                "  {}. {} -> {}{}",
+                i + 1,
+                record.name,
+                status,
+                violation_marker
+            );
         } else {
-            eprintln!("  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
+            eprintln!(
+                "  {}. {}({}) -> {}{}",
+                i + 1,
+                record.name,
+                params_str,
+                status,
+                violation_marker
+            );
         }
 
         // Print taint info if available
@@ -387,7 +407,7 @@ pub fn print_action_sequence() {
                     for change in changes {
                         let short_key = &change.pubkey[..8.min(change.pubkey.len())];
                         let type_prefix = change.pubkey.as_str(); // full key as fallback
-                        // Try to get type name from schema registry using discriminator
+                                                                  // Try to get type name from schema registry using discriminator
                         let label = short_key;
 
                         let mut parts = Vec::new();
@@ -403,11 +423,16 @@ pub fn print_action_sequence() {
                         // Field diffs (Phase 2) take priority over byte ranges
                         if let Some(ref field_diffs) = change.field_diffs {
                             for fd in field_diffs {
-                                parts.push(format!("{}: {} -> {}", fd.field, fd.old_value, fd.new_value));
+                                parts.push(format!(
+                                    "{}: {} -> {}",
+                                    fd.field, fd.old_value, fd.new_value
+                                ));
                             }
                         } else if !change.changed_ranges.is_empty() {
                             // Byte ranges
-                            let ranges_str: Vec<String> = change.changed_ranges.iter()
+                            let ranges_str: Vec<String> = change
+                                .changed_ranges
+                                .iter()
                                 .map(|(off, len)| format!("data[{}..{}]", off, off + len))
                                 .collect();
                             parts.push(ranges_str.join(", "));
@@ -427,7 +452,9 @@ pub fn print_action_sequence() {
                     }
                 } else {
                     // No detailed diffs, just show account list
-                    let short_keys: Vec<String> = taint.written_accounts.iter()
+                    let short_keys: Vec<String> = taint
+                        .written_accounts
+                        .iter()
                         .map(|k| format!("{}...", &k[..8.min(k.len())]))
                         .collect();
                     eprintln!("     wrote: {}", short_keys.join(", "));
@@ -438,7 +465,10 @@ pub fn print_action_sequence() {
 
     // Show skipped actions
     if skipped > 0 {
-        eprintln!("  ... {} action(s) not executed (stopped on violation)", skipped);
+        eprintln!(
+            "  ... {} action(s) not executed (stopped on violation)",
+            skipped
+        );
     }
 
     eprintln!("================================\n");
@@ -456,7 +486,8 @@ fn format_json_value(v: &serde_json::Value) -> String {
             format!("[{}]", items.join(", "))
         }
         serde_json::Value::Object(obj) => {
-            let items: Vec<String> = obj.iter()
+            let items: Vec<String> = obj
+                .iter()
                 .map(|(k, v)| format!("{}: {}", k, format_json_value(v)))
                 .collect();
             format!("{{{}}}", items.join(", "))
@@ -465,7 +496,12 @@ fn format_json_value(v: &serde_json::Value) -> String {
 }
 
 /// Write crash metadata to a .meta.json file and save input bytes for replay
-pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>, input_bytes: &[u8]) {
+pub fn write_crash_metadata(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+) {
     let crash_id = format!("crash_{:016x}", input_hash);
     let metadata = build_crash_metadata(seed);
     let meta_filename = format!("{}/{}.meta.json", crash_dir, crash_id);
@@ -473,7 +509,10 @@ pub fn write_crash_metadata(crash_dir: &str, input_hash: u64, seed: Option<u64>,
 
     // Save the input bytes for replay
     if let Err(e) = std::fs::write(&input_filename, input_bytes) {
-        eprintln!("[META] Failed to write crash input {}: {}", input_filename, e);
+        eprintln!(
+            "[META] Failed to write crash input {}: {}",
+            input_filename, e
+        );
     }
 
     // Save the metadata
@@ -553,7 +592,11 @@ fn chrono_lite_timestamp() -> String {
     let mut year = 1970;
     let mut remaining_days = days_since_epoch as i64;
     loop {
-        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+        let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            366
+        } else {
+            365
+        };
         if remaining_days < days_in_year {
             break;
         }
@@ -577,7 +620,10 @@ fn chrono_lite_timestamp() -> String {
     }
     let day = remaining_days + 1;
 
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 // ============================================================================
@@ -629,7 +675,8 @@ pub fn lookup_instruction_by_discriminator(instruction_data: &[u8]) -> Option<St
 
 /// Get all registered discriminators (for debugging)
 pub fn get_registered_discriminators() -> Vec<(String, Vec<u8>)> {
-    DISCRIMINATOR_MAP.get()
+    DISCRIMINATOR_MAP
+        .get()
         .map(|(_, map)| map.iter().map(|(k, v)| (v.clone(), k.clone())).collect())
         .unwrap_or_default()
 }
@@ -886,7 +933,12 @@ impl TxOutcome {
     pub fn unwrap(self) {
         match self {
             TxOutcome::Success { .. } => {}
-            TxOutcome::ProgramError { error, error_code, logs, .. } => {
+            TxOutcome::ProgramError {
+                error,
+                error_code,
+                logs,
+                ..
+            } => {
                 let mut msg = format!("Transaction failed: {:?}", error);
                 if let Some(code) = error_code {
                     msg.push_str(&format!(" (code: {})", code));
@@ -918,9 +970,17 @@ impl TxOutcome {
     pub fn into_result(self) -> std::result::Result<(), TxError> {
         match self {
             TxOutcome::Success { .. } => Ok(()),
-            TxOutcome::ProgramError { error, error_code, instruction_index, logs } => {
-                Err(TxError { error, error_code, instruction_index, logs })
-            }
+            TxOutcome::ProgramError {
+                error,
+                error_code,
+                instruction_index,
+                logs,
+            } => Err(TxError {
+                error,
+                error_code,
+                instruction_index,
+                logs,
+            }),
         }
     }
 }
@@ -971,29 +1031,34 @@ pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutc
 
 // Re-export types needed by generated code
 pub mod fuzz_types {
-    pub use solana_transaction::sanitized::SanitizedTransaction;
-    pub use solana_transaction_context::{IndexOfAccount, InstructionContext};
-    pub use solana_program_runtime::invoke_context::{InvokeContext, Executable};
+    pub use solana_program_runtime::invoke_context::{Executable, InvokeContext};
+    pub use solana_pubkey::Pubkey;
     pub use solana_sbpf::ebpf;
     pub use solana_sbpf::static_analysis::Analysis;
-    pub use solana_pubkey::Pubkey;
+    pub use solana_transaction::sanitized::SanitizedTransaction;
+    pub use solana_transaction_context::{IndexOfAccount, InstructionContext};
 }
 
 /// Count reachable code from a given entry PC using static CFG analysis.
 /// Returns (instructions, branches, edges) or None if analysis fails.
 /// Used by the fuzzer for per-instruction totals computation.
-pub fn count_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option<(usize, usize, usize)> {
+pub fn count_reachable_from_pc(
+    program_data: &[u8],
+    entry_pc: usize,
+) -> Option<(usize, usize, usize)> {
+    use solana_sbpf::ebpf;
     use solana_sbpf::elf::Executable;
     use solana_sbpf::program::BuiltinProgram;
     use solana_sbpf::static_analysis::Analysis;
     use solana_sbpf::vm::ContextObject;
-    use solana_sbpf::ebpf;
 
     // Minimal ContextObject for static analysis
     struct DummyContext;
     impl ContextObject for DummyContext {
         fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 { 0 }
+        fn get_remaining(&self) -> u64 {
+            0
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
@@ -1086,8 +1151,14 @@ pub fn count_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option<(
         }
     }
 
-    eprintln!("[DEBUG] count_reachable_from_pc(0x{:x}): {} nodes, {} instructions, {} branches, {} edges",
-        entry_pc, visited.len(), total_instructions, total_branches, total_edges);
+    eprintln!(
+        "[DEBUG] count_reachable_from_pc(0x{:x}): {} nodes, {} instructions, {} branches, {} edges",
+        entry_pc,
+        visited.len(),
+        total_instructions,
+        total_branches,
+        total_edges
+    );
 
     Some((total_instructions, total_branches, total_edges))
 }
@@ -1105,17 +1176,22 @@ pub fn count_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option<(
 
 /// Extended CFG analysis that returns both counts and sets of reachable code.
 /// Used for filtering visited coverage to only include code within the handler's scope.
-pub fn analyze_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option<ReachableAnalysis> {
+pub fn analyze_reachable_from_pc(
+    program_data: &[u8],
+    entry_pc: usize,
+) -> Option<ReachableAnalysis> {
+    use solana_sbpf::ebpf;
     use solana_sbpf::elf::Executable;
     use solana_sbpf::program::BuiltinProgram;
     use solana_sbpf::static_analysis::Analysis;
     use solana_sbpf::vm::ContextObject;
-    use solana_sbpf::ebpf;
 
     struct DummyContext;
     impl ContextObject for DummyContext {
         fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 { 0 }
+        fn get_remaining(&self) -> u64 {
+            0
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
@@ -1139,9 +1215,13 @@ pub fn analyze_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option
     }
 
     // Find starting node
-    let start_node = analysis.cfg_nodes.iter()
+    let start_node = analysis
+        .cfg_nodes
+        .iter()
         .find(|(_, cfg_node)| {
-            if cfg_node.instructions.is_empty() { return false; }
+            if cfg_node.instructions.is_empty() {
+                return false;
+            }
             let first_pc = analysis.instructions[cfg_node.instructions.start].ptr;
             let last_pc = analysis.instructions[cfg_node.instructions.end - 1].ptr;
             entry_pc >= first_pc && entry_pc <= last_pc
@@ -1211,8 +1291,14 @@ pub fn analyze_reachable_from_pc(program_data: &[u8], entry_pc: usize) -> Option
         }
     }
 
-    eprintln!("[DEBUG] analyze_reachable_from_pc(0x{:x}): {} nodes, {} PCs, {} branches, {} edges",
-        entry_pc, visited_nodes.len(), result.reachable_pcs.len(), result.total_branches, result.total_edges);
+    eprintln!(
+        "[DEBUG] analyze_reachable_from_pc(0x{:x}): {} nodes, {} PCs, {} branches, {} edges",
+        entry_pc,
+        visited_nodes.len(),
+        result.reachable_pcs.len(),
+        result.total_branches,
+        result.total_edges
+    );
 
     Some(result)
 }
@@ -1249,7 +1335,11 @@ impl Clone for TestContext {
         Self {
             svm: self.svm.clone(),
             pending_instructions: self.pending_instructions.clone(),
-            pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+            pending_signers: self
+                .pending_signers
+                .iter()
+                .map(|k| k.insecure_clone())
+                .collect(),
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
@@ -1262,7 +1352,6 @@ impl Clone for TestContext {
     }
 }
 
-
 /// Empty callback that does nothing - used during setup to avoid DefaultRegisterTracingCallback
 /// trying to find .so files on disk for built-in programs.
 pub struct EmptyInvocationCallback;
@@ -1273,13 +1362,15 @@ impl InvocationInspectCallback for EmptyInvocationCallback {
         _tx: &solana_transaction::sanitized::SanitizedTransaction,
         _program_indices: &[solana_transaction_context::IndexOfAccount],
         _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
-    ) {}
+    ) {
+    }
 
     fn after_invocation(
         &self,
         _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
         _register_tracing_enabled: bool,
-    ) {}
+    ) {
+    }
 }
 
 impl TestContext {
@@ -1332,17 +1423,19 @@ impl TestContext {
     /// Only counts edges from conditional jump instructions (matching runtime tracking).
     /// Used for coverage percentage calculation.
     pub fn analyze_program_coverage(program_data: &[u8]) -> Option<(usize, usize)> {
+        use solana_sbpf::ebpf;
         use solana_sbpf::elf::Executable;
         use solana_sbpf::program::BuiltinProgram;
         use solana_sbpf::static_analysis::Analysis;
         use solana_sbpf::vm::ContextObject;
-        use solana_sbpf::ebpf;
 
         // Minimal ContextObject implementation for static analysis
         struct DummyContext;
         impl ContextObject for DummyContext {
             fn consume(&mut self, _amount: u64) {}
-            fn get_remaining(&self) -> u64 { 0 }
+            fn get_remaining(&self) -> u64 {
+                0
+            }
         }
 
         // Create a dummy loader for parsing
@@ -1393,13 +1486,21 @@ impl TestContext {
     ///
     /// Same as `add_program()` but takes `&[u8]` instead of a file path.
     /// Runs coverage analysis and stores program data for debuggable SVM reloading.
-    pub fn add_program_from_bytes(&mut self, program_id: &Pubkey, program_data: &[u8]) -> Result<()> {
+    pub fn add_program_from_bytes(
+        &mut self,
+        program_id: &Pubkey,
+        program_data: &[u8],
+    ) -> Result<()> {
         // Run static analysis to get total edge and instruction count for coverage percentages
-        if let Some((total_edges, total_instructions)) = Self::analyze_program_coverage(program_data) {
-            self.program_coverage_totals.insert(*program_id, (total_edges, total_instructions));
+        if let Some((total_edges, total_instructions)) =
+            Self::analyze_program_coverage(program_data)
+        {
+            self.program_coverage_totals
+                .insert(*program_id, (total_edges, total_instructions));
         }
 
-        self.svm.add_program(program_id.clone(), program_data)
+        self.svm
+            .add_program(program_id.clone(), program_data)
             .map_err(|e| anyhow::anyhow!("failed to load program {}: {:?}", program_id, e))?;
         // Store program data for reloading into debuggable SVMs
         std::sync::Arc::make_mut(&mut self.programs).push(ProgramData {
@@ -1443,7 +1544,10 @@ impl TestContext {
     /// NOTE: For better performance in fuzzing loops, prefer using `set_invocation_callback` after
     /// cloning the fixture instead of this method. This method performs an additional SVM clone
     /// beyond the fixture clone, which can be expensive.
-    pub fn clone_with_invocation_callback<C: InvocationInspectCallback + 'static>(&self, callback: C) -> Self {
+    pub fn clone_with_invocation_callback<C: InvocationInspectCallback + 'static>(
+        &self,
+        callback: C,
+    ) -> Self {
         // Just clone the SVM directly and set callback - don't use builder methods
         // as they may create a fresh SVM and lose account data
         let mut cloned_svm = self.svm.clone();
@@ -1452,7 +1556,11 @@ impl TestContext {
         Self {
             svm: cloned_svm,
             pending_instructions: self.pending_instructions.clone(),
-            pending_signers: self.pending_signers.iter().map(|k| k.insecure_clone()).collect(),
+            pending_signers: self
+                .pending_signers
+                .iter()
+                .map(|k| k.insecure_clone())
+                .collect(),
             programs: self.programs.clone(),
             tracked_accounts: self.tracked_accounts.clone(),
             program_coverage_totals: self.program_coverage_totals.clone(),
@@ -1516,14 +1624,16 @@ impl TestContext {
     /// Returns a map from program pubkey to binary data.
     /// Used by the fuzzer for per-instruction CFG divergence analysis.
     pub fn get_program_binaries(&self) -> HashMap<Pubkey, Vec<u8>> {
-        self.programs.iter()
+        self.programs
+            .iter()
             .map(|p| (p.program_id, p.data.clone()))
             .collect()
     }
 
     /// Get program binary by pubkey (for CFG analysis).
     pub fn get_program_binary(&self, pubkey: &Pubkey) -> Option<&[u8]> {
-        self.programs.iter()
+        self.programs
+            .iter()
             .find(|p| &p.program_id == pubkey)
             .map(|p| p.data.as_slice())
     }
@@ -1544,7 +1654,10 @@ impl TestContext {
         for pubkey in self.dirty_tracker.dirty_accounts() {
             self.tracked_accounts.insert(*pubkey);
         }
-        self.snapshot = Some(snapshot::SvmSnapshot::take(&self.svm, &self.tracked_accounts));
+        self.snapshot = Some(snapshot::SvmSnapshot::take(
+            &self.svm,
+            &self.tracked_accounts,
+        ));
         // Clear the dirty tracker so it's fresh for the first iteration
         self.dirty_tracker.clear();
     }
@@ -1590,17 +1703,17 @@ impl TestContext {
     pub fn create_account(&mut self) -> GenericAccountBuilder<'_> {
         GenericAccountBuilder {
             ctx: self,
-            address: Pubkey::default(),  
+            address: Pubkey::default(),
             account_state: Account {
-                lamports: 0,  
-                data: vec![],  
-                owner: system_program::id(), 
+                lamports: 0,
+                data: vec![],
+                owner: system_program::id(),
                 executable: false,
                 rent_epoch: 0,
             },
         }
     }
-    
+
     // Create a mint account
     pub fn create_mint(&mut self) -> MintAccountBuilder<'_> {
         let rent = Rent::default();
@@ -1610,14 +1723,14 @@ impl TestContext {
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Mint::LEN),
                 data: vec![0; spl_token::state::Mint::LEN],
-                owner: spl_token::id(),  
+                owner: spl_token::id(),
                 executable: false,
                 rent_epoch: 0,
             },
             mint: spl_token::state::Mint {
-                mint_authority: COption::None,  
+                mint_authority: COption::None,
                 supply: 0,
-                decimals: 0,  
+                decimals: 0,
                 is_initialized: true,
                 freeze_authority: COption::None,
             },
@@ -1631,13 +1744,13 @@ impl TestContext {
             account_state: Account {
                 lamports: rent.minimum_balance(spl_token::state::Account::LEN),
                 data: vec![0; spl_token::state::Account::LEN],
-                owner: spl_token::id(),  
+                owner: spl_token::id(),
                 executable: false,
                 rent_epoch: 0,
             },
             token_state: spl_token::state::Account {
-                mint: Pubkey::default(),  
-                owner: Pubkey::default(),  
+                mint: Pubkey::default(),
+                owner: Pubkey::default(),
                 amount: 0,
                 delegate: COption::None,
                 state: spl_token::state::AccountState::Initialized,
@@ -1647,7 +1760,7 @@ impl TestContext {
             },
         }
     }
-    
+
     /// Transfer tokens between accounts
     pub fn transfer_tokens(
         &mut self,
@@ -1657,18 +1770,18 @@ impl TestContext {
         amount: u64,
     ) -> anyhow::Result<()> {
         self.raw_call(spl_token::instruction::transfer(
-                &spl_token::id(),
-                from,
-                to,
-                &owner.pubkey(),
-                &[],
-                amount,
-            )?)
-            .signers(&[owner])
-            .send()?;
+            &spl_token::id(),
+            from,
+            to,
+            &owner.pubkey(),
+            &[],
+            amount,
+        )?)
+        .signers(&[owner])
+        .send()?;
         Ok(())
     }
-    
+
     pub fn mint_to(
         &mut self,
         mint: &Pubkey,
@@ -1677,15 +1790,15 @@ impl TestContext {
         authority: &Rc<Keypair>,
     ) -> anyhow::Result<()> {
         self.raw_call(spl_token::instruction::mint_to(
-                &spl_token::id(),
-                mint,
-                destination,
-                &authority.pubkey(),
-                &[],
-                amount,
-            )?)
-            .signers(&[&**authority])
-            .send()?;
+            &spl_token::id(),
+            mint,
+            destination,
+            &authority.pubkey(),
+            &[],
+            amount,
+        )?)
+        .signers(&[&**authority])
+        .send()?;
         Ok(())
     }
 
@@ -1701,6 +1814,13 @@ impl TestContext {
         self.svm.warp_to_slot(target_slot);
     }
 
+    pub fn set_sysvar<T>(&mut self, sysvar: &T) -> ()
+    where
+        T: solana_sysvar::SysvarSerialize,
+    {
+        self.svm.set_sysvar::<T>(sysvar);
+    }
+
     /// Getters
 
     pub fn slot(&self) -> u64 {
@@ -1714,7 +1834,8 @@ impl TestContext {
 
     /// Check if account exists AND has at least `min_size` bytes of data
     pub fn account_has_data(&self, pubkey: &Pubkey, min_size: usize) -> bool {
-        self.svm.get_account(pubkey)
+        self.svm
+            .get_account(pubkey)
             .map(|acc| acc.data.len() >= min_size)
             .unwrap_or(false)
     }
@@ -1729,10 +1850,13 @@ impl TestContext {
             .get_account(address)
             .ok_or_else(|| anyhow::anyhow!("Account not found: {}", address))
     }
-    
+
     /// Read anchor account at address and deserialize the data.
     /// Uses the type's DISCRIMINATOR to determine how many bytes to skip.
-    pub fn read_anchor_account<T: AnchorDeserialize + Discriminator>(&self, address: &Pubkey) -> Result<T> {
+    pub fn read_anchor_account<T: AnchorDeserialize + Discriminator>(
+        &self,
+        address: &Pubkey,
+    ) -> Result<T> {
         let account = self.read_account(address)?;
         let disc_len = T::DISCRIMINATOR.len();
 
@@ -1786,12 +1910,12 @@ impl TestContext {
         let _ = self.svm.set_account(*address, account);
         Ok(())
     }
-    
+
     // Serialize with discriminator, write to SVM
     pub fn write_anchor_account<T: AnchorSerialize + Discriminator>(
         &mut self,
         address: &Pubkey,
-        data: &T
+        data: &T,
     ) -> Result<()> {
         // Read existing account to preserve lamports, owner, etc.
         let mut account = self.read_account(address)?;
@@ -1848,7 +1972,9 @@ impl TestContext {
                 discriminator_len
             ));
         }
-        Ok(*bytemuck::from_bytes::<T>(&account.data[discriminator_len..discriminator_len + std::mem::size_of::<T>()]))
+        Ok(*bytemuck::from_bytes::<T>(
+            &account.data[discriminator_len..discriminator_len + std::mem::size_of::<T>()],
+        ))
     }
 
     /// Write a zero-copy account (preserves 8-byte discriminator).
@@ -1862,7 +1988,11 @@ impl TestContext {
     /// reserve.last_update.mark_fresh(current_slot);
     /// ctx.write_zero_copy_account(&reserve_addr, &reserve)?;
     /// ```
-    pub fn write_zero_copy_account<T: bytemuck::Pod>(&mut self, address: &Pubkey, data: &T) -> Result<()> {
+    pub fn write_zero_copy_account<T: bytemuck::Pod>(
+        &mut self,
+        address: &Pubkey,
+        data: &T,
+    ) -> Result<()> {
         self.write_zero_copy_account_with_discriminator(address, data, 8)
     }
 
@@ -1919,9 +2049,9 @@ impl TestContext {
             signers: vec![],
         }
     }
-    
+
     // For calling Anchor programs dynamically
-    pub fn program(&mut self, program_id: Pubkey) -> ProgramBuilder<'_> {  
+    pub fn program(&mut self, program_id: Pubkey) -> ProgramBuilder<'_> {
         ProgramBuilder {
             ctx: self,
             instruction: Instruction {
@@ -1929,10 +2059,10 @@ impl TestContext {
                 accounts: vec![],
                 data: vec![],
             },
-            signers: vec![],  
+            signers: vec![],
         }
     }
-    
+
     // For batching multiple instructions
     pub fn transaction(&mut self) -> TransactionBuilder<'_> {
         TransactionBuilder {
@@ -1953,12 +2083,16 @@ impl TestContext {
 
         // Deduplicate signers while preserving order (first = fee payer)
         let mut seen = std::collections::HashSet::new();
-        let unique_signers: Vec<&Keypair> = self.pending_signers
+        let unique_signers: Vec<&Keypair> = self
+            .pending_signers
             .iter()
             .filter(|k| seen.insert(k.pubkey()))
             .collect();
 
-        let fee_payer = unique_signers.first().map(|k| k.pubkey()).unwrap_or_default();
+        let fee_payer = unique_signers
+            .first()
+            .map(|k| k.pubkey())
+            .unwrap_or_default();
 
         if debug {
             eprintln!("[TX] Sending batch with {} instructions", num_ixs);
@@ -1968,7 +2102,8 @@ impl TestContext {
         }
 
         // Record dirty accounts + capture metadata before instructions are consumed
-        self.dirty_tracker.record_tx(&self.pending_instructions, &fee_payer);
+        self.dirty_tracker
+            .record_tx(&self.pending_instructions, &fee_payer);
         let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer);
         let pre_state = if self.taint_log.collects_diffs() {
             Some(snapshot::snapshot_writable_accounts(
@@ -1982,23 +2117,28 @@ impl TestContext {
 
         // Send transaction with all queued instructions (take ownership to avoid clone)
         let instructions = std::mem::take(&mut self.pending_instructions);
-        let result = instruction_builder::send_transaction(
-            &mut self.svm,
-            instructions,
-            &unique_signers
-        )?;
+        let result =
+            instruction_builder::send_transaction(&mut self.svm, instructions, &unique_signers)?;
 
         let outcome = tx_result_to_outcome(result);
 
         if debug {
             match &outcome {
-                TxOutcome::Success { compute_units, logs } => {
+                TxOutcome::Success {
+                    compute_units,
+                    logs,
+                } => {
                     eprintln!("[TX] SUCCESS - compute_units={}, logs:", compute_units);
                     for log in logs {
                         eprintln!("[TX]   {}", log);
                     }
                 }
-                TxOutcome::ProgramError { error, error_code, logs, .. } => {
+                TxOutcome::ProgramError {
+                    error,
+                    error_code,
+                    logs,
+                    ..
+                } => {
                     eprintln!("[TX] FAILED - error: {:?}", error);
                     if let Some(code) = error_code {
                         eprintln!("[TX]   error code: {}", code);
@@ -2019,7 +2159,11 @@ impl TestContext {
         let taint = snapshot::build_taint_record_from_captured(
             &self.svm,
             captured,
-            if outcome.is_success() { pre_state.as_ref() } else { None },
+            if outcome.is_success() {
+                pre_state.as_ref()
+            } else {
+                None
+            },
         );
         self.taint_log.push(taint);
 
@@ -2154,12 +2298,7 @@ mod tests {
     fn test_action_record_without_taint() {
         clear_action_history();
 
-        push_action_record_with_taint(
-            "action_withdraw",
-            serde_json::json!({}),
-            false,
-            None,
-        );
+        push_action_record_with_taint("action_withdraw", serde_json::json!({}), false, None);
 
         let history = get_action_history();
         assert_eq!(history.len(), 1);
@@ -2242,12 +2381,7 @@ mod tests {
             account_changes: None,
         };
 
-        push_action_record_with_taint(
-            "action_a",
-            serde_json::json!({"x": 1}),
-            true,
-            Some(taint),
-        );
+        push_action_record_with_taint("action_a", serde_json::json!({"x": 1}), true, Some(taint));
 
         push_action_record("action_b", serde_json::json!({}), false);
 
@@ -2279,8 +2413,14 @@ mod tests {
             taint: None,
         };
         let json = serde_json::to_string(&record).unwrap();
-        assert!(!json.contains("taint"), "taint:null should be omitted from JSON");
-        assert!(!json.contains("error_code"), "error_code:null should be omitted from JSON");
+        assert!(
+            !json.contains("taint"),
+            "taint:null should be omitted from JSON"
+        );
+        assert!(
+            !json.contains("error_code"),
+            "error_code:null should be omitted from JSON"
+        );
 
         // With taint present
         let record_with_taint = ActionRecord {
@@ -2296,8 +2436,14 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&record_with_taint).unwrap();
-        assert!(json.contains("taint"), "taint field should be present when Some");
-        assert!(!json.contains("account_changes"), "None account_changes should be omitted");
+        assert!(
+            json.contains("taint"),
+            "taint field should be present when Some"
+        );
+        assert!(
+            !json.contains("account_changes"),
+            "None account_changes should be omitted"
+        );
     }
 
     #[test]
@@ -2487,7 +2633,10 @@ mod tests {
         assert_eq!(format_json_value(&serde_json::json!(true)), "true");
         assert_eq!(format_json_value(&serde_json::json!(42)), "42");
         assert_eq!(format_json_value(&serde_json::json!("hello")), "\"hello\"");
-        assert_eq!(format_json_value(&serde_json::json!([1, 2, 3])), "[1, 2, 3]");
+        assert_eq!(
+            format_json_value(&serde_json::json!([1, 2, 3])),
+            "[1, 2, 3]"
+        );
         assert_eq!(format_json_value(&serde_json::json!({"a": 1})), "{a: 1}");
     }
 
@@ -2504,21 +2653,29 @@ mod tests {
         let pk2 = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        ctx.write_account(&pk1, Account {
-            lamports: 1_000_000,
-            data: vec![1, 2, 3, 4],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk1,
+            Account {
+                lamports: 1_000_000,
+                data: vec![1, 2, 3, 4],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
-        ctx.write_account(&pk2, Account {
-            lamports: 2_000_000,
-            data: vec![10, 20, 30],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk2,
+            Account {
+                lamports: 2_000_000,
+                data: vec![10, 20, 30],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Take snapshot
         ctx.take_snapshot();
@@ -2528,21 +2685,29 @@ mod tests {
         ctx.begin_iteration();
 
         // Modify accounts
-        ctx.write_account(&pk1, Account {
-            lamports: 999,
-            data: vec![99, 99, 99, 99],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk1,
+            Account {
+                lamports: 999,
+                data: vec![99, 99, 99, 99],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
-        ctx.write_account(&pk2, Account {
-            lamports: 0,
-            data: vec![],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk2,
+            Account {
+                lamports: 0,
+                data: vec![],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Verify accounts are modified
         let acc1 = ctx.read_account(&pk1).unwrap();
@@ -2570,26 +2735,34 @@ mod tests {
         // Write one initial account
         let pk_initial = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
-        ctx.write_account(&pk_initial, Account {
-            lamports: 1_000_000,
-            data: vec![1, 2, 3],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_initial,
+            Account {
+                lamports: 1_000_000,
+                data: vec![1, 2, 3],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         ctx.take_snapshot();
         ctx.begin_iteration();
 
         // Create a new account that didn't exist at snapshot time
         let pk_new = Pubkey::new_unique();
-        ctx.write_account(&pk_new, Account {
-            lamports: 500_000,
-            data: vec![42],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_new,
+            Account {
+                lamports: 500_000,
+                data: vec![42],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Verify new account exists
         assert!(ctx.read_account(&pk_new).is_ok());
@@ -2639,13 +2812,17 @@ mod tests {
         let pk = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        ctx.write_account(&pk, Account {
-            lamports: 1_000_000,
-            data: vec![0; 32],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0; 32],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         ctx.take_snapshot();
 
@@ -2654,13 +2831,17 @@ mod tests {
             ctx.begin_iteration();
 
             // Each iteration modifies the account differently
-            ctx.write_account(&pk, Account {
-                lamports: (i + 1) * 100,
-                data: vec![i as u8; 32],
-                owner,
-                executable: false,
-                rent_epoch: 0,
-            }).unwrap();
+            ctx.write_account(
+                &pk,
+                Account {
+                    lamports: (i + 1) * 100,
+                    data: vec![i as u8; 32],
+                    owner,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
 
             // Verify modification took effect
             let acc = ctx.read_account(&pk).unwrap();
@@ -2684,21 +2865,29 @@ mod tests {
         let pk2 = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        ctx.write_account(&pk1, Account {
-            lamports: 100,
-            data: vec![],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk1,
+            Account {
+                lamports: 100,
+                data: vec![],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
-        ctx.write_account(&pk2, Account {
-            lamports: 200,
-            data: vec![],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk2,
+            Account {
+                lamports: 200,
+                data: vec![],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Both should be tracked as dirty
         assert!(ctx.dirty_tracker.dirty_accounts().contains(&pk1));
@@ -2745,33 +2934,45 @@ mod tests {
         let pk_untouched = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        ctx.write_account(&pk_modified, Account {
-            lamports: 100,
-            data: vec![1, 2, 3],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_modified,
+            Account {
+                lamports: 100,
+                data: vec![1, 2, 3],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
-        ctx.write_account(&pk_untouched, Account {
-            lamports: 200,
-            data: vec![4, 5, 6],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_untouched,
+            Account {
+                lamports: 200,
+                data: vec![4, 5, 6],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         ctx.take_snapshot();
         ctx.begin_iteration();
 
         // Only modify one account
-        ctx.write_account(&pk_modified, Account {
-            lamports: 999,
-            data: vec![9, 9, 9],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_modified,
+            Account {
+                lamports: 999,
+                data: vec![9, 9, 9],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Only 1 dirty account (pk_modified) should be restored
         let restored = ctx.restore_snapshot();
@@ -2792,13 +2993,17 @@ mod tests {
         let mut ctx = TestContext::new();
 
         let pk = Pubkey::new_unique();
-        ctx.write_account(&pk, Account {
-            lamports: 100,
-            data: vec![],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 100,
+                data: vec![],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         ctx.take_snapshot();
         assert!(ctx.has_snapshot());
@@ -2822,23 +3027,30 @@ mod tests {
         let owner = Pubkey::new_unique();
 
         // This goes through write_account → tracked_accounts
-        ctx.write_account(&pk_tracked, Account {
-            lamports: 100,
-            data: vec![1],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk_tracked,
+            Account {
+                lamports: 100,
+                data: vec![1],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Simulate a CPI-created account: manually set in SVM and mark dirty
         // (In real usage, this happens via record_tx during a send() call)
-        let _ = ctx.svm.set_account(pk_cpi, Account {
-            lamports: 200,
-            data: vec![2],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        });
+        let _ = ctx.svm.set_account(
+            pk_cpi,
+            Account {
+                lamports: 200,
+                data: vec![2],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
         ctx.dirty_tracker.mark_account_dirty(&pk_cpi);
 
         // take_snapshot should include pk_cpi even though it's not in tracked_accounts
@@ -2848,13 +3060,16 @@ mod tests {
         ctx.begin_iteration();
 
         // Modify the CPI-created account
-        let _ = ctx.svm.set_account(pk_cpi, Account {
-            lamports: 999,
-            data: vec![9],
-            owner,
-            executable: false,
-            rent_epoch: 0,
-        });
+        let _ = ctx.svm.set_account(
+            pk_cpi,
+            Account {
+                lamports: 999,
+                data: vec![9],
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
         ctx.dirty_tracker.mark_account_dirty(&pk_cpi);
 
         // Restore should bring it back
@@ -2870,17 +3085,20 @@ mod tests {
 
         // Verify programs field uses Arc (clone is cheap)
         let pk = Pubkey::new_unique();
-        ctx.write_account(&pk, Account {
-            lamports: 100,
-            data: vec![0; 1024],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 100,
+                data: vec![0; 1024],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
 
         // Clone should share program data via Arc
         let cloned = ctx.clone();
         assert_eq!(ctx.programs_count(), cloned.programs_count());
     }
 }
-
