@@ -70,7 +70,7 @@ pub fn singlecore_mode(
         let __pristine_svm = std::cell::RefCell::new(template_fixture.ctx.svm.clone());
         let __saved_svm = std::cell::RefCell::new(std::mem::replace(
             &mut template_fixture.ctx.svm,
-            litesvm::LiteSVM::new(),
+            crucible_test_context::litesvm::LiteSVM::new(),
         ));
 
         // Periodic full SVM reset interval (0 = disabled)
@@ -161,7 +161,8 @@ pub fn singlecore_mode(
             }
 
             if let Some(msg) = crucible_test_context::take_violation() {
-                eprintln!("[VIOLATION] {}", msg);
+                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                eprintln!("[FUZZ_FINDING] {}", msg);
                 crucible_test_context::print_action_sequence();
                 // Use the same hash as LibAFL (xxh3_64) so our metadata matches LibAFL's crash filenames
                 let input_hash = hash_std(slice);
@@ -266,7 +267,7 @@ pub fn singlecore_mode(
                     *__pristine_svm.borrow_mut() = __new_fixture.ctx.svm.clone();
                     *__saved_svm.borrow_mut() = std::mem::replace(
                         &mut __new_fixture.ctx.svm,
-                        litesvm::LiteSVM::new(),
+                        crucible_test_context::litesvm::LiteSVM::new(),
                     );
                 }
 

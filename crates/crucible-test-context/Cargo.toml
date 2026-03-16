@@ -43,3 +43,4 @@ solana-rpc-client-api = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
+solana-instruction = "3.1"

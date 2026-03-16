@@ -200,6 +200,13 @@ pub fn multicore_mode(
             shared_actions_shmem.fill(0);
             let shared_actions_ptr = shared_actions_shmem.as_slice().as_ptr() as *mut u8;
 
+            // Allocate shared memory for cross-process succeeded action counter (8 bytes for AtomicU64)
+            let mut shared_ok_shmem = shmem_provider
+                .new_shmem(8)
+                .expect("failed to allocate shared ok counter");
+            shared_ok_shmem.fill(0);
+            let shared_ok_ptr = shared_ok_shmem.as_slice().as_ptr() as *mut u8;
+
             // Allocate shared memory for cross-process execution counter (8 bytes for AtomicU64)
             // Batched together with shared_actions to ensure accurate actions/exec ratio
             let mut shared_execs_shmem = shmem_provider
@@ -207,6 +214,15 @@ pub fn multicore_mode(
                 .expect("failed to allocate shared execution counter");
             shared_execs_shmem.fill(0);
             let shared_execs_ptr = shared_execs_shmem.as_slice().as_ptr() as *mut u8;
+
+            // Allocate shared memory for discovered variant bitmap (success-seeking)
+            // Each byte represents whether a variant has ever succeeded (0 or 1)
+            // 256 bytes supports up to 256 action variants
+            let mut shared_discovered_shmem = shmem_provider
+                .new_shmem(256)
+                .expect("failed to allocate shared discovered variants bitmap");
+            shared_discovered_shmem.fill(0);
+            let shared_discovered_ptr = shared_discovered_shmem.as_slice().as_ptr() as *mut u8;
 
             // Setup shared corpus directory for multi-core mode
             let shared_corpus_dir = corpus_out_dir.clone()
@@ -302,7 +318,11 @@ pub fn multicore_mode(
 
                 for line in s.lines() {
                     if line.contains("(GLOBAL)") {
-                        let mut line = line.replace("objectives", "crashes");
+                        let mut line = line.replace("objectives", "crashes").replace("(GLOBAL) ", "");
+                        // Replace LibAFL's [Testcase #N] prefix with [FUZZ_PULSE]
+                        if let Some(bracket_end) = line.find(']') {
+                            line = format!("[FUZZ_PULSE]{}", &line[bracket_end + 1..]);
+                        }
 
                         // Check if we need to refresh cached values
                         let now_ms = std::time::SystemTime::now()
@@ -365,6 +385,25 @@ pub fn multicore_mode(
                             .unwrap_or(0);
                         let total_branches = total_edges / 2;
 
+                        // Handles SI suffixes: k (1000), M (1000000)
+                        fn __parse_mc_val(s: &str, key: &str) -> f64 {
+                            s.find(key)
+                                .and_then(|i| {
+                                    let rest = &s[i + key.len()..];
+                                    let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
+                                        .unwrap_or(rest.len());
+                                    let token = rest[..end].trim();
+                                    if let Some(num) = token.strip_suffix('k') {
+                                        num.parse::<f64>().ok().map(|v| v * 1000.0)
+                                    } else if let Some(num) = token.strip_suffix('M') {
+                                        num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
+                                    } else {
+                                        token.parse().ok()
+                                    }
+                                })
+                                .unwrap_or(0.0)
+                        }
+
                         // Append program-level coverage stats to LibAFL's output
                         if line.contains("exec/sec:") {
                             let edge_pct = if total_edges > 0 { (cached_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
@@ -375,6 +414,10 @@ pub fn multicore_mode(
                                 let counter = &*(shared_actions_ptr as *const std::sync::atomic::AtomicU64);
                                 counter.load(std::sync::atomic::Ordering::Relaxed)
                             };
+                            let shared_total_ok = unsafe {
+                                let counter = &*(shared_ok_ptr as *const std::sync::atomic::AtomicU64);
+                                counter.load(std::sync::atomic::Ordering::Relaxed)
+                            };
                             let shared_execs = unsafe {
                                 let counter = &*(shared_execs_ptr as *const std::sync::atomic::AtomicU64);
                                 counter.load(std::sync::atomic::Ordering::Relaxed)
@@ -382,30 +425,33 @@ pub fn multicore_mode(
                             let avg_actions = if shared_execs > 0 {
                                 shared_total_actions as f64 / shared_execs as f64
                             } else { 0.0 };
+                            let ok_pct = if shared_total_actions > 0 {
+                                (shared_total_ok as f64 / shared_total_actions as f64) * 100.0
+                            } else { 0.0 };
 
-                            println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}",
-                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions);
+                            // Count discovered variants from shared bitmap
+                            let discovered = unsafe {
+                                let slice = std::slice::from_raw_parts(shared_discovered_ptr as *const u8, 256);
+                                slice.iter().filter(|&&b| b != 0).count()
+                            };
+                            let total_variants = crucible_test_context::TOTAL_ACTION_VARIANTS
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let discovered_str = if total_variants > 0 {
+                                format!(", discovered: {}/{} actions", discovered, total_variants)
+                            } else {
+                                String::new()
+                            };
+
+                            let __memory_kib = {
+                                let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                                unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+                                if cfg!(target_os = "macos") { (usage.ru_maxrss / 1024) as u64 } else { usage.ru_maxrss as u64 }
+                            };
+                            eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
+                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions, shared_total_ok, shared_total_actions, ok_pct, discovered_str, __memory_kib);
 
                             // Write CSV stats row if enabled
                             if let Some(ref csv) = __csv_ref_mc {
-                                // Handles SI suffixes: k (1000), M (1000000)
-                                fn __parse_mc_val(s: &str, key: &str) -> f64 {
-                                    s.find(key)
-                                        .and_then(|i| {
-                                            let rest = &s[i + key.len()..];
-                                            let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
-                                                .unwrap_or(rest.len());
-                                            let token = rest[..end].trim();
-                                            if let Some(num) = token.strip_suffix('k') {
-                                                num.parse::<f64>().ok().map(|v| v * 1000.0)
-                                            } else if let Some(num) = token.strip_suffix('M') {
-                                                num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
-                                            } else {
-                                                token.parse().ok()
-                                            }
-                                        })
-                                        .unwrap_or(0.0)
-                                }
                                 let elapsed = {
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -425,7 +471,7 @@ pub fn multicore_mode(
                                 }
                             }
                         } else {
-                            println!("{}", line);
+                            eprintln!("{}", line);
                         }
                     }
                 }
@@ -487,7 +533,7 @@ pub fn multicore_mode(
                 let __pristine_svm = std::cell::RefCell::new(template_fixture.ctx.svm.clone());
                 let __saved_svm = std::cell::RefCell::new(std::mem::replace(
                     &mut template_fixture.ctx.svm,
-                    litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::new(),
                 ));
 
                 // Periodic full SVM reset interval (0 = disabled)
@@ -549,19 +595,16 @@ pub fn multicore_mode(
                 let stop_signal_for_harness = stop_signal_file_for_client.clone();
 
                 // Local accumulators for batching shared counter updates
-                // Both are flushed together every 64 iterations to ensure accurate actions/exec ratio
+                // All are flushed together every 64 iterations to ensure accurate actions/exec ratio
                 let mut __local_actions_pending: u64 = 0;
+                let mut __local_ok_pending: u64 = 0;
                 let mut __local_execs_pending: u64 = 0;
 
                 let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
                     // Check file-based stop signal (set by any worker on --stop-on-crash or timeout)
-                    // Rate-limit this check to every 100 iterations to avoid filesystem overhead
+                    // Check every iteration — stat() is cheap and stop-on-crash must be responsive
                     let current_iter = iteration_counter.load(std::sync::atomic::Ordering::Relaxed);
-                    let global_stop = if current_iter % 100 == 0 {
-                        stop_signal_for_harness.exists()
-                    } else {
-                        false
-                    };
+                    let global_stop = stop_signal_for_harness.exists();
 
                     if global_stop || should_stop {
                         // Exit cleanly - don't panic, as LibAFL's InProcessExecutor
@@ -624,6 +667,8 @@ pub fn multicore_mode(
                     // Track action count before test function for delta calculation
                     let actions_before = crucible_test_context::TOTAL_ACTIONS_DISPATCHED
                         .load(std::sync::atomic::Ordering::Relaxed);
+                    let ok_before = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
                     // Wrap test function in catch_unwind so panics print location and exit cleanly
                     let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -637,6 +682,19 @@ pub fn multicore_mode(
                         #mod_name::set_success_pattern(__pattern);
                     }
 
+                    // Flush discovered variants to shared bitmap (rate-limited to every 64 iterations)
+                    if current_iteration % 64 == 0 {
+                        let __total_variants = crucible_test_context::TOTAL_ACTION_VARIANTS
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        for __vi in 0..__total_variants.min(256) {
+                            if crucible_test_context::has_variant_succeeded(__vi) {
+                                unsafe {
+                                    *shared_discovered_ptr.add(__vi) = 1;
+                                }
+                            }
+                        }
+                    }
+
                     // Flush thread-local bitmap buffers to shared memory at end of iteration.
                     // This is required for SharedBitmapFeedback to detect new coverage.
                     // The buffering still reduces atomic ops by merging updates within the iteration.
@@ -645,20 +703,26 @@ pub fn multicore_mode(
                     // Accumulate this iteration's action count and execution count locally
                     let actions_this_iter = crucible_test_context::TOTAL_ACTIONS_DISPATCHED
                         .load(std::sync::atomic::Ordering::Relaxed) - actions_before;
+                    let ok_this_iter = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED
+                        .load(std::sync::atomic::Ordering::Relaxed) - ok_before;
                     __local_actions_pending += actions_this_iter;
+                    __local_ok_pending += ok_this_iter;
                     __local_execs_pending += 1;
 
-                    // Flush both counters together every 64 iterations to reduce atomic contention.
+                    // Flush all counters together every 64 iterations to reduce atomic contention.
                     // Flushing together ensures the actions/exec ratio is always accurate since
                     // both numerator and denominator update atomically in lockstep.
                     if current_iteration % 64 == 0 {
                         unsafe {
                             let action_counter = &*(shared_actions_ptr as *const std::sync::atomic::AtomicU64);
                             action_counter.fetch_add(__local_actions_pending, std::sync::atomic::Ordering::Relaxed);
+                            let ok_counter = &*(shared_ok_ptr as *const std::sync::atomic::AtomicU64);
+                            ok_counter.fetch_add(__local_ok_pending, std::sync::atomic::Ordering::Relaxed);
                             let exec_counter = &*(shared_execs_ptr as *const std::sync::atomic::AtomicU64);
                             exec_counter.fetch_add(__local_execs_pending, std::sync::atomic::Ordering::Relaxed);
                         }
                         __local_actions_pending = 0;
+                        __local_ok_pending = 0;
                         __local_execs_pending = 0;
                     }
 
@@ -681,8 +745,9 @@ pub fn multicore_mode(
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
+                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                         if std::env::var("FUZZ_VERBOSE").is_ok() {
-                            eprintln!("[VIOLATION] {}", msg);
+                            eprintln!("[FUZZ_FINDING] {}", msg);
                             crucible_test_context::print_action_sequence();
                         }
                         let input_hash = hash_std(slice);
@@ -693,8 +758,8 @@ pub fn multicore_mode(
                             eprintln!("[FUZZ] First crash found. Worker {} signaling stop (--stop-on-crash).", worker_id);
                             // Create stop signal file to notify all workers
                             let _ = std::fs::write(&stop_signal_for_harness, b"stop");
-                            should_stop = true;
-                            // Return Crash to record it, then next iteration will panic and stop
+                            // Exit immediately so other workers see the stop file
+                            std::process::exit(0);
                         }
 
                         ExitKind::Crash
@@ -769,7 +834,7 @@ pub fn multicore_mode(
                     *__pristine_svm.borrow_mut() = __new_fixture.ctx.svm.clone();
                     *__saved_svm.borrow_mut() = std::mem::replace(
                         &mut __new_fixture.ctx.svm,
-                        litesvm::LiteSVM::new(),
+                        crucible_test_context::litesvm::LiteSVM::new(),
                     );
                 }
 

@@ -46,8 +46,9 @@ where
             return Ok(MutationResult::Skipped);
         }
 
-        // Pick a random corpus entry
-        let corpus_idx = CorpusId::from(crate::mutators::primitives::rand_below(state.rand_mut(), corpus_count));
+        // Pick a random corpus entry (use nth() to handle non-contiguous IDs)
+        let rand_idx = crate::mutators::primitives::rand_below(state.rand_mut(), corpus_count);
+        let corpus_idx = state.corpus().nth(rand_idx);
 
         let donor_bytes = {
             let mut tc = state.corpus().get(corpus_idx)?.borrow_mut();

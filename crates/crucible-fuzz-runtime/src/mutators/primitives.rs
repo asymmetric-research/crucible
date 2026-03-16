@@ -164,3 +164,129 @@ pub fn mutate_i64<R: Rand>(val: &mut i64, lo: i64, hi: i64, rng: &mut R) {
         *val = lo.wrapping_add((rng.next() % range) as i64);
     }
 }
+
+/// Generate a random u128 in [lo, hi) using LibAFL's Rand trait.
+pub fn gen_range_u128<R: Rand>(rng: &mut R, lo: u128, hi: u128) -> u128 {
+    if hi <= lo {
+        return lo;
+    }
+    let range = hi - lo;
+    let raw = ((rng.next() as u128) << 64) | (rng.next() as u128);
+    lo + (raw % range)
+}
+
+/// Pick a random interesting u128 value in [lo, hi) without heap allocation.
+#[inline]
+fn pick_interesting_u128<R: Rand>(lo: u128, hi: u128, rng: &mut R) -> Option<u128> {
+    const STATIC_CANDIDATES: [u128; 15] = [
+        0, 1, 2, u128::MAX, u128::MAX / 2,
+        1 << 8, 1 << 16, 1 << 32, 1 << 64,
+        (1u128 << 8) - 1, (1u128 << 16) - 1, (1u128 << 32) - 1, (1u128 << 64) - 1,
+        u64::MAX as u128, (u64::MAX as u128) + 1,
+    ];
+    let dynamic: [u128; 2] = [lo, hi.saturating_sub(1)];
+
+    let mut count = 0u32;
+    for &v in &STATIC_CANDIDATES {
+        if v >= lo && v < hi {
+            count += 1;
+        }
+    }
+    for &v in &dynamic {
+        if v >= lo && v < hi {
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+
+    let target = rand_below(rng, count as usize) as u32;
+    let mut seen = 0u32;
+    for &v in STATIC_CANDIDATES.iter().chain(&dynamic) {
+        if v >= lo && v < hi {
+            if seen == target {
+                return Some(v);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+/// Mutate a u128 value within [lo, hi).
+/// - 40% interesting values
+/// - 30% arithmetic (+/-1, +/-small)
+/// - 30% random in range
+pub fn mutate_u128<R: Rand>(val: &mut u128, lo: u128, hi: u128, rng: &mut R) {
+    if hi <= lo {
+        return;
+    }
+    let choice = rand_below(rng, 100);
+    if choice < 40 {
+        if let Some(v) = pick_interesting_u128(lo, hi, rng) {
+            *val = v;
+        } else {
+            *val = gen_range_u128(rng, lo, hi);
+        }
+    } else if choice < 70 {
+        // Arithmetic mutation — stay in u128 space to avoid i128 wrapping
+        // when val or lo/hi are in the upper half of u128 (> i128::MAX).
+        let delta_abs_choices: &[u128] = &[1, 2, 4, 8, 16, 32];
+        let idx = rand_below(rng, delta_abs_choices.len());
+        let delta_abs = delta_abs_choices[idx];
+        let max_val = hi - 1;
+        if rand_below(rng, 2) == 0 {
+            // Subtract
+            *val = val.saturating_sub(delta_abs).max(lo);
+        } else {
+            // Add
+            *val = val.saturating_add(delta_abs).min(max_val);
+        }
+        // Clamp into [lo, hi) in case val started outside the range
+        *val = (*val).max(lo).min(max_val);
+    } else {
+        *val = gen_range_u128(rng, lo, hi);
+    }
+}
+
+/// Mutate an i128 value within [lo, hi).
+pub fn mutate_i128<R: Rand>(val: &mut i128, lo: i128, hi: i128, rng: &mut R) {
+    if hi <= lo {
+        return;
+    }
+    let range = (hi as u128).wrapping_sub(lo as u128);
+    let choice = rand_below(rng, 100);
+    if choice < 40 {
+        let candidates: [i128; 7] = [lo, hi - 1, 0, 1, -1, lo / 2, (hi - 1) / 2];
+        let mut count = 0u32;
+        for &v in &candidates {
+            if v >= lo && v < hi {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            let target = rand_below(rng, count as usize) as u32;
+            let mut seen = 0u32;
+            for &v in &candidates {
+                if v >= lo && v < hi {
+                    if seen == target {
+                        *val = v;
+                        return;
+                    }
+                    seen += 1;
+                }
+            }
+        }
+        let raw = ((rng.next() as u128) << 64) | (rng.next() as u128);
+        *val = lo.wrapping_add((raw % range) as i128);
+    } else if choice < 70 {
+        let delta_choices: &[i64] = &[-1, 1, -2, 2, -4, 4, -8, 8];
+        let idx = rand_below(rng, delta_choices.len());
+        let delta = delta_choices[idx] as i128;
+        *val = val.saturating_add(delta).max(lo).min(hi - 1);
+    } else {
+        let raw = ((rng.next() as u128) << 64) | (rng.next() as u128);
+        *val = lo.wrapping_add((raw % range) as i128);
+    }
+}

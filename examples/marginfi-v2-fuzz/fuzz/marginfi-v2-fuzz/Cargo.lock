@@ -1220,6 +1220,7 @@ dependencies = [
  "libafl",
  "libafl_bolts",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1233,7 +1234,10 @@ dependencies = [
  "crucible-fuzz-runtime",
  "crucible-invariant-macro",
  "crucible-test-context",
+ "libc",
+ "mimalloc",
  "rand 0.8.5",
+ "serde_json",
 ]
 
 [[package]]
@@ -2246,6 +2250,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "667f4fec20f29dfc6bc7357c582d91796c169ad7e2fce709468aefeb2c099870"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "libsecp256k1"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2422,6 +2436,7 @@ dependencies = [
  "crucible-fuzzer",
  "crucible-idl-gen",
  "crucible-test-context",
+ "ctor",
  "ctrlc",
  "fixed",
  "fixed-macro",
@@ -2482,6 +2497,15 @@ dependencies = [
  "keccak",
  "rand_core 0.6.4",
  "zeroize",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.48"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1ee66a4b64c74f4ef288bcbb9192ad9c3feaad75193129ac8509af543894fd8"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]

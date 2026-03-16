@@ -2,6 +2,15 @@ use core::fmt::Debug;
 
 use crate::action::FuzzAction;
 
+/// Info about how many actions were expected vs actually parsed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParseInfo {
+    /// Number of actions declared in the binary header (first 4 bytes).
+    pub expected_count: usize,
+    /// Number of actions actually deserialized.
+    pub actual_count: usize,
+}
+
 /// Structured fuzz input: a sequence of typed actions.
 ///
 /// This is an internal type used for decode/encode between `BytesInput`
@@ -47,6 +56,20 @@ impl<A: FuzzAction> FuzzInput<A> {
             // Fallback: empty input (mutators will add actions)
             FuzzInput::new(Vec::new())
         })
+    }
+
+    /// Deserialize from bytes and return parse info (expected vs actual count).
+    /// Useful for detecting partial deserialization when the harness has changed.
+    pub fn from_bytes_with_info(bytes: &[u8]) -> (Self, ParseInfo) {
+        let expected_count = if bytes.len() >= 4 {
+            let raw = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            raw.min(256) // same cap as try_from_bytes
+        } else {
+            0
+        };
+        let input = Self::from_bytes(bytes);
+        let actual_count = input.actions.len();
+        (input, ParseInfo { expected_count, actual_count })
     }
 
     /// Try to deserialize from bytes. Returns None on failure.
@@ -177,6 +200,60 @@ mod tests {
     }
 
     #[test]
+    fn test_partial_deserialization_detection() {
+        // Create a valid 3-action input
+        let actions = vec![
+            TestAction::NoFields,
+            TestAction::OneField { amount: 42 },
+            TestAction::NoFields,
+        ];
+        let bytes = FuzzInput::new(actions).to_bytes();
+
+        // Tamper: change header to claim 10 actions (but only 3 encoded)
+        let mut tampered = bytes.clone();
+        tampered[0..4].copy_from_slice(&10u32.to_le_bytes());
+
+        let (input, info) = FuzzInput::<TestAction>::from_bytes_with_info(&tampered);
+        assert_eq!(info.expected_count, 10);
+        assert_eq!(info.actual_count, 3);
+        assert_eq!(input.actions.len(), 3);
+    }
+
+    #[test]
+    fn test_invalid_variant_stops_parsing() {
+        // Manually build bytes: header says 2 actions, first valid, second has invalid variant
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // count = 2
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // variant 0 (NoFields)
+        bytes.extend_from_slice(&255u16.to_le_bytes()); // variant 255 (invalid)
+
+        let (input, info) = FuzzInput::<TestAction>::from_bytes_with_info(&bytes);
+        assert_eq!(info.expected_count, 2);
+        assert_eq!(info.actual_count, 1); // only first parsed
+        assert_eq!(input.actions.len(), 1);
+    }
+
+    #[test]
+    fn test_from_bytes_with_info_normal() {
+        // Normal case: expected == actual
+        let actions = vec![TestAction::NoFields, TestAction::OneField { amount: 99 }];
+        let bytes = FuzzInput::new(actions.clone()).to_bytes();
+
+        let (input, info) = FuzzInput::<TestAction>::from_bytes_with_info(&bytes);
+        assert_eq!(info.expected_count, 2);
+        assert_eq!(info.actual_count, 2);
+        assert_eq!(input.actions.len(), 2);
+    }
+
+    #[test]
+    fn test_from_bytes_with_info_empty() {
+        let (input, info) = FuzzInput::<TestAction>::from_bytes_with_info(&[]);
+        assert_eq!(info.expected_count, 0);
+        assert_eq!(info.actual_count, 0);
+        assert!(input.actions.is_empty());
+    }
+
+    #[test]
     fn test_from_bytes_malformed() {
         // Empty bytes
         let decoded = FuzzInput::<TestAction>::from_bytes(&[]);
@@ -212,5 +289,85 @@ mod tests {
         let decoded = FuzzInput::<TestAction>::from_bytes(&data);
         assert_eq!(decoded.actions.len(), 1);
         assert_eq!(decoded.actions[0], TestAction::NoFields);
+    }
+
+    /// Demonstrates the cross-enum deserialization problem:
+    /// bytes serialized with TestAction (6 variants) get misinterpreted
+    /// when read with SmallIntTestAction (5 variants, different field layout).
+    ///
+    /// This is the root cause of the replay bug: if a crash is generated
+    /// by one test (with action enum A) but replayed by a binary compiled
+    /// for a different test (with action enum B), variant indices map to
+    /// different actions, causing garbled deserialization.
+    #[test]
+    fn test_cross_enum_deserialization_mismatch() {
+        use crate::test_helpers::SmallIntTestAction;
+
+        // Serialize with TestAction (variant 1 = OneField { amount })
+        let original = FuzzInput::new(vec![
+            TestAction::OneField { amount: 12345 },
+            TestAction::TwoFields { user_idx: 2, flag: true },
+        ]);
+        let bytes = original.to_bytes();
+
+        // Deserialize same bytes as SmallIntTestAction
+        // variant 1 in SmallIntTestAction = SignedSmall { x, y, z } (3 fields × 8 bytes = 24)
+        // variant 1 in TestAction = OneField { amount } (1 field × 8 bytes = 8)
+        // The SmallInt deserializer will try to read 24 bytes of fields for variant 1,
+        // consuming bytes from the second action's variant header + fields.
+        let (cross_decoded, info) = FuzzInput::<SmallIntTestAction>::from_bytes_with_info(&bytes);
+
+        // The cross-deserialization should produce a different result:
+        // Either fewer actions (field bytes consumed by wrong deserializer)
+        // or different action types entirely.
+        assert_ne!(
+            info.actual_count, info.expected_count,
+            "cross-enum deserialization should NOT roundtrip correctly — \
+             expected partial parse due to field size mismatch"
+        );
+        assert!(
+            cross_decoded.actions.len() < original.actions.len(),
+            "cross-enum parse should produce fewer actions (got {}, original had {})",
+            cross_decoded.actions.len(),
+            original.actions.len()
+        );
+    }
+
+    /// Verify from_bytes_with_info detects partial deserialization —
+    /// this is what the replay mode uses to warn about harness changes.
+    #[test]
+    fn test_partial_deser_detection_with_variant_count_change() {
+        // Build bytes manually: 3 actions, variant indices 0, 3, 5
+        // TestAction has 6 variants (0-5), all valid
+        let actions = vec![
+            TestAction::NoFields,                    // variant 0
+            TestAction::FourFields { a: 1, b: 2, c: 3, d: true }, // variant 3
+            TestAction::VecField { items: vec![10, 20] }, // variant 5
+        ];
+        let bytes = FuzzInput::new(actions.clone()).to_bytes();
+
+        // Full parse with TestAction (6 variants) should work
+        let (full, full_info) = FuzzInput::<TestAction>::from_bytes_with_info(&bytes);
+        assert_eq!(full_info.expected_count, 3);
+        assert_eq!(full_info.actual_count, 3);
+        assert_eq!(full.actions.len(), 3);
+
+        // Now imagine a "reduced" enum with only 4 variants (0-3).
+        // Variant 5 (VecField) would be >= variant_count, causing early stop.
+        // We can't easily test this with a different type without creating one,
+        // but we can simulate by tampering with the bytes.
+        // Change the third action's variant from 5 to 255 (invalid for any enum)
+        let mut tampered = bytes.clone();
+        // Find where the third action's variant is:
+        // header (4) + action0 variant (2) + action0 fields (0) +
+        // action1 variant (2) + action1 fields (32) +
+        // -> offset 40 is where action2 variant starts
+        tampered[40] = 255;
+        tampered[41] = 0;
+
+        let (partial, partial_info) = FuzzInput::<TestAction>::from_bytes_with_info(&tampered);
+        assert_eq!(partial_info.expected_count, 3);
+        assert_eq!(partial_info.actual_count, 2); // stopped at invalid variant
+        assert_eq!(partial.actions.len(), 2);
     }
 }

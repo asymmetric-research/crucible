@@ -788,6 +788,8 @@ fn test_show_replay_no_binary() {
     fs::create_dir_all(&crashes_dir).unwrap();
     fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
 
+    // Cargo.toml has the "test" feature so build --features test will attempt to compile,
+    // but the binary won't actually work as a fuzz harness.
     fs::write(
         fuzz_dir.join("Cargo.toml"),
         r#"[package]
@@ -795,6 +797,8 @@ name = "my_prog_fuzz"
 version = "0.1.0"
 edition = "2021"
 [workspace]
+[features]
+test = []
 "#,
     ).unwrap();
     fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
@@ -804,12 +808,62 @@ edition = "2021"
 
     let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_replay", "--replay"]);
 
-    assert!(!output.status.success(), "replay should fail without binary");
+    // Replay may fail because the binary doesn't produce meaningful output,
+    // or succeed with "completed without crash". Either way it should not panic.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // The build should be attempted with --features test (the test directory name)
+    assert!(
+        combined.contains("Building with --features test") || combined.contains("Build failed"),
+        "replay should attempt to build with correct feature. got:\nstdout: {}\nstderr: {}", stdout, stderr
+    );
+}
+
+/// Verify that --replay infers the test name from the crash directory
+/// and passes it as a build feature.
+#[test]
+fn test_show_replay_infers_test_feature() {
+    ensure_cli_built();
+
+    let temp = TempDir::new().unwrap();
+
+    // Create fuzz structure with TWO test directories
+    let fuzz_dir = temp.path().join("fuzz/my_prog");
+    let crashes_dir_a = fuzz_dir.join("crashes/invariant_test_a");
+    let crashes_dir_b = fuzz_dir.join("crashes/invariant_test_b");
+    fs::create_dir_all(&crashes_dir_a).unwrap();
+    fs::create_dir_all(&crashes_dir_b).unwrap();
+    fs::create_dir_all(&fuzz_dir.join("src")).unwrap();
+
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        r#"[package]
+name = "my_prog_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[features]
+invariant_test_a = []
+invariant_test_b = []
+"#,
+    ).unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+
+    // Put crash in test_b directory
+    fs::write(crashes_dir_b.join("crash_abc123"), b"crash bytes").unwrap();
+
+    let output = run_crucible_in(temp.path(), &["show", "my_prog", "crash_abc123", "--replay"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    // Should build with --features invariant_test_b (NOT invariant_test_a)
     assert!(
-        stderr.contains("binary not found") || stderr.contains("Build it first"),
-        "error should indicate binary needs to be built"
+        combined.contains("Building with --features invariant_test_b"),
+        "should build with feature from crash directory. got:\nstdout: {}\nstderr: {}", stdout, stderr
     );
 }
 
@@ -1050,6 +1104,1253 @@ test_feature = []
         combined.to_lowercase().contains("coverage"),
         "CLI should mention coverage mode. stdout: {}, stderr: {}", stdout, stderr
     );
+}
+
+// =============================================================================
+// Helper: create minimal fuzz stub directory
+// =============================================================================
+
+/// Create a minimal fuzz stub directory at `base/fuzz/<prog>/` with the given
+/// Cargo features. Returns the path to the fuzz directory.
+fn create_stub_fuzz_dir(base: &Path, prog: &str, features: &[&str]) -> std::path::PathBuf {
+    let fuzz_dir = base.join("fuzz").join(prog);
+    fs::create_dir_all(fuzz_dir.join("src")).unwrap();
+    let feats: String = features
+        .iter()
+        .map(|f| format!("{} = []\n", f))
+        .collect();
+    fs::write(
+        fuzz_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{prog}_fuzz"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[features]
+{feats}"#
+        ),
+    )
+    .unwrap();
+    fs::write(fuzz_dir.join("src/main.rs"), "fn main() {}").unwrap();
+    fuzz_dir
+}
+
+// =============================================================================
+// Section 1: Individual Flag Messages
+// =============================================================================
+
+#[test]
+fn test_run_no_tracing_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--no-tracing", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Tracing disabled"),
+        "expected 'Tracing disabled' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_stateful_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--stateful", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Stateful mode"),
+        "expected 'Stateful mode' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_max_depth_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--stateful", "--max-depth", "25", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Max state depth: 25"),
+        "expected 'Max state depth: 25' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_taint_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--taint", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Taint enabled"),
+        "expected 'Taint enabled' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_taint_diffs_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--taint-diffs", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Taint diffs enabled"),
+        "expected 'Taint diffs enabled' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_symbols_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create a dummy symbols file (canonicalize requires it to exist)
+    let symbols_file = temp.path().join("symbols.so");
+    fs::write(&symbols_file, b"fake elf").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--symbols", "./symbols.so", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Debug symbols:"),
+        "expected 'Debug symbols:' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_lcov_out_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--lcov-out", "./cov.lcov", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("LCOV output:"),
+        "expected 'LCOV output:' in stdout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_replay_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create a dummy input file (replay uses absolute path via resolve_path)
+    let input_file = temp.path().join("dummy_input");
+    fs::write(&input_file, b"fuzz bytes").unwrap();
+
+    let abs_path = input_file.to_str().unwrap();
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--replay", abs_path],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Replaying input:"),
+        "expected 'Replaying input:' in stdout, got: {}", stdout
+    );
+}
+
+// =============================================================================
+// Section 2: Flag Combinations
+// =============================================================================
+
+#[test]
+fn test_run_stateful_with_max_depth() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--stateful", "--max-depth", "30", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stateful mode"), "missing stateful message, got: {}", stdout);
+    assert!(stdout.contains("Max state depth: 30"), "missing max depth message, got: {}", stdout);
+}
+
+#[test]
+fn test_run_cores_with_timeout() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--cores", "8", "--timeout", "60", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("8 parallel workers"), "missing cores message, got: {}", stdout);
+    assert!(stdout.contains("60s timeout"), "missing timeout message, got: {}", stdout);
+}
+
+#[test]
+fn test_run_taint_diffs_suppresses_taint() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // When both --taint and --taint-diffs are given, only taint-diffs message should appear
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--taint", "--taint-diffs", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Taint diffs enabled"),
+        "expected taint-diffs message, got: {}", stdout
+    );
+    assert!(
+        !stdout.contains("Taint enabled: per-action read/write"),
+        "taint-diffs should suppress plain taint message, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_coverage_corpus_in_triggers_coverage_only() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create corpus with files
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    // coverage + corpus-in + no timeout + no dry-run + no replay → coverage-only mode
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--coverage", "--corpus-in", "./corpus"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Coverage-only mode"),
+        "expected 'Coverage-only mode', got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_coverage_corpus_in_with_timeout_skips_coverage_only() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    // coverage + corpus-in + timeout → NOT coverage-only (timeout means fuzzing, not just coverage)
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--coverage", "--corpus-in", "./corpus", "--timeout", "30"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Coverage-only mode"),
+        "should NOT trigger coverage-only mode with --timeout, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_all_flags_together() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let symbols_file = temp.path().join("symbols.so");
+    fs::write(&symbols_file, b"fake elf").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &[
+            "run", "test_prog", "test_feature",
+            "--stateful", "--max-depth", "20",
+            "--no-tracing", "--taint-diffs",
+            "--cores", "2", "--timeout", "10",
+            "--seed", "42",
+            "--stop-on-crash",
+            "--max-actions", "5",
+            "--symbols", "./symbols.so",
+            "--lcov-out", "./out.lcov",
+            "--dry-run",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Stateful mode"), "missing stateful, got: {}", stdout);
+    assert!(stdout.contains("Max state depth: 20"), "missing depth, got: {}", stdout);
+    assert!(stdout.contains("Tracing disabled"), "missing no-tracing, got: {}", stdout);
+    assert!(stdout.contains("Taint diffs enabled"), "missing taint-diffs, got: {}", stdout);
+    assert!(stdout.contains("2 parallel workers"), "missing cores, got: {}", stdout);
+    assert!(stdout.contains("10s timeout"), "missing timeout, got: {}", stdout);
+    assert!(stdout.contains("Using seed: 42"), "missing seed, got: {}", stdout);
+    assert!(stdout.contains("Stop-on-crash"), "missing stop-on-crash, got: {}", stdout);
+    assert!(stdout.contains("Max actions per iteration: 5"), "missing max-actions, got: {}", stdout);
+    assert!(stdout.contains("Debug symbols:"), "missing symbols, got: {}", stdout);
+    assert!(stdout.contains("LCOV output:"), "missing lcov-out, got: {}", stdout);
+    assert!(stdout.contains("Dry-run mode"), "missing dry-run, got: {}", stdout);
+}
+
+#[test]
+fn test_run_j_shorthand_for_cores() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "-j", "4", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("4 parallel workers"),
+        "expected '-j 4' to produce '4 parallel workers', got: {}", stdout
+    );
+}
+
+// =============================================================================
+// Section 3: Mode Translation
+// =============================================================================
+
+#[test]
+fn test_run_mode_dry_run() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "dry_run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dry-run mode"),
+        "expected 'Dry-run mode', got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_explore_defaults() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // No ./corpus directory → explore mode should NOT load corpus
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "explore", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stop-on-crash"), "explore should enable stop-on-crash, got: {}", stdout);
+    assert!(stdout.contains("Writing corpus to:") && stdout.contains("output"), "explore should set corpus-out to output, got: {}", stdout);
+    assert!(stdout.contains("Crashes directory:") && stdout.contains("output"), "explore should set crashes-out to output, got: {}", stdout);
+    assert!(!stdout.contains("Loading corpus from:"), "should not load corpus when ./corpus doesn't exist, got: {}", stdout);
+}
+
+#[test]
+fn test_run_mode_explore_with_corpus() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create ./corpus with a file → explore should auto-detect it
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("seed1"), b"data").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "explore", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Loading corpus from:"),
+        "explore should auto-load ./corpus when it exists, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_explore_explicit_overrides() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let seeds_dir = temp.path().join("seeds");
+    fs::create_dir_all(&seeds_dir).unwrap();
+    fs::write(seeds_dir.join("seed1"), b"data").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "explore", "--corpus-in", "./seeds", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Loading corpus from:") && stdout.contains("seeds"),
+        "explicit --corpus-in should override explore default, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_coverage_defaults() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create ./corpus with a file for coverage mode
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"data").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "coverage"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Coverage-only mode"),
+        "coverage mode should trigger coverage-only, got: {}", stdout
+    );
+    assert!(
+        stdout.contains("LCOV output:"),
+        "coverage mode should set lcov output, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_coverage_with_lcov_out() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"data").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "coverage", "--lcov-out", "./my.lcov"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("LCOV output:") && stdout.contains("my.lcov"),
+        "explicit --lcov-out should be used in coverage mode, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_reproduce_with_input() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create ./input directory with a file (reproduce mode looks there)
+    let input_dir = temp.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::write(input_dir.join("test_input"), b"crash bytes").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "reproduce"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Replaying input:") && stdout.contains("test_input"),
+        "reproduce mode should find and replay input file, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_reproduce_no_input() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // No ./input directory → reproduce mode should not set replay
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "reproduce", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Replaying input:"),
+        "reproduce mode with no input dir should not replay, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_mode_invalid() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "foobar"],
+    );
+    assert!(!output.status.success(), "invalid mode should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unknown mode: foobar"),
+        "should report unknown mode, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_run_mode_with_flag_override() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "explore", "--crashes-out", "./custom", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Crashes directory:") && stdout.contains("custom"),
+        "explicit --crashes-out should override explore default, got: {}", stdout
+    );
+}
+
+// =============================================================================
+// Section 4: Directory & Path Handling
+// =============================================================================
+
+#[test]
+fn test_run_corpus_in_empty_dir_skipped() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create empty corpus directory
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--corpus-in", "./corpus", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty, skipping"),
+        "empty corpus dir should be skipped, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_corpus_in_with_files_loaded() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--corpus-in", "./corpus", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Loading corpus from:"),
+        "corpus dir with files should be loaded, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_crashes_out_default() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Crashes directory:") && stdout.contains("crashes") && stdout.contains("test_feature"),
+        "default crashes dir should contain 'crashes' and test name, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_max_actions_default() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Max actions per iteration: 10"),
+        "default max-actions should be 10, got: {}", stdout
+    );
+}
+
+// =============================================================================
+// Section 5: resolve_fuzz_dir Edge Cases
+// =============================================================================
+
+#[test]
+fn test_run_hyphen_underscore_conversion() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    // Create with underscores, reference with hyphens
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test-prog", "test_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should find it via hyphen/underscore conversion
+    assert!(
+        stdout.contains("Dry-run mode"),
+        "should find fuzz dir with hyphen-underscore conversion, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_run_single_harness_auto_detect() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    // Create only one harness with a different name
+    create_stub_fuzz_dir(temp.path(), "only_one", &["test_feature"]);
+
+    // Reference with wrong name → should auto-detect the single harness
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "wrong_name", "test_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dry-run mode"),
+        "should auto-detect single harness, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_run_from_fuzz_dir() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    let fuzz_dir = create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Run CLI with cwd inside the fuzz dir itself
+    let output = run_crucible_in(
+        &fuzz_dir,
+        &["run", "test_prog", "test_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dry-run mode"),
+        "should work when cwd is inside fuzz dir, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// =============================================================================
+// Section 6: Error Cases
+// =============================================================================
+
+#[test]
+fn test_run_no_subcommand() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    let output = run_crucible_in(temp.path(), &[]);
+    assert!(!output.status.success(), "no subcommand should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage") || stderr.contains("usage") || stderr.contains("USAGE"),
+        "should show usage info, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_run_missing_test_name() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    let output = run_crucible_in(temp.path(), &["run", "prog"]);
+    assert!(!output.status.success(), "missing test name should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required") || stderr.contains("error") || stderr.contains("Usage"),
+        "should show error about missing argument, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_run_unknown_feature_passes_cli() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["real_feature"]);
+
+    // CLI should proceed even with a feature that isn't in Cargo.toml
+    // (feature validation is cargo's responsibility, not CLI's)
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "unknown_feature", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // CLI should at least print its messages before handing off to cargo
+    assert!(
+        stdout.contains("Dry-run mode") || stdout.contains("Max actions"),
+        "CLI should proceed with unknown feature, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// =============================================================================
+// Section 7: Tmin/Cmin Quick Tests
+// =============================================================================
+
+#[test]
+fn test_tmin_nonexistent_harness() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["tmin", "nonexistent", "test"],
+    );
+    assert!(!output.status.success(), "tmin should fail for nonexistent harness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not exist") || stderr.contains("not found"),
+        "should report missing harness, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_cmin_corpus_in_flag() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create corpus with a file
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test data").unwrap();
+
+    // Use --corpus-in flag instead of positional arg
+    let output = run_crucible_in(
+        temp.path(),
+        &["cmin", "test_prog", "test_feature", "--corpus-in", "./corpus"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should accept the flag and start minimization (will fail at cargo build, which is fine)
+    assert!(
+        stdout.contains("[CMIN]") || stdout.contains("Minimizing"),
+        "should accept --corpus-in flag, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// =============================================================================
+// Section 8: Compound & Edge Case Tests
+// =============================================================================
+
+#[test]
+fn test_run_stateful_no_tracing_combination() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--stateful", "--no-tracing", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stateful mode"), "missing stateful, got: {}", stdout);
+    assert!(stdout.contains("Tracing disabled"), "missing no-tracing, got: {}", stdout);
+}
+
+#[test]
+fn test_run_replay_auto_enables_taint_diffs() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let input_file = temp.path().join("dummy_input");
+    fs::write(&input_file, b"fuzz bytes").unwrap();
+
+    // --replay auto-enables taint diffs via env var (no message, but replay message should appear)
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--replay", input_file.to_str().unwrap()],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Replaying input:"), "missing replay message, got: {}", stdout);
+}
+
+#[test]
+fn test_run_corpus_out_creates_message() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // --corpus-out to a dir that doesn't exist yet — CLI should still print the message
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--corpus-out", "./new_dir", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Writing corpus to:") && stdout.contains("new_dir"),
+        "expected corpus-out message, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_crashes_out_custom_path() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--crashes-out", "./my_crashes", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Crashes directory:") && stdout.contains("my_crashes"),
+        "expected custom crashes path, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_max_actions_custom() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--max-actions", "1", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Max actions per iteration: 1"),
+        "expected max-actions 1, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_max_actions_large() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--max-actions", "1000", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Max actions per iteration: 1000"),
+        "expected max-actions 1000, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_seed_zero() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--seed", "0", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Using seed: 0"),
+        "seed 0 should be valid, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_seed_large() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--seed", "18446744073709551615", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Using seed: 18446744073709551615"),
+        "u64 max seed should be valid, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_cores_one() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--cores", "1", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("1 parallel workers"),
+        "cores=1 should still print multi-core message, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_multiple_harnesses_requires_exact_name() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+
+    // Create two harnesses — auto-detect should NOT work
+    create_stub_fuzz_dir(temp.path(), "prog_a", &["test_feature"]);
+    create_stub_fuzz_dir(temp.path(), "prog_b", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "wrong_name", "test_feature", "--dry-run"],
+    );
+    assert!(!output.status.success(), "should fail with multiple harnesses and wrong name");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not exist"),
+        "should report not found, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_run_mode_explore_corpus_out_override() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--mode", "explore", "--corpus-out", "./custom", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Writing corpus to:") && stdout.contains("custom"),
+        "explicit --corpus-out should override explore default, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_dry_run_does_not_trigger_coverage_only() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    // coverage + corpus-in + dry-run → should NOT trigger coverage-only mode
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--coverage", "--corpus-in", "./corpus", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Coverage-only mode"),
+        "dry-run should suppress coverage-only mode, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_replay_does_not_trigger_coverage_only() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    let input_file = temp.path().join("replay_input");
+    fs::write(&input_file, b"crash").unwrap();
+
+    // coverage + corpus-in + replay → should NOT trigger coverage-only mode
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--coverage", "--corpus-in", "./corpus", "--replay", input_file.to_str().unwrap()],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Coverage-only mode"),
+        "replay should suppress coverage-only mode, got: {}", stdout
+    );
+}
+
+#[test]
+fn test_run_stateful_with_taint_and_cores() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["run", "test_prog", "test_feature", "--stateful", "--taint", "--cores", "4", "--dry-run"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Stateful mode"), "missing stateful, got: {}", stdout);
+    assert!(stdout.contains("Taint enabled"), "missing taint, got: {}", stdout);
+    assert!(stdout.contains("4 parallel workers"), "missing cores, got: {}", stdout);
+}
+
+// =============================================================================
+// Section 9: Tmin Edge Cases
+// =============================================================================
+
+#[test]
+fn test_tmin_no_crash_file_no_all() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // tmin with test name but no crash file and no --all
+    // Should try to resolve crash dirs and fail (no crashes dir exists)
+    let output = run_crucible_in(
+        temp.path(),
+        &["tmin", "test_prog", "test_feature"],
+    );
+    // This should either fail or proceed to build (which fails on stub)
+    // Either way it shouldn't panic
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Just verify it ran without panic
+    assert!(
+        !stdout.is_empty() || !stderr.is_empty(),
+        "tmin should produce some output"
+    );
+}
+
+#[test]
+fn test_tmin_all_flag_with_harness() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // --all flag with valid harness → should proceed to build step
+    let output = run_crucible_in(
+        temp.path(),
+        &["tmin", "test_prog", "test_feature", "--all"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    // Should attempt to build (which will fail on our stub, but that's fine)
+    assert!(
+        combined.contains("Building") || combined.contains("Compiling") || combined.contains("error") || combined.contains("No crashes"),
+        "tmin --all should proceed past CLI parsing, got: {}", combined
+    );
+}
+
+#[test]
+fn test_tmin_crash_id_auto_detect() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    let fuzz_dir = create_stub_fuzz_dir(temp.path(), "test_prog", &["invariant_test"]);
+
+    // Create crashes dir with a crash file in a test subdirectory
+    let crashes_dir = fuzz_dir.join("crashes/invariant_test");
+    fs::create_dir_all(&crashes_dir).unwrap();
+    fs::write(crashes_dir.join("crash_xyz"), b"crash data").unwrap();
+
+    // Use 2-arg form: tmin prog crash_xyz → should auto-detect test from crash dirs
+    let output = run_crucible_in(
+        temp.path(),
+        &["tmin", "test_prog", "crash_xyz"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    // Should find the crash and proceed to building with invariant_test feature
+    assert!(
+        combined.contains("invariant_test") || combined.contains("Building") || combined.contains("Compiling"),
+        "should auto-detect test name from crash dir, got: {}", combined
+    );
+}
+
+#[test]
+fn test_tmin_crash_id_not_found() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    let fuzz_dir = create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // Create empty crashes dir
+    fs::create_dir_all(fuzz_dir.join("crashes/test_feature")).unwrap();
+
+    // 2-arg form with nonexistent crash
+    let output = run_crucible_in(
+        temp.path(),
+        &["tmin", "test_prog", "crash_nothere"],
+    );
+    assert!(!output.status.success(), "should fail when crash not found");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Could not find crash") || stderr.contains("not found"),
+        "should report crash not found, got: {}", stderr
+    );
+}
+
+// =============================================================================
+// Section 10: Cmin Edge Cases
+// =============================================================================
+
+#[test]
+fn test_cmin_with_corpus_out() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    let output = run_crucible_in(
+        temp.path(),
+        &["cmin", "test_prog", "test_feature", "./corpus", "--corpus-out", "./corpus_min"],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Output directory:") || stdout.contains("Minimizing"),
+        "should show output dir or minimizing message, got stdout: {}, stderr: {}",
+        stdout, String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_cmin_no_corpus_arg() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    // No positional corpus arg and no --corpus-in
+    let output = run_crucible_in(
+        temp.path(),
+        &["cmin", "test_prog", "test_feature"],
+    );
+    assert!(!output.status.success(), "should fail without corpus arg");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Corpus directory required") || stderr.contains("required"),
+        "should report missing corpus, got: {}", stderr
+    );
+}
+
+#[test]
+fn test_cmin_positional_and_flag_both_work() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let corpus_dir = temp.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    fs::write(corpus_dir.join("input1"), b"test").unwrap();
+
+    // Positional
+    let output1 = run_crucible_in(
+        temp.path(),
+        &["cmin", "test_prog", "test_feature", "./corpus"],
+    );
+    let stdout1 = String::from_utf8_lossy(&output1.stdout);
+    assert!(stdout1.contains("[CMIN]"), "positional should work, got: {}", stdout1);
+
+    // Flag
+    let output2 = run_crucible_in(
+        temp.path(),
+        &["cmin", "test_prog", "test_feature", "--corpus-in", "./corpus"],
+    );
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(stdout2.contains("[CMIN]"), "flag should work, got: {}", stdout2);
+}
+
+// =============================================================================
+// Section 11: Init Edge Cases
+// =============================================================================
+
+#[test]
+fn test_init_creates_gitignore() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    let output = run_crucible_in(temp.path(), &["init", "my_program"]);
+    assert!(output.status.success(), "init should succeed");
+
+    let gitignore = temp.path().join("fuzz/.gitignore");
+    assert!(gitignore.exists(), "fuzz/.gitignore should exist");
+    let content = fs::read_to_string(&gitignore).unwrap();
+    assert!(content.contains("target"), ".gitignore should ignore target dirs");
+    assert!(content.contains("crashes"), ".gitignore should ignore crashes dirs");
+}
+
+#[test]
+fn test_init_cargo_toml_has_features() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    let output = run_crucible_in(temp.path(), &["init", "my_program"]);
+    assert!(output.status.success(), "init should succeed");
+
+    let cargo_toml = temp.path().join("fuzz/my_program/Cargo.toml");
+    let content = fs::read_to_string(&cargo_toml).unwrap();
+    assert!(content.contains("[features]"), "should have [features] section");
+    assert!(content.contains("invariant_test"), "should have invariant_test feature");
 }
 
 // =============================================================================
@@ -2392,6 +3693,113 @@ fn test_e2e_stop_on_crash_multicore() {
         );
     } else {
         eprintln!("[STOP-ON-CRASH-MC] No crash found within timeout - test-program bug may be hard to trigger");
+    }
+}
+
+/// Test that --stop-on-crash works in stateful single-core mode
+#[test]
+#[ignore]
+fn test_e2e_stop_on_crash_stateful() {
+    if !ensure_test_program_built() { return; }
+
+    let temp = TempDir::new().unwrap();
+    let crashes_dir = temp.path().join("crashes");
+
+    let start = std::time::Instant::now();
+
+    let (stdout, stderr, _) = common::run_test_program_fuzz_with_timeout(
+        &[
+            ("FUZZ_TIMEOUT_SECS", "120"),
+            ("FUZZ_STOP_ON_CRASH", "1"),
+            ("FUZZ_STATEFUL", "1"),
+            ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
+        ],
+        150,
+    );
+
+    let elapsed = start.elapsed();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    if stderr == "TIMEOUT" {
+        eprintln!("[STOP-ON-CRASH-STATEFUL] Hard timeout reached - stop-on-crash may not be working");
+        return;
+    }
+
+    let crash_files = common::count_crash_files(&crashes_dir);
+
+    eprintln!("[STOP-ON-CRASH-STATEFUL] Elapsed: {}s, Crashes: {}", elapsed.as_secs(), crash_files);
+
+    if crash_files > 0 {
+        assert!(
+            elapsed.as_secs() < 100,
+            "Stateful stop-on-crash should exit after finding crash. Took {}s. Output: {}",
+            elapsed.as_secs(), combined
+        );
+
+        assert!(
+            combined.contains("stop-on-crash") || combined.contains("signaling stop"),
+            "Should show stop-on-crash message. Output: {}", combined
+        );
+    } else {
+        eprintln!("[STOP-ON-CRASH-STATEFUL] No crash found within timeout");
+    }
+}
+
+/// Test that --stop-on-crash works in stateful multi-core mode (all workers stop)
+#[test]
+#[ignore]
+fn test_e2e_stop_on_crash_stateful_multicore() {
+    if !ensure_test_program_built() { return; }
+
+    let temp = TempDir::new().unwrap();
+    let crashes_dir = temp.path().join("crashes");
+
+    let start = std::time::Instant::now();
+
+    let (stdout, stderr, _) = common::run_test_program_fuzz_with_timeout(
+        &[
+            ("FUZZ_TIMEOUT_SECS", "120"),
+            ("FUZZ_STOP_ON_CRASH", "1"),
+            ("FUZZ_STATEFUL", "1"),
+            ("FUZZ_CORES", "4"),
+            ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
+        ],
+        150,
+    );
+
+    let elapsed = start.elapsed();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    if stderr == "TIMEOUT" {
+        eprintln!("[STOP-ON-CRASH-STATEFUL-MC] Hard timeout reached - stop-on-crash not stopping all cores");
+        // This IS a failure in multicore - if stop-on-crash can't stop all threads, it's broken
+        panic!("Stateful multicore stop-on-crash failed: process did not exit within 150s");
+    }
+
+    let crash_files = common::count_crash_files(&crashes_dir);
+
+    eprintln!("[STOP-ON-CRASH-STATEFUL-MC] Elapsed: {}s, Crashes: {}", elapsed.as_secs(), crash_files);
+
+    if crash_files > 0 {
+        assert!(
+            elapsed.as_secs() < 100,
+            "Stateful multicore stop-on-crash should exit quickly. Took {}s. Output: {}",
+            elapsed.as_secs(), combined
+        );
+
+        assert!(
+            combined.contains("stop-on-crash") || combined.contains("signaling stop"),
+            "Should show stop-on-crash message. Output: {}", combined
+        );
+
+        // Should have minimal crashes (stopped after first)
+        assert!(
+            crash_files <= 3,  // Allow small race condition with multiple workers
+            "Stop-on-crash should stop after first crash. Got {} crashes. Output: {}",
+            crash_files, combined
+        );
+    } else {
+        eprintln!("[STOP-ON-CRASH-STATEFUL-MC] No crash found within timeout");
     }
 }
 
@@ -4170,4 +5578,188 @@ fn extract_exec_count(output: &str) -> Option<u64> {
         }
     }
     None
+}
+
+// =============================================================================
+// Standard Driver Output Protocol Tests
+// =============================================================================
+
+#[test]
+fn test_fuzz_pulse_in_all_modes() {
+    // Verify [FUZZ_PULSE] format exists in all monitor output sites
+    for (file, label) in [
+        ("crates/crucible-fuzz-macro/src/codegen.rs", "singlecore"),
+        ("crates/crucible-fuzz-macro/src/multicore.rs", "multicore"),
+        ("crates/crucible-fuzz-macro/src/stateful.rs", "stateful"),
+    ] {
+        let content = fs::read_to_string(project_root().join(file)).unwrap();
+        assert!(content.contains("[FUZZ_PULSE]"), "{} should emit FUZZ_PULSE", label);
+    }
+}
+
+#[test]
+fn test_fuzz_finding_in_all_modes() {
+    for (file, label) in [
+        ("crates/crucible-fuzz-macro/src/singlecore.rs", "singlecore"),
+        ("crates/crucible-fuzz-macro/src/multicore.rs", "multicore"),
+        ("crates/crucible-fuzz-macro/src/stateful.rs", "stateful"),
+    ] {
+        let content = fs::read_to_string(project_root().join(file)).unwrap();
+        assert!(content.contains("[FUZZ_FINDING]"), "{} should emit FUZZ_FINDING", label);
+    }
+    // Replay mode uses [INVARIANT] instead of [FUZZ_FINDING]
+    let modes_content = fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/modes.rs")
+    ).unwrap();
+    assert!(modes_content.contains("[INVARIANT]"), "modes should emit INVARIANT for replay");
+}
+
+#[test]
+fn test_did_not_reproduce_string() {
+    let content = fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/modes.rs")
+    ).unwrap();
+    assert!(content.contains(r#"println!("did not reproduce")"#));
+}
+
+#[test]
+fn test_memory_reporting() {
+    // Verify getrusage is used for memory reporting
+    let content = fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/codegen.rs")
+    ).unwrap();
+    assert!(content.contains("getrusage"), "codegen should use getrusage for memory");
+    let content = fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/stateful.rs")
+    ).unwrap();
+    assert!(content.contains("getrusage"), "stateful should use getrusage for memory");
+}
+
+#[test]
+fn test_show_crashes_dir_nested() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    // Create fuzz dir structure for "." auto-detection
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"").unwrap();
+    fs::create_dir_all(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}").unwrap();
+    // Create nested layout: crashes_dir/test_name/crash_file
+    let test_dir = temp.path().join("my_crashes/invariant_test");
+    fs::create_dir_all(&test_dir).unwrap();
+    fs::write(test_dir.join("crash_0000000000000001.meta.json"),
+        r#"{"test_name":"invariant_test","timestamp":"2026-01-01T00:00:00Z","iteration":1,"actions":[]}"#
+    ).unwrap();
+    fs::write(test_dir.join("crash_0000000000000001"), b"test").unwrap();
+
+    let output = run_crucible_in(temp.path(), &[
+        "show", ".", "--crashes-dir", temp.path().join("my_crashes").to_str().unwrap()
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("crash_0000000000000001"), "should list crash from custom dir, got: {}", stdout);
+}
+
+#[test]
+fn test_show_crashes_dir_flat() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    // Create fuzz dir structure for "." auto-detection
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"").unwrap();
+    fs::create_dir_all(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}").unwrap();
+    // Create flat layout: crashes_dir/crash_file (no test subdirectory)
+    let crashes = temp.path().join("output");
+    fs::create_dir_all(&crashes).unwrap();
+    fs::write(crashes.join("crash_flat_001.meta.json"),
+        r#"{"test_name":"invariant_test","timestamp":"2026-01-01T00:00:00Z","iteration":42,"actions":[{"name":"action_deposit","params":{"amount":100},"success":true}]}"#
+    ).unwrap();
+    fs::write(crashes.join("crash_flat_001"), b"test").unwrap();
+
+    let output = run_crucible_in(temp.path(), &[
+        "show", ".", "--crashes-dir", crashes.to_str().unwrap()
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("crash_flat_001"), "should list flat crash, got: {}", stdout);
+}
+
+#[test]
+fn test_show_crash_metadata_from_custom_dir() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    // Create fuzz dir structure for "." auto-detection
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"").unwrap();
+    fs::create_dir_all(temp.path().join("src")).unwrap();
+    fs::write(temp.path().join("src/main.rs"), "fn main() {}").unwrap();
+    let crashes = temp.path().join("output");
+    fs::create_dir_all(&crashes).unwrap();
+    fs::write(crashes.join("crash_meta_test.meta.json"),
+        r#"{"test_name":"invariant_test","timestamp":"2026-03-12T00:00:00Z","iteration":99,"actions":[{"name":"action_withdraw","params":{"user":0},"success":false}]}"#
+    ).unwrap();
+
+    let output = run_crucible_in(temp.path(), &[
+        "show", ".", "crash_meta_test", "--crashes-dir", crashes.to_str().unwrap()
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("action_withdraw"), "should show action name, got: {}", stdout);
+    assert!(stdout.contains("99"), "should show iteration, got: {}", stdout);
+}
+
+#[test]
+fn test_run_replay_flag_exists() {
+    ensure_cli_built();
+    // Verify --replay is accepted (will fail because no harness, but shouldn't be "unknown flag")
+    let output = run_crucible_in(&std::env::temp_dir(), &["run", "test", "test", "--replay", "/nonexistent"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("unexpected argument"), "--replay should be a valid flag, got: {}", stderr);
+}
+
+#[test]
+fn test_run_crashes_out_flag_exists() {
+    ensure_cli_built();
+    let output = run_crucible_in(&std::env::temp_dir(), &["run", "test", "test", "--crashes-out", "/tmp/crashes"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("unexpected argument"), "--crashes-out should be a valid flag, got: {}", stderr);
+}
+
+// =============================================================================
+// Fuzzcorp compatibility
+// =============================================================================
+
+#[test]
+fn test_fuzz_error_output() {
+    // Verify [FUZZ_ERROR] strings exist in modes.rs source
+    let modes_src = std::fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/modes.rs")
+    ).unwrap();
+    assert!(
+        modes_src.contains("[FUZZ_ERROR]"),
+        "modes.rs should contain [FUZZ_ERROR] output"
+    );
+}
+
+#[test]
+fn test_reproduces_false() {
+    // Verify reproduces:false string exists in modes.rs source
+    let modes_src = std::fs::read_to_string(
+        project_root().join("crates/crucible-fuzz-macro/src/modes.rs")
+    ).unwrap();
+    assert!(
+        modes_src.contains("reproduces:false"),
+        "modes.rs should contain reproduces:false output"
+    );
+}
+
+#[test]
+fn test_run_mode_flag_exists() {
+    ensure_cli_built();
+    let output = run_crucible_in(&std::env::temp_dir(), &["run", "test", "test", "--mode", "explore"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("unexpected argument"), "--mode should be a valid flag, got: {}", stderr);
+}
+
+#[test]
+fn test_run_lcov_out_flag_exists() {
+    ensure_cli_built();
+    let output = run_crucible_in(&std::env::temp_dir(), &["run", "test", "test", "--lcov-out", "./output/coverage.lcov"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("unexpected argument"), "--lcov-out should be a valid flag, got: {}", stderr);
 }

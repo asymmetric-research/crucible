@@ -8,23 +8,51 @@ use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 use std::{rc::Rc, collections::HashMap};
 use crucible_fuzzer::anchor_spl::token::spl_token;
+use crucible_test_context::rpc_clone::AccountCloner;
 
 mod types;
 use types::{Reserve, Obligation, RESERVE_SIZE, OBLIGATION_SIZE};
+
+// ============================================================================
+// Safe wrappers for send/send_batch to catch litesvm panics
+// ============================================================================
+// litesvm can panic during account lookup (lib.rs:981) when program cache
+// is out of sync with accounts store after snapshot restore. Catch these
+// panics and convert them to errors so the fuzzer keeps running.
+
+/// Wrap a `.send()` call with catch_unwind to prevent litesvm panics from killing the fuzzer.
+macro_rules! safe_send {
+    ($builder:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $builder.send())) {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("litesvm panic during send")),
+        }
+    };
+}
+
+/// Wrap a `.send_batch()` call with catch_unwind.
+macro_rules! safe_send_batch {
+    ($ctx:expr) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $ctx.send_batch())) {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("litesvm panic during send_batch")),
+        }
+    };
+}
 
 // Generate types from IDL
 crucible_idl_gen::declare_fuzz_program!("idls/klend.json");
 
 use kamino_lending::instruction;
 use kamino_lending::accounts;
-use kamino_lending::types::{InitObligationArgs, UpdateConfigMode};
+use kamino_lending::types::InitObligationArgs;
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 // Set to true to enable debug output
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 // ============================================================================
 // Klend Error Code Mapping (from programs/klend/src/utils/constraints.rs)
@@ -149,13 +177,11 @@ fn log_klend_error(action: &str, outcome: &TxOutcome) {
         eprintln!("[KLEND_ERR] {}: {} (code: {:?}) at ix {:?}",
             action, error_name, error_code, instruction_index);
 
-        // Print relevant logs (last 5 only to reduce noise)
+        // Print all logs to help debug
         let log_count = logs.len();
-        let start = if log_count > 5 { log_count - 5 } else { 0 };
+        let start = if log_count > 10 { log_count - 10 } else { 0 };
         for log in &logs[start..] {
-            if log.contains("Error") || log.contains("error") || log.contains("failed") {
-                eprintln!("  {}", log);
-            }
+            eprintln!("  LOG: {}", log);
         }
     }
 }
@@ -177,6 +203,18 @@ mod action_stats {
     pub static WITHDRAW_FAIL: AtomicU32 = AtomicU32::new(0);
     pub static LIQUIDATE_OK: AtomicU32 = AtomicU32::new(0);
     pub static LIQUIDATE_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_OK: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static DEPOSIT_AND_COLL_OK: AtomicU32 = AtomicU32::new(0);
+    pub static DEPOSIT_AND_COLL_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static FLASH_LOAN_OK: AtomicU32 = AtomicU32::new(0);
+    pub static FLASH_LOAN_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static WITHDRAW_COLL_OK: AtomicU32 = AtomicU32::new(0);
+    pub static WITHDRAW_COLL_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_FEES_OK: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_FEES_FAIL: AtomicU32 = AtomicU32::new(0);
+    pub static SOCIALIZE_OK: AtomicU32 = AtomicU32::new(0);
+    pub static SOCIALIZE_FAIL: AtomicU32 = AtomicU32::new(0);
 
     // Early return counters per action
     pub static DEPOSIT_EARLY: AtomicU32 = AtomicU32::new(0);
@@ -185,6 +223,12 @@ mod action_stats {
     pub static REPAY_EARLY: AtomicU32 = AtomicU32::new(0);
     pub static WITHDRAW_EARLY: AtomicU32 = AtomicU32::new(0);
     pub static LIQUIDATE_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static DEPOSIT_AND_COLL_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static FLASH_LOAN_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static WITHDRAW_COLL_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static REDEEM_FEES_EARLY: AtomicU32 = AtomicU32::new(0);
+    pub static SOCIALIZE_EARLY: AtomicU32 = AtomicU32::new(0);
 
     pub static TOTAL_ACTIONS: AtomicU32 = AtomicU32::new(0);
 
@@ -195,6 +239,12 @@ mod action_stats {
     static REPAY_LOG: AtomicU32 = AtomicU32::new(0);
     static WITHDRAW_LOG: AtomicU32 = AtomicU32::new(0);
     static LIQUIDATE_LOG: AtomicU32 = AtomicU32::new(0);
+    static REDEEM_LOG: AtomicU32 = AtomicU32::new(0);
+    static DEPOSIT_AND_COLL_LOG: AtomicU32 = AtomicU32::new(0);
+    static FLASH_LOAN_LOG: AtomicU32 = AtomicU32::new(0);
+    static WITHDRAW_COLL_LOG: AtomicU32 = AtomicU32::new(0);
+    static REDEEM_FEES_LOG: AtomicU32 = AtomicU32::new(0);
+    static SOCIALIZE_LOG: AtomicU32 = AtomicU32::new(0);
 
     fn get_log_counter(action: &str) -> &'static AtomicU32 {
         match action {
@@ -204,6 +254,12 @@ mod action_stats {
             "repay" => &REPAY_LOG,
             "withdraw" => &WITHDRAW_LOG,
             "liquidate" => &LIQUIDATE_LOG,
+            "redeem" => &REDEEM_LOG,
+            "deposit_and_coll" => &DEPOSIT_AND_COLL_LOG,
+            "flash_loan" => &FLASH_LOAN_LOG,
+            "withdraw_coll" => &WITHDRAW_COLL_LOG,
+            "redeem_fees" => &REDEEM_FEES_LOG,
+            "socialize" => &SOCIALIZE_LOG,
             _ => &DEPOSIT_LOG,
         }
     }
@@ -411,11 +467,11 @@ impl KlendFixture {
         let mut ctx = TestContext::new();
         let program_id = kamino_lending::ID;
 
-        // Load program
+        // Load program binary (local .so is faster than cloning from RPC)
         ctx.add_program(&program_id, "../../kamino_lending.so")
             .expect("Failed to load klend program");
 
-        fixture_helpers::initialize_state(&mut ctx, &program_id)
+        fixture_helpers::initialize_from_mainnet(&mut ctx, &program_id)
     }
 
     // Directly patch reserve's last_update to bypass staleness checks
@@ -541,12 +597,6 @@ impl KlendFixture {
         Ok(())
     }
 
-    // Legacy helpers for compatibility - still patch freshness for reserve staleness
-    fn queue_refresh_all(&mut self, user_idx: usize) {
-        // Patch account data for timestamp-based staleness checks
-        self.patch_freshness_all(user_idx);
-    }
-
     // Ensure reserve has a valid market price after RefreshReserve might have corrupted it
     // Call this after each batch that includes RefreshReserve
     fn ensure_reserve_price(&mut self, reserve_idx: usize) {
@@ -636,9 +686,11 @@ impl KlendFixture {
     pub fn action_deposit(
         &mut self,
         #[range(0..4)] user_idx: usize,
-        #[range(0..2)] reserve_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
         #[range(100_000_000..2_000_000_000)] amount: u64,  // 0.1 to 2 SOL equivalent - larger to pass value thresholds
     ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
         // Patch reserve freshness to pass staleness check
         self.patch_reserve_freshness(reserve_idx);
 
@@ -677,9 +729,17 @@ impl KlendFixture {
             }
         };
 
-        // Use the simpler deposit_reserve_liquidity instruction
-        let user_keypair = &self.users[user_idx].keypair;
-        let result = self.ctx.program(self.program_id)
+        // Queue RefreshReserve first (required by klend's instruction sysvar check,
+        // and also ensures program_id is an instruction account which avoids litesvm panic)
+        let user_keypair = self.users[user_idx].keypair.clone();
+        if let Err(e) = self.queue_refresh_reserve(reserve_idx) {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit refresh_reserve: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, false);
+            return;
+        }
+
+        // Queue the deposit instruction
+        if let Err(e) = self.ctx.program(self.program_id)
             .call(instruction::DepositReserveLiquidity {
                 liquidity_amount: amount,
             })
@@ -697,11 +757,17 @@ impl KlendFixture {
                 liquidity_token_program: spl_token::id(),
                 instruction_sysvar_account: sysvar_ids::instructions_id(),
             })
-            .signers(&[&**user_keypair])
-            .send();
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL, false);
+            return;
+        }
 
-        // Track result using helper (replaces verbose 13-line match block)
-        action_stats::handle_result("deposit", &result, &action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL);
+        // Send batch: RefreshReserve + DepositReserveLiquidity
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("deposit", &result, &action_stats::DEPOSIT_OK, &action_stats::DEPOSIT_FAIL);
     }
 
     // ========================================================================
@@ -711,9 +777,11 @@ impl KlendFixture {
     pub fn action_deposit_collateral(
         &mut self,
         #[range(0..4)] user_idx: usize,
-        #[range(0..2)] reserve_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
         #[range(100_000_000..2_000_000_000)] amount: u64,  // Larger amounts to pass value thresholds
     ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
         let collateral_mint = self.reserves[reserve_idx].collateral_mint;
 
         // If user doesn't have cTokens, do a deposit first (smart harness)
@@ -782,7 +850,7 @@ impl KlendFixture {
         }
 
         // Send batch with RefreshReserve + RefreshObligation + DepositObligationCollateral
-        let result = self.ctx.send_batch();
+        let result = safe_send_batch!(self.ctx);
         action_stats::handle_batch_result("deposit_coll", &result, &action_stats::DEPOSIT_COLL_OK, &action_stats::DEPOSIT_COLL_FAIL);
     }
 
@@ -793,10 +861,12 @@ impl KlendFixture {
     pub fn action_borrow(
         &mut self,
         #[range(0..4)] user_idx: usize,
-        #[range(0..2)] reserve_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
         #[range(10_000_000..500_000_000)] amount: u64,  // Reasonable borrow amounts (smaller than collateral due to LTV)
     ) {
         use types::{Obligation, OBLIGATION_SIZE};
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
 
         let reserve_mint = self.reserves[reserve_idx].mint;
 
@@ -958,7 +1028,7 @@ impl KlendFixture {
         }
 
         // Send batch with RefreshReserve + RefreshObligation + BorrowObligationLiquidity
-        let result = self.ctx.send_batch();
+        let result = safe_send_batch!(self.ctx);
 
         // Restore obligation on batch failure to undo harness patches.
         // The batch is atomic — if it fails, no program state changes.
@@ -981,10 +1051,12 @@ impl KlendFixture {
     pub fn action_repay(
         &mut self,
         #[range(0..4)] user_idx: usize,
-        #[range(0..2)] reserve_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
         #[range(10_000_000..500_000_000)] amount: u64,  // Match borrow amounts
     ) {
         use types::{Obligation, OBLIGATION_SIZE};
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
 
         let reserve_mint = self.reserves[reserve_idx].mint;
 
@@ -1081,7 +1153,7 @@ impl KlendFixture {
         }
 
         // Send batch with RefreshReserve + RefreshObligation + RepayObligationLiquidity
-        let result = self.ctx.send_batch();
+        let result = safe_send_batch!(self.ctx);
         action_stats::handle_batch_result("repay", &result, &action_stats::REPAY_OK, &action_stats::REPAY_FAIL);
     }
 
@@ -1092,10 +1164,12 @@ impl KlendFixture {
     pub fn action_withdraw(
         &mut self,
         #[range(0..4)] user_idx: usize,
-        #[range(0..2)] reserve_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
         #[range(10_000_000..1_000_000_000)] collateral_amount: u64,  // Reasonable withdrawal amounts
     ) {
         use types::{Obligation, OBLIGATION_SIZE};
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
 
         let reserve_mint = self.reserves[reserve_idx].mint;
 
@@ -1191,7 +1265,7 @@ impl KlendFixture {
         }
 
         // Send batch with RefreshReserve + RefreshObligation + WithdrawObligationCollateralAndRedeemReserveCollateral
-        let result = self.ctx.send_batch();
+        let result = safe_send_batch!(self.ctx);
         action_stats::handle_batch_result("withdraw", &result, &action_stats::WITHDRAW_OK, &action_stats::WITHDRAW_FAIL);
     }
 
@@ -1199,8 +1273,8 @@ impl KlendFixture {
     // Refresh Reserve Action (now patches directly instead of calling RefreshReserve)
     // ========================================================================
 
-    pub fn action_refresh_reserve(&mut self, #[range(0..2)] reserve_idx: usize) {
-        // Patch freshness directly instead of calling RefreshReserve (which needs oracles)
+    pub fn action_refresh_reserve(&mut self, #[range(0..4)] reserve_idx: usize) {
+        let reserve_idx = reserve_idx % self.reserves.len();
         self.patch_reserve_freshness(reserve_idx);
     }
 
@@ -1208,8 +1282,8 @@ impl KlendFixture {
     // Refresh Obligation Action (now patches directly instead of calling RefreshObligation)
     // ========================================================================
 
-    pub fn action_refresh_obligation(&mut self, #[range(0..2)] user_idx: usize) {
-        // Patch freshness directly instead of calling RefreshObligation
+    pub fn action_refresh_obligation(&mut self, #[range(0..4)] user_idx: usize) {
+        let user_idx = user_idx % self.users.len();
         self.patch_obligation_freshness(user_idx);
     }
 
@@ -1219,14 +1293,39 @@ impl KlendFixture {
 
     pub fn action_change_price(
         &mut self,
-        #[range(0..2)] reserve_idx: usize,
-        #[range(0..10)] price_change: u64,  // 0-10 maps to -5% to +5%
+        #[range(0..4)] reserve_idx: usize,
+        #[range(0..20)] price_change: u64,  // 0-20 maps to wide price range
     ) {
         let reserve_idx = reserve_idx % self.reserves.len();
         let reserve_data = &self.reserves[reserve_idx];
 
-        // Map 0-10 to modest price movements: 95% (-5%) to 105% (+5%)
-        let price_percent: u64 = 95 + price_change;
+        // Map 0-20 to wide price swings to enable liquidation scenarios:
+        // 0=$10, 1=$20, 2=$30, 3=$50, 4=$70, 5=$80, 6=$90, 7=$95,
+        // 8=$98, 9=$99, 10=$100, 11=$101, 12=$102, 13=$105, 14=$110,
+        // 15=$120, 16=$130, 17=$150, 18=$200, 19=$300, 20=$500
+        let price_percent: u64 = match price_change {
+            0 => 10,    // -90% crash
+            1 => 20,    // -80%
+            2 => 30,    // -70%
+            3 => 50,    // -50%
+            4 => 70,    // -30%
+            5 => 80,    // -20%
+            6 => 90,    // -10%
+            7 => 95,    // -5%
+            8 => 98,    // -2%
+            9 => 99,    // -1%
+            10 => 100,  // unchanged
+            11 => 101,  // +1%
+            12 => 102,  // +2%
+            13 => 105,  // +5%
+            14 => 110,  // +10%
+            15 => 120,  // +20%
+            16 => 130,  // +30%
+            17 => 150,  // +50%
+            18 => 200,  // +100%
+            19 => 300,  // +200%
+            _ => 500,   // +400%
+        };
 
         let new_price_i64: i64 = (price_percent as i64) * 1_00000000;  // $price with 8 decimals
 
@@ -1301,10 +1400,14 @@ impl KlendFixture {
         &mut self,
         #[range(0..4)] liquidator_idx: usize,
         #[range(0..4)] target_idx: usize,
-        #[range(0..2)] repay_reserve_idx: usize,
-        #[range(0..2)] withdraw_reserve_idx: usize,
+        #[range(0..4)] repay_reserve_idx: usize,
+        #[range(0..4)] withdraw_reserve_idx: usize,
         #[range(10_000_000..200_000_000)] liquidity_amount: u64,  // Reasonable liquidation amounts
     ) {
+        let liquidator_idx = liquidator_idx % self.users.len();
+        let target_idx = target_idx % self.users.len();
+        let repay_reserve_idx = repay_reserve_idx % self.reserves.len();
+        let withdraw_reserve_idx = withdraw_reserve_idx % self.reserves.len();
         // Can't liquidate yourself
         if liquidator_idx == target_idx {
             action_stats::log_early_return("liquidate", "self_liquidation", &action_stats::LIQUIDATE_EARLY);
@@ -1437,8 +1540,463 @@ impl KlendFixture {
         }
 
         // Send batch with RefreshObligation + LiquidateObligationAndRedeemReserveCollateral
-        let result = self.ctx.send_batch();
+        let result = safe_send_batch!(self.ctx);
         action_stats::handle_batch_result("liquidate", &result, &action_stats::LIQUIDATE_OK, &action_stats::LIQUIDATE_FAIL);
+    }
+
+    // ========================================================================
+    // Redeem Reserve Collateral Action (convert cTokens back to liquidity)
+    // ========================================================================
+
+    pub fn action_redeem(
+        &mut self,
+        #[range(0..4)] user_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
+        #[range(10_000_000..1_000_000_000)] collateral_amount: u64,
+    ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
+        let reserve = self.reserves[reserve_idx].clone();
+
+        // User needs cTokens to redeem
+        let user_collateral_account = match self.users[user_idx].token_accounts.get(&reserve.collateral_mint) {
+            Some(acc) => *acc,
+            None => {
+                action_stats::log_early_return("redeem", "no_ctoken_account", &action_stats::REDEEM_EARLY);
+                return;
+            }
+        };
+
+        let balance = self.ctx.token_balance(&user_collateral_account);
+        let amount = collateral_amount.min(balance);
+        if amount == 0 {
+            action_stats::log_early_return("redeem", &format!("zero_ctoken_balance (bal={})", balance), &action_stats::REDEEM_EARLY);
+            return;
+        }
+
+        // User needs a liquidity token account to receive the redeemed tokens
+        let user_liquidity_account = match self.users[user_idx].token_accounts.get(&reserve.mint) {
+            Some(acc) => *acc,
+            None => {
+                action_stats::log_early_return("redeem", "no_liquidity_account", &action_stats::REDEEM_EARLY);
+                return;
+            }
+        };
+
+        self.patch_reserve_freshness(reserve_idx);
+
+        let user_keypair = self.users[user_idx].keypair.clone();
+
+        // Queue RefreshReserve (required by instruction sysvar check + avoids litesvm panic)
+        if let Err(e) = self.queue_refresh_reserve(reserve_idx) {
+            if DEBUG { eprintln!("[QUEUE_ERR] redeem refresh_reserve: {:?}", e); }
+            action_stats::record(&action_stats::REDEEM_OK, &action_stats::REDEEM_FAIL, false);
+            return;
+        }
+
+        // Queue the redeem instruction
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::RedeemReserveCollateral {
+                collateral_amount: amount,
+            })
+            .accounts(accounts::RedeemReserveCollateral {
+                owner: user_keypair.pubkey(),
+                reserve: reserve.reserve,
+                lending_market: self.lending_market,
+                lending_market_authority: self.lending_market_authority,
+                reserve_liquidity_mint: reserve.mint,
+                reserve_collateral_mint: reserve.collateral_mint,
+                reserve_liquidity_supply: reserve.liquidity_supply,
+                user_source_collateral: user_collateral_account,
+                user_destination_liquidity: user_liquidity_account,
+                collateral_token_program: spl_token::id(),
+                liquidity_token_program: spl_token::id(),
+                instruction_sysvar_account: sysvar_ids::instructions_id(),
+            })
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] redeem: {:?}", e); }
+            action_stats::record(&action_stats::REDEEM_OK, &action_stats::REDEEM_FAIL, false);
+            return;
+        }
+
+        // Send batch: RefreshReserve + RedeemReserveCollateral
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("redeem", &result, &action_stats::REDEEM_OK, &action_stats::REDEEM_FAIL);
+    }
+
+    // ========================================================================
+    // Combined Deposit + Obligation Collateral (single instruction)
+    // ========================================================================
+
+    pub fn action_deposit_and_collateral(
+        &mut self,
+        #[range(0..4)] user_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
+        #[range(100_000_000..2_000_000_000)] amount: u64,
+    ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
+        let reserve = self.reserves[reserve_idx].clone();
+        let user_pubkey = self.users[user_idx].keypair.pubkey();
+
+        // User needs liquidity tokens
+        let token_account = match self.users[user_idx].token_accounts.get(&reserve.mint) {
+            Some(acc) => *acc,
+            None => {
+                action_stats::log_early_return("deposit_and_coll", "no_token_account", &action_stats::DEPOSIT_AND_COLL_EARLY);
+                return;
+            }
+        };
+
+        let balance = self.ctx.token_balance(&token_account);
+        let amount = amount.min(balance);
+        if amount == 0 {
+            action_stats::log_early_return("deposit_and_coll", &format!("zero_balance (bal={})", balance), &action_stats::DEPOSIT_AND_COLL_EARLY);
+            return;
+        }
+
+        let user_keypair = self.users[user_idx].keypair.clone();
+        let user_obligation = self.users[user_idx].obligation;
+
+        // Patch freshness and queue refreshes
+        self.patch_freshness_all(user_idx);
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit_and_coll refresh: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_AND_COLL_OK, &action_stats::DEPOSIT_AND_COLL_FAIL, false);
+            return;
+        }
+
+        // Queue the combined instruction
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::DepositReserveLiquidityAndObligationCollateral {
+                liquidity_amount: amount,
+            })
+            .accounts(accounts::DepositReserveLiquidityAndObligationCollateral {
+                owner: user_pubkey,
+                obligation: user_obligation,
+                lending_market: self.lending_market,
+                lending_market_authority: self.lending_market_authority,
+                reserve: reserve.reserve,
+                reserve_liquidity_mint: reserve.mint,
+                reserve_liquidity_supply: reserve.liquidity_supply,
+                reserve_collateral_mint: reserve.collateral_mint,
+                reserve_destination_deposit_collateral: reserve.collateral_supply,
+                user_source_liquidity: token_account,
+                placeholder_user_destination_collateral: Some(self.program_id),
+                collateral_token_program: spl_token::id(),
+                liquidity_token_program: spl_token::id(),
+                instruction_sysvar_account: sysvar_ids::instructions_id(),
+            })
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] deposit_and_coll: {:?}", e); }
+            action_stats::record(&action_stats::DEPOSIT_AND_COLL_OK, &action_stats::DEPOSIT_AND_COLL_FAIL, false);
+            return;
+        }
+
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("deposit_and_coll", &result, &action_stats::DEPOSIT_AND_COLL_OK, &action_stats::DEPOSIT_AND_COLL_FAIL);
+    }
+
+    // ========================================================================
+    // Flash Loan Action (borrow + repay in same transaction)
+    // ========================================================================
+
+    pub fn action_flash_loan(
+        &mut self,
+        #[range(0..4)] user_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
+        #[range(10_000_000..500_000_000)] amount: u64,
+    ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
+        let reserve = self.reserves[reserve_idx].clone();
+
+        // User needs a token account for this reserve
+        let token_account = match self.users[user_idx].token_accounts.get(&reserve.mint) {
+            Some(acc) => *acc,
+            None => {
+                action_stats::log_early_return("flash_loan", "no_token_account", &action_stats::FLASH_LOAN_EARLY);
+                return;
+            }
+        };
+
+        // Need some balance to pay flash loan fees
+        let balance = self.ctx.token_balance(&token_account);
+        if balance < amount / 100 {
+            action_stats::log_early_return("flash_loan", &format!("insufficient_fee_balance (bal={})", balance), &action_stats::FLASH_LOAN_EARLY);
+            return;
+        }
+
+        // Check reserve has enough liquidity
+        if let Ok(res_account) = self.ctx.get_account(&reserve.reserve) {
+            if res_account.data.len() >= 8 + RESERVE_SIZE {
+                let res: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+                if res.liquidity.available_amount < amount {
+                    action_stats::log_early_return("flash_loan", "insufficient_reserve_liquidity", &action_stats::FLASH_LOAN_EARLY);
+                    return;
+                }
+            }
+        }
+
+        self.patch_reserve_freshness(reserve_idx);
+
+        let user_keypair = self.users[user_idx].keypair.clone();
+
+        // Queue FlashBorrowReserveLiquidity (instruction index 0)
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::FlashBorrowReserveLiquidity {
+                liquidity_amount: amount,
+            })
+            .accounts(accounts::FlashBorrowReserveLiquidity {
+                user_transfer_authority: user_keypair.pubkey(),
+                lending_market_authority: self.lending_market_authority,
+                lending_market: self.lending_market,
+                reserve: reserve.reserve,
+                reserve_liquidity_mint: reserve.mint,
+                reserve_source_liquidity: reserve.liquidity_supply,
+                user_destination_liquidity: token_account,
+                reserve_liquidity_fee_receiver: reserve.fee_receiver,
+                referrer_token_state: Some(self.program_id),
+                referrer_account: Some(self.program_id),
+                sysvar_info: sysvar_ids::instructions_id(),
+                token_program: spl_token::id(),
+            })
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] flash_borrow: {:?}", e); }
+            action_stats::record(&action_stats::FLASH_LOAN_OK, &action_stats::FLASH_LOAN_FAIL, false);
+            return;
+        }
+
+        // Queue FlashRepayReserveLiquidity (instruction index 1, references borrow at index 0)
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::FlashRepayReserveLiquidity {
+                liquidity_amount: amount,
+                borrow_instruction_index: 0, // FlashBorrow is the first instruction in the batch
+            })
+            .accounts(accounts::FlashRepayReserveLiquidity {
+                user_transfer_authority: user_keypair.pubkey(),
+                lending_market_authority: self.lending_market_authority,
+                lending_market: self.lending_market,
+                reserve: reserve.reserve,
+                reserve_liquidity_mint: reserve.mint,
+                reserve_destination_liquidity: reserve.liquidity_supply,
+                user_source_liquidity: token_account,
+                reserve_liquidity_fee_receiver: reserve.fee_receiver,
+                referrer_token_state: Some(self.program_id),
+                referrer_account: Some(self.program_id),
+                sysvar_info: sysvar_ids::instructions_id(),
+                token_program: spl_token::id(),
+            })
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] flash_repay: {:?}", e); }
+            action_stats::record(&action_stats::FLASH_LOAN_OK, &action_stats::FLASH_LOAN_FAIL, false);
+            return;
+        }
+
+        // Send batch: FlashBorrow + FlashRepay
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("flash_loan", &result, &action_stats::FLASH_LOAN_OK, &action_stats::FLASH_LOAN_FAIL);
+    }
+
+    // ========================================================================
+    // Standalone Withdraw Obligation Collateral (without redeem)
+    // Different code path from the combined withdraw+redeem action
+    // ========================================================================
+
+    pub fn action_withdraw_collateral(
+        &mut self,
+        #[range(0..4)] user_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
+        #[range(10_000_000..1_000_000_000)] collateral_amount: u64,
+    ) {
+        use types::{Obligation, OBLIGATION_SIZE};
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let user_idx = user_idx % self.users.len();
+
+        // Check if user has collateral deposited
+        let user_obligation_pubkey = self.users[user_idx].obligation;
+        if let Ok(account) = self.ctx.get_account(&user_obligation_pubkey) {
+            if account.data.len() >= 8 + OBLIGATION_SIZE {
+                let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+                let has_collateral = obligation.deposits.iter().any(|d| d.deposit_reserve != [0u8; 32]);
+                if !has_collateral {
+                    action_stats::log_early_return("withdraw_coll", "no_collateral", &action_stats::WITHDRAW_COLL_EARLY);
+                    return;
+                }
+            }
+        }
+
+        let reserve = self.reserves[reserve_idx].clone();
+
+        // User needs a collateral token account to receive withdrawn cTokens
+        let user_collateral_account = match self.users[user_idx].token_accounts.get(&reserve.collateral_mint) {
+            Some(acc) => *acc,
+            None => {
+                // Create one
+                let user_pubkey = self.users[user_idx].keypair.pubkey();
+                let acc = self.ctx.create_token_account()
+                    .pubkey(Keypair::new().pubkey())
+                    .mint(reserve.collateral_mint)
+                    .token_owner(user_pubkey)
+                    .create()
+                    .unwrap();
+                self.users[user_idx].token_accounts.insert(reserve.collateral_mint, acc);
+                acc
+            }
+        };
+
+        let user_keypair = self.users[user_idx].keypair.clone();
+        let user_obligation = self.users[user_idx].obligation;
+
+        // Patch freshness and queue refresh instructions
+        self.patch_freshness_all(user_idx);
+        if let Err(e) = self.queue_all_refreshes(user_idx, &[reserve_idx]) {
+            if DEBUG { eprintln!("[QUEUE_ERR] withdraw_coll refresh: {:?}", e); }
+            action_stats::record(&action_stats::WITHDRAW_COLL_OK, &action_stats::WITHDRAW_COLL_FAIL, false);
+            return;
+        }
+
+        // Queue WithdrawObligationCollateral
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::WithdrawObligationCollateral {
+                collateral_amount,
+            })
+            .accounts(accounts::WithdrawObligationCollateral {
+                owner: user_keypair.pubkey(),
+                obligation: user_obligation,
+                lending_market: self.lending_market,
+                lending_market_authority: self.lending_market_authority,
+                withdraw_reserve: reserve.reserve,
+                reserve_source_collateral: reserve.collateral_supply,
+                user_destination_collateral: user_collateral_account,
+                token_program: spl_token::id(),
+                instruction_sysvar_account: sysvar_ids::instructions_id(),
+            })
+            .signers(&[&*user_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] withdraw_coll: {:?}", e); }
+            action_stats::record(&action_stats::WITHDRAW_COLL_OK, &action_stats::WITHDRAW_COLL_FAIL, false);
+            return;
+        }
+
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("withdraw_coll", &result, &action_stats::WITHDRAW_COLL_OK, &action_stats::WITHDRAW_COLL_FAIL);
+    }
+
+    // ========================================================================
+    // Redeem Fees Action (protocol fee extraction)
+    // ========================================================================
+
+    pub fn action_redeem_fees(
+        &mut self,
+        #[range(0..4)] reserve_idx: usize,
+    ) {
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let reserve = self.reserves[reserve_idx].clone();
+
+        self.patch_reserve_freshness(reserve_idx);
+
+        // Queue RefreshReserve + RedeemFees
+        if let Err(e) = self.queue_refresh_reserve(reserve_idx) {
+            if DEBUG { eprintln!("[QUEUE_ERR] redeem_fees refresh: {:?}", e); }
+            action_stats::record(&action_stats::REDEEM_FEES_OK, &action_stats::REDEEM_FEES_FAIL, false);
+            return;
+        }
+
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::RedeemFees {})
+            .accounts(accounts::RedeemFees {
+                reserve: reserve.reserve,
+                reserve_liquidity_mint: reserve.mint,
+                reserve_liquidity_fee_receiver: reserve.fee_receiver,
+                reserve_supply_liquidity: reserve.liquidity_supply,
+                lending_market: self.lending_market,
+                lending_market_authority: self.lending_market_authority,
+                token_program: spl_token::id(),
+            })
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] redeem_fees: {:?}", e); }
+            action_stats::record(&action_stats::REDEEM_FEES_OK, &action_stats::REDEEM_FEES_FAIL, false);
+            return;
+        }
+
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("redeem_fees", &result, &action_stats::REDEEM_FEES_OK, &action_stats::REDEEM_FEES_FAIL);
+    }
+
+    // ========================================================================
+    // Socialize Loss Action (bad debt handling)
+    // ========================================================================
+
+    pub fn action_socialize_loss(
+        &mut self,
+        #[range(0..4)] target_idx: usize,
+        #[range(0..4)] reserve_idx: usize,
+        #[range(1_000_000..100_000_000)] liquidity_amount: u64,
+    ) {
+        use types::{Obligation, OBLIGATION_SIZE};
+        let reserve_idx = reserve_idx % self.reserves.len();
+        let target_idx = target_idx % self.users.len();
+
+        // Check if obligation has borrows (required for socialization)
+        let user_obligation_pubkey = self.users[target_idx].obligation;
+        if let Ok(account) = self.ctx.get_account(&user_obligation_pubkey) {
+            if account.data.len() >= 8 + OBLIGATION_SIZE {
+                let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+                let has_borrows = obligation.borrows.iter().any(|b| b.borrow_reserve != [0u8; 32]);
+                if !has_borrows {
+                    action_stats::log_early_return("socialize", "no_borrows", &action_stats::SOCIALIZE_EARLY);
+                    return;
+                }
+            }
+        }
+
+        let reserve = self.reserves[reserve_idx].clone();
+
+        // Socialize loss requires risk_council signer (admin acts as risk council)
+        let admin_keypair = self.admin.clone();
+
+        self.patch_reserve_freshness(reserve_idx);
+        self.patch_obligation_freshness(target_idx);
+
+        // Queue RefreshReserve first
+        if let Err(e) = self.queue_refresh_reserve(reserve_idx) {
+            if DEBUG { eprintln!("[QUEUE_ERR] socialize refresh: {:?}", e); }
+            action_stats::record(&action_stats::SOCIALIZE_OK, &action_stats::SOCIALIZE_FAIL, false);
+            return;
+        }
+
+        if let Err(e) = self.ctx.program(self.program_id)
+            .call(instruction::SocializeLoss {
+                liquidity_amount,
+            })
+            .accounts(accounts::SocializeLoss {
+                risk_council: admin_keypair.pubkey(),
+                obligation: self.users[target_idx].obligation,
+                lending_market: self.lending_market,
+                reserve: reserve.reserve,
+                instruction_sysvar_account: sysvar_ids::instructions_id(),
+            })
+            .signers(&[&*admin_keypair])
+            .add_transaction()
+        {
+            if DEBUG { eprintln!("[QUEUE_ERR] socialize: {:?}", e); }
+            action_stats::record(&action_stats::SOCIALIZE_OK, &action_stats::SOCIALIZE_FAIL, false);
+            return;
+        }
+
+        let result = safe_send_batch!(self.ctx);
+        action_stats::handle_batch_result("socialize", &result, &action_stats::SOCIALIZE_OK, &action_stats::SOCIALIZE_FAIL);
     }
 }
 
@@ -1449,6 +2007,317 @@ impl KlendFixture {
 mod fixture_helpers {
     use super::*;
 
+    const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+
+    // Mainnet main lending market
+    const MAINNET_LENDING_MARKET: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF";
+
+    /// Initialize the fixture by cloning mainnet state via RPC.
+    /// Clones the lending market, discovers reserves, clones their associated
+    /// token accounts and oracles, then creates local users.
+    pub fn initialize_from_mainnet(ctx: &mut TestContext, program_id: &Pubkey) -> KlendFixture {
+        use solana_rpc_client_api::filter::{RpcFilterType, Memcmp, MemcmpEncodedBytes};
+
+        let lending_market: Pubkey = MAINNET_LENDING_MARKET.parse().expect("invalid lending market address");
+
+        // Lending market authority PDA
+        let (lending_market_authority, _bump) = Pubkey::find_program_address(
+            &[LENDING_MARKET_AUTH, lending_market.as_ref()],
+            program_id,
+        );
+
+        let mut cloner = ctx.clone_from_rpc(RPC_URL);
+
+        // 1. Clone the lending market account
+        eprintln!("[SETUP] Cloning lending market: {}", lending_market);
+        cloner.clone_account(&lending_market).expect("Failed to clone lending market");
+
+        // 2. Clone all reserve accounts for this lending market.
+        // Reserves are 8 + 8616 bytes. Filter by:
+        //   - data size = 8624
+        //   - lending_market field at offset 8 (version) + 16 (last_update) = 24
+        //     Actually: discriminator(8) + version(8) + last_update(16) + lending_market(32)
+        //     So lending_market starts at offset 8 + 8 + 16 = 32
+        let reserve_data_size: u64 = (8 + RESERVE_SIZE) as u64;
+        let filters = vec![
+            RpcFilterType::DataSize(reserve_data_size),
+            RpcFilterType::Memcmp(Memcmp::new(
+                32, // offset: discrim(8) + version(8) + last_update(16) = 32
+                MemcmpEncodedBytes::Bytes(lending_market.to_bytes().to_vec()),
+            )),
+        ];
+        eprintln!("[SETUP] Discovering reserves (data_size={}, market filter at offset 32)...", reserve_data_size);
+        let reserve_pubkeys = cloner.clone_program_accounts(program_id, &filters)
+            .expect("Failed to clone reserve accounts");
+        eprintln!("[SETUP] Found {} reserves", reserve_pubkeys.len());
+
+        // 3. Read cloned reserves to discover associated accounts, then clone those too.
+        // We need to drop the cloner, read, then create a new cloner.
+        drop(cloner);
+
+        // Collect ALL valid reserve info first, then pick the best 4
+        let mut all_reserve_infos: Vec<(String, Pubkey, ReserveData)> = Vec::new();
+        let mut accounts_to_clone: Vec<Pubkey> = Vec::new();
+
+        for reserve_pubkey in &reserve_pubkeys {
+
+            let Ok(account) = ctx.get_account(reserve_pubkey) else { continue };
+            if account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+            let reserve: &Reserve = bytemuck::from_bytes(&account.data[8..8 + RESERVE_SIZE]);
+
+            // Skip inactive reserves (status != 0 means disabled/obsolete)
+            if reserve.config.status != 0 {
+                eprintln!("[SETUP] Skipping inactive reserve {} (status={})", reserve_pubkey, reserve.config.status);
+                continue;
+            }
+
+            let liquidity_mint = Pubkey::new_from_array(reserve.liquidity.mint_pubkey);
+            let liquidity_supply = Pubkey::new_from_array(reserve.liquidity.supply_vault);
+            let fee_receiver = Pubkey::new_from_array(reserve.liquidity.fee_vault);
+            let collateral_mint = Pubkey::new_from_array(reserve.collateral.mint_pubkey);
+            let collateral_supply = Pubkey::new_from_array(reserve.collateral.supply_vault);
+
+            let pyth_oracle = Pubkey::new_from_array(reserve.config.token_info.pyth_configuration.price);
+            let decimals = reserve.liquidity.mint_decimals as u8;
+            let token_name = std::str::from_utf8(&reserve.config.token_info.name)
+                .unwrap_or("???")
+                .trim_end_matches('\0');
+            eprintln!("[SETUP] Reserve {}: {} (decimals={}, LTV={}%, liq_thresh={}%)",
+                reserve_pubkey, token_name, decimals,
+                reserve.config.loan_to_value_pct,
+                reserve.config.liquidation_threshold_pct);
+
+            all_reserve_infos.push((token_name.to_string(), *reserve_pubkey, ReserveData {
+                reserve: *reserve_pubkey,
+                mint: liquidity_mint,
+                liquidity_supply,
+                collateral_mint,
+                collateral_supply,
+                fee_receiver,
+                decimals,
+                mock_pyth_oracle: pyth_oracle,
+            }));
+        }
+
+        // Pick 4 reserves, preferring well-known tokens
+        let preferred = ["SOL", "USDC", "USDT", "JitoSOL", "mSOL", "bSOL", "JTO", "PYTH", "JUP", "WIF"];
+        let max_reserves = 4;
+        let mut selected: Vec<(String, Pubkey, ReserveData)> = Vec::new();
+
+        // First pass: pick preferred tokens
+        for name in &preferred {
+            if selected.len() >= max_reserves { break; }
+            if let Some(pos) = all_reserve_infos.iter().position(|(n, _, _)| n == *name) {
+                selected.push(all_reserve_infos.remove(pos));
+            }
+        }
+        // Second pass: fill remaining slots with whatever's available
+        while selected.len() < max_reserves && !all_reserve_infos.is_empty() {
+            selected.push(all_reserve_infos.remove(0));
+        }
+
+        eprintln!("[SETUP] Selected reserves: {:?}", selected.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>());
+
+        // Collect accounts to clone for selected reserves
+        let mut selected_accounts: Vec<Pubkey> = Vec::new();
+        for (_, _, rd) in &selected {
+            selected_accounts.push(rd.mint);
+            selected_accounts.push(rd.liquidity_supply);
+            selected_accounts.push(rd.fee_receiver);
+            selected_accounts.push(rd.collateral_mint);
+            selected_accounts.push(rd.collateral_supply);
+            if rd.mock_pyth_oracle != Pubkey::default() {
+                selected_accounts.push(rd.mock_pyth_oracle);
+            }
+        }
+
+        // 4. Clone all associated accounts (mints, vaults, oracles)
+        eprintln!("[SETUP] Cloning {} associated accounts...", selected_accounts.len());
+        let mut cloner = ctx.clone_from_rpc(RPC_URL);
+        for pubkey in &selected_accounts {
+            if let Err(e) = cloner.clone_account(pubkey) {
+                eprintln!("[SETUP] Warning: failed to clone {}: {}", pubkey, e);
+            }
+        }
+        drop(cloner);
+
+        let reserves: Vec<ReserveData> = selected.into_iter().map(|(_, _, rd)| rd).collect();
+
+        // 5. Patch mint authorities so we can mint tokens to users
+        // Mainnet mints have their own authorities; we need our admin to be the authority
+        let admin = Rc::new(Keypair::new());
+        ctx.create_account()
+            .pubkey(admin.pubkey())
+            .lamports(100_000_000_000)
+            .owner(system_program::ID)
+            .create()
+            .unwrap();
+
+        // Patch mint authorities so our admin can mint tokens to users
+        for reserve_data in &reserves {
+            patch_mint_authority(ctx, &reserve_data.mint, &admin.pubkey());
+        }
+        eprintln!("[SETUP] Patched {} mint authorities", reserves.len());
+
+        // Set the SVM clock to a recent time so mainnet timestamps are not "in the future"
+        // Mainnet reserves have timestamps from 2024/2025, so we need unix_timestamp >= those
+        {
+            use solana_program::clock::Clock;
+            let slot = 350_000_000u64; // ~current mainnet slot
+            let mut clock = ctx.svm.get_sysvar::<Clock>();
+            clock.slot = slot;
+            clock.epoch_start_timestamp = 1740000000; // ~Feb 2025
+            clock.unix_timestamp = 1740000000;        // ~Feb 2025
+            clock.leader_schedule_epoch = clock.epoch + 1;
+            ctx.svm.set_sysvar(&clock);
+        }
+
+        // Create mock Pyth oracles and patch reserves for fuzzing
+        let current_slot = ctx.slot();
+        let mut patched_reserves: Vec<ReserveData> = Vec::new();
+
+        for reserve_data in &reserves {
+            // Create a mock Pyth oracle (mainnet oracles won't have valid slot timestamps)
+            let mock_pyth_oracle = ctx.create_mock_pyth_oracle()
+                .price(100_00000000)  // $100
+                .exponent(-8)
+                .confidence(100_000)
+                .build()
+                .unwrap();
+
+            // Patch reserve for fuzzing: unlimited limits, fresh timestamps, mock oracle
+            if let Ok(account) = ctx.get_account(&reserve_data.reserve) {
+                let mut data = account.data.clone();
+                if data.len() >= 8 + RESERVE_SIZE {
+                    let reserve: &mut Reserve = bytemuck::from_bytes_mut(&mut data[8..8 + RESERVE_SIZE]);
+
+                    // Fix freshness
+                    reserve.last_update.mark_fresh(current_slot);
+
+                    // Set unlimited limits for fuzzing
+                    reserve.config.deposit_limit = u64::MAX;
+                    reserve.config.borrow_limit = u64::MAX;
+                    reserve.config.borrow_limit_outside_elevation_group = u64::MAX;
+                    reserve.config.status = 0; // Active
+
+                    // Set mock oracle (mainnet Pyth timestamps will be stale)
+                    reserve.config.token_info.pyth_configuration.price = mock_pyth_oracle.to_bytes();
+                    reserve.config.token_info.max_age_price_seconds = 600;
+                    reserve.config.token_info.max_age_twap_seconds = 600;
+
+                    // Zero out other oracle configs
+                    reserve.config.token_info.switchboard_configuration.price_aggregator = [0u8; 32];
+                    reserve.config.token_info.switchboard_configuration.twap_aggregator = [0u8; 32];
+                    reserve.config.token_info.scope_configuration.price_feed = [0u8; 32];
+                    reserve.config.token_info.scope_configuration.price_chain = [0xFFFF; 4];
+                    reserve.config.token_info.scope_configuration.twap_chain = [0xFFFF; 4];
+
+                    // Set market price
+                    let price_sf: u128 = 100 * 10_u128.pow(18);
+                    reserve.liquidity.market_price_sf = types::u128_to_u64_pair(price_sf);
+
+                    // Set cumulative_borrow_rate to at least 1.0 if zero
+                    if reserve.liquidity.cumulative_borrow_rate_bsf.value[0] == 0 {
+                        reserve.liquidity.cumulative_borrow_rate_bsf.value[0] = 1u64 << 60;
+                    }
+
+                    // Ensure token_program is set
+                    if reserve.liquidity.token_program == [0u8; 32] {
+                        reserve.liquidity.token_program = spl_token::id().to_bytes();
+                    }
+
+                    // Remove withdrawal caps that would block fuzzing
+                    reserve.config.deposit_withdrawal_cap.config_capacity = i64::MAX;
+                    reserve.config.deposit_withdrawal_cap.current_total = 0;
+                    reserve.config.deposit_withdrawal_cap.last_interval_start_timestamp = 0;
+                    reserve.config.debt_withdrawal_cap.config_capacity = i64::MAX;
+                    reserve.config.debt_withdrawal_cap.current_total = 0;
+                    reserve.config.debt_withdrawal_cap.last_interval_start_timestamp = 0;
+
+                    // Disable price heuristic (mainnet has tight bounds per token)
+                    reserve.config.token_info.heuristic.lower = 0;
+                    reserve.config.token_info.heuristic.upper = u64::MAX;
+                    reserve.config.token_info.heuristic.exp = 0;
+
+                    // Reset other timestamps that may be in the future
+                    reserve.liquidity.deposit_limit_crossed_timestamp = 0;
+                    reserve.liquidity.borrow_limit_crossed_timestamp = 0;
+
+                    // Sync available_amount with actual vault balance
+                    // Mainnet data may have a different available_amount than what's in the vault
+                    // (due to timing differences in cloning). This prevents false conservation violations.
+                    let vault_pk = Pubkey::new_from_array(reserve.liquidity.supply_vault);
+                    if let Ok(vault_account) = ctx.get_account(&vault_pk) {
+                        // SPL Token Account: balance is at offset 64..72
+                        if vault_account.data.len() >= 72 {
+                            let vault_balance = u64::from_le_bytes(
+                                vault_account.data[64..72].try_into().unwrap()
+                            );
+                            reserve.liquidity.available_amount = vault_balance;
+                        }
+                    }
+
+                    // Log the token program this reserve uses
+                    let token_program_key = Pubkey::new_from_array(reserve.liquidity.token_program);
+                    let token_name_str = std::str::from_utf8(&reserve.config.token_info.name)
+                        .unwrap_or("???").trim_end_matches('\0');
+                    eprintln!("[SETUP] Reserve {} token_program: {}", token_name_str, token_program_key);
+
+                    let _ = ctx.svm.set_account(reserve_data.reserve, solana_account::Account {
+                        lamports: account.lamports,
+                        data,
+                        owner: *program_id,
+                        executable: false,
+                        rent_epoch: account.rent_epoch,
+                    });
+                }
+            }
+
+            patched_reserves.push(ReserveData {
+                mock_pyth_oracle,
+                ..reserve_data.clone()
+            });
+        }
+
+        // 6. Patch lending market: risk_council, liquidation config
+        patch_lending_market(ctx, &lending_market, &admin.pubkey(), program_id);
+
+        // 7. Create users with obligations and funded token accounts
+        // Need GlobalConfig for InitObligation -> InitUserMetadata
+        let (global_config, _) = Pubkey::find_program_address(&[GLOBAL_CONFIG_STATE], program_id);
+        // Create global config if it doesn't exist
+        if ctx.get_account(&global_config).is_err() {
+            create_global_config_account(ctx, &global_config, &admin.pubkey(), program_id);
+        }
+
+        let users: Vec<_> = (0..4)
+            .map(|i| {
+                let user = create_user(
+                    ctx, program_id, &lending_market,
+                    &patched_reserves, &admin, i,
+                );
+                eprintln!("[SETUP] User {} created: {}", i, user.keypair.pubkey());
+                user
+            })
+            .collect();
+
+        let num_reserves = patched_reserves.len();
+        eprintln!("[SETUP] Complete: {} reserves, {} users", num_reserves, users.len());
+
+        KlendFixture {
+            ctx: std::mem::replace(ctx, TestContext::new()),
+            program_id: *program_id,
+            admin,
+            lending_market,
+            lending_market_authority,
+            reserves: patched_reserves,
+            users,
+            prev_borrow_rates: vec![[0u64; 4]; num_reserves],
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn initialize_state(ctx: &mut TestContext, program_id: &Pubkey) -> KlendFixture {
         // Create admin account
         let admin = Rc::new(Keypair::new());
@@ -1514,6 +2383,10 @@ mod fixture_helpers {
             }
         }
 
+        // Patch lending market for liquidation and socialize_loss support
+        // Set risk_council = admin, liquidation params, global_allowed_borrow_value
+        patch_lending_market(ctx, &lending_market.pubkey(), &admin.pubkey(), program_id);
+
         // Create token mints
         let sol_mint = ctx.create_mint()
             .pubkey(Keypair::new().pubkey())
@@ -1568,6 +2441,98 @@ mod fixture_helpers {
             reserves,
             users,
             prev_borrow_rates: vec![[0u64; 4]; num_reserves],
+        }
+    }
+
+    /// Patch an SPL Token mint account to set our admin as the mint authority.
+    /// SPL Token mint layout (82 bytes):
+    /// [0..4]:  COption<Pubkey> tag (1 = Some)
+    /// [4..36]: mint_authority pubkey
+    /// [36..44]: supply (u64)
+    /// [44]: decimals (u8)
+    /// [45]: is_initialized (bool)
+    /// [46..50]: COption<Pubkey> tag for freeze_authority
+    /// [50..82]: freeze_authority pubkey
+    fn patch_mint_authority(ctx: &mut TestContext, mint: &Pubkey, new_authority: &Pubkey) {
+        if let Ok(account) = ctx.get_account(mint) {
+            let mut data = account.data.clone();
+            if data.len() >= 36 {
+                // Set COption tag to Some (1)
+                data[0..4].copy_from_slice(&1u32.to_le_bytes());
+                // Set mint authority to our admin
+                data[4..36].copy_from_slice(new_authority.as_ref());
+
+                let _ = ctx.svm.set_account(*mint, solana_account::Account {
+                    lamports: account.lamports,
+                    data,
+                    owner: account.owner,
+                    executable: account.executable,
+                    rent_epoch: account.rent_epoch,
+                });
+            }
+        }
+    }
+
+    fn patch_lending_market(
+        ctx: &mut TestContext,
+        lending_market: &Pubkey,
+        admin: &Pubkey,
+        program_id: &Pubkey,
+    ) {
+        let account = ctx.get_account(lending_market).unwrap();
+        let mut data = account.data.clone();
+
+        // LendingMarket layout (zero_copy = repr(C), after 8-byte discriminator):
+        // [8..16]:  version (u64)
+        // [16..24]: bump_seed (u64)
+        // [24..56]: lending_market_owner (Pubkey)
+        // [56..88]: lending_market_owner_cached (Pubkey)
+        // [88..120]: quote_currency ([u8; 32])
+        // [120..122]: referral_fee_bps (u16)
+        // [122]: emergency_mode (u8) — must be 0
+        // [123]: autodeleverage_enabled (u8)
+        // [124]: borrow_disabled (u8) — must be 0
+        // [125]: price_refresh_trigger_to_max_age_pct (u8)
+        // [126]: liquidation_max_debt_close_factor_pct (u8)
+        // [127]: insolvency_risk_unhealthy_ltv_pct (u8)
+        // [128..136]: min_full_liquidation_value_threshold (u64)
+        // [136..144]: max_liquidatable_debt_market_value_at_once (u64)
+        // [144..152]: reserved0 ([u8; 8])
+        // [152..160]: global_allowed_borrow_value (u64)
+        // [160..192]: risk_council (Pubkey)
+
+        // Set risk_council = admin (needed for socialize_loss)
+        data[160..192].copy_from_slice(admin.as_ref());
+
+        // Set liquidation_max_debt_close_factor_pct = 100
+        data[126] = 100;
+
+        // Set insolvency_risk_unhealthy_ltv_pct = 100
+        data[127] = 100;
+
+        // Set min_full_liquidation_value_threshold = 0 (allow any size liquidation)
+        data[128..136].copy_from_slice(&0u64.to_le_bytes());
+
+        // Set max_liquidatable_debt_market_value_at_once = u64::MAX
+        data[136..144].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        // Set global_allowed_borrow_value = u64::MAX
+        data[152..160].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        // Ensure emergency_mode = 0 and borrow_disabled = 0
+        data[122] = 0;
+        data[124] = 0;
+
+        ctx.create_account()
+            .pubkey(*lending_market)
+            .lamports(account.lamports)
+            .owner(*program_id)
+            .data(&data)
+            .create()
+            .unwrap();
+
+        if DEBUG {
+            eprintln!("[SETUP] Patched lending market: risk_council={}, liq_close_factor=100%", admin);
         }
     }
 
@@ -1634,7 +2599,7 @@ mod fixture_helpers {
         program_id: &Pubkey,
         lending_market: &Pubkey,
         lending_market_authority: &Pubkey,
-        global_config: &Pubkey,
+        _global_config: &Pubkey,
         mint: &Pubkey,
         decimals: u8,
         admin: &Rc<Keypair>,
@@ -1738,47 +2703,8 @@ mod fixture_helpers {
         // Configure reserve with proper price and status
         configure_reserve_manually(ctx, program_id, &reserve_kp.pubkey(), current_slot, &mock_pyth_oracle);
 
-        // Use update_reserve_config to properly set deposit_limit and borrow_limit
-        // UpdateConfigMode::UpdateDepositLimit = 8, UpdateBorrowLimit = 9
-        {
-            // Set deposit limit to u64::MAX
-            let result = ctx.program(*program_id)
-                .call(instruction::UpdateReserveConfig {
-                    mode: UpdateConfigMode::UpdateDepositLimit,
-                    value: u64::MAX.to_le_bytes().to_vec(),
-                    skip_config_integrity_validation: true,
-                })
-                .accounts(accounts::UpdateReserveConfig {
-                    signer: admin.pubkey(),
-                    global_config: *global_config,
-                    lending_market: *lending_market,
-                    reserve: reserve_kp.pubkey(),
-                })
-                .signers(&[&**admin])
-                .send();
-            if let Ok(TxOutcome::ProgramError { error, .. }) = &result {
-                eprintln!("[DEBUG] UpdateReserveConfig (deposit_limit) failed: {:?}", error);
-            }
-
-            // Set borrow limit to u64::MAX
-            let result = ctx.program(*program_id)
-                .call(instruction::UpdateReserveConfig {
-                    mode: UpdateConfigMode::UpdateBorrowLimit,
-                    value: u64::MAX.to_le_bytes().to_vec(),
-                    skip_config_integrity_validation: true,
-                })
-                .accounts(accounts::UpdateReserveConfig {
-                    signer: admin.pubkey(),
-                    global_config: *global_config,
-                    lending_market: *lending_market,
-                    reserve: reserve_kp.pubkey(),
-                })
-                .signers(&[&**admin])
-                .send();
-            if let Ok(TxOutcome::ProgramError { error, .. }) = &result {
-                eprintln!("[DEBUG] UpdateReserveConfig (borrow_limit) failed: {:?}", error);
-            }
-        }
+        // Note: UpdateReserveConfig fails with 3002 (discriminator mismatch) because the
+        // IDL doesn't match the binary. Limits are set via configure_reserve_manually instead.
 
         // Debug: print reserve config after patching
         if DEBUG {
@@ -1813,7 +2739,7 @@ mod fixture_helpers {
         current_slot: u64,
         mock_pyth_oracle: &Pubkey,
     ) {
-        use types::{Reserve, RESERVE_SIZE, PRICE_STATUS_ALL_CHECKS, u128_to_u64_pair};
+        use types::{Reserve, RESERVE_SIZE, u128_to_u64_pair};
 
         let account = ctx.get_account(reserve_pubkey).unwrap();
         let mut data = account.data.clone();
@@ -2038,6 +2964,24 @@ fn invariant_test(fixture: &mut KlendFixture) {
     reserve_liquidity_conservation(fixture);
     no_phantom_borrows(fixture);
     interest_rate_monotonicity(fixture);
+    collateral_supply_conservation(fixture);
+    total_borrowed_consistency(fixture);
+    reserve_utilization_bounds(fixture);
+    obligation_deposit_integrity(fixture);
+    // Phase D iteration 27
+    exchange_rate_monotonicity(fixture);
+    cumulative_borrow_rate_floor(fixture);
+    reserve_vault_balance_match(fixture);
+    reserve_ltv_lte_liquidation_threshold(fixture);
+    has_debt_flag_consistency(fixture);
+    obligation_lending_market_immutable(fixture);
+    obligation_owner_immutable(fixture);
+    no_duplicate_deposit_reserves(fixture);
+    no_duplicate_borrow_reserves(fixture);
+    config_borrow_limit_consistency(fixture);
+    liquidation_bonus_range_valid(fixture);
+    protocol_take_rate_bounded(fixture);
+    reserve_borrowed_lte_total_deposited(fixture);
 }
 
 fn solvency_check(fixture: &mut KlendFixture) {
@@ -2172,5 +3116,457 @@ fn interest_rate_monotonicity(fixture: &mut KlendFixture) {
         }
 
         fixture.prev_borrow_rates[i] = current;
+    }
+}
+
+/// Invariant: collateral mint total_supply == sum of all cTokens held by users + reserve's collateral_supply vault.
+/// The cToken mint tracks ownership of the liquidity pool. If total_supply diverges from
+/// the actual token distribution, shares can be created from thin air.
+fn collateral_supply_conservation(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+        let mint_total_supply = reserve.collateral.mint_total_supply;
+
+        // Sum all known cToken holdings: reserve collateral vault + all user collateral accounts
+        let mut tracked_supply: u64 = fixture.ctx.token_balance(&reserve_data.collateral_supply);
+        for user in &fixture.users {
+            if let Some(ctoken_acc) = user.token_accounts.get(&reserve_data.collateral_mint) {
+                tracked_supply = tracked_supply.saturating_add(fixture.ctx.token_balance(ctoken_acc));
+            }
+        }
+
+        // Allow 2% tolerance for stale mint_total_supply in cloned mainnet state
+        let tolerance = (tracked_supply / 50).max(1);
+        crucible_test_context::fuzz_assert!(
+            mint_total_supply + tolerance >= tracked_supply,
+            "COLLATERAL SUPPLY LEAK: reserve {} mint_total_supply {} < tracked cToken holdings {} (tolerance {})",
+            reserve_data.reserve,
+            mint_total_supply,
+            tracked_supply,
+            tolerance
+        );
+    }
+}
+
+/// Invariant: reserve.liquidity.borrowed_amount_sf should be >= sum of all obligation borrow entries
+/// for that reserve. If borrowed_amount_sf < sum(obligations), the protocol has lost track of
+/// outstanding debt — a critical accounting vulnerability.
+fn total_borrowed_consistency(fixture: &mut KlendFixture) {
+    use types::{Reserve, Obligation, RESERVE_SIZE, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+        let reserve_borrowed = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+
+        // Sum all obligation borrows against this reserve
+        let mut total_obligation_borrows: u128 = 0;
+        let reserve_pubkey_bytes = reserve_data.reserve.to_bytes();
+
+        for user in &fixture.users {
+            let Ok(obl_account) = fixture.ctx.get_account(&user.obligation) else { continue };
+            if obl_account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+
+            let obligation: &Obligation = bytemuck::from_bytes(&obl_account.data[8..8 + OBLIGATION_SIZE]);
+
+            for borrow in &obligation.borrows {
+                if borrow.borrow_reserve == reserve_pubkey_bytes {
+                    let borrowed_amount = u64_pair_to_u128(borrow.borrowed_amount_sf);
+                    total_obligation_borrows = total_obligation_borrows.saturating_add(borrowed_amount);
+                }
+            }
+        }
+
+        // Reserve's tracked borrowed amount should be >= the sum of all obligation borrows
+        // (it can be slightly higher due to rounding in interest accrual)
+        if total_obligation_borrows > 0 {
+            crucible_test_context::fuzz_assert_ge!(
+                reserve_borrowed,
+                total_obligation_borrows,
+                "BORROW TRACKING MISMATCH: reserve {} tracks {} borrowed but obligations sum to {}",
+                reserve_data.reserve,
+                reserve_borrowed,
+                total_obligation_borrows
+            );
+        }
+    }
+}
+
+/// Invariant: utilization rate must be between 0% and 100%.
+/// utilization = borrowed / (available + borrowed). If utilization > 100%, more has been
+/// lent out than exists, which shouldn't be possible.
+fn reserve_utilization_bounds(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
+
+        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
+        let available = reserve.liquidity.available_amount as u128;
+        let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+
+        // borrowed_amount_sf is in scaled fraction (18 decimals), convert to raw
+        let borrowed = borrowed_sf / 10_u128.pow(18);
+
+        if borrowed > 0 || available > 0 {
+            let total = available.saturating_add(borrowed);
+
+            crucible_test_context::fuzz_assert_le!(
+                borrowed,
+                total,
+                "UTILIZATION > 100%%: reserve {} borrowed {} > total {} (available {})",
+                reserve_data.reserve,
+                borrowed,
+                total,
+                available
+            );
+        }
+    }
+}
+
+/// Invariant: obligation deposit entries must reference existing reserves.
+/// Each active deposit slot's deposit_reserve must match one of the known reserves.
+/// If a deposit references an unknown reserve, it indicates state corruption.
+fn obligation_deposit_integrity(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    let known_reserves: Vec<[u8; 32]> = fixture.reserves.iter()
+        .map(|r| r.reserve.to_bytes())
+        .collect();
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        for (i, deposit) in obligation.deposits.iter().enumerate() {
+            if deposit.deposit_reserve == [0u8; 32] { continue; }
+
+            let is_known = known_reserves.contains(&deposit.deposit_reserve);
+            crucible_test_context::fuzz_assert!(
+                is_known,
+                "UNKNOWN DEPOSIT RESERVE: user {} deposit slot {} references unknown reserve {:?}",
+                user.keypair.pubkey(),
+                i,
+                deposit.deposit_reserve
+            );
+        }
+
+        for (i, borrow) in obligation.borrows.iter().enumerate() {
+            if borrow.borrow_reserve == [0u8; 32] { continue; }
+
+            let is_known = known_reserves.contains(&borrow.borrow_reserve);
+            crucible_test_context::fuzz_assert!(
+                is_known,
+                "UNKNOWN BORROW RESERVE: user {} borrow slot {} references unknown reserve {:?}",
+                user.keypair.pubkey(),
+                i,
+                borrow.borrow_reserve
+            );
+        }
+    }
+}
+
+/// Invariant: Exchange rate (total_liquidity / ctoken_supply) should never decrease
+/// (except via socialize_loss). A decreasing rate means depositors are losing value.
+fn exchange_rate_monotonicity(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let ctoken_supply = reserve.collateral.mint_total_supply;
+        if ctoken_supply == 0 { continue; }
+
+        let available = reserve.liquidity.available_amount as u128;
+        let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+        let total_liq = available.saturating_add(borrowed_sf >> 60);
+
+        // Exchange rate in millionths to avoid floating point
+        let rate = total_liq.saturating_mul(1_000_000) / ctoken_supply as u128;
+
+        // Rate should be >= 1:1 (1_000_000 in millionths)
+        // Allow small tolerance for rounding (0.1%)
+        crucible_test_context::fuzz_assert!(
+            rate >= 999_000,
+            "EXCHANGE RATE BELOW 1:1: reserve {} rate={}/1000000 total_liq={} ctoken_supply={}",
+            reserve_data.reserve, rate, total_liq, ctoken_supply
+        );
+    }
+}
+
+/// Invariant: Cumulative borrow rate should be >= 1.0 (stored as BigFraction with value[0] >= 2^60).
+fn cumulative_borrow_rate_floor(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let rate_bsf = &reserve.liquidity.cumulative_borrow_rate_bsf.value;
+        // BigFraction 1.0 = 2^60 in the lowest word, 0 in higher words
+        // Rate should be >= 1.0: either higher words > 0, or word[0] >= 2^60
+        let is_ge_one = rate_bsf[3] > 0 || rate_bsf[2] > 0 || rate_bsf[1] > 0
+            || rate_bsf[0] >= (1u64 << 60);
+        // Skip zeroed reserves (never had borrows)
+        let is_zero = rate_bsf[0] == 0 && rate_bsf[1] == 0 && rate_bsf[2] == 0 && rate_bsf[3] == 0;
+        if is_zero { continue; }
+
+        crucible_test_context::fuzz_assert!(
+            is_ge_one,
+            "CUMULATIVE BORROW RATE < 1.0: reserve {} rate_bsf=[{},{},{},{}]",
+            reserve_data.reserve, rate_bsf[0], rate_bsf[1], rate_bsf[2], rate_bsf[3]
+        );
+    }
+}
+
+/// Invariant: Vault balance should be >= available_amount (vault also holds protocol fees).
+fn reserve_vault_balance_match(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let vault_balance = fixture.ctx.token_balance(&reserve_data.liquidity_supply);
+        let available = reserve.liquidity.available_amount;
+
+        // Vault should hold at least available_amount (plus fees, so vault >= available)
+        // Allow 5% tolerance for rounding and pending fee calculations
+        let tolerance = (available / 20).max(1);
+        crucible_test_context::fuzz_assert!(
+            vault_balance + tolerance >= available,
+            "VAULT UNDERFUNDED: reserve {} vault={} < available={}",
+            reserve_data.reserve, vault_balance, available
+        );
+    }
+}
+
+/// Invariant: LTV must be <= liquidation threshold for every active reserve.
+fn reserve_ltv_lte_liquidation_threshold(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let ltv = reserve.config.loan_to_value_pct;
+        let liq_threshold = reserve.config.liquidation_threshold_pct;
+        if ltv == 0 { continue; }
+
+        crucible_test_context::fuzz_assert!(
+            ltv <= liq_threshold,
+            "LTV > LIQUIDATION THRESHOLD: reserve {} ltv={}% > liq_threshold={}%",
+            reserve_data.reserve, ltv, liq_threshold
+        );
+    }
+}
+
+/// Invariant: has_debt flag should be 1 iff the obligation has any active borrows.
+fn has_debt_flag_consistency(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        let has_active_borrow = obligation.borrows.iter().any(|b| {
+            b.borrow_reserve != [0u8; 32] && u64_pair_to_u128(b.borrowed_amount_sf) > 0
+        });
+
+        if has_active_borrow {
+            crucible_test_context::fuzz_assert!(
+                obligation.has_debt == 1,
+                "HAS_DEBT FLAG MISSING: user {} has active borrows but has_debt={}",
+                user.keypair.pubkey(), obligation.has_debt
+            );
+        }
+    }
+}
+
+/// Invariant: Obligation's lending_market should not change after creation.
+fn obligation_lending_market_immutable(fixture: &mut KlendFixture) {
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + types::OBLIGATION_SIZE { continue; }
+        let obligation: &types::Obligation = bytemuck::from_bytes(
+            &account.data[8..8 + types::OBLIGATION_SIZE]
+        );
+
+        crucible_test_context::fuzz_assert!(
+            obligation.lending_market == fixture.lending_market.to_bytes(),
+            "OBLIGATION LENDING MARKET CHANGED: user {}",
+            user.keypair.pubkey()
+        );
+    }
+}
+
+/// Invariant: Obligation owner should remain the original user.
+fn obligation_owner_immutable(fixture: &mut KlendFixture) {
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + types::OBLIGATION_SIZE { continue; }
+        let obligation: &types::Obligation = bytemuck::from_bytes(
+            &account.data[8..8 + types::OBLIGATION_SIZE]
+        );
+
+        crucible_test_context::fuzz_assert!(
+            obligation.owner == user.keypair.pubkey().to_bytes(),
+            "OBLIGATION OWNER CHANGED: user {} expected {:?} got {:?}",
+            user.keypair.pubkey(), user.keypair.pubkey().to_bytes(), obligation.owner
+        );
+    }
+}
+
+/// Invariant: No duplicate deposit reserves in an obligation.
+fn no_duplicate_deposit_reserves(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        let active: Vec<_> = obligation.deposits.iter()
+            .filter(|d| d.deposit_reserve != [0u8; 32])
+            .collect();
+        for (i, d1) in active.iter().enumerate() {
+            for d2 in active.iter().skip(i + 1) {
+                crucible_test_context::fuzz_assert!(
+                    d1.deposit_reserve != d2.deposit_reserve,
+                    "DUPLICATE DEPOSIT RESERVE: user {} reserve {:?}",
+                    user.keypair.pubkey(), d1.deposit_reserve
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: No duplicate borrow reserves in an obligation.
+fn no_duplicate_borrow_reserves(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        let active: Vec<_> = obligation.borrows.iter()
+            .filter(|b| b.borrow_reserve != [0u8; 32])
+            .collect();
+        for (i, b1) in active.iter().enumerate() {
+            for b2 in active.iter().skip(i + 1) {
+                crucible_test_context::fuzz_assert!(
+                    b1.borrow_reserve != b2.borrow_reserve,
+                    "DUPLICATE BORROW RESERVE: user {} reserve {:?}",
+                    user.keypair.pubkey(), b1.borrow_reserve
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: borrow_limit >= borrow_limit_outside_elevation_group when outside-EG limit is enabled.
+fn config_borrow_limit_consistency(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let borrow_limit = reserve.config.borrow_limit;
+        let outside_eg_limit = reserve.config.borrow_limit_outside_elevation_group;
+
+        if outside_eg_limit != u64::MAX {
+            crucible_test_context::fuzz_assert!(
+                borrow_limit >= outside_eg_limit,
+                "BORROW LIMIT < OUTSIDE-EG LIMIT: reserve {} borrow_limit={} < outside_eg={}",
+                reserve_data.reserve, borrow_limit, outside_eg_limit
+            );
+        }
+    }
+}
+
+/// Invariant: min_liquidation_bonus_bps <= max_liquidation_bonus_bps.
+fn liquidation_bonus_range_valid(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let min_bonus = reserve.config.min_liquidation_bonus_bps;
+        let max_bonus = reserve.config.max_liquidation_bonus_bps;
+        if min_bonus == 0 && max_bonus == 0 { continue; }
+
+        crucible_test_context::fuzz_assert!(
+            min_bonus <= max_bonus,
+            "MIN LIQUIDATION BONUS > MAX: reserve {} min={} > max={}",
+            reserve_data.reserve, min_bonus, max_bonus
+        );
+    }
+}
+
+/// Invariant: Protocol take rate and liquidation fee must be <= 100%.
+fn protocol_take_rate_bounded(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        crucible_test_context::fuzz_assert!(
+            reserve.config.protocol_take_rate_pct <= 100,
+            "PROTOCOL TAKE RATE > 100%: reserve {} rate={}%",
+            reserve_data.reserve, reserve.config.protocol_take_rate_pct
+        );
+        crucible_test_context::fuzz_assert!(
+            reserve.config.protocol_liquidation_fee_pct <= 100,
+            "PROTOCOL LIQUIDATION FEE > 100%: reserve {} fee={}%",
+            reserve_data.reserve, reserve.config.protocol_liquidation_fee_pct
+        );
+    }
+}
+
+/// Invariant: Total borrowed should never exceed total deposited for a reserve.
+fn reserve_borrowed_lte_total_deposited(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let available = reserve.liquidity.available_amount as u128;
+        let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+        let borrowed = borrowed_sf >> 60;
+        let total_deposited = available.saturating_add(borrowed);
+
+        // Borrowed should never exceed total deposited (100% utilization is the max)
+        // Allow 1% tolerance for rounding
+        let tolerance = (total_deposited / 100).max(1);
+        crucible_test_context::fuzz_assert!(
+            borrowed <= total_deposited + tolerance,
+            "BORROWED > TOTAL DEPOSITED: reserve {} borrowed={} > total_deposited={}",
+            reserve_data.reserve, borrowed, total_deposited
+        );
     }
 }

@@ -134,7 +134,11 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                     .unwrap_or(0.0)
             }
 
-            let s = s.replace("objectives", "crashes");
+            let mut s = s.replace("objectives", "crashes").replace("(GLOBAL) ", "");
+            // Replace LibAFL's [Testcase #N] prefix with [FUZZ_PULSE]
+            if let Some(bracket_end) = s.find(']') {
+                s = format!("[FUZZ_PULSE]{}", &s[bracket_end + 1..]);
+            }
             // Remove LibAFL's "edges: N" if present (we add our own program-level stats)
             let s = {
                 let mut result = s.clone();
@@ -157,10 +161,28 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                 let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                 let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
                 let total_actions = crucible_test_context::TOTAL_ACTIONS_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed);
+                let total_ok = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED.load(std::sync::atomic::Ordering::Relaxed);
                 let execs_for_avg = #mod_name::TOTAL_EXECUTIONS.load(std::sync::atomic::Ordering::Relaxed);
                 let avg_actions = if execs_for_avg > 0 { total_actions as f64 / execs_for_avg as f64 } else { 0.0 };
-                println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}",
-                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions);
+                let ok_pct = if total_actions > 0 { (total_ok as f64 / total_actions as f64) * 100.0 } else { 0.0 };
+                let discovered = crucible_test_context::succeeded_variant_count();
+                let total_variants = crucible_test_context::TOTAL_ACTION_VARIANTS.load(std::sync::atomic::Ordering::Relaxed);
+                let discovered_str = if total_variants > 0 {
+                    format!(", discovered: {}/{} actions", discovered, total_variants)
+                } else {
+                    String::new()
+                };
+                let __memory_kib = {
+                    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+                    if cfg!(target_os = "macos") {
+                        (usage.ru_maxrss / 1024) as u64
+                    } else {
+                        usage.ru_maxrss as u64
+                    }
+                };
+                eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
+                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str, __memory_kib);
 
                 // Write CSV stats row if enabled
                 if let Some(ref csv) = __csv_ref {
@@ -184,7 +206,7 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                         let _ = f.flush();
                     }
                 }
-            } else { println!("{s}"); }
+            } else { eprintln!("{s}"); }
         });
         let mut mgr = SimpleEventManager::new(monitor);
     }

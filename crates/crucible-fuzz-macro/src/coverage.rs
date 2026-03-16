@@ -34,20 +34,25 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             h
         }
 
-        /// Convert hitcount to AFL-style bucket (0-8)
-        /// Different buckets trigger different bits in shared bitmap for corpus growth
+        /// Convert hitcount to bucket for shared bitmap corpus growth.
+        /// 13 buckets (50% more granular than AFL's 9) to reduce coverage plateaus
+        /// in stateful fuzzing where action sequences hit the same edges at different depths.
         #[inline]
-        fn to_bucket(count: u8) -> u8 {
+        pub fn to_bucket(count: u8) -> u8 {
             match count {
                 0 => 0,
                 1 => 1,
                 2 => 2,
                 3 => 3,
-                4..=7 => 4,
-                8..=15 => 5,
-                16..=31 => 6,
-                32..=127 => 7,
-                _ => 8,
+                4..=5 => 4,
+                6..=7 => 5,
+                8..=11 => 6,
+                12..=15 => 7,
+                16..=23 => 8,
+                24..=31 => 9,
+                32..=63 => 10,
+                64..=127 => 11,
+                _ => 12,
             }
         }
 
@@ -76,55 +81,138 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         // Coverage enabled flag (set by --coverage arg)
         pub static COVERAGE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-        // Multi-core mode: Track whether this iteration discovered new coverage in the shared bitmap.
-        // This is set by flush_bitmap_updates when fetch_or returns a value without the bit set.
+        // Multi-core mode: Track how many new coverage bits this iteration discovered
+        // in the shared bitmap. Incremented by flush_bitmap_updates/flush_local_bitmap_buffers
+        // when fetch_or returns a value without the bit set.
         // Reset at start of each iteration, checked by SharedBitmapFeedback.
         thread_local! {
-            pub static NEW_COVERAGE_THIS_ITERATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            pub static NEW_COVERAGE_BITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
 
         pub fn reset_new_coverage_flag() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(false));
+            NEW_COVERAGE_BITS.with(|c| c.set(0));
         }
 
         pub fn found_new_coverage() -> bool {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.get())
+            NEW_COVERAGE_BITS.with(|c| c.get() > 0)
+        }
+
+        /// Return the number of new coverage bits discovered this iteration.
+        pub fn new_coverage_count() -> u32 {
+            NEW_COVERAGE_BITS.with(|c| c.get())
         }
 
         fn mark_new_coverage() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(true));
+            NEW_COVERAGE_BITS.with(|c| c.set(c.get() + 1));
         }
 
-        // Thread-local buffers for bitmap updates to reduce atomic contention in multi-core mode.
-        // Updates are accumulated locally and flushed periodically instead of on every transaction.
+        // Thread-local bitmaps that mirror the shared bitmaps for O(1) accumulation.
+        // Each byte position is directly indexed instead of appended to a Vec.
+        // Dirty position sets enable O(dirty) flush instead of O(bitmap_size) scan.
         thread_local! {
-            pub static LOCAL_EDGE_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
-            pub static LOCAL_BRANCH_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+            static LOCAL_EDGE_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_EDGE_BITMAP_SIZE]);
+            static LOCAL_BRANCH_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_BRANCH_BITMAP_SIZE]);
+            static LOCAL_EDGE_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(512));
+            static LOCAL_BRANCH_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(256));
         }
 
         /// Flush thread-local bitmap buffers to shared memory.
-        /// Called periodically from the harness (e.g., every 50 iterations) to reduce atomic contention.
+        /// Iterates only dirty positions — O(dirty) atomic ops, no merge step.
         pub fn flush_local_bitmap_buffers(shared_edge_ptr: *mut u8, shared_branch_ptr: *mut u8) {
-            LOCAL_EDGE_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_edge_ptr, &buffer, SHARED_EDGE_BITMAP_SIZE);
-                    buffer.clear();
-                }
+            LOCAL_EDGE_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_EDGE_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_edge_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
             });
-            LOCAL_BRANCH_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_branch_ptr, &buffer, SHARED_BRANCH_BITMAP_SIZE);
-                    buffer.clear();
-                }
+            LOCAL_BRANCH_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_BRANCH_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_branch_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
             });
         }
 
         /// Clear thread-local bitmap buffers without flushing (used when resetting for new iteration).
         pub fn clear_local_bitmap_buffers() {
-            LOCAL_EDGE_BUFFER.with(|buf| buf.borrow_mut().clear());
-            LOCAL_BRANCH_BUFFER.with(|buf| buf.borrow_mut().clear());
+            LOCAL_EDGE_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                LOCAL_EDGE_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    for &pos in dirty.iter() { bm[pos as usize] = 0; }
+                });
+                dirty.clear();
+            });
+            LOCAL_BRANCH_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                LOCAL_BRANCH_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    for &pos in dirty.iter() { bm[pos as usize] = 0; }
+                });
+                dirty.clear();
+            });
+        }
+
+        // CMIN mode: exact edge tracking via HashSet (immune to u8 wrapping)
+        // When enabled, process_trace() inserts AFL map indices into this set.
+        // Cmin reads from this instead of scanning the u8 map, avoiding the bug
+        // where edges hit exactly N*256 times wrap to 0 and become invisible.
+        thread_local! {
+            pub static CMIN_EDGE_SET: std::cell::RefCell<Option<crucible_test_context::FastHashSet<usize>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Enable cmin edge tracking. Call before each input execution.
+        pub fn cmin_edge_set_enable() {
+            CMIN_EDGE_SET.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some(ref mut set) = *s {
+                    set.clear();
+                } else {
+                    *s = Some(crucible_test_context::FastHashSet::default());
+                }
+            });
+        }
+
+        /// Take the cmin edge set (returns and disables).
+        pub fn cmin_edge_set_take() -> Option<crucible_test_context::FastHashSet<usize>> {
+            CMIN_EDGE_SET.with(|s| s.borrow_mut().take())
         }
 
         // Force-accept mode for initial corpus loading
@@ -140,6 +228,13 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         pub fn is_force_interesting() -> bool {
             FORCE_INTERESTING.with(|f| f.get())
         }
+
+        // Atomic mirror of COVERAGE_STATE.total_edges for lock-free reads in the
+        // stateful hot path. Updated in process_trace() whenever the Mutex-guarded
+        // total_edges changes. Stateful mode reads this instead of locking the Mutex
+        // twice per iteration per worker.
+        pub static TOTAL_EDGES_ATOMIC: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
 
         // Runtime stats tracking
         pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -198,6 +293,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     shared_branch_bitmap: None,
                     skip_global_state: false,
                 }
+            }
+
+            /// Skip global COVERAGE_STATE updates (saves mutex lock overhead).
+            /// Used in cmin mode where global state is not needed.
+            pub fn set_skip_global_state(&mut self, skip: bool) {
+                self.skip_global_state = skip;
             }
 
             pub fn with_shared_memory(
@@ -369,6 +470,13 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         buf[edge] = buf[edge].wrapping_add(1);
                     }
 
+                    // CMIN mode: record exact edge index (immune to u8 wrapping)
+                    CMIN_EDGE_SET.with(|s| {
+                        if let Some(ref mut set) = *s.borrow_mut() {
+                            set.insert(edge);
+                        }
+                    });
+
                     // Multi-core mode: batch updates to shared bitmaps
                     // Edge bitmap is split into two halves:
                     // - First half (bits 0..256K): edge presence (counted for display)
@@ -417,16 +525,38 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     }
                 }
 
-                // Multi-core mode: accumulate updates in thread-local buffers
-                // Buffers are flushed periodically from the harness to reduce atomic contention
+                // Multi-core mode: merge updates into thread-local bitmaps (O(1) per update)
+                // Dirty positions are tracked for O(dirty) flush later
                 if self.shared_edge_bitmap.is_some() {
-                    LOCAL_EDGE_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(edge_bitmap_updates.iter().cloned());
+                    LOCAL_EDGE_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_EDGE_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &edge_bitmap_updates {
+                                if byte_pos < SHARED_EDGE_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
                 if self.shared_branch_bitmap.is_some() {
-                    LOCAL_BRANCH_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(branch_bitmap_updates.iter().cloned());
+                    LOCAL_BRANCH_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_BRANCH_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &branch_bitmap_updates {
+                                if byte_pos < SHARED_BRANCH_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
 
@@ -442,7 +572,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                 let edge_set = state.edges.entry(program_hash).or_default();
                 let old_edge_count = edge_set.len();
                 edge_set.extend(&local_edges);
-                state.total_edges += edge_set.len() - old_edge_count;
+                let new_edges = edge_set.len() - old_edge_count;
+                state.total_edges += new_edges;
+                // Mirror to atomic for lock-free reads in stateful hot path
+                if new_edges > 0 {
+                    TOTAL_EDGES_ATOMIC.store(state.total_edges, std::sync::atomic::Ordering::Relaxed);
+                }
 
                 // Track branch PCs and update cached total
                 let branch_set = state.branch_pcs.entry(program_hash).or_default();

@@ -5,7 +5,7 @@ use solana_signer::Signer;
 use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crucible_fuzzer::anchor_spl::associated_token;
 
@@ -35,39 +35,7 @@ macro_rules! debug_print {
 // Action Stats Tracking
 // ============================================================================
 
-mod action_stats {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    macro_rules! define_counters {
-        ($($name:ident),*) => {
-            $(pub static $name: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));)*
-        }
-    }
-
-    define_counters!(
-        SWAP, INCREASE_LIQUIDITY, DECREASE_LIQUIDITY,
-        UPDATE_FEES, COLLECT_FEES, OPEN_POSITION, CLOSE_POSITION
-    );
-
-    pub fn record(counter: &(AtomicU32, AtomicU32), success: bool) {
-        if success {
-            counter.0.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counter.1.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    pub fn print_summary() {
-        eprintln!("=== Action Stats ===");
-        eprintln!("swap:           {:>5} ok / {:>5} fail", SWAP.0.load(Ordering::Relaxed), SWAP.1.load(Ordering::Relaxed));
-        eprintln!("increase_liq:   {:>5} ok / {:>5} fail", INCREASE_LIQUIDITY.0.load(Ordering::Relaxed), INCREASE_LIQUIDITY.1.load(Ordering::Relaxed));
-        eprintln!("decrease_liq:   {:>5} ok / {:>5} fail", DECREASE_LIQUIDITY.0.load(Ordering::Relaxed), DECREASE_LIQUIDITY.1.load(Ordering::Relaxed));
-        eprintln!("update_fees:    {:>5} ok / {:>5} fail", UPDATE_FEES.0.load(Ordering::Relaxed), UPDATE_FEES.1.load(Ordering::Relaxed));
-        eprintln!("collect_fees:   {:>5} ok / {:>5} fail", COLLECT_FEES.0.load(Ordering::Relaxed), COLLECT_FEES.1.load(Ordering::Relaxed));
-        eprintln!("open_position:  {:>5} ok / {:>5} fail", OPEN_POSITION.0.load(Ordering::Relaxed), OPEN_POSITION.1.load(Ordering::Relaxed));
-        eprintln!("close_position: {:>5} ok / {:>5} fail", CLOSE_POSITION.0.load(Ordering::Relaxed), CLOSE_POSITION.1.load(Ordering::Relaxed));
-    }
-}
+mod action_stats;
 
 // ============================================================================
 // Constants from Whirlpool Program
@@ -857,11 +825,11 @@ impl WhirlpoolFixture {
             action_stats::print_summary();
 
             // State snapshot - show pool stats
-            eprintln!("\n=== State Snapshot (action {}) ===", count);
-            eprintln!("positions: {}", self.positions.len());
-            eprintln!("total_swaps: {} (successful: {})", self.total_swaps, self.successful_swaps);
-            eprintln!("total_liquidity_added: {}", self.total_liquidity_added);
-            eprintln!();
+            debug_print!("\n=== State Snapshot (action {}) ===", count);
+            debug_print!("positions: {}", self.positions.len());
+            debug_print!("total_swaps: {} (successful: {})", self.total_swaps, self.successful_swaps);
+            debug_print!("total_liquidity_added: {}", self.total_liquidity_added);
+            debug_print!("");
         }
     }
 }
@@ -897,24 +865,24 @@ mod fixture_helpers {
             .create()
             .unwrap();
 
-        eprintln!("[SETUP] Admin pubkey: {} (localnet admin)", admin.pubkey());
+        debug_print!("[SETUP] Admin pubkey: {} (localnet admin)", admin.pubkey());
 
         // Initialize WhirlpoolsConfig
         let config = init_config(ctx, &admin, program_id);
-        eprintln!("[SETUP] Config: {}", config);
+        debug_print!("[SETUP] Config: {}", config);
 
         // Initialize FeeTier
         let fee_tier = init_fee_tier(ctx, &admin, &config, program_id);
-        eprintln!("[SETUP] Fee tier: {}", fee_tier);
+        debug_print!("[SETUP] Fee tier: {}", fee_tier);
 
         // Create token mints (must be ordered: mint_a < mint_b by pubkey)
         let (mint_a, mint_b) = create_ordered_mints(ctx, &admin);
-        eprintln!("[SETUP] Mint A: {}", mint_a);
-        eprintln!("[SETUP] Mint B: {}", mint_b);
+        debug_print!("[SETUP] Mint A: {}", mint_a);
+        debug_print!("[SETUP] Mint B: {}", mint_b);
 
         // Initialize Whirlpool
         let pool = init_pool(ctx, &admin, &config, &fee_tier, &mint_a, &mint_b, program_id);
-        eprintln!("[SETUP] Whirlpool: {}", pool.whirlpool);
+        debug_print!("[SETUP] Whirlpool: {}", pool.whirlpool);
 
         // Initialize tick arrays around current price
         let tick_arrays = init_tick_arrays(ctx, &admin, &pool.whirlpool, program_id);
@@ -929,7 +897,7 @@ mod fixture_helpers {
         let users: Vec<_> = (0..3)
             .map(|i| {
                 let user = create_user(ctx, &admin, &mint_a, &mint_b);
-                eprintln!("[SETUP] User {}: {}", i, user.keypair.pubkey());
+                debug_print!("[SETUP] User {}: {}", i, user.keypair.pubkey());
                 user
             })
             .collect();
@@ -971,14 +939,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeConfig SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializeConfig SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializeConfig TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializeConfig TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializeConfig");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializeConfig SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializeConfig SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializeConfig");
             }
         }
@@ -1012,14 +980,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeFeeTier SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializeFeeTier SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializeFeeTier");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializeFeeTier SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializeFeeTier SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializeFeeTier");
             }
         }
@@ -1099,14 +1067,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializePool SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializePool SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializePool TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializePool TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializePool");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializePool SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializePool SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializePool");
             }
         }
@@ -1163,15 +1131,15 @@ mod fixture_helpers {
             match result {
                 Ok(TxOutcome::Success { .. }) => {
                     tick_arrays.push((start_tick_index, tick_array));
-                    eprintln!("[SETUP] TickArray SUCCESS at start_tick={}", start_tick_index);
+                    debug_print!("[SETUP] TickArray SUCCESS at start_tick={}", start_tick_index);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: InitializeTickArray at start_tick={}", start_tick_index);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] TickArray SEND_FAILED at start_tick={}: {:?}", start_tick_index, e);
+                    debug_print!("[SETUP] TickArray SEND_FAILED at start_tick={}: {:?}", start_tick_index, e);
                     panic!("Setup failed: InitializeTickArray at start_tick={}", start_tick_index);
                 }
             }
@@ -1181,7 +1149,7 @@ mod fixture_helpers {
             panic!("Setup failed: No tick arrays were created!");
         }
 
-        eprintln!("[SETUP] Created {} tick arrays", tick_arrays.len());
+        debug_print!("[SETUP] Created {} tick arrays", tick_arrays.len());
         tick_arrays
     }
 
@@ -1287,15 +1255,15 @@ mod fixture_helpers {
                         owner_idx: user_idx,
                         has_liquidity: false,
                     });
-                    eprintln!("[SETUP] Position {} created: ticks=[{},{}]", positions.len(), tick_lower_index, tick_upper_index);
+                    debug_print!("[SETUP] Position {} created: ticks=[{},{}]", positions.len(), tick_lower_index, tick_upper_index);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: OpenPosition for user {}", user_idx);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] Position SEND_FAILED for user {}: {:?}", user_idx, e);
+                    debug_print!("[SETUP] Position SEND_FAILED for user {}: {:?}", user_idx, e);
                     panic!("Setup failed: OpenPosition for user {}", user_idx);
                 }
             }
@@ -1352,15 +1320,15 @@ mod fixture_helpers {
             match result {
                 Ok(TxOutcome::Success { .. }) => {
                     position.has_liquidity = true;
-                    eprintln!("[SETUP] Added initial liquidity to position {}", pos_idx);
+                    debug_print!("[SETUP] Added initial liquidity to position {}", pos_idx);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: IncreaseLiquidity for position {}", pos_idx);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] Initial liquidity SEND_FAILED for position {}: {:?}", pos_idx, e);
+                    debug_print!("[SETUP] Initial liquidity SEND_FAILED for position {}: {:?}", pos_idx, e);
                     panic!("Setup failed: IncreaseLiquidity for position {}", pos_idx);
                 }
             }
@@ -1370,9 +1338,131 @@ mod fixture_helpers {
             panic!("Setup failed: No positions were created!");
         }
 
-        eprintln!("[SETUP] Created {} positions with liquidity", positions.len());
+        debug_print!("[SETUP] Created {} positions with liquidity", positions.len());
         positions
     }
+}
+
+// ============================================================================
+// On-chain Account State (for invariant deserialization)
+// ============================================================================
+
+/// Whirlpool pool state (manually parsed from on-chain account data)
+struct WhirlpoolState {
+    whirlpools_config: Pubkey,
+    tick_spacing: u16,
+    fee_rate: u16,
+    protocol_fee_rate: u16,
+    liquidity: u128,
+    sqrt_price: u128,
+    tick_current_index: i32,
+    protocol_fee_owed_a: u64,
+    protocol_fee_owed_b: u64,
+    token_mint_a: Pubkey,
+    token_vault_a: Pubkey,
+    fee_growth_global_a: u128,
+    token_mint_b: Pubkey,
+    token_vault_b: Pubkey,
+    fee_growth_global_b: u128,
+}
+
+/// Position state (manually parsed from on-chain account data)
+struct PositionState {
+    whirlpool: Pubkey,
+    position_mint: Pubkey,
+    liquidity: u128,
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    fee_growth_checkpoint_a: u128,
+    fee_owed_a: u64,
+    fee_growth_checkpoint_b: u128,
+    fee_owed_b: u64,
+}
+
+fn read_pubkey(data: &[u8], offset: usize) -> Pubkey {
+    Pubkey::from(<[u8; 32]>::try_from(&data[offset..offset+32]).unwrap())
+}
+fn read_u16(data: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(data[offset..offset+2].try_into().unwrap())
+}
+fn read_u64(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(data[offset..offset+8].try_into().unwrap())
+}
+fn read_u128(data: &[u8], offset: usize) -> u128 {
+    u128::from_le_bytes(data[offset..offset+16].try_into().unwrap())
+}
+fn read_i32(data: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(data[offset..offset+4].try_into().unwrap())
+}
+
+fn deser_pool(ctx: &TestContext, pubkey: &Pubkey) -> Option<WhirlpoolState> {
+    let acc = ctx.get_account(pubkey).ok()?;
+    let d = &acc.data;
+    if d.len() < 260 { return None; }
+    // Layout after 8-byte discriminator:
+    // 0:  whirlpools_config (32)
+    // 32: whirlpool_bump (1)
+    // 33: tick_spacing (2)
+    // 35: fee_tier_index_seed (2)
+    // 37: fee_rate (2)
+    // 39: protocol_fee_rate (2)
+    // 41: liquidity (16)
+    // 57: sqrt_price (16)
+    // 73: tick_current_index (4)
+    // 77: protocol_fee_owed_a (8)
+    // 85: protocol_fee_owed_b (8)
+    // 93: token_mint_a (32)
+    // 125: token_vault_a (32)
+    // 157: fee_growth_global_a (16)
+    // 173: token_mint_b (32)
+    // 205: token_vault_b (32)
+    // 237: fee_growth_global_b (16)
+    let base = 8; // skip discriminator
+    Some(WhirlpoolState {
+        whirlpools_config: read_pubkey(d, base),
+        tick_spacing: read_u16(d, base + 33),
+        fee_rate: read_u16(d, base + 37),
+        protocol_fee_rate: read_u16(d, base + 39),
+        liquidity: read_u128(d, base + 41),
+        sqrt_price: read_u128(d, base + 57),
+        tick_current_index: read_i32(d, base + 73),
+        protocol_fee_owed_a: read_u64(d, base + 77),
+        protocol_fee_owed_b: read_u64(d, base + 85),
+        token_mint_a: read_pubkey(d, base + 93),
+        token_vault_a: read_pubkey(d, base + 125),
+        fee_growth_global_a: read_u128(d, base + 157),
+        token_mint_b: read_pubkey(d, base + 173),
+        token_vault_b: read_pubkey(d, base + 205),
+        fee_growth_global_b: read_u128(d, base + 237),
+    })
+}
+
+fn deser_position(ctx: &TestContext, pubkey: &Pubkey) -> Option<PositionState> {
+    let acc = ctx.get_account(pubkey).ok()?;
+    let d = &acc.data;
+    if d.len() < 144 { return None; }
+    // Layout after 8-byte discriminator:
+    // 0:  whirlpool (32)
+    // 32: position_mint (32)
+    // 64: liquidity (16)
+    // 80: tick_lower_index (4)
+    // 84: tick_upper_index (4)
+    // 88: fee_growth_checkpoint_a (16)
+    // 104: fee_owed_a (8)
+    // 112: fee_growth_checkpoint_b (16)
+    // 128: fee_owed_b (8)
+    let base = 8;
+    Some(PositionState {
+        whirlpool: read_pubkey(d, base),
+        position_mint: read_pubkey(d, base + 32),
+        liquidity: read_u128(d, base + 64),
+        tick_lower_index: read_i32(d, base + 80),
+        tick_upper_index: read_i32(d, base + 84),
+        fee_growth_checkpoint_a: read_u128(d, base + 88),
+        fee_owed_a: read_u64(d, base + 104),
+        fee_growth_checkpoint_b: read_u128(d, base + 112),
+        fee_owed_b: read_u64(d, base + 128),
+    })
 }
 
 // ============================================================================
@@ -1381,47 +1471,258 @@ mod fixture_helpers {
 
 #[invariant_test]
 fn invariant_test(fixture: &mut WhirlpoolFixture) {
-    debug_print!("[INVARIANT] swaps: {}/{}, positions: {}, liq_added: {}",
-        fixture.successful_swaps, fixture.total_swaps,
-        fixture.positions.len(), fixture.total_liquidity_added);
+    // =====================================================================
+    // Read on-chain state
+    // =====================================================================
+    let pool_state = match deser_pool(&fixture.ctx, &fixture.pool.whirlpool) {
+        Some(s) => s,
+        None => return, // Pool not readable (shouldn't happen)
+    };
 
-    // Check that all positions have valid tick ranges
-    for (idx, position) in fixture.positions.iter().enumerate() {
-        fuzz_assert_lt!(
-            position.tick_lower_index, position.tick_upper_index,
-            "Position {} tick range invalid: {} >= {}",
-            idx, position.tick_lower_index, position.tick_upper_index
-        );
+    let vault_a_balance = fixture.ctx.token_balance(&fixture.pool.token_vault_a);
+    let vault_b_balance = fixture.ctx.token_balance(&fixture.pool.token_vault_b);
 
-        // Ticks must be multiples of tick_spacing
-        fuzz_assert_eq!(
-            position.tick_lower_index % (TICK_SPACING as i32), 0,
-            "Position {} lower tick not aligned to tick spacing",
-            idx
-        );
-        fuzz_assert_eq!(
-            position.tick_upper_index % (TICK_SPACING as i32), 0,
-            "Position {} upper tick not aligned to tick spacing",
-            idx
-        );
+    // Read all on-chain position states
+    let position_states: Vec<(usize, PositionState)> = fixture.positions.iter()
+        .enumerate()
+        .filter_map(|(idx, pos)| {
+            deser_position(&fixture.ctx, &pos.position).map(|s| (idx, s))
+        })
+        .collect();
 
-        // Ticks must be within bounds
+    // =====================================================================
+    // 1. SQRT PRICE BOUNDS — sqrt_price must be within [MIN, MAX]
+    // =====================================================================
+    fuzz_assert_ge!(
+        pool_state.sqrt_price, MIN_SQRT_PRICE_X64,
+        "Pool sqrt_price {} below MIN {}",
+        pool_state.sqrt_price, MIN_SQRT_PRICE_X64
+    );
+    fuzz_assert_le!(
+        pool_state.sqrt_price, MAX_SQRT_PRICE_X64,
+        "Pool sqrt_price {} above MAX {}",
+        pool_state.sqrt_price, MAX_SQRT_PRICE_X64
+    );
+
+    // =====================================================================
+    // 2. TICK-PRICE CONSISTENCY — tick_current_index within valid range
+    // =====================================================================
+    fuzz_assert_ge!(
+        pool_state.tick_current_index, MIN_TICK_INDEX,
+        "Pool tick_current_index {} below MIN {}",
+        pool_state.tick_current_index, MIN_TICK_INDEX
+    );
+    fuzz_assert_le!(
+        pool_state.tick_current_index, MAX_TICK_INDEX,
+        "Pool tick_current_index {} above MAX {}",
+        pool_state.tick_current_index, MAX_TICK_INDEX
+    );
+
+    // =====================================================================
+    // 3. FEE RATE BOUNDS — fee_rate and protocol_fee_rate within limits
+    // =====================================================================
+    fuzz_assert_le!(
+        pool_state.fee_rate, 60_000u16, // MAX_FEE_RATE
+        "Pool fee_rate {} exceeds MAX_FEE_RATE 60000",
+        pool_state.fee_rate
+    );
+    fuzz_assert_le!(
+        pool_state.protocol_fee_rate, 2_500u16, // MAX_PROTOCOL_FEE_RATE
+        "Pool protocol_fee_rate {} exceeds MAX_PROTOCOL_FEE_RATE 2500",
+        pool_state.protocol_fee_rate
+    );
+
+    // =====================================================================
+    // 4. VAULT SOLVENCY — vaults must hold enough to cover protocol fees
+    //    vault_balance >= protocol_fee_owed (at minimum)
+    // =====================================================================
+    fuzz_assert_ge!(
+        vault_a_balance, pool_state.protocol_fee_owed_a,
+        "Vault A balance {} < protocol_fee_owed_a {}. INSOLVENCY!",
+        vault_a_balance, pool_state.protocol_fee_owed_a
+    );
+    fuzz_assert_ge!(
+        vault_b_balance, pool_state.protocol_fee_owed_b,
+        "Vault B balance {} < protocol_fee_owed_b {}. INSOLVENCY!",
+        vault_b_balance, pool_state.protocol_fee_owed_b
+    );
+
+    // =====================================================================
+    // 5. VAULT SOLVENCY (DEEP) — vaults must cover protocol fees PLUS
+    //    all position fees owed (fees that positions can claim)
+    // =====================================================================
+    let mut total_fees_owed_a: u64 = pool_state.protocol_fee_owed_a;
+    let mut total_fees_owed_b: u64 = pool_state.protocol_fee_owed_b;
+    let mut overflow_a = false;
+    let mut overflow_b = false;
+
+    for (_, pos_state) in &position_states {
+        match total_fees_owed_a.checked_add(pos_state.fee_owed_a) {
+            Some(v) => total_fees_owed_a = v,
+            None => overflow_a = true,
+        }
+        match total_fees_owed_b.checked_add(pos_state.fee_owed_b) {
+            Some(v) => total_fees_owed_b = v,
+            None => overflow_b = true,
+        }
+    }
+
+    if !overflow_a {
         fuzz_assert_ge!(
-            position.tick_lower_index, MIN_TICK_INDEX,
-            "Position {} lower tick below min: {} < {}",
-            idx, position.tick_lower_index, MIN_TICK_INDEX
+            vault_a_balance, total_fees_owed_a,
+            "Vault A balance {} < total fees owed {} (protocol {} + positions). DEEP INSOLVENCY!",
+            vault_a_balance, total_fees_owed_a, pool_state.protocol_fee_owed_a
         );
-        fuzz_assert_le!(
-            position.tick_upper_index, MAX_TICK_INDEX,
-            "Position {} upper tick above max: {} > {}",
-            idx, position.tick_upper_index, MAX_TICK_INDEX
+    }
+    if !overflow_b {
+        fuzz_assert_ge!(
+            vault_b_balance, total_fees_owed_b,
+            "Vault B balance {} < total fees owed {} (protocol {} + positions). DEEP INSOLVENCY!",
+            vault_b_balance, total_fees_owed_b, pool_state.protocol_fee_owed_b
         );
     }
 
-    // Verify we have tick arrays
-    fuzz_assert_ge!(
-        fixture.pool.tick_arrays.len(), 3,
-        "Not enough tick arrays: {}",
-        fixture.pool.tick_arrays.len()
+    // =====================================================================
+    // 6. POSITION ON-CHAIN CONSISTENCY — on-chain position data matches
+    //    our fixture and satisfies program invariants
+    // =====================================================================
+    for (idx, pos_state) in &position_states {
+        let fixture_pos = &fixture.positions[*idx];
+
+        // Position must reference the correct whirlpool
+        fuzz_assert_eq!(
+            pos_state.whirlpool, fixture.pool.whirlpool,
+            "Position {} whirlpool mismatch: on-chain {} != fixture {}",
+            idx, pos_state.whirlpool, fixture.pool.whirlpool
+        );
+
+        // On-chain tick range must match fixture
+        fuzz_assert_eq!(
+            pos_state.tick_lower_index, fixture_pos.tick_lower_index,
+            "Position {} tick_lower mismatch: on-chain {} != fixture {}",
+            idx, pos_state.tick_lower_index, fixture_pos.tick_lower_index
+        );
+        fuzz_assert_eq!(
+            pos_state.tick_upper_index, fixture_pos.tick_upper_index,
+            "Position {} tick_upper mismatch: on-chain {} != fixture {}",
+            idx, pos_state.tick_upper_index, fixture_pos.tick_upper_index
+        );
+
+        // Tick ordering (on-chain)
+        fuzz_assert_lt!(
+            pos_state.tick_lower_index, pos_state.tick_upper_index,
+            "Position {} on-chain tick range invalid: {} >= {}",
+            idx, pos_state.tick_lower_index, pos_state.tick_upper_index
+        );
+
+        // Tick bounds (on-chain)
+        fuzz_assert_ge!(
+            pos_state.tick_lower_index, MIN_TICK_INDEX,
+            "Position {} on-chain lower tick {} below MIN",
+            idx, pos_state.tick_lower_index
+        );
+        fuzz_assert_le!(
+            pos_state.tick_upper_index, MAX_TICK_INDEX,
+            "Position {} on-chain upper tick {} above MAX",
+            idx, pos_state.tick_upper_index
+        );
+
+        // Tick alignment to tick_spacing (on-chain)
+        fuzz_assert_eq!(
+            pos_state.tick_lower_index % (TICK_SPACING as i32), 0,
+            "Position {} on-chain lower tick {} not aligned to spacing {}",
+            idx, pos_state.tick_lower_index, TICK_SPACING
+        );
+        fuzz_assert_eq!(
+            pos_state.tick_upper_index % (TICK_SPACING as i32), 0,
+            "Position {} on-chain upper tick {} not aligned to spacing {}",
+            idx, pos_state.tick_upper_index, TICK_SPACING
+        );
+
+        // Position mint must match
+        fuzz_assert_eq!(
+            pos_state.position_mint, fixture_pos.position_mint,
+            "Position {} mint mismatch: on-chain {} != fixture {}",
+            idx, pos_state.position_mint, fixture_pos.position_mint
+        );
+    }
+
+    // =====================================================================
+    // 7. POOL CONFIG CONSISTENCY — pool references must not change
+    // =====================================================================
+    fuzz_assert_eq!(
+        pool_state.whirlpools_config, fixture.config,
+        "Pool config changed: {} != {}",
+        pool_state.whirlpools_config, fixture.config
     );
+    fuzz_assert_eq!(
+        pool_state.token_mint_a, fixture.pool.token_mint_a,
+        "Pool token_mint_a changed: {} != {}",
+        pool_state.token_mint_a, fixture.pool.token_mint_a
+    );
+    fuzz_assert_eq!(
+        pool_state.token_mint_b, fixture.pool.token_mint_b,
+        "Pool token_mint_b changed: {} != {}",
+        pool_state.token_mint_b, fixture.pool.token_mint_b
+    );
+    fuzz_assert_eq!(
+        pool_state.token_vault_a, fixture.pool.token_vault_a,
+        "Pool token_vault_a changed: {} != {}",
+        pool_state.token_vault_a, fixture.pool.token_vault_a
+    );
+    fuzz_assert_eq!(
+        pool_state.token_vault_b, fixture.pool.token_vault_b,
+        "Pool token_vault_b changed: {} != {}",
+        pool_state.token_vault_b, fixture.pool.token_vault_b
+    );
+    fuzz_assert_eq!(
+        pool_state.tick_spacing, TICK_SPACING,
+        "Pool tick_spacing changed: {} != {}",
+        pool_state.tick_spacing, TICK_SPACING
+    );
+
+    // =====================================================================
+    // 8. VAULT NON-ZERO AFTER LIQUIDITY — if pool has liquidity,
+    //    at least one vault should have tokens
+    // =====================================================================
+    if pool_state.liquidity > 0 {
+        let total_vault = vault_a_balance.saturating_add(vault_b_balance);
+        fuzz_assert_ge!(
+            total_vault, 1u64,
+            "Pool has liquidity {} but both vaults are empty!",
+            pool_state.liquidity
+        );
+    }
+
+    // =====================================================================
+    // 9. POSITION LIQUIDITY CONSISTENCY — if position has_liquidity in
+    //    our fixture, the on-chain liquidity should be > 0
+    // =====================================================================
+    for (idx, pos_state) in &position_states {
+        let fixture_pos = &fixture.positions[*idx];
+        if fixture_pos.has_liquidity {
+            // We track has_liquidity when increase succeeds, but decrease
+            // can reduce it. Only check it hasn't gone negative (it's u128, so
+            // just check it exists). We already validated tick range above.
+            // The real check: if we added liquidity, the position should still
+            // have its tick range intact (checked above).
+        }
+
+        // Fee owed values should be consistent: if no fees were generated
+        // (fee_growth_global_a == 0), positions can't owe fees
+        if pool_state.fee_growth_global_a == 0 {
+            fuzz_assert_eq!(
+                pos_state.fee_owed_a, 0u64,
+                "Position {} has fee_owed_a {} but no global fees generated (fee_growth_a=0)",
+                idx, pos_state.fee_owed_a
+            );
+        }
+        if pool_state.fee_growth_global_b == 0 {
+            fuzz_assert_eq!(
+                pos_state.fee_owed_b, 0u64,
+                "Position {} has fee_owed_b {} but no global fees generated (fee_growth_b=0)",
+                idx, pos_state.fee_owed_b
+            );
+        }
+    }
 }

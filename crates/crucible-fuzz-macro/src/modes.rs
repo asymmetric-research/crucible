@@ -120,6 +120,7 @@ pub fn replay_mode(
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
     structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
 
@@ -136,15 +137,63 @@ pub fn replay_mode(
         }
     };
 
+    // Partial deserialization fallback: reconstruct from .meta.json when binary deserialization fails
+    let partial_deser_warning = if structured {
+        let action_ty = action_type.unwrap();
+        quote! {
+            // Detect partial deserialization (harness may have changed since crash)
+            let __expected_actions = if __raw_bytes.len() >= 4 {
+                let raw = u32::from_le_bytes(__raw_bytes[0..4].try_into().unwrap()) as usize;
+                raw.min(256)
+            } else { 0 };
+            let __actual_actions = param_1.len();
+            if __actual_actions < __expected_actions {
+                eprintln!("[REPLAY] Binary deserialized {}/{} actions — attempting .meta.json reconstruction",
+                    __actual_actions, __expected_actions);
+
+                // Try to load actions from .meta.json (stable across enum reorderings)
+                let __meta_path = format!("{}.meta.json", input_path);
+                let __reconstructed = (|| -> Option<Vec<#action_ty>> {
+                    let meta_bytes = std::fs::read(&__meta_path).ok()?;
+                    let meta: crucible_test_context::serde_json::Value =
+                        crucible_test_context::serde_json::from_slice(&meta_bytes).ok()?;
+                    let actions_arr = meta.get("actions")?.as_array()?;
+                    let mut reconstructed = Vec::with_capacity(actions_arr.len());
+                    for action_obj in actions_arr {
+                        let name = action_obj.get("name")?.as_str()?;
+                        let params = action_obj.get("params").cloned()
+                            .unwrap_or(crucible_test_context::serde_json::json!({}));
+                        if let Some(action) = <#action_ty as crucible_fuzzer::FuzzAction>::from_name_and_params(name, &params) {
+                            reconstructed.push(action);
+                        } else {
+                            eprintln!("[REPLAY] Could not reconstruct action '{}' — unknown or incompatible params", name);
+                            return None;
+                        }
+                    }
+                    Some(reconstructed)
+                })();
+
+                if let Some(actions) = __reconstructed {
+                    eprintln!("[REPLAY] Reconstructed {} actions from .meta.json", actions.len());
+                    param_1 = actions;
+                } else {
+                    eprintln!("[REPLAY] [WARN] Could not reconstruct from .meta.json");
+                    eprintln!("[REPLAY] Crash may not reproduce correctly");
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         // === SINGLE INPUT REPLAY MODE ===
         // Replay a specific input file and report the outcome
         if let Some(ref input_path) = input_file {
-            eprintln!("[REPLAY] Loading input from: {}", input_path);
-
             let input_bytes = match std::fs::read(input_path) {
                 Ok(bytes) => bytes,
                 Err(e) => {
+                    println!("[FUZZ_ERROR] Failed to read input file: {}", e);
                     eprintln!("[REPLAY] Failed to read input file: {}", e);
                     std::process::exit(1);
                 }
@@ -172,34 +221,23 @@ pub fn replay_mode(
             // Parse input and run test
             #deser_block
 
+            #partial_deser_warning
+
             // Clear any previous action sequence
             crucible_test_context::clear_action_history();
 
-            eprintln!("[REPLAY] Executing test...");
             #fn_name(#(#call_args),*);
 
             // Check for crash/violation
             let violation_msg = crucible_test_context::take_violation();
 
-            // Rewrite .meta.json with latest action history (includes taint data)
-            {
-                let input_path_buf = std::path::PathBuf::from(input_path);
-                if let (Some(parent), Some(filename)) = (input_path_buf.parent(), input_path_buf.file_name()) {
-                    let crash_id = filename.to_string_lossy().to_string();
-                    let crashes_dir = parent.to_string_lossy().to_string();
-                    crucible_test_context::write_crash_metadata_for_id(&crashes_dir, &crash_id, None);
-                    eprintln!("[REPLAY] Updated {}.meta.json", crash_id);
-                }
-            }
-
             if let Some(msg) = violation_msg {
-                eprintln!("[REPLAY] CRASH REPRODUCED!");
-                eprintln!("[REPLAY] Violation: {}", msg);
                 crucible_test_context::print_action_sequence();
+                eprintln!("[INVARIANT] {}", msg);
                 std::process::exit(1);
             } else {
-                eprintln!("[REPLAY] Test completed without crash");
-                eprintln!("[REPLAY] Note: If you expected a crash, the input may be from a different harness version");
+                println!("[FUZZ_FINDING] reproduces:false summary:did not reproduce");
+                println!("did not reproduce");
                 crucible_test_context::print_action_sequence();
                 std::process::exit(0);
             }
@@ -240,6 +278,7 @@ pub fn coverage_only_mode(
             let corpus_dir = match &corpus_in_dir {
                 Some(dir) => dir.clone(),
                 None => {
+                    println!("[FUZZ_ERROR] --corpus-in required for coverage-only mode");
                     eprintln!("[COVERAGE-ONLY] Error: --corpus-in required for coverage-only mode");
                     std::process::exit(1);
                 }
@@ -328,7 +367,13 @@ pub fn coverage_only_mode(
 
             // Write coverage output
             let coverage_output = std::env::var("FUZZ_COVERAGE_OUT")
-                .unwrap_or_else(|_| "coverage.lcov".to_string());
+                .unwrap_or_else(|_| {
+                    if std::path::Path::new("./output").is_dir() {
+                        "./output/coverage.lcov".to_string()
+                    } else {
+                        "coverage.lcov".to_string()
+                    }
+                });
             #mod_name::write_lcov_coverage(&coverage_output);
 
             // Print summary

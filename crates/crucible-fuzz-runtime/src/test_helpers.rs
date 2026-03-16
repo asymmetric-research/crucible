@@ -274,6 +274,39 @@ impl FuzzAction for TestAction {
             _ => 0,
         }
     }
+
+    fn from_name_and_params(name: &str, params: &serde_json::Value) -> Option<Self> {
+        match name {
+            "no_fields" => Some(Self::NoFields),
+            "one_field" => Some(Self::OneField {
+                amount: params.get("amount")?.as_u64()?,
+            }),
+            "two_fields" => Some(Self::TwoFields {
+                user_idx: params.get("user_idx")?.as_u64()? as usize,
+                flag: params.get("flag")?.as_bool()?,
+            }),
+            "four_fields" => Some(Self::FourFields {
+                a: params.get("a")?.as_u64()?,
+                b: params.get("b")?.as_u64()? as usize,
+                c: params.get("c")?.as_u64()?,
+                d: params.get("d")?.as_bool()?,
+            }),
+            "six_fields" => Some(Self::SixFields {
+                a: params.get("a")?.as_u64()?,
+                b: params.get("b")?.as_u64()?,
+                c: params.get("c")?.as_u64()? as usize,
+                d: params.get("d")?.as_u64()? as usize,
+                e: params.get("e")?.as_u64()?,
+                f: params.get("f")?.as_bool()?,
+            }),
+            "vec_field" => {
+                let arr = params.get("items")?.as_array()?;
+                let items: Option<Vec<u64>> = arr.iter().map(|v| v.as_u64()).collect();
+                Some(Self::VecField { items: items? })
+            }
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -561,6 +594,47 @@ impl FuzzAction for SmallIntTestAction {
             3 => 8,                   // OptionU8: 1 * 8
             4 => 24,                  // Mixed: 3 * 8
             _ => 0,
+        }
+    }
+
+    fn from_name_and_params(name: &str, params: &serde_json::Value) -> Option<Self> {
+        match name {
+            "unsigned_small" => Some(Self::UnsignedSmall {
+                a: params.get("a")?.as_u64()? as u8,
+                b: params.get("b")?.as_u64()? as u16,
+                c: params.get("c")?.as_u64()? as u32,
+            }),
+            "signed_small" => Some(Self::SignedSmall {
+                x: params.get("x")?.as_i64()? as i8,
+                y: params.get("y")?.as_i64()? as i16,
+                z: params.get("z")?.as_i64()? as i32,
+            }),
+            "vec_u16" => {
+                let arr = params.get("items")?.as_array()?;
+                let items: Option<Vec<u16>> = arr.iter().map(|v| v.as_u64().map(|n| n as u16)).collect();
+                Some(Self::VecU16 { items: items? })
+            }
+            "option_u8" => {
+                let val = match params.get("val") {
+                    Some(v) if v.is_null() => None,
+                    Some(v) => Some(v.as_u64()? as u8),
+                    None => None,
+                };
+                Some(Self::OptionU8 { val })
+            }
+            "mixed" => {
+                let opt = match params.get("opt") {
+                    Some(v) if v.is_null() => None,
+                    Some(v) => Some(v.as_u64()? as u32),
+                    None => None,
+                };
+                Some(Self::Mixed {
+                    small: params.get("small")?.as_u64()? as u8,
+                    signed: params.get("signed")?.as_i64()? as i16,
+                    opt,
+                })
+            }
+            _ => None,
         }
     }
 }

@@ -22,8 +22,8 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--cores N` / `-j N` | Run N parallel fuzzer workers |
 | `--corpus-in <DIR>` | Load seed corpus from directory |
 | `--corpus-out <DIR>` | Write corpus to directory |
-| `--crashes-dir <DIR>` | Custom crash output directory |
-| `--input <FILE>` | Replay a single input file |
+| `--crashes-out <DIR>` | Custom crash output directory |
+| `--replay <FILE>` | Replay a single input file |
 | `--dry-run` | Validate setup without fuzzing |
 | `--seed <N>` | Random seed for reproducible fuzzing |
 | `--symbols <PATH>` | Path to debug binary with DWARF symbols (for source-level coverage) |
@@ -49,7 +49,7 @@ crucible run myproject invariant_test --release --coverage --timeout 120
 crucible run myproject invariant_test --dry-run
 
 # Replay a crash
-crucible run myproject invariant_test --input ./crashes/invariant_test/abc123
+crucible run myproject invariant_test --replay ./crashes/invariant_test/abc123
 
 # Reproducible fuzzing
 crucible run myproject invariant_test --release --seed 12345
@@ -73,10 +73,18 @@ crucible list                  # List all fuzz harnesses
 ## `crucible show`
 
 ```bash
-crucible show <program>                       # List all crashes
-crucible show <program> <crash_file>          # View metadata
-crucible show <program> <crash_file> --replay # Replay crash
+crucible show <program>                                    # List all crashes
+crucible show <program> <crash_file>                       # View metadata
+crucible show <program> <crash_file> --replay              # Replay crash
+crucible show <program> --crashes-dir <DIR>                # List crashes from custom dir
+crucible show <program> <crash_file> --crashes-dir <DIR>   # View metadata from custom dir
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--replay` | Actually replay the crash by running the binary |
+| `--regen` | Regenerate crash metadata |
+| `--crashes-dir <DIR>` | Custom crashes directory to read from (supports flat and nested layouts) |
 
 ## `crucible cmin`
 
@@ -117,7 +125,7 @@ crucible tmin myproject invariant_test --all --release
 
 1. **Normal Fuzzing** (default) - Continuous input generation and mutation
 2. **Dry-Run** (`--dry-run`) - Single iteration to validate harness setup
-3. **Input Replay** (`--input`) - Execute one specific input file
+3. **Input Replay** (`--replay`) - Execute one specific input file
 4. **Coverage-Only** (`--coverage --corpus-in`) - Run corpus once for coverage report
 5. **Seeded Fuzzing** (`--corpus-in`) - Start from pre-existing corpus
 6. **Multi-Core** (`--cores N`) - Parallel fuzzer workers with shared coverage

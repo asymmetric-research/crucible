@@ -104,9 +104,14 @@ pub fn cmin_mode(
 
                 // Create fresh fixture for each input
                 // Use set_invocation_callback to avoid double SVM clone (critical for performance)
-                let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                let mut callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                // Skip global COVERAGE_STATE lock — cmin doesn't use it
+                callback.set_skip_global_state(true);
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
+
+                // Enable exact edge tracking (immune to u8 wrapping in the AFL map)
+                #mod_name::cmin_edge_set_enable();
 
                 // Run the test in a closure to handle deserialization failures
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -117,16 +122,13 @@ pub fn cmin_mode(
                 // Clear any violation flag
                 let _ = crucible_test_context::take_violation();
 
-                // Collect edges hit by this input from the coverage map
-                let mut edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
-                unsafe {
-                    let map = std::slice::from_raw_parts(cov_ptr, #mod_name::MAP_SIZE);
-                    for (edge_idx, &count) in map.iter().enumerate() {
-                        if count > 0 {
-                            edges.insert(edge_idx as u64);
-                        }
-                    }
-                }
+                // Collect edges from the exact edge set (not the u8 map).
+                // The u8 AFL map uses wrapping_add(1) — edges hit exactly N*256
+                // times wrap to 0 and become invisible. The edge set tracks
+                // presence via HashSet, which is immune to this bug.
+                let edges: std::collections::HashSet<u64> = #mod_name::cmin_edge_set_take()
+                    .map(|set| set.into_iter().map(|e| e as u64).collect())
+                    .unwrap_or_default();
 
                 if !edges.is_empty() {
                     edges_per_input.push(edges);
@@ -152,37 +154,8 @@ pub fn cmin_mode(
             // Phase 2: Greedy set-cover algorithm
             eprintln!("[CMIN] Phase 2: Computing minimum corpus...");
 
-            let mut uncovered: std::collections::HashSet<u64> = all_edges.clone();
-            let mut selected: Vec<usize> = Vec::new();
-            let mut used: Vec<bool> = vec![false; edges_per_input.len()];
-
-            while !uncovered.is_empty() {
-                // Find input that covers the most uncovered edges
-                // (ties broken by file size - smaller inputs sorted first)
-                let mut best_idx = None;
-                let mut best_count = 0usize;
-
-                for (idx, edges) in edges_per_input.iter().enumerate() {
-                    if used[idx] { continue; }
-
-                    let new_coverage = edges.iter().filter(|e| uncovered.contains(e)).count();
-                    if new_coverage > best_count {
-                        best_count = new_coverage;
-                        best_idx = Some(idx);
-                    }
-                }
-
-                match best_idx {
-                    Some(idx) => {
-                        used[idx] = true;
-                        selected.push(idx);
-                        for edge in &edges_per_input[idx] {
-                            uncovered.remove(edge);
-                        }
-                    }
-                    None => break, // No more inputs can cover remaining edges
-                }
-            }
+            let cmin_result = crucible_fuzzer::cmin::greedy_set_cover(&edges_per_input);
+            let selected = cmin_result.selected;
 
             eprintln!("[CMIN] Selected {} inputs (reduced from {})",
                 selected.len(), edges_per_input.len());

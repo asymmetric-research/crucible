@@ -270,7 +270,11 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         let action_ty = action_type.as_ref().unwrap();
         quote! {
             println!("Crash Input (structured):");
-            let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&bytes);
+            let (__fuzz_input, __parse_info) = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes_with_info(&bytes);
+            if __parse_info.actual_count < __parse_info.expected_count {
+                println!("[WARN] Deserialized {}/{} actions — harness may have changed since crash was recorded",
+                    __parse_info.actual_count, __parse_info.expected_count);
+            }
             println!("Actions ({} total):", __fuzz_input.actions.len());
             for (i, action) in __fuzz_input.actions.iter().enumerate() {
                 println!("  {}: {:?}", i, action);
@@ -366,6 +370,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &simple_deser_stmts,
         &call_args,
         structured,
+        action_type_tokens.as_ref(),
     );
 
     let coverage_only_code = modes::coverage_only_mode(
@@ -438,6 +443,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         #input_fn
 
         #[cfg(feature = #feature_name)]
+        #[global_allocator]
+        static __CRUCIBLE_ALLOC: crucible_fuzzer::MiMalloc = crucible_fuzzer::MiMalloc;
+
+        #[cfg(feature = #feature_name)]
         mod #mod_name {
             use super::*;
             use std::collections::{HashMap, HashSet};
@@ -482,7 +491,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             let cmin_mode = std::env::var("FUZZ_CMIN").is_ok();
             let corpus_in_dir = std::env::var("FUZZ_CORPUS_IN").ok();
             let corpus_out_dir = std::env::var("FUZZ_CORPUS_OUT").ok();
-            let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok();
+            let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok().or_else(|| {
+                if std::path::Path::new("./output").is_dir() { Some("./output".to_string()) } else { None }
+            });
             let verbose = std::env::var("FUZZ_VERBOSE").is_ok();
 
             // Coverage map - just a simple vec, no shared memory needed for InProcessExecutor

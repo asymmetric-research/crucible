@@ -51,19 +51,31 @@ impl ProgramBuilder<'_> {
         let fee_payer = self.signers.first().map(|k| k.pubkey()).unwrap_or_default();
         let ixs = std::slice::from_ref(&self.instruction);
 
-        // Always: record dirty accounts (just FxHashSet inserts, zero-alloc)
+        // Pre-tx: dirty tracking + metadata capture
+        let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer);
-
-        // Capture metadata + optional pre-state before instruction is consumed
         let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer);
         let pre_state = if self.ctx.taint_log.collects_diffs() {
             Some(crate::snapshot::snapshot_writable_accounts(&self.ctx.svm, ixs, &fee_payer))
         } else {
             None
         };
+        crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
+        // SVM execution
+        let __t_svm = std::time::Instant::now();
         let result = instruction_builder::send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)?;
+        crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
+
+        // Post-tx: outcome parsing + taint record
+        let __t_post = std::time::Instant::now();
         let outcome = tx_result_to_outcome(result);
+
+        // Track tx success/failure for monitor display
+        crate::increment_action_count();
+        if outcome.is_success() {
+            crate::increment_action_success_count();
+        }
 
         // Build taint record from captured metadata (only for successful txs)
         if outcome.is_success() {
@@ -72,6 +84,7 @@ impl ProgramBuilder<'_> {
             );
             self.ctx.taint_log.push(taint);
         }
+        crate::SEND_BATCH_POST_NS.with(|c| c.set(c.get() + __t_post.elapsed().as_nanos() as u64));
 
         Ok(outcome)
     }
