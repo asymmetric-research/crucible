@@ -465,11 +465,16 @@ pub fn multicore_mode(
                 let mut coverage_map = vec![0u8; #mod_name::MAP_SIZE];
                 let cov_ptr = coverage_map.as_mut_ptr();
 
-                // Setup template fixture per worker (fresh SVM instance)
+                // Clone the pre-fork fixture so every worker sees the exact same
+                // initial environment (pubkeys, accounts, programs, etc.). This is
+                // required for diff fuzzing because workers share corpus entries:
+                // re-executing the same input against per-worker `setup()` output
+                // can produce spurious mismatches when setup uses fresh keypairs.
+                //
                 // Always enable tracing so corpus loading establishes coverage baseline.
                 // If --no-tracing, we switch to non-instrumented SVM after corpus loading.
                 std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
-                let template_fixture = #fixture_name::setup();
+                let template_fixture = template_fixture.clone();
 
                 // Take snapshot of initial SVM state for reference
                 #[allow(unused_mut)]
