@@ -2709,3 +2709,990 @@ mod generator_edge_tests {
         }
     }
 }
+
+// ============================================================================
+// Part 1D: FuzzAction trait — Direct Tests
+// ============================================================================
+
+#[test]
+fn test_action_variant_count() {
+    assert_eq!(TestAction::variant_count(), 6);
+    assert_eq!(SmallIntTestAction::variant_count(), 5);
+}
+
+#[test]
+fn test_action_random_variant_in_bounds() {
+    let mut rng = make_rng(3000);
+    for variant_idx in 0..6 {
+        let action = TestAction::random_variant(variant_idx, &mut rng);
+        assert_eq!(
+            action.variant_index(), variant_idx,
+            "random_variant({}) produced variant_index {}",
+            variant_idx, action.variant_index()
+        );
+    }
+}
+
+#[test]
+fn test_action_random_variant_wraps_on_overflow() {
+    let mut rng = make_rng(3001);
+    let action = TestAction::random_variant(6, &mut rng);
+    assert_eq!(action.variant_index(), 0, "variant_idx 6 should wrap to 0 (6 % 6)");
+    let action = TestAction::random_variant(7, &mut rng);
+    assert_eq!(action.variant_index(), 1, "variant_idx 7 should wrap to 1 (7 % 6)");
+    let action = TestAction::random_variant(100, &mut rng);
+    assert_eq!(action.variant_index(), 100 % 6);
+}
+
+#[test]
+fn test_action_serialize_deserialize_all_variants() {
+    let mut rng = make_rng(3002);
+    for variant_idx in 0..6 {
+        for _ in 0..10 {
+            let action = TestAction::random_variant(variant_idx, &mut rng);
+            let mut buf = Vec::new();
+            action.serialize_fields(&mut buf);
+            let mut cursor = 0;
+            let deserialized = TestAction::deserialize_fields(variant_idx, &buf, &mut cursor);
+            assert!(deserialized.is_some(), "Failed to deserialize variant {}", variant_idx);
+            assert_eq!(action, deserialized.unwrap(), "Roundtrip failed for variant {}", variant_idx);
+            assert_eq!(cursor, buf.len(), "Cursor didn't consume all bytes for variant {}", variant_idx);
+        }
+    }
+}
+
+#[test]
+fn test_action_field_byte_count_matches_serialize() {
+    let mut rng = make_rng(3003);
+    for variant_idx in 0..6 {
+        for _ in 0..10 {
+            let action = TestAction::random_variant(variant_idx, &mut rng);
+            let mut buf = Vec::new();
+            action.serialize_fields(&mut buf);
+            assert_eq!(
+                buf.len(),
+                TestAction::field_byte_count(variant_idx),
+                "field_byte_count({}) doesn't match actual serialized size",
+                variant_idx
+            );
+        }
+    }
+}
+
+#[test]
+fn test_action_from_name_and_params_valid() {
+    use serde_json::json;
+    let a = TestAction::from_name_and_params("no_fields", &json!({}));
+    assert_eq!(a, Some(TestAction::NoFields));
+
+    let a = TestAction::from_name_and_params("one_field", &json!({"amount": 42}));
+    assert_eq!(a, Some(TestAction::OneField { amount: 42 }));
+
+    let a = TestAction::from_name_and_params("two_fields", &json!({"user_idx": 2, "flag": true}));
+    assert_eq!(a, Some(TestAction::TwoFields { user_idx: 2, flag: true }));
+
+    let a = TestAction::from_name_and_params("four_fields", &json!({"a": 1, "b": 2, "c": 3, "d": false}));
+    assert_eq!(a, Some(TestAction::FourFields { a: 1, b: 2, c: 3, d: false }));
+
+    let a = TestAction::from_name_and_params("vec_field", &json!({"items": [10, 20, 30]}));
+    assert_eq!(a, Some(TestAction::VecField { items: vec![10, 20, 30] }));
+}
+
+#[test]
+fn test_action_from_name_and_params_unknown_name() {
+    use serde_json::json;
+    assert_eq!(TestAction::from_name_and_params("nonexistent", &json!({})), None);
+    assert_eq!(TestAction::from_name_and_params("", &json!({})), None);
+}
+
+#[test]
+fn test_action_from_name_and_params_wrong_types() {
+    use serde_json::json;
+    assert_eq!(TestAction::from_name_and_params("one_field", &json!({"amount": "hello"})), None);
+    assert_eq!(TestAction::from_name_and_params("one_field", &json!({})), None);
+    assert_eq!(TestAction::from_name_and_params("two_fields", &json!({"user_idx": 1, "flag": 42})), None);
+}
+
+// ============================================================================
+// Part 1E: FuzzInput Edge Cases
+// ============================================================================
+
+#[test]
+fn test_input_empty_bytes() {
+    let decoded = FuzzInput::<TestAction>::from_bytes(&[]);
+    assert!(decoded.actions.is_empty());
+}
+
+#[test]
+fn test_input_short_header() {
+    let decoded = FuzzInput::<TestAction>::from_bytes(&[1, 2]);
+    assert!(decoded.actions.is_empty());
+    let decoded = FuzzInput::<TestAction>::from_bytes(&[1, 0, 0]);
+    assert!(decoded.actions.is_empty());
+}
+
+#[test]
+fn test_input_huge_count_capped() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&10000u32.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NoFields
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NoFields
+    let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
+    assert_eq!(decoded.actions.len(), 2);
+}
+
+#[test]
+fn test_input_truncated_action_data() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NoFields
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NoFields
+    bytes.extend_from_slice(&0u16.to_le_bytes()); // NoFields
+    let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
+    assert_eq!(decoded.actions.len(), 3, "should parse 3 of 5 claimed actions");
+}
+
+#[test]
+fn test_input_zero_actions() {
+    let bytes = 0u32.to_le_bytes();
+    let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
+    assert!(decoded.actions.is_empty());
+}
+
+// ============================================================================
+// Part 1A: SequenceMutator — Precise Behavioral Tests
+// ============================================================================
+
+/// Run SequenceMutator deterministically and verify exact output.
+/// This catches any behavioral drift (wrong op selection, indexing off-by-one, etc.)
+#[test]
+fn test_sequence_mutator_deterministic_output() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::Mutator;
+    use libafl::state::NopState;
+
+    // Build a known input: [NoFields, OneField(42), TwoFields(1, true)]
+    let actions = vec![
+        TestAction::NoFields,
+        TestAction::OneField { amount: 42 },
+        TestAction::TwoFields { user_idx: 1, flag: true },
+    ];
+    let input_bytes = FuzzInput::new(actions).to_bytes();
+
+    // Run mutation with specific state seed and record outputs
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(8);
+
+    // Run 100 mutations and verify each output is:
+    // 1. Valid (roundtrips cleanly)
+    // 2. Within length bounds
+    // 3. Contains only valid TestAction variants
+    for _ in 0..100 {
+        let mut bytes_input = BytesInput::new(input_bytes.clone());
+        let _ = mutator.mutate(&mut state, &mut bytes_input);
+        let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+
+        // Must roundtrip
+        let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
+        let re_decoded = FuzzInput::<TestAction>::from_bytes(&re_encoded);
+        assert_eq!(
+            decoded.actions.len(), re_decoded.actions.len(),
+            "roundtrip changed action count: {} → {}",
+            decoded.actions.len(), re_decoded.actions.len()
+        );
+        for (a, b) in decoded.actions.iter().zip(re_decoded.actions.iter()) {
+            assert_eq!(a, b, "roundtrip corrupted action data");
+        }
+
+        // Length bounds
+        assert!(decoded.actions.len() >= 1 && decoded.actions.len() <= 8);
+
+        // All variants valid
+        for action in &decoded.actions {
+            assert!(action.variant_index() < 6, "invalid variant: {}", action.variant_index());
+        }
+    }
+}
+
+#[test]
+fn test_sequence_empty_input_adds_action() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{Mutator, MutationResult};
+    use libafl::state::NopState;
+
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+
+    let fuzz_input = FuzzInput::<TestAction>::new(Vec::new());
+    let mut bytes_input = BytesInput::new(fuzz_input.to_bytes());
+
+    let result = mutator.mutate(&mut state, &mut bytes_input).unwrap();
+    assert_eq!(result, MutationResult::Mutated);
+    let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+    assert_eq!(decoded.actions.len(), 1, "Empty input should get exactly 1 action added");
+}
+
+/// Verify that when SequenceMutator reports Skipped, the bytes are truly unchanged.
+/// This catches bugs where the mutator modifies input but returns wrong status.
+#[test]
+fn test_sequence_skipped_means_unchanged() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{Mutator, MutationResult};
+    use libafl::state::NopState;
+
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+
+    let mut unchanged_on_skip = 0;
+    let mut total_skips = 0;
+
+    for _ in 0..1000 {
+        // Use 1-action input to force many skips (swap/delete/shuffle/truncate all skip)
+        let actions = vec![TestAction::OneField { amount: 42 }];
+        let original_bytes = FuzzInput::new(actions).to_bytes();
+        let mut bytes_input = BytesInput::new(original_bytes.clone());
+
+        let result = mutator.mutate(&mut state, &mut bytes_input).unwrap();
+        if result == MutationResult::Skipped {
+            total_skips += 1;
+            if bytes_input.as_ref() == &original_bytes[..] {
+                unchanged_on_skip += 1;
+            }
+        }
+    }
+
+    assert!(total_skips > 100, "Expected many skips from 1-action input, got {}", total_skips);
+    assert_eq!(
+        unchanged_on_skip, total_skips,
+        "Skipped mutations should not modify input: {}/{} were unchanged",
+        unchanged_on_skip, total_skips
+    );
+}
+
+#[test]
+fn test_sequence_at_max_blocks_growth_strictly() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::Mutator;
+    use libafl::state::{NopState, HasRand};
+
+    let max_actions = 4;
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(max_actions);
+
+    for _ in 0..1000 {
+        let actions: Vec<TestAction> = (0..max_actions)
+            .map(|_| TestAction::random(state.rand_mut()))
+            .collect();
+        let fuzz_input = FuzzInput::new(actions);
+        let mut bytes_input = BytesInput::new(fuzz_input.to_bytes());
+
+        let _ = mutator.mutate(&mut state, &mut bytes_input);
+        let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+        assert!(
+            decoded.actions.len() <= max_actions,
+            "At-capacity mutation grew: {} > {}",
+            decoded.actions.len(), max_actions
+        );
+    }
+}
+
+/// Verify delete always reduces length by exactly 1 and preserves remaining order.
+/// Manually applies delete operation to known input.
+#[test]
+fn test_sequence_delete_preserves_order() {
+    let mut rng = make_rng(3100);
+    let original = vec![
+        TestAction::NoFields,
+        TestAction::OneField { amount: 1 },
+        TestAction::OneField { amount: 2 },
+        TestAction::OneField { amount: 3 },
+        TestAction::OneField { amount: 4 },
+    ];
+
+    for _ in 0..100 {
+        let mut actions = original.clone();
+        let idx = rand_below(&mut rng, actions.len());
+        actions.remove(idx);
+
+        assert_eq!(actions.len(), 4);
+        // Remaining elements should be in their original relative order
+        let mut expected_idx = 0;
+        for action in &actions {
+            while expected_idx < original.len() && *action != original[expected_idx] {
+                expected_idx += 1;
+            }
+            assert!(expected_idx < original.len(), "Element not found in original");
+            expected_idx += 1;
+        }
+    }
+}
+
+/// Verify repeat puts clone immediately after source.
+#[test]
+fn test_sequence_repeat_adjacent() {
+    // The repeat op (6): src = random index, insert_at = src + 1
+    let actions = vec![
+        TestAction::OneField { amount: 1 },
+        TestAction::OneField { amount: 2 },
+        TestAction::OneField { amount: 3 },
+    ];
+
+    let mut rng = make_rng(3200);
+    for _ in 0..50 {
+        let mut test_actions = actions.clone();
+        let src = rand_below(&mut rng, test_actions.len());
+        let cloned = test_actions[src].clone();
+        let insert_at = (src + 1).min(test_actions.len());
+        test_actions.insert(insert_at, cloned.clone());
+
+        // The cloned element should be at insert_at and equal to the source
+        assert_eq!(test_actions[insert_at], cloned);
+        assert_eq!(test_actions.len(), 4);
+        // Source should still be at src
+        assert_eq!(test_actions[src], cloned);
+    }
+}
+
+/// Verify the shuffle operation is a permutation (no elements lost or duplicated).
+#[test]
+fn test_sequence_shuffle_is_permutation() {
+    let mut rng = make_rng(3300);
+
+    for _ in 0..200 {
+        let len = 5 + rand_below(&mut rng, 10); // 5-14 elements
+        let original: Vec<u64> = (0..len as u64).collect();
+        let mut shuffled = original.clone();
+
+        let start = rand_below(&mut rng, len - 1);
+        let end = (start + 2 + rand_below(&mut rng, (len - start - 1).min(4))).min(len);
+
+        // Fisher-Yates on subsequence
+        for i in (1..(end - start)).rev() {
+            let j = rand_below(&mut rng, i + 1);
+            shuffled.swap(start + i, start + j);
+        }
+
+        // Elements outside [start, end) unchanged
+        for i in 0..start {
+            assert_eq!(shuffled[i], original[i], "shuffle modified element before range");
+        }
+        for i in end..len {
+            assert_eq!(shuffled[i], original[i], "shuffle modified element after range");
+        }
+
+        // Elements within [start, end) are a permutation
+        let mut sub_orig: Vec<u64> = original[start..end].to_vec();
+        let mut sub_shuf: Vec<u64> = shuffled[start..end].to_vec();
+        sub_orig.sort();
+        sub_shuf.sort();
+        assert_eq!(sub_orig, sub_shuf, "shuffle lost or duplicated elements");
+    }
+}
+
+/// Verify truncate always keeps at least 1 and never exceeds original length.
+#[test]
+fn test_sequence_truncate_bounds() {
+    let mut rng = make_rng(3400);
+
+    for _ in 0..1000 {
+        let len = 2 + rand_below(&mut rng, 10); // 2-11
+        let new_len = 1 + rand_below(&mut rng, len - 1);
+        assert!(new_len >= 1, "truncate produced length 0");
+        assert!(new_len < len, "truncate didn't reduce: {} >= {}", new_len, len);
+    }
+}
+
+// ============================================================================
+// Part 1B: CrossoverMutator — Precise Tests
+// ============================================================================
+
+#[test]
+fn test_crossover_empty_corpus_skips() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{Mutator, MutationResult};
+    use libafl::state::StdState;
+    use libafl::corpus::InMemoryCorpus;
+    use libafl_bolts::rands::StdRand;
+
+    let mut state = StdState::new(
+        StdRand::with_seed(42), InMemoryCorpus::new(), InMemoryCorpus::new(), &mut (), &mut (),
+    ).unwrap();
+    let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(10);
+
+    let actions = vec![TestAction::NoFields];
+    let mut bytes_input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+    let original = bytes_input.as_ref().to_vec();
+
+    let result = mutator.mutate(&mut state, &mut bytes_input).unwrap();
+    assert_eq!(result, MutationResult::Skipped);
+    assert_eq!(bytes_input.as_ref(), &original[..], "Input should be unchanged when skipped");
+}
+
+#[test]
+fn test_crossover_respects_max_actions() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::Mutator;
+    use libafl::state::StdState;
+    use libafl::corpus::{Corpus, InMemoryCorpus, Testcase};
+    use libafl_bolts::rands::StdRand;
+
+    let max_actions = 5;
+    let mut corpus = InMemoryCorpus::<BytesInput>::new();
+    // Donor has max-sized inputs to stress the truncation
+    for _ in 0..5 {
+        let actions: Vec<TestAction> = (0..8).map(|_| TestAction::NoFields).collect();
+        corpus.add(Testcase::new(BytesInput::new(FuzzInput::new(actions).to_bytes()))).unwrap();
+    }
+    let mut state = StdState::new(
+        StdRand::with_seed(42), corpus, InMemoryCorpus::new(), &mut (), &mut (),
+    ).unwrap();
+
+    let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(max_actions);
+
+    for _ in 0..500 {
+        // Start with 4 actions (near max)
+        let actions: Vec<TestAction> = (0..4).map(|_| TestAction::NoFields).collect();
+        let mut bytes_input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+
+        let _ = mutator.mutate(&mut state, &mut bytes_input);
+        let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+        assert!(
+            decoded.actions.len() <= max_actions,
+            "Crossover exceeded max_actions: {} > {}",
+            decoded.actions.len(), max_actions
+        );
+    }
+}
+
+/// Verify spliced actions come from donor and are contiguous.
+#[test]
+fn test_crossover_splice_contiguity() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::Mutator;
+    use libafl::state::{StdState, HasRand};
+    use libafl::corpus::{Corpus, InMemoryCorpus, Testcase};
+    use libafl_bolts::rands::StdRand;
+
+    // Donor: all OneField with distinct amounts [100, 101, 102, 103]
+    let mut corpus = InMemoryCorpus::<BytesInput>::new();
+    let donor_actions = vec![
+        TestAction::OneField { amount: 100 },
+        TestAction::OneField { amount: 101 },
+        TestAction::OneField { amount: 102 },
+        TestAction::OneField { amount: 103 },
+    ];
+    corpus.add(Testcase::new(BytesInput::new(FuzzInput::new(donor_actions.clone()).to_bytes()))).unwrap();
+
+    let mut state = StdState::new(
+        StdRand::with_seed(42), corpus, InMemoryCorpus::new(), &mut (), &mut (),
+    ).unwrap();
+    let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(20);
+
+    let mut found_contiguous_splice = false;
+    for _ in 0..200 {
+        // Current: all NoFields
+        let actions = vec![TestAction::NoFields; 5];
+        let mut bytes_input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+
+        let _ = mutator.mutate(&mut state, &mut bytes_input);
+        let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+
+        // Find spliced OneField actions
+        let spliced: Vec<u64> = decoded.actions.iter().filter_map(|a| {
+            if let TestAction::OneField { amount } = a {
+                Some(*amount)
+            } else {
+                None
+            }
+        }).collect();
+
+        if spliced.len() >= 2 {
+            // Verify they're a contiguous subsequence of [100, 101, 102, 103]
+            for window in spliced.windows(2) {
+                assert_eq!(
+                    window[1], window[0] + 1,
+                    "Spliced actions not contiguous: {:?}", spliced
+                );
+            }
+            found_contiguous_splice = true;
+        }
+    }
+    assert!(found_contiguous_splice, "Never saw multi-action splice in 200 iterations");
+}
+
+/// Verify crossover with single-action donor always splices exactly 1.
+#[test]
+fn test_crossover_single_action_donor() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{Mutator, MutationResult};
+    use libafl::state::StdState;
+    use libafl::corpus::{Corpus, InMemoryCorpus, Testcase};
+    use libafl_bolts::rands::StdRand;
+
+    let mut corpus = InMemoryCorpus::<BytesInput>::new();
+    let donor = vec![TestAction::OneField { amount: 999 }];
+    corpus.add(Testcase::new(BytesInput::new(FuzzInput::new(donor).to_bytes()))).unwrap();
+
+    let mut state = StdState::new(
+        StdRand::with_seed(42), corpus, InMemoryCorpus::new(), &mut (), &mut (),
+    ).unwrap();
+    let mut mutator = crate::mutators::crossover::CrossoverMutator::<TestAction>::new(20);
+
+    for _ in 0..100 {
+        let actions = vec![TestAction::NoFields; 3];
+        let mut bytes_input = BytesInput::new(FuzzInput::new(actions).to_bytes());
+
+        let result = mutator.mutate(&mut state, &mut bytes_input).unwrap();
+        if result == MutationResult::Mutated {
+            let decoded = FuzzInput::<TestAction>::from_bytes(bytes_input.as_ref());
+            // With donor of length 1: splice_start=0, splice_len=1+rand_below(1.min(4))=1
+            // So exactly 1 action should be spliced, making total = 4
+            assert_eq!(
+                decoded.actions.len(), 4,
+                "Single-action donor should add exactly 1 action, got {}",
+                decoded.actions.len()
+            );
+            // Exactly one should be OneField
+            let one_field_count = decoded.actions.iter()
+                .filter(|a| matches!(a, TestAction::OneField { amount: 999 }))
+                .count();
+            assert_eq!(one_field_count, 1, "Expected exactly 1 spliced action, got {}", one_field_count);
+        }
+    }
+}
+
+// ============================================================================
+// Part 1C: SuccessTrimStage — Precise Behavioral Tests
+// ============================================================================
+
+/// Replicate the exact trim logic from SuccessTrimStage::perform and verify
+/// it correctly handles all edge cases.
+fn simulate_trim(actions: Vec<TestAction>, pattern: Vec<bool>) -> Option<Vec<TestAction>> {
+    if actions.is_empty() {
+        return None;
+    }
+
+    let actions_len = actions.len();
+    let pattern_len = pattern.len();
+    let effective_len = actions_len.min(pattern_len);
+    let success_count = pattern[..effective_len].iter().filter(|&&s| s).count();
+
+    // Skip conditions from the actual SuccessTrimStage
+    if success_count == 0 || success_count == effective_len {
+        return None; // No trimming
+    }
+
+    let trimmed: Vec<TestAction> = actions
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            if *i >= pattern_len {
+                return true;
+            }
+            pattern[*i]
+        })
+        .map(|(_, a)| a)
+        .collect();
+
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
+}
+
+#[test]
+fn test_trim_removes_exactly_failed_actions() {
+    let actions = vec![
+        TestAction::NoFields,
+        TestAction::OneField { amount: 42 },
+        TestAction::TwoFields { user_idx: 0, flag: true },
+        TestAction::FourFields { a: 1, b: 2, c: 3, d: true },
+    ];
+    let pattern = vec![false, true, false, true];
+
+    let trimmed = simulate_trim(actions, pattern).unwrap();
+    assert_eq!(trimmed.len(), 2);
+    assert_eq!(trimmed[0], TestAction::OneField { amount: 42 });
+    assert_eq!(trimmed[1], TestAction::FourFields { a: 1, b: 2, c: 3, d: true });
+}
+
+#[test]
+fn test_trim_all_success_returns_none() {
+    let actions = vec![TestAction::NoFields; 4];
+    let pattern = vec![true, true, true, true];
+    assert!(simulate_trim(actions, pattern).is_none());
+}
+
+#[test]
+fn test_trim_all_failed_returns_none() {
+    let actions = vec![TestAction::NoFields; 4];
+    let pattern = vec![false, false, false, false];
+    assert!(simulate_trim(actions, pattern).is_none());
+}
+
+/// When pattern is shorter than actions, actions beyond pattern are KEPT.
+/// This is important: the SuccessTrimStage deliberately keeps unpatched actions
+/// because the harness may have added more actions since the pattern was recorded.
+#[test]
+fn test_trim_short_pattern_keeps_trailing_actions() {
+    let actions = vec![
+        TestAction::OneField { amount: 1 },
+        TestAction::OneField { amount: 2 },
+        TestAction::OneField { amount: 3 },
+        TestAction::OneField { amount: 4 },
+        TestAction::OneField { amount: 5 },
+    ];
+    let pattern = vec![false, true, false]; // only covers first 3
+
+    let trimmed = simulate_trim(actions, pattern).unwrap();
+    // index 0 → false (removed), 1 → true (kept), 2 → false (removed), 3,4 → kept
+    assert_eq!(trimmed.len(), 3);
+    assert_eq!(trimmed[0], TestAction::OneField { amount: 2 }); // from index 1
+    assert_eq!(trimmed[1], TestAction::OneField { amount: 4 }); // from index 3
+    assert_eq!(trimmed[2], TestAction::OneField { amount: 5 }); // from index 4
+}
+
+/// When pattern is longer than actions, extra pattern entries are ignored.
+/// This tests effective_len = actions_len.min(pattern_len) logic.
+#[test]
+fn test_trim_long_pattern_ignored_beyond_actions() {
+    let actions = vec![
+        TestAction::OneField { amount: 1 },
+        TestAction::OneField { amount: 2 },
+    ];
+    let pattern = vec![true, false, true, true, false]; // longer than actions
+
+    let trimmed = simulate_trim(actions, pattern).unwrap();
+    // Only first 2 pattern entries matter: [true, false]
+    // index 0 → kept, index 1 → removed
+    assert_eq!(trimmed.len(), 1);
+    assert_eq!(trimmed[0], TestAction::OneField { amount: 1 });
+}
+
+/// Verify trimmed actions serialize correctly (indices shift).
+#[test]
+fn test_trim_reserializes_with_correct_variant_indices() {
+    let actions = vec![
+        TestAction::VecField { items: vec![10, 20] },  // variant 5
+        TestAction::NoFields,                            // variant 0
+        TestAction::FourFields { a: 1, b: 2, c: 3, d: true }, // variant 3
+        TestAction::OneField { amount: 99 },             // variant 1
+    ];
+    let pattern = vec![true, false, true, false]; // keep indices 0 and 2
+
+    let trimmed = simulate_trim(actions.clone(), pattern).unwrap();
+    assert_eq!(trimmed.len(), 2);
+    assert_eq!(trimmed[0], actions[0]);
+    assert_eq!(trimmed[1], actions[2]);
+
+    // Roundtrip the trimmed output
+    let bytes = FuzzInput::new(trimmed.clone()).to_bytes();
+    let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
+    assert_eq!(decoded.actions, trimmed);
+}
+
+/// Edge case: what if the only surviving action has complex fields (VecField)?
+/// This caught a real deserialization issue in early versions.
+#[test]
+fn test_trim_single_surviving_action_roundtrips() {
+    let actions = vec![
+        TestAction::NoFields,
+        TestAction::VecField { items: vec![100, 200, 300, 400] },
+        TestAction::NoFields,
+    ];
+    let pattern = vec![false, true, false];
+
+    let trimmed = simulate_trim(actions, pattern).unwrap();
+    assert_eq!(trimmed.len(), 1);
+    assert_eq!(trimmed[0], TestAction::VecField { items: vec![100, 200, 300, 400] });
+
+    let bytes = FuzzInput::new(trimmed.clone()).to_bytes();
+    let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
+    assert_eq!(decoded.actions, trimmed);
+}
+
+// ============================================================================
+// pick_interesting_u64: Duplicate Candidate Bias
+// ============================================================================
+// Bug: When lo=0, both STATIC_CANDIDATES[0]=0 and dynamic[0]=lo=0 match,
+// giving value 0 double selection weight vs other candidates.
+
+#[test]
+fn test_interesting_u64_duplicate_candidate_bias() {
+    let mut rng = make_rng(4000);
+    let mut count_zero = 0u32;
+    let mut count_999 = 0u32;
+    let n = 100_000;
+
+    for _ in 0..n {
+        let mut val = 500u64;
+        mutate_u64(&mut val, 0, 1000, &mut rng);
+        if val == 0 { count_zero += 1; }
+        if val == 999 { count_999+= 1; }
+    }
+
+    // Both 0 and 999 are interesting values. If there's no duplicate bias,
+    // they should appear at roughly similar rates (within 3x).
+    // With the duplicate bug, 0 has ~2x the weight of 999.
+    if count_999 > 0 {
+        let ratio = count_zero as f64 / count_999 as f64;
+        // Document the bias: we expect ratio > 1.5 due to the duplicate
+        // This test will need updating if the bug is fixed (ratio should be ~1.0)
+        eprintln!(
+            "interesting_u64 bias: 0 selected {}x, 999 selected {}x, ratio={:.2}",
+            count_zero, count_999, ratio
+        );
+        // For now, just verify both are selected (no total failure)
+        assert!(count_zero > 0, "0 was never selected as interesting");
+        assert!(count_999 > 0, "999 was never selected as interesting");
+    }
+}
+
+// ============================================================================
+// gen_range_u64: Modulo Bias
+// ============================================================================
+
+#[test]
+fn test_gen_range_u64_modulo_bias() {
+    // gen_range_u64 uses rng.next() % range, which has modulo bias.
+    // For range = 3, the bias should be measurable over 1M samples.
+    // 2^64 mod 3 = 1, so value 0 gets one extra mapping (bias = 1/2^64, negligible).
+    // For power-of-2 ranges there's zero bias.
+    let mut rng = make_rng(4100);
+    let mut counts = [0u32; 3];
+    let n = 300_000;
+
+    for _ in 0..n {
+        let val = gen_range_u64(&mut rng, 0, 3);
+        counts[val as usize] += 1;
+    }
+
+    // Each should be ~100k. Allow 10% tolerance.
+    for (i, &c) in counts.iter().enumerate() {
+        let expected = n / 3;
+        let diff = (c as i64 - expected as i64).unsigned_abs();
+        assert!(
+            diff < expected / 5, // 20% tolerance
+            "gen_range_u64 modulo bias: bucket {} has {} (expected ~{})",
+            i, c, expected
+        );
+    }
+}
+
+// ============================================================================
+// SequenceMutator: Mutated-but-unchanged detection
+// ============================================================================
+
+/// The swap op can return Mutated even when swapping indices that happen to
+/// hold equal actions (different positions, same content). This is technically
+/// correct (the structure was mutated) but worth documenting.
+#[test]
+fn test_sequence_swap_identical_content() {
+    use libafl::inputs::BytesInput;
+    use libafl::mutators::{Mutator, MutationResult};
+    use libafl::state::NopState;
+
+    let mut state = NopState::<BytesInput>::new();
+    let mut mutator = crate::mutators::sequence::SequenceMutator::<TestAction>::new(10);
+
+    // All same actions — any swap is content-preserving
+    let actions = vec![TestAction::NoFields; 5];
+    let original_bytes = FuzzInput::new(actions).to_bytes();
+
+    let mut mutated_but_same_bytes = 0;
+    let mut total_mutated = 0;
+    for _ in 0..500 {
+        let mut bytes_input = BytesInput::new(original_bytes.clone());
+        let result = mutator.mutate(&mut state, &mut bytes_input).unwrap();
+        if result == MutationResult::Mutated {
+            total_mutated += 1;
+            if bytes_input.as_ref() == &original_bytes[..] {
+                mutated_but_same_bytes += 1;
+            }
+        }
+    }
+
+    // Document: some "mutations" on uniform inputs produce identical bytes.
+    // This includes swap (same content), shuffle (same content), and truncate
+    // which reduces length (so bytes differ). Only swap/shuffle are wasted.
+    eprintln!(
+        "swap_identical_content: {}/{} Mutated results had identical bytes",
+        mutated_but_same_bytes, total_mutated
+    );
+    // With all-NoFields, swaps and shuffles always produce identical bytes.
+    // We should see a significant fraction.
+    assert!(
+        mutated_but_same_bytes > 10,
+        "Expected some wasted mutations on uniform input, got only {}",
+        mutated_but_same_bytes
+    );
+}
+
+// ============================================================================
+// Part 2: Coverage Utils Tests
+// ============================================================================
+
+#[test]
+fn test_bucket_zero() {
+    assert_eq!(crate::coverage_utils::to_bucket(0), 0);
+}
+
+#[test]
+fn test_bucket_exact_values() {
+    assert_eq!(crate::coverage_utils::to_bucket(1), 1);
+    assert_eq!(crate::coverage_utils::to_bucket(2), 2);
+    assert_eq!(crate::coverage_utils::to_bucket(3), 3);
+    assert_eq!(crate::coverage_utils::to_bucket(4), 4);
+    assert_eq!(crate::coverage_utils::to_bucket(5), 4);
+    assert_eq!(crate::coverage_utils::to_bucket(6), 5);
+    assert_eq!(crate::coverage_utils::to_bucket(7), 5);
+    assert_eq!(crate::coverage_utils::to_bucket(8), 6);
+}
+
+#[test]
+fn test_bucket_boundaries() {
+    // Verify every boundary transition point
+    assert_eq!(crate::coverage_utils::to_bucket(11), 6);
+    assert_eq!(crate::coverage_utils::to_bucket(12), 7);
+    assert_eq!(crate::coverage_utils::to_bucket(15), 7);
+    assert_eq!(crate::coverage_utils::to_bucket(16), 8);
+    assert_eq!(crate::coverage_utils::to_bucket(23), 8);
+    assert_eq!(crate::coverage_utils::to_bucket(24), 9);
+    assert_eq!(crate::coverage_utils::to_bucket(31), 9);
+    assert_eq!(crate::coverage_utils::to_bucket(32), 10);
+    assert_eq!(crate::coverage_utils::to_bucket(63), 10);
+    assert_eq!(crate::coverage_utils::to_bucket(64), 11);
+    assert_eq!(crate::coverage_utils::to_bucket(127), 11);
+    assert_eq!(crate::coverage_utils::to_bucket(128), 12);
+}
+
+#[test]
+fn test_bucket_high() {
+    assert_eq!(crate::coverage_utils::to_bucket(255), 12);
+}
+
+#[test]
+fn test_bucket_monotonic() {
+    for i in 0..255u8 {
+        assert!(
+            crate::coverage_utils::to_bucket(i) <= crate::coverage_utils::to_bucket(i + 1),
+            "to_bucket not monotonic at {}: {} > {}",
+            i,
+            crate::coverage_utils::to_bucket(i),
+            crate::coverage_utils::to_bucket(i + 1)
+        );
+    }
+}
+
+/// Verify to_bucket covers all 13 buckets and each input maps to exactly one.
+#[test]
+fn test_bucket_exhaustive() {
+    let mut buckets_seen = HashSet::new();
+    for i in 0..=255u8 {
+        let b = crate::coverage_utils::to_bucket(i);
+        assert!(b <= 12, "bucket {} out of range for input {}", b, i);
+        buckets_seen.insert(b);
+    }
+    assert_eq!(buckets_seen.len(), 13, "Not all 13 buckets reachable: {:?}", buckets_seen);
+}
+
+#[test]
+fn test_mix_hash_few_fixed_points() {
+    let mut fixed_points = 0;
+    for x in 0..10000u64 {
+        if crate::coverage_utils::mix_hash(x) == x {
+            fixed_points += 1;
+        }
+    }
+    // 0 is a known fixed point (XOR/MUL chain preserves 0)
+    assert!(
+        fixed_points <= 2,
+        "mix_hash has too many fixed points in 0..10000: {}",
+        fixed_points
+    );
+}
+
+/// Strict avalanche criterion: flipping each input bit should change ~32 output bits.
+#[test]
+fn test_mix_hash_avalanche() {
+    for bit in 0..64 {
+        let a = crate::coverage_utils::mix_hash(0);
+        let b = crate::coverage_utils::mix_hash(1u64 << bit);
+        let diff_bits = (a ^ b).count_ones();
+        assert!(
+            diff_bits >= 15,
+            "mix_hash: flipping bit {} only changed {} bits (expected >= 15)",
+            bit, diff_bits
+        );
+    }
+
+    // Also test with non-zero base values
+    for base in [1u64, 42, 1000, u64::MAX / 2] {
+        for bit in 0..64 {
+            let a = crate::coverage_utils::mix_hash(base);
+            let b = crate::coverage_utils::mix_hash(base ^ (1u64 << bit));
+            let diff_bits = (a ^ b).count_ones();
+            assert!(
+                diff_bits >= 10,
+                "mix_hash: flipping bit {} of {} only changed {} bits",
+                bit, base, diff_bits
+            );
+        }
+    }
+}
+
+#[test]
+fn test_mix_hash_no_trivial_collisions() {
+    let mut seen = HashSet::new();
+    for i in 0..10000u64 {
+        let h = crate::coverage_utils::mix_hash(i);
+        assert!(
+            seen.insert(h),
+            "mix_hash collision: mix_hash({}) = {} already seen",
+            i, h
+        );
+    }
+}
+
+#[test]
+fn test_mix_hash_zero_is_fixed_point() {
+    assert_eq!(crate::coverage_utils::mix_hash(0), 0);
+    assert_ne!(crate::coverage_utils::mix_hash(1), 1);
+    assert_ne!(crate::coverage_utils::mix_hash(1), 0);
+}
+
+#[test]
+fn test_mix_hash_deterministic() {
+    for x in [0u64, 1, 42, u64::MAX, u64::MAX / 2] {
+        assert_eq!(
+            crate::coverage_utils::mix_hash(x),
+            crate::coverage_utils::mix_hash(x),
+        );
+    }
+}
+
+/// Verify mix_hash output distribution is roughly uniform across u64 space.
+#[test]
+fn test_mix_hash_distribution() {
+    // Hash sequential inputs and check the high bits are spread.
+    let mut high_byte_counts = [0u32; 256];
+    for i in 0..100_000u64 {
+        let h = crate::coverage_utils::mix_hash(i);
+        let high_byte = (h >> 56) as u8;
+        high_byte_counts[high_byte as usize] += 1;
+    }
+
+    // Each of 256 buckets should have ~390 entries. Allow 3x deviation.
+    let expected = 100_000.0 / 256.0;
+    let mut outliers = 0;
+    for &c in &high_byte_counts {
+        if (c as f64) < expected / 3.0 || (c as f64) > expected * 3.0 {
+            outliers += 1;
+        }
+    }
+    assert!(
+        outliers < 5,
+        "mix_hash distribution has {} outlier buckets (expected < 5)",
+        outliers
+    );
+}

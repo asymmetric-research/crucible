@@ -71,7 +71,7 @@ fn test_all_states_max_violations_still_picks() {
 }
 
 // =========================================================================
-// 3. Fingerprint boundary values: 0, u64::MAX, all-ones in bottom 16 bits
+// 3. Fingerprint boundary values: 0, u64::MAX, all-ones in bottom 17 bits
 // =========================================================================
 
 #[test]
@@ -84,9 +84,10 @@ fn test_fingerprint_boundary_values() {
     let added_max = add_test_state(&mut pool, u64::MAX, 1, None, "max", None);
     assert!(added_max, "u64::MAX fingerprint should be accepted");
 
-    let fp_collision = 0x0000_0000_0000_FFFFu64;
+    // Same bottom 17 bits as u64::MAX (0x1FFFF) — should collide
+    let fp_collision = 0x0000_0000_0001_FFFFu64;
     let rejected = add_test_state(&mut pool, fp_collision, 2, None, "collision", None);
-    assert!(!rejected, "same bottom-16-bit fingerprint should be rejected");
+    assert!(!rejected, "same bottom-17-bit fingerprint should be rejected");
 
     assert_eq!(pool.len(), 2);
     assert_eq!(pool.active_count(), 2);
@@ -189,10 +190,10 @@ fn test_try_add_at_exact_capacity_boundary() {
     assert_eq!(pool.len(), cap);
 
     let overflow_fp = ((cap as u64) << 1) + 0x8000;
-    let rejected = add_test_state(&mut pool, overflow_fp, cap as u32, None, "", None);
-    assert!(!rejected, "should reject when pool is at capacity");
-    assert_eq!(pool.len(), cap);
-    assert!(pool.is_full());
+    let added = add_test_state(&mut pool, overflow_fp, cap as u32, None, "", None);
+    assert!(added, "should evict weakest and add when pool is at capacity");
+    // states vec grows (evicted entry preserved for parent chains), active stays bounded
+    assert_eq!(pool.active_count(), cap);
 }
 
 // =========================================================================
@@ -460,27 +461,38 @@ fn test_action_stats_map_many_classes_independent() {
 #[test]
 fn test_pick_weighted_exhausted_vs_fresh() {
     let mut pool = StatePool::new(10, 20);
-    add_test_state(&mut pool, 0x0001, 0, None, "exhausted", None);
+    // State 0: exhausted, but has novelty_bits=30
+    pool.try_add(
+        0x0001u64,
+        SvmSnapshot::empty(make_test_clock(0)),
+        0, None,
+        make_action_bytes(1, &[0x01]),
+        "exhausted".to_string(),
+        None, vec![], None, 30, 30, true, None,
+    );
     add_test_state(&mut pool, 0x0002, 1, None, "fresh", None);
 
-    // Heavily-picked state (10000 picks, no novel children → reward_rate=0, low explore)
+    // Heavily-picked state (10000 picks) — novelty decayed significantly
     pool.states[0].pick_count.store(10_000, Ordering::Relaxed);
-    // Simulate matching total_picks
+    // Fresh state: never picked → gets 1e6 priority
+    pool.states[1].pick_count.store(0, Ordering::Relaxed);
     pool.total_picks.store(10_000, Ordering::Relaxed);
 
+    let rng_vals: Vec<u64> = (0..1_000u64)
+        .map(|i| i.wrapping_mul(6364136223846793005))
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
+
     let mut counts = [0u32; 2];
-    for i in 0..1_000u64 {
-        let rv = i.wrapping_mul(6364136223846793005);
-        if let Some(idx) = pool.pick_weighted(rv) {
-            counts[idx] += 1;
-        }
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
     }
 
-    // Fresh state (never picked) should be picked significantly more than exhausted state.
-    // UCB1 exploration bonus keeps exhausted state from being fully starved (by design),
-    // so we only expect ~3-5x advantage, not 1000x.
+    // Fresh (never-picked, weight=1e6) should heavily dominate exhausted
+    // (picks=10000, novelty_bits=30: effective_bits=30/101≈0.3, weight≈1.05)
     assert!(
-        counts[1] > counts[0] * 2,
+        counts[1] > counts[0] * 3,
         "fresh state should dominate: counts={:?}", counts
     );
 }
@@ -499,17 +511,17 @@ fn test_try_add_fingerprint_zero_dedup() {
         0, None,
         make_action_bytes(1, &[0x00]),
         "zero_fp".to_string(),
-        None, vec![], None, 0, true,
+        None, vec![], None, 0, 0, true, None,
     );
     assert!(first, "fingerprint 0 should be accepted first time");
 
     let second = pool.try_add(
-        0x1_0000u64,
+        0x2_0000u64, // bottom 17 bits = 0, same dedup key as fingerprint 0
         SvmSnapshot::empty(make_test_clock(1)),
         1, None,
         make_action_bytes(1, &[0x01]),
         "fp_collision".to_string(),
-        Some(0), vec![], None, 0, true,
+        Some(0), vec![], None, 0, 0, true, None,
     );
     assert!(!second, "same dedup_key=0 should be rejected");
 
@@ -657,7 +669,7 @@ fn test_batched_flush_five_novel_states() {
         SvmSnapshot::empty(clock.clone()),
         0, None,
         0u32.to_le_bytes().to_vec(),
-        String::new(), None, vec![], None, 0, true,
+        String::new(), None, vec![], None, 0, 0, true, None,
     );
     assert!(added, "initial state must be added");
     assert_eq!(pool.len(), 1);
@@ -684,7 +696,7 @@ fn test_batched_flush_five_novel_states() {
             Some(*idx as u16),
             vec![*idx as u8],
             None,
-            0, true,
+            0, 0, true, None,
     );
         if ok { added_count += 1; }
     }
@@ -969,7 +981,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
     pool.try_add(
         0x0001, SvmSnapshot::empty(clock.clone()),
         0, None, 0u32.to_le_bytes().to_vec(),
-        String::new(), None, vec![], None, 0, true,
+        String::new(), None, vec![], None, 0, 0, true, None,
     );
 
     let child_snap = make_pool_snapshot(vec![(pk, 100)]);
@@ -977,7 +989,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
     pool.try_add(
         0x0002, child_snap, 1, Some(0),
         1u32.to_le_bytes().to_vec(),
-        "action_deposit".to_string(), Some(0), vec![42], None, 0, true,
+        "action_deposit".to_string(), Some(0), vec![42], None, 0, 0, true, None,
     );
 
     let gc_snap = make_pool_snapshot(vec![(pk, 200)]);
@@ -985,7 +997,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
     pool.try_add(
         0x0003, gc_snap, 2, Some(1),
         2u32.to_le_bytes().to_vec(),
-        "action_borrow".to_string(), Some(1), vec![77], None, 0, true,
+        "action_borrow".to_string(), Some(1), vec![77], None, 0, 0, true, None,
     );
 
     assert_eq!(pool.len(), 3);
@@ -1379,22 +1391,22 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
     pool.try_add(
         0xAA01, SvmSnapshot::empty(clock.clone()),
         0, None, 0u32.to_le_bytes().to_vec(),
-        "state_0".into(), None, vec![], None, 0, true,
+        "state_0".into(), None, vec![], None, 0, 0, true, None,
     );
     pool.try_add(
         0xAA02, SvmSnapshot::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
-        "state_1".into(), Some(1), vec![1], None, 0, true,
+        "state_1".into(), Some(1), vec![1], None, 0, 0, true, None,
     );
     pool.try_add(
         0xAA03, SvmSnapshot::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
-        "state_2".into(), Some(2), vec![2], None, 10, true,
+        "state_2".into(), Some(2), vec![2], None, 10, 10, true, None,
     );
     pool.try_add(
         0xAA04, SvmSnapshot::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
-        "state_3".into(), Some(3), vec![3], None, 0, true,
+        "state_3".into(), Some(3), vec![3], None, 0, 0, true, None,
     );
 
     assert_eq!(pool.len(), 4);
@@ -1488,22 +1500,26 @@ fn test_take_delta_tombstone_propagation() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_record_violation_reduces_pick_weight() {
+    // violation_count is tracked for diagnostics but no longer affects weight.
+    // Violated states are removed from active set via mark_crashed() instead.
     let mut pool = StatePool::new(50, 10);
     let clock = make_test_clock(1);
 
     pool.try_add(
         0xAAAA, SvmSnapshot::empty(clock.clone()),
-        0, None, 0u32.to_le_bytes().to_vec(), "state_0".into(), None, vec![], None, 0, true,
+        0, None, 0u32.to_le_bytes().to_vec(), "state_0".into(), None, vec![], None, 0, 0, true, None,
     );
     pool.try_add(
         0xBBBB, SvmSnapshot::empty(clock.clone()),
-        1, Some(0), 1u32.to_le_bytes().to_vec(), "state_1".into(), Some(1), vec![1], None, 0, true,
+        1, Some(0), 1u32.to_le_bytes().to_vec(), "state_1".into(), Some(1), vec![1], None, 0, 0, true, None,
     );
 
     for _ in 0..20 {
         pool.record_violation(1);
     }
+    assert_eq!(pool.get(1).unwrap().violation_count, 20);
 
+    // Both states should still be picked (violations don't affect weight anymore)
     let rng_vals: Vec<u64> = (0u64..1000)
         .map(|i| i.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
         .collect();
@@ -1513,8 +1529,9 @@ fn test_record_violation_reduces_pick_weight() {
     let state0_picks = picks.iter().filter(|(_, _, idx, _, _, _, _, _)| *idx == 0).count();
     let state1_picks = picks.iter().filter(|(_, _, idx, _, _, _, _, _)| *idx == 1).count();
 
-    assert!(state0_picks > state1_picks * 3,
-        "violated state should be picked rarely: state0={}, state1={}",
+    // Both should get substantial picks (violations don't affect weight)
+    assert!(state0_picks > 100 && state1_picks > 100,
+        "both states should get picks: state0={}, state1={}",
         state0_picks, state1_picks);
 }
 

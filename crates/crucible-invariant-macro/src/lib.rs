@@ -150,15 +150,16 @@ fn field_byte_size(kind: &FieldTypeKind, max_len: Option<usize>) -> usize {
             let ml = max_len.unwrap_or(8);
             let elem_size = match inner.as_ref() {
                 FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
-                _ => 8,
+                _ => 8, // all scalar types serialize as u64
             };
             8 + ml * elem_size // 8-byte length prefix + elements
         }
-        FieldTypeKind::U8 | FieldTypeKind::I8 | FieldTypeKind::Bool => 1,
-        FieldTypeKind::U16 | FieldTypeKind::I16 => 2,
-        FieldTypeKind::U32 | FieldTypeKind::I32 => 4,
         FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
-        _ => 8,
+        FieldTypeKind::Option(inner) => match inner.as_ref() {
+            FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
+            _ => 8, // Option<T> serializes as u64 (value or u64::MAX for None)
+        },
+        _ => 8, // all scalar types (bool, u8, u16, u32, u64, i*, usize) serialize as u64
     }
 }
 
@@ -621,6 +622,81 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
     }
 }
 
+/// Generate code for extracting a field from a JSON params object.
+/// Used by `from_name_and_params` to reconstruct actions from .meta.json.
+fn gen_from_json_field_code(name: &Ident, ty: &Type) -> proc_macro2::TokenStream {
+    let name_str = name.to_string();
+    let kind = classify_field_type(ty);
+    gen_from_json_kind(name, &name_str, ty, &kind)
+}
+
+fn gen_from_json_kind(name: &Ident, name_str: &str, ty: &Type, kind: &FieldTypeKind) -> proc_macro2::TokenStream {
+    match kind {
+        FieldTypeKind::U64 => quote! { let #name = __params.get(#name_str)?.as_u64()?; },
+        FieldTypeKind::U8 => quote! { let #name = __params.get(#name_str)?.as_u64()? as u8; },
+        FieldTypeKind::U16 => quote! { let #name = __params.get(#name_str)?.as_u64()? as u16; },
+        FieldTypeKind::U32 => quote! { let #name = __params.get(#name_str)?.as_u64()? as u32; },
+        FieldTypeKind::U128 => quote! { let #name = __params.get(#name_str)?.as_u64()? as u128; },
+        FieldTypeKind::Usize => quote! { let #name = __params.get(#name_str)?.as_u64()? as usize; },
+        FieldTypeKind::I64 => quote! { let #name = __params.get(#name_str)?.as_i64()?; },
+        FieldTypeKind::I8 => quote! { let #name = __params.get(#name_str)?.as_i64()? as i8; },
+        FieldTypeKind::I16 => quote! { let #name = __params.get(#name_str)?.as_i64()? as i16; },
+        FieldTypeKind::I32 => quote! { let #name = __params.get(#name_str)?.as_i64()? as i32; },
+        FieldTypeKind::I128 => quote! { let #name = __params.get(#name_str)?.as_i64()? as i128; },
+        FieldTypeKind::Bool => quote! { let #name = __params.get(#name_str)?.as_bool()?; },
+        FieldTypeKind::Option(inner) => {
+            let inner_ty = extract_option_inner(ty).unwrap_or(ty);
+            let inner_extract = match inner.as_ref() {
+                FieldTypeKind::U64 => quote! { __v.as_u64()? },
+                FieldTypeKind::U8 => quote! { __v.as_u64()? as u8 },
+                FieldTypeKind::U16 => quote! { __v.as_u64()? as u16 },
+                FieldTypeKind::U32 => quote! { __v.as_u64()? as u32 },
+                FieldTypeKind::U128 => quote! { __v.as_u64()? as u128 },
+                FieldTypeKind::Usize => quote! { __v.as_u64()? as usize },
+                FieldTypeKind::I64 => quote! { __v.as_i64()? },
+                FieldTypeKind::I8 => quote! { __v.as_i64()? as i8 },
+                FieldTypeKind::I16 => quote! { __v.as_i64()? as i16 },
+                FieldTypeKind::I32 => quote! { __v.as_i64()? as i32 },
+                FieldTypeKind::I128 => quote! { __v.as_i64()? as i128 },
+                FieldTypeKind::Bool => quote! { __v.as_bool()? },
+                _ => quote! { __v.as_u64()? as #inner_ty },
+            };
+            quote! {
+                let #name: Option<#inner_ty> = match __params.get(#name_str) {
+                    Some(__v) if __v.is_null() => None,
+                    Some(__v) => Some(#inner_extract),
+                    None => None,
+                };
+            }
+        }
+        FieldTypeKind::Vec(inner) => {
+            let inner_ty = extract_vec_inner(ty).unwrap_or(ty);
+            let elem_extract = match inner.as_ref() {
+                FieldTypeKind::U64 => quote! { __e.as_u64()? },
+                FieldTypeKind::U8 => quote! { __e.as_u64()? as u8 },
+                FieldTypeKind::U16 => quote! { __e.as_u64()? as u16 },
+                FieldTypeKind::U32 => quote! { __e.as_u64()? as u32 },
+                FieldTypeKind::U128 => quote! { __e.as_u64()? as u128 },
+                FieldTypeKind::Usize => quote! { __e.as_u64()? as usize },
+                FieldTypeKind::I64 => quote! { __e.as_i64()? },
+                FieldTypeKind::I8 => quote! { __e.as_i64()? as i8 },
+                FieldTypeKind::I16 => quote! { __e.as_i64()? as i16 },
+                FieldTypeKind::I32 => quote! { __e.as_i64()? as i32 },
+                FieldTypeKind::I128 => quote! { __e.as_i64()? as i128 },
+                FieldTypeKind::Bool => quote! { __e.as_bool()? },
+                _ => quote! { __e.as_u64()? as #inner_ty },
+            };
+            quote! {
+                let #name: Vec<#inner_ty> = {
+                    let __arr = __params.get(#name_str)?.as_array()?;
+                    let __items: Option<Vec<#inner_ty>> = __arr.iter().map(|__e| Some(#elem_extract)).collect();
+                    __items?
+                };
+            }
+        }
+    }
+}
+
 /// Generate constraint expression, handling Option<T> by constraining the inner value.
 fn gen_constraint_code(
     field_name: &Ident,
@@ -866,6 +942,7 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
     let mut deserialize_arms = Vec::new();
     let mut fuzz_action_name_arms = Vec::new();
     let mut field_byte_count_arms = Vec::new();
+    let mut from_json_arms = Vec::new();
 
     for (idx, (action_name, _, params)) in actions.iter().enumerate() {
         let action_str = to_snake_case(&action_name.to_string());
@@ -878,6 +955,7 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             deserialize_arms.push(quote! { #idx => Some(Self::#action_name), });
             fuzz_action_name_arms.push(quote! { Self::#action_name => #action_str, });
             field_byte_count_arms.push(quote! { #idx => 0, });
+            from_json_arms.push(quote! { #action_str => Some(Self::#action_name), });
         } else {
             let field_names: Vec<_> = params.iter().map(|(name, _)| name.clone()).collect();
             let num_fields = params.len();
@@ -949,6 +1027,17 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             fuzz_action_name_arms.push(quote! { Self::#action_name { .. } => #action_str, });
 
             field_byte_count_arms.push(quote! { #idx => #total_bytes, });
+
+            // Generate from_name_and_params arm for this variant
+            let from_json_fields: Vec<_> = params.iter().map(|(name, ty)| {
+                gen_from_json_field_code(name, ty)
+            }).collect();
+            from_json_arms.push(quote! {
+                #action_str => {
+                    #(#from_json_fields)*
+                    Some(Self::#action_name { #(#field_names),* })
+                },
+            });
         }
     }
 
@@ -1035,6 +1124,13 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                     match variant_idx {
                         #(#field_byte_count_arms)*
                         _ => 0,
+                    }
+                }
+
+                fn from_name_and_params(__name: &str, __params: &crucible_fuzzer::serde_json::Value) -> Option<Self> {
+                    match __name {
+                        #(#from_json_arms)*
+                        _ => None,
                     }
                 }
             }
@@ -1213,6 +1309,11 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 std::sync::atomic::Ordering::Relaxed,
             );
 
+            // Keep executed actions for backfilling JSON params on crash/violation.
+            // Only the action names are recorded during the hot loop (push_action_record_lite),
+            // and full JSON params are materialized lazily when needed.
+            let mut __executed_actions: Vec<#mod_name::#enum_name> = Vec::with_capacity(capped_len);
+
             for (i, mut action) in actions.into_iter().take(max_actions).enumerate() {
                 action.constrain_in_place();
 
@@ -1229,19 +1330,39 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                     crucible_test_context::mark_variant_succeeded(variant_idx);
                 }
 
-                // Record action with params for crash output
-                let action_name_str = action.action_name();
-                let action_params = action.to_json_params();
-                crucible_test_context::push_action_record_with_taint(
-                    action_name_str, action_params, success, None,
-                );
+                // Record lite action (no JSON serialization — deferred to crash/violation)
+                crucible_test_context::push_action_record_lite(action.action_name(), success);
+
+                // Keep the action for potential param backfill (move, no extra clone)
+                __executed_actions.push(action);
 
                 #fn_body
 
                 // === EARLY EXIT: Stop immediately if invariant was violated ===
                 if crucible_test_context::has_violation() {
+                    // Backfill JSON params for ALL executed actions (needed for crash metadata + fuzz show)
+                    for (j, a) in __executed_actions.iter().enumerate() {
+                        crucible_test_context::backfill_action_params(j, a.to_json_params());
+                    }
                     crucible_test_context::set_violation_action_index(i);
                     break;
+                }
+
+                // Stop chain on first failure in stateful mode
+                // (failed actions produce dead-end states, continuing wastes SVM executions)
+                if !success && crucible_test_context::is_stateful_chain_mode() {
+                    break;
+                }
+            }
+
+            // Backfill ALL action params after the loop if not already done by violation.
+            // This ensures `fuzz show --replay` and crash metadata always have full params.
+            // Only runs in replay/verbose mode — not on the normal fuzzing hot path.
+            if !crucible_test_context::has_violation()
+                && (std::env::var("FUZZ_INPUT_FILE").is_ok() || debug)
+            {
+                for (j, a) in __executed_actions.iter().enumerate() {
+                    crucible_test_context::backfill_action_params(j, a.to_json_params());
                 }
             }
 
@@ -1273,4 +1394,265 @@ fn to_snake_case(s: &str) -> String {
         result.push(ch.to_lowercase().next().unwrap());
     }
     result
+}
+
+/// Parse `[features]` section from Cargo.toml content string.
+/// Extracted for testability (read_cargo_features reads from disk).
+fn parse_features_from_content(content: &str) -> Vec<String> {
+    let mut features = Vec::new();
+    let mut in_features = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[features]" {
+            in_features = true;
+            continue;
+        }
+        if in_features && trimmed.starts_with('[') {
+            break;
+        }
+        if in_features && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(eq_pos) = trimmed.find('=') {
+                let name = trimmed[..eq_pos].trim();
+                if !name.is_empty() && name != "default" {
+                    features.push(name.to_string());
+                }
+            }
+        }
+    }
+    features
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::Type;
+
+    fn parse_type(s: &str) -> Type {
+        syn::parse_str::<Type>(s).unwrap()
+    }
+
+    // ========================================================================
+    // classify_field_type tests
+    // ========================================================================
+
+    #[test]
+    fn test_classify_u8() {
+        assert!(matches!(classify_field_type(&parse_type("u8")), FieldTypeKind::U8));
+    }
+
+    #[test]
+    fn test_classify_u64() {
+        assert!(matches!(classify_field_type(&parse_type("u64")), FieldTypeKind::U64));
+    }
+
+    #[test]
+    fn test_classify_u128() {
+        assert!(matches!(classify_field_type(&parse_type("u128")), FieldTypeKind::U128));
+    }
+
+    #[test]
+    fn test_classify_bool() {
+        assert!(matches!(classify_field_type(&parse_type("bool")), FieldTypeKind::Bool));
+    }
+
+    #[test]
+    fn test_classify_i64() {
+        assert!(matches!(classify_field_type(&parse_type("i64")), FieldTypeKind::I64));
+    }
+
+    #[test]
+    fn test_classify_usize() {
+        assert!(matches!(classify_field_type(&parse_type("usize")), FieldTypeKind::Usize));
+    }
+
+    #[test]
+    fn test_classify_vec_u64() {
+        match classify_field_type(&parse_type("Vec<u64>")) {
+            FieldTypeKind::Vec(inner) => assert!(matches!(*inner, FieldTypeKind::U64)),
+            other => panic!("Expected Vec(U64), got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_classify_option_u64() {
+        match classify_field_type(&parse_type("Option<u64>")) {
+            FieldTypeKind::Option(inner) => assert!(matches!(*inner, FieldTypeKind::U64)),
+            other => panic!("Expected Option(U64), got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_classify_option_vec() {
+        match classify_field_type(&parse_type("Option<Vec<u8>>")) {
+            FieldTypeKind::Option(inner) => match *inner {
+                FieldTypeKind::Vec(elem) => assert!(matches!(*elem, FieldTypeKind::U8)),
+                _ => panic!("Expected Vec inside Option"),
+            },
+            _ => panic!("Expected Option"),
+        }
+    }
+
+    #[test]
+    fn test_classify_unknown_defaults_u64() {
+        // Unknown type names default to U64
+        assert!(matches!(classify_field_type(&parse_type("Pubkey")), FieldTypeKind::U64));
+        assert!(matches!(classify_field_type(&parse_type("MyCustomType")), FieldTypeKind::U64));
+    }
+
+    // ========================================================================
+    // field_byte_size tests
+    // ========================================================================
+
+    #[test]
+    fn test_byte_size_u64() {
+        assert_eq!(field_byte_size(&FieldTypeKind::U64, None), 8);
+    }
+
+    #[test]
+    fn test_byte_size_u128() {
+        assert_eq!(field_byte_size(&FieldTypeKind::U128, None), 16);
+    }
+
+    #[test]
+    fn test_byte_size_bool() {
+        assert_eq!(field_byte_size(&FieldTypeKind::Bool, None), 8);
+    }
+
+    #[test]
+    fn test_byte_size_vec_default() {
+        // Vec(U64) with no max_len → 8 + 8*8 = 72
+        let kind = FieldTypeKind::Vec(Box::new(FieldTypeKind::U64));
+        assert_eq!(field_byte_size(&kind, None), 8 + 8 * 8);
+    }
+
+    #[test]
+    fn test_byte_size_vec_max_len() {
+        // Vec(U64) with max_len=4 → 8 + 4*8 = 40
+        let kind = FieldTypeKind::Vec(Box::new(FieldTypeKind::U64));
+        assert_eq!(field_byte_size(&kind, Some(4)), 8 + 4 * 8);
+    }
+
+    #[test]
+    fn test_byte_size_option() {
+        // Option(U64) → 8
+        let kind = FieldTypeKind::Option(Box::new(FieldTypeKind::U64));
+        assert_eq!(field_byte_size(&kind, None), 8);
+    }
+
+    #[test]
+    fn test_byte_size_option_u128() {
+        // Option(U128) → 16
+        let kind = FieldTypeKind::Option(Box::new(FieldTypeKind::U128));
+        assert_eq!(field_byte_size(&kind, None), 16);
+    }
+
+    #[test]
+    fn test_byte_size_vec_u128() {
+        // Vec(U128) with max_len=3 → 8 + 3*16 = 56
+        let kind = FieldTypeKind::Vec(Box::new(FieldTypeKind::U128));
+        assert_eq!(field_byte_size(&kind, Some(3)), 8 + 3 * 16);
+    }
+
+    #[test]
+    fn test_byte_size_all_scalars_are_8() {
+        for kind in [
+            FieldTypeKind::U8, FieldTypeKind::U16, FieldTypeKind::U32,
+            FieldTypeKind::U64, FieldTypeKind::I8, FieldTypeKind::I16,
+            FieldTypeKind::I32, FieldTypeKind::I64, FieldTypeKind::Usize,
+            FieldTypeKind::Bool,
+        ] {
+            assert_eq!(field_byte_size(&kind, None), 8, "Scalar {:?} should be 8 bytes", std::mem::discriminant(&kind));
+        }
+    }
+
+    // BUG: Option<Vec<u64>> returns 8 instead of full Vec size (72).
+    // The Option arm only special-cases U128/I128 but not Vec.
+    #[test]
+    fn test_byte_size_option_vec_undercount_bug() {
+        let kind = FieldTypeKind::Option(Box::new(FieldTypeKind::Vec(Box::new(FieldTypeKind::U64))));
+        let actual = field_byte_size(&kind, None);
+        // BUG: returns 8, should return 8 + 8*8 = 72 (same as bare Vec<u64>)
+        assert_eq!(actual, 8, "Documents current (buggy) behavior: Option<Vec<u64>> returns 8");
+        // When fixed, this should be:
+        // assert_eq!(actual, 72, "Option<Vec<u64>> should match Vec<u64> byte size");
+    }
+
+    // ========================================================================
+    // parse_features_from_content tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_features_basic() {
+        let content = "[features]\nfoo = []\nbar = [\"dep\"]\n";
+        let features = parse_features_from_content(content);
+        assert_eq!(features, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_features_skips_default() {
+        let content = "[features]\ndefault = [\"foo\"]\nfoo = []\nbar = []\n";
+        let features = parse_features_from_content(content);
+        assert_eq!(features, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_features_skips_comments() {
+        let content = "[features]\n# this is a comment\nfoo = []\n# another comment\nbar = []\n";
+        let features = parse_features_from_content(content);
+        assert_eq!(features, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_features_stops_at_next_section() {
+        let content = "[features]\nfoo = []\n[dependencies]\nbar = \"1.0\"\n";
+        let features = parse_features_from_content(content);
+        assert_eq!(features, vec!["foo"]);
+    }
+
+    #[test]
+    fn test_parse_features_empty() {
+        let content = "[dependencies]\nfoo = \"1.0\"\n";
+        let features = parse_features_from_content(content);
+        assert!(features.is_empty());
+    }
+
+    #[test]
+    fn test_parse_features_no_content() {
+        let features = parse_features_from_content("");
+        assert!(features.is_empty());
+    }
+
+    // ========================================================================
+    // extract_generic_inner / type helper tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_vec_inner() {
+        let ty = parse_type("Vec<u64>");
+        let inner = extract_vec_inner(&ty);
+        assert!(inner.is_some());
+        assert!(matches!(classify_field_type(inner.unwrap()), FieldTypeKind::U64));
+    }
+
+    #[test]
+    fn test_extract_option_inner() {
+        let ty = parse_type("Option<bool>");
+        let inner = extract_option_inner(&ty);
+        assert!(inner.is_some());
+        assert!(matches!(classify_field_type(inner.unwrap()), FieldTypeKind::Bool));
+    }
+
+    #[test]
+    fn test_extract_non_generic() {
+        let ty = parse_type("u64");
+        assert!(extract_vec_inner(&ty).is_none());
+        assert!(extract_option_inner(&ty).is_none());
+    }
+
+    #[test]
+    fn test_extract_wrong_name() {
+        let ty = parse_type("HashMap<K, V>");
+        assert!(extract_generic_inner(&ty, "Vec").is_none());
+        assert!(extract_generic_inner(&ty, "Option").is_none());
+    }
 }

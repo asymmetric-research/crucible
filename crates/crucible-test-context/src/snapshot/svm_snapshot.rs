@@ -281,29 +281,34 @@ impl SvmSnapshot {
 // State Fingerprinting — bucketed hashing for state novelty detection
 // ============================================================================
 
-/// Fine-grained value bucketing (11 buckets: 0-10).
+/// Per-magnitude exponential value bucketing (16 buckets: 0-15).
 ///
-/// Finer than the old `log2_bucket` at low values where distinct token
-/// amounts, user counts, and small balances need to produce different
-/// fingerprints. Collapses large values (>1B) since the exact magnitude
-/// rarely matters for state novelty.
+/// 0, 1 get individual buckets (critical for flags/booleans).
+/// Then each order of magnitude (decade) gets one bucket:
+/// 2-9, 10-99, 100-999, 1K-9K, 10K-99K, 100K-999K,
+/// 1M-9M, 10M-99M, 100M-999M, 1B-9B, 10B-99B, 100B-999B, 1T-9T, >10T.
 ///
-/// Buckets: 0=zero, 1=one, 2=two, 3=3-10, 4=11-100, 5=101-1K,
-///          6=1K-10K, 7=10K-100K, 8=100K-1M, 9=1M-1B, 10=>1B
+/// Total: 16 buckets covering the full u64 range.
+/// Naturally adaptive: u8-range values only use ~6, u64-range use all 16.
 #[inline]
 pub fn value_bucket(val: u64) -> u8 {
     match val {
         0 => 0,
         1 => 1,
-        2 => 2,
-        3..=10 => 3,
-        11..=100 => 4,
-        101..=1_000 => 5,
-        1_001..=10_000 => 6,
-        10_001..=100_000 => 7,
-        100_001..=1_000_000 => 8,
-        1_000_001..=1_000_000_000 => 9,
-        _ => 10,
+        2..=9 => 2,
+        10..=99 => 3,
+        100..=999 => 4,
+        1_000..=9_999 => 5,
+        10_000..=99_999 => 6,
+        100_000..=999_999 => 7,
+        1_000_000..=9_999_999 => 8,
+        10_000_000..=99_999_999 => 9,
+        100_000_000..=999_999_999 => 10,
+        1_000_000_000..=9_999_999_999 => 11,
+        10_000_000_000..=99_999_999_999 => 12,
+        100_000_000_000..=999_999_999_999 => 13,
+        1_000_000_000_000..=9_999_999_999_999 => 14,
+        _ => 15,
     }
 }
 
@@ -344,34 +349,15 @@ pub fn slot_diff_bucket(diff: u64) -> u8 {
     }
 }
 
-/// Differential bucketing for lamports changes from initial (~65 buckets).
-/// Same as slot_diff_bucket but extends to larger magnitudes for lamport amounts.
-#[inline]
-pub fn lamports_diff_bucket(diff: u64) -> u8 {
-    match diff {
-        0..=9 => diff as u8,                              // 0-9
-        10..=99 => 9 + (diff / 10) as u8,                 // 10-18
-        100..=999 => 18 + (diff / 100) as u8,              // 19-27
-        1000..=9999 => 27 + (diff / 1000) as u8,           // 28-36
-        10_000..=99_999 => 36 + (diff / 10_000) as u8,     // 37-45
-        100_000..=999_999 => 45 + (diff / 100_000) as u8,  // 46-54
-        1_000_000..=9_999_999 => 54 + (diff / 1_000_000) as u8, // 55-63
-        _ => 64,                                            // overflow
-    }
-}
-
 /// Number of bits in the final fingerprint for dedup. Controls novel rate:
 /// - Too many bits → every state is "novel", pool grows unbounded
 /// - Too few bits → states collapse, pool stays tiny
-/// 16 bits = 64K possible fingerprints (8KB bitmap).
-pub(super) const FINGERPRINT_BITS: u32 = 16;
-
-/// Maximum number of u64 words to sample per account for fingerprinting.
-const FINGERPRINT_WORDS_PER_ACCOUNT: usize = 12;
+/// 17 bits = 128K possible fingerprints (16KB bitmap).
+pub(super) const FINGERPRINT_BITS: u32 = 17;
 
 /// Compute an absolute state fingerprint from the current SVM state.
 ///
-/// Samples evenly-spaced u64 words per dirty account with coarse bucketing.
+/// Uses field-boundary-aware diffing against initial state for layout-aware bucketing.
 /// The hash is truncated to FINGERPRINT_BITS for dedup (in StatePool::try_add)
 /// while the full 64-bit value is kept for state_class action selection.
 pub fn compute_state_fingerprint_from_snapshot(
@@ -379,22 +365,15 @@ pub fn compute_state_fingerprint_from_snapshot(
     dirty: &DirtyTracker,
     initial: &SvmSnapshot,
 ) -> u64 {
-    // Hash each dirty account into a FxHasher.
-    // Every u64 word is bucketed and hashed with its position index, giving
-    // full visibility into account data changes.
     let mut hasher = FxHasher::default();
 
     // Use differential slot: how much slot advanced from initial, not absolute value.
-    // This makes the fingerprint capture the *change* rather than the absolute slot,
-    // which is much more meaningful for state novelty detection.
     let clock: Clock = svm.get_sysvar();
     let slot_diff = clock.slot.saturating_sub(initial.clock.slot);
     slot_diff_bucket(slot_diff).hash(&mut hasher);
     clock.epoch.hash(&mut hasher);
 
     if dirty.dirty_accounts().is_empty() {
-        // Only clock state changed — return a non-zero fingerprint
-        // so the state gets considered for pool addition.
         return hasher.finish();
     }
 
@@ -406,146 +385,395 @@ pub fn compute_state_fingerprint_from_snapshot(
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
         let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
 
-        // Hash pubkey identity (first 8 bytes) so same data at different accounts differs
-        let pk_bytes = pubkey.as_ref();
-        let pk_prefix = u64::from_le_bytes(pk_bytes[0..8].try_into().unwrap());
-        pk_prefix.hash(&mut hasher);
+        // Use account type key (discriminant) instead of pubkey prefix.
+        // Collapses all accounts of the same type, so "has any Token account
+        // reached balance bucket 5?" rather than per-account tracking.
+        let type_key = account_type_key(data);
+        type_key.hash(&mut hasher);
 
-        // Hash lamports differential bucket (change from initial)
-        let initial_lamports = initial.accounts.get(pubkey).map(|a| a.lamports).unwrap_or(0);
-        let lamports_diff = (lamports as i128 - initial_lamports as i128).unsigned_abs() as u64;
-        lamports_diff_bucket(lamports_diff).hash(&mut hasher);
+        // Hash absolute lamports bucket (not differential)
+        value_bucket(lamports).hash(&mut hasher);
 
         // Hash data length bucket
         value_bucket(data.len() as u64).hash(&mut hasher);
 
-        // Hash sampled data words with coarse bucketing.
-        // Evenly-spaced sampling captures structure without hashing every byte.
-        let total_words = data.len() / 8;
-        if total_words > 0 {
-            let sample_count = total_words.min(FINGERPRINT_WORDS_PER_ACCOUNT);
-            for i in 0..sample_count {
-                let word_idx = if sample_count < total_words {
-                    i * total_words / sample_count
-                } else {
-                    i
-                };
-                let pos = word_idx * 8;
-                let val = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-                (word_idx as u16, value_bucket(val)).hash(&mut hasher);
+        // Field-boundary-aware diffing: find contiguous changed regions vs initial
+        let init_data = initial.accounts.get(pubkey).map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let min_len = data.len().min(init_data.len());
+        let mut i = 0usize;
+        while i < min_len {
+            if data[i] != init_data[i] {
+                let start = i;
+                while i < min_len && data[i] != init_data[i] { i += 1; }
+                let val = read_region_value(&data[start..i]);
+                (start as u32, value_bucket(val)).hash(&mut hasher);
+            } else {
+                i += 1;
             }
+        }
+        // Handle data beyond init_data (new/grown accounts): diff against zero.
+        // Without this, two new accounts of the same type with same lamports/length
+        // but different data would produce identical fingerprints.
+        if data.len() > min_len {
+            let mut i = min_len;
+            while i < data.len() {
+                if data[i] != 0 {
+                    let start = i;
+                    while i < data.len() && data[i] != 0 { i += 1; }
+                    let val = read_region_value(&data[start..i]);
+                    (start as u32, value_bucket(val)).hash(&mut hasher);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        // Resize entry: signal that the account changed size
+        if data.len() != init_data.len() {
+            (min_len as u32, value_bucket(data.len() as u64)).hash(&mut hasher);
         }
     }
 
     hasher.finish()
 }
 
-/// Size of the state coverage bitmap in bytes (64KB — same as edge coverage map).
-pub const STATE_COV_BITMAP_SIZE: usize = 1 << 16;
+/// Extract account type key from account data.
+///
+/// Accounts with ≥8 bytes: first 8 bytes = Anchor discriminant (sha256 of type name).
+/// SPL Token accounts (165 bytes, no Anchor disc): first 8 bytes = mint pubkey prefix → groups by mint.
+/// Accounts with <8 bytes: hash(data_len, available_bytes) as discriminant.
+/// Empty/zero accounts: fixed sentinel value (0).
+#[inline]
+fn account_type_key(data: &[u8]) -> u64 {
+    if data.len() >= 8 {
+        u64::from_le_bytes(data[0..8].try_into().unwrap())
+    } else if data.is_empty() {
+        0
+    } else {
+        let mut h = FxHasher::default();
+        (data.len() as u64).hash(&mut h);
+        data.hash(&mut h);
+        h.finish()
+    }
+}
 
-/// Check state coverage: slot bucket and per-account lamports buckets.
+/// Size of the account novelty bitmap in bytes (64KB = 512K bits).
+pub const ACCOUNT_NOVELTY_BITMAP_SIZE: usize = 1 << 16;
+
+/// Size of the field novelty bitmap in bytes (128KB = 1M bits).
+/// Tracks per-(account, offset, value_bucket) combinations for fine-grained
+/// state novelty detection.
+pub const FIELD_NOVELTY_BITMAP_SIZE: usize = 1 << 17;
+
+/// Maximum number of u64 words to sample per account for novelty checking.
+const NOVELTY_WORDS_PER_ACCOUNT: usize = 8;
+
+/// Check per-account state novelty using exponential bucketing.
 ///
-/// Hashes each novel (slot_bucket) and (pubkey, lamports_bucket) pair into
-/// bit positions in `bitmap`. Returns the number of new bits set (0 = no novelty).
+/// For each dirty account, exponentially bins the absolute lamports, data length,
+/// and sampled data words using `value_bucket()`. The combination is hashed per-account
+/// into a bitmap position. Returns the count of novel (previously-unseen) account states.
 ///
-/// This gives stateful mode a coverage signal for state transitions that
-/// mirrors the hitcount bucketing used for code edges: a new lamports bucket
-/// or slot bucket counts as "new coverage" and triggers pool addition.
-pub fn check_state_coverage(
+/// Uses atomic bitmap operations so the same function works for both singlecore
+/// (local `&mut [u8]`) and multicore (shared `*mut u8`) modes.
+///
+/// # Safety
+/// `bitmap_ptr` must point to a valid region of `bitmap_len` bytes.
+/// For multicore, this region must be shared memory accessed only via atomics.
+pub unsafe fn check_account_state_novelty(
     svm: &LiteSVM,
     dirty: &super::DirtyTracker,
-    initial: &SvmSnapshot,
-    bitmap: &mut [u8],
+    bitmap_ptr: *mut u8,
+    bitmap_len: usize,
 ) -> u32 {
-    let mut novel_bits: u32 = 0;
+    let mut novel_count: u32 = 0;
+    let total_bits = bitmap_len * 8;
 
-    // Slot differential bucket
-    let clock: Clock = svm.get_sysvar();
-    let slot_diff = clock.slot.saturating_sub(initial.clock.slot);
-    let sb = slot_diff_bucket(slot_diff) as usize;
-    let h = sb.wrapping_mul(0x9e3779b9) % (bitmap.len() * 8);
-    let byte_idx = h / 8;
-    let bit_mask = 1u8 << (h % 8);
-    if bitmap[byte_idx] & bit_mask == 0 {
-        bitmap[byte_idx] |= bit_mask;
-        novel_bits += 1;
-    }
-
-    // Per-account lamports differential buckets
     for pubkey in dirty.dirty_accounts() {
         let account = svm.get_account(pubkey);
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
-        let initial_lamports = initial.accounts.get(pubkey).map(|a| a.lamports).unwrap_or(0);
-        let lamports_diff = (lamports as i128 - initial_lamports as i128).unsigned_abs() as u64;
-        let lb = lamports_diff_bucket(lamports_diff) as usize;
-        let pk_bytes = pubkey.as_ref();
-        let pk_prefix = u32::from_le_bytes(pk_bytes[0..4].try_into().unwrap()) as usize;
-        let h = pk_prefix.wrapping_mul(0x9e3779b9) ^ lb.wrapping_mul(0x517cc1b7);
-        let h = h % (bitmap.len() * 8);
-        let byte_idx = h / 8;
-        let bit_mask = 1u8 << (h % 8);
-        if bitmap[byte_idx] & bit_mask == 0 {
-            bitmap[byte_idx] |= bit_mask;
-            novel_bits += 1;
+        let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+
+        let h = account_state_hash(lamports, data);
+        novel_count += check_and_set_bit_atomic(bitmap_ptr, total_bits, h);
+    }
+
+    novel_count
+}
+
+/// Hash an account's type + exponentially-binned state into a single u64.
+/// Used by both local and atomic novelty checks.
+#[inline]
+fn account_state_hash(lamports: u64, data: &[u8]) -> u64 {
+    let mut hasher = FxHasher::default();
+
+    // Account type key (discriminant) instead of pubkey prefix
+    account_type_key(data).hash(&mut hasher);
+
+    // Exponentially binned absolute state fields
+    value_bucket(lamports).hash(&mut hasher);
+    value_bucket(data.len() as u64).hash(&mut hasher);
+
+    // Sample evenly-spaced data words, each exponentially binned.
+    let total_words = data.len() / 8;
+    if total_words > 0 {
+        let sample_count = total_words.min(NOVELTY_WORDS_PER_ACCOUNT);
+        for i in 0..sample_count {
+            let word_idx = if sample_count < total_words {
+                i * total_words / sample_count
+            } else {
+                i
+            };
+            let pos = word_idx * 8;
+            let val = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            value_bucket(val).hash(&mut hasher);
         }
     }
 
-    novel_bits
+    hasher.finish()
 }
 
-/// Atomic variant of [`check_state_coverage`] for multicore mode.
+// ============================================================================
+// Per-Field Novelty — diff each account against initial, track changed regions
+// ============================================================================
+
+/// Sentinel offset for lamports novelty (cannot collide with real data offsets).
+const LAMPORTS_SENTINEL: u32 = u32::MAX;
+
+/// Type key for clock sysvar novelty (cannot collide with real account type keys).
+const CLOCK_TYPE_KEY: u64 = u64::MAX - 1;
+
+/// Read a changed byte region as a u64 value for bucketing.
+/// Short regions are read as native integers; long regions are hashed.
+#[inline]
+fn read_region_value(region: &[u8]) -> u64 {
+    match region.len() {
+        0 => 0,
+        1 => region[0] as u64,
+        2 => u16::from_le_bytes(region[0..2].try_into().unwrap()) as u64,
+        3..=4 => {
+            let mut buf = [0u8; 4];
+            buf[..region.len()].copy_from_slice(region);
+            u32::from_le_bytes(buf) as u64
+        }
+        5..=8 => {
+            let mut buf = [0u8; 8];
+            buf[..region.len()].copy_from_slice(region);
+            u64::from_le_bytes(buf)
+        }
+        _ => {
+            // Hash longer regions (pubkeys, byte arrays, etc.)
+            let mut h = FxHasher::default();
+            region.hash(&mut h);
+            h.finish()
+        }
+    }
+}
+
+/// Combine (account_type_key, offset, value_bucket) into a hash for bitmap indexing.
+#[inline]
+fn field_hash(type_key: u64, offset: u32, bucket: u8) -> u64 {
+    let mut h = FxHasher::default();
+    type_key.hash(&mut h);
+    offset.hash(&mut h);
+    bucket.hash(&mut h);
+    h.finish()
+}
+
+/// Atomically check and set a bit in a bitmap. Returns 1 if the bit was new, 0 otherwise.
 ///
-/// Uses `AtomicU8::fetch_or` on a shared bitmap so that only one worker
-/// "wins" each novel bit — preventing N× duplicate state additions.
+/// Uses `AtomicU8::fetch_or` with `Relaxed` ordering — negligible overhead on
+/// uncontended cache lines, so the same function works for both singlecore and multicore.
 ///
 /// # Safety
-/// `bitmap_ptr` must point to a valid, shared-memory region of `bitmap_len` bytes
-/// that is only accessed via atomic operations.
-pub unsafe fn check_state_coverage_atomic(
+/// `bitmap_ptr` must point to a valid region of at least `ceil(total_bits/8)` bytes.
+#[inline]
+unsafe fn check_and_set_bit_atomic(bitmap_ptr: *mut u8, total_bits: usize, hash: u64) -> u32 {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let idx = hash as usize % total_bits;
+    let byte_ptr = bitmap_ptr.add(idx / 8) as *const AtomicU8;
+    let bit_mask = 1u8 << (idx % 8);
+    let prev = (*byte_ptr).fetch_or(bit_mask, Ordering::Relaxed);
+    if prev & bit_mask == 0 { 1 } else { 0 }
+}
+
+/// Check per-field state novelty by diffing each dirty account against initial state.
+///
+/// For each dirty account, walks bytes to find contiguous changed regions (runs of
+/// differing bytes), classifies each by size → integer type, reads the value, and
+/// checks if `(account_type, offset, value_bucket(value))` has been seen before.
+///
+/// Uses atomic bitmap operations so the same function works for both singlecore
+/// (local `&mut [u8]`) and multicore (shared `*mut u8`) modes.
+///
+/// Returns the count of novel (previously-unseen) field states.
+///
+/// # Safety
+/// `bitmap_ptr` must point to a valid region of `bitmap_len` bytes.
+/// For multicore, this region must be shared memory accessed only via atomics.
+pub unsafe fn check_field_novelty(
     svm: &LiteSVM,
     dirty: &super::DirtyTracker,
     initial: &SvmSnapshot,
     bitmap_ptr: *mut u8,
     bitmap_len: usize,
 ) -> u32 {
-    use std::sync::atomic::{AtomicU8, Ordering};
-
-    let mut novel_bits: u32 = 0;
+    let mut novel_count: u32 = 0;
     let total_bits = bitmap_len * 8;
 
-    // Slot differential bucket
+    // Read clock once for both clock novelty and combined account×clock novelty.
     let clock: Clock = svm.get_sysvar();
     let slot_diff = clock.slot.saturating_sub(initial.clock.slot);
-    let sb = slot_diff_bucket(slot_diff) as usize;
-    let h = sb.wrapping_mul(0x9e3779b9) % total_bits;
-    let byte_idx = h / 8;
-    let bit_mask = 1u8 << (h % 8);
-    let byte_ptr = bitmap_ptr.add(byte_idx) as *const AtomicU8;
-    let prev = (*byte_ptr).fetch_or(bit_mask, Ordering::Relaxed);
-    if prev & bit_mask == 0 {
-        novel_bits += 1;
+    let sdb = slot_diff_bucket(slot_diff);
+
+    // Detect clock changes by comparing against initial snapshot.
+    // This catches ALL clock modifications regardless of how the harness sets
+    // the clock (ctx.advance_slots, svm.set_sysvar, etc.) without relying on
+    // DirtyTracker's clock_dirty flag.
+    if slot_diff > 0 || clock.epoch != initial.clock.epoch {
+        novel_count += check_and_set_bit_atomic(
+            bitmap_ptr, total_bits,
+            field_hash(CLOCK_TYPE_KEY, 0, sdb),
+        );
+        novel_count += check_and_set_bit_atomic(
+            bitmap_ptr, total_bits,
+            field_hash(CLOCK_TYPE_KEY, 1, value_bucket(clock.epoch)),
+        );
     }
 
-    // Per-account lamports differential buckets
+    // Collect pubkeys for combined set novelty (computed after per-account loop).
+    let mut __dirty_pubkeys: Vec<&Pubkey> = Vec::with_capacity(dirty.dirty_accounts().len());
+
     for pubkey in dirty.dirty_accounts() {
         let account = svm.get_account(pubkey);
-        let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
-        let initial_lamports = initial.accounts.get(pubkey).map(|a| a.lamports).unwrap_or(0);
-        let lamports_diff = (lamports as i128 - initial_lamports as i128).unsigned_abs() as u64;
-        let lb = lamports_diff_bucket(lamports_diff) as usize;
-        let pk_bytes = pubkey.as_ref();
-        let pk_prefix = u32::from_le_bytes(pk_bytes[0..4].try_into().unwrap()) as usize;
-        let h = pk_prefix.wrapping_mul(0x9e3779b9) ^ lb.wrapping_mul(0x517cc1b7);
-        let h = h % total_bits;
-        let byte_idx = h / 8;
-        let bit_mask = 1u8 << (h % 8);
-        let byte_ptr = bitmap_ptr.add(byte_idx) as *const AtomicU8;
-        let prev = (*byte_ptr).fetch_or(bit_mask, Ordering::Relaxed);
-        if prev & bit_mask == 0 {
-            novel_bits += 1;
+        let cur_data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let cur_lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
+
+        // Use account type key (discriminant) instead of pubkey prefix
+        let type_key = account_type_key(cur_data);
+        __dirty_pubkeys.push(pubkey);
+
+        // Combined account×clock novelty: "this account type is dirty at this time depth."
+        // Captures cross-product states like "Stake account modified + epoch 7" that are
+        // novel even when each dimension was seen independently.
+        // Cost: ~16 account types × ~31 slot buckets = ~500 combinations (trivial).
+        if slot_diff > 0 {
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits,
+                field_hash(type_key, LAMPORTS_SENTINEL - 1, sdb),
+            );
+        }
+
+        // Check lamports novelty
+        novel_count += check_and_set_bit_atomic(
+            bitmap_ptr, total_bits,
+            field_hash(type_key, LAMPORTS_SENTINEL, value_bucket(cur_lamports)),
+        );
+
+        let init_data = initial.accounts.get(pubkey)
+            .map(|a| a.data.as_slice())
+            .unwrap_or(&[]);
+
+        // Walk bytes, find contiguous changed regions
+        let min_len = cur_data.len().min(init_data.len());
+        let mut i = 0usize;
+        while i < min_len {
+            if cur_data[i] != init_data[i] {
+                let start = i;
+                while i < min_len && cur_data[i] != init_data[i] {
+                    i += 1;
+                }
+                let val = read_region_value(&cur_data[start..i]);
+                novel_count += check_and_set_bit_atomic(
+                    bitmap_ptr, total_bits,
+                    field_hash(type_key, start as u32, value_bucket(val)),
+                );
+            } else {
+                i += 1;
+            }
+        }
+
+        // Handle data beyond init_data (new/grown accounts): diff against zero.
+        // Without this, two new accounts of the same type with same lamports/length
+        // but different data would produce identical novelty contributions.
+        if cur_data.len() > min_len {
+            let mut i = min_len;
+            while i < cur_data.len() {
+                if cur_data[i] != 0 {
+                    let start = i;
+                    while i < cur_data.len() && cur_data[i] != 0 { i += 1; }
+                    let val = read_region_value(&cur_data[start..i]);
+                    novel_count += check_and_set_bit_atomic(
+                        bitmap_ptr, total_bits,
+                        field_hash(type_key, start as u32, value_bucket(val)),
+                    );
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Trailing bytes (account grew or shrank) — resize signal
+        if cur_data.len() != init_data.len() {
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits,
+                field_hash(type_key, min_len as u32, value_bucket(cur_data.len() as u64)),
+            );
+        }
+
+        // Per-identity novelty: (pubkey, lamports_bucket, data_len_bucket)
+        // Distinguishes individual accounts, not just account types.
+        // "stake_account_A at 64B lamports" is distinct from "stake_account_B at 64B lamports".
+        {
+            let mut id_hasher = FxHasher::default();
+            pubkey.hash(&mut id_hasher);
+            value_bucket(cur_lamports).hash(&mut id_hasher);
+            value_bucket(cur_data.len() as u64).hash(&mut id_hasher);
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits, id_hasher.finish(),
+            );
+        }
+
+        // Per-identity × clock: "this specific account at this time depth."
+        // Captures "stake_account_A delegated + epoch 7" as distinct from epoch 0.
+        if slot_diff > 0 {
+            let mut id_clock_hasher = FxHasher::default();
+            pubkey.hash(&mut id_clock_hasher);
+            value_bucket(cur_lamports).hash(&mut id_clock_hasher);
+            sdb.hash(&mut id_clock_hasher);
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits, id_clock_hasher.finish(),
+            );
         }
     }
 
-    novel_bits
+    // Combined set novelty: hash the sorted set of dirty pubkeys together.
+    // "{stake_A, stake_B, vote_V} dirty together" is distinct from
+    // "{stake_A, stake_C, vote_V} dirty together", unlike the old type_key
+    // approach which collapsed all accounts of the same type.
+    if __dirty_pubkeys.len() > 1 {
+        __dirty_pubkeys.sort();
+        let mut set_hasher = FxHasher::default();
+        for pk in &__dirty_pubkeys {
+            pk.hash(&mut set_hasher);
+        }
+        novel_count += check_and_set_bit_atomic(
+            bitmap_ptr, total_bits, set_hasher.finish(),
+        );
+
+        // Combined set × clock: same pubkey combination at a different
+        // time depth is novel (e.g. {stake_A, vote_V} dirty at epoch 7 vs epoch 0).
+        if slot_diff > 0 {
+            let mut set_clock_hasher = FxHasher::default();
+            for pk in &__dirty_pubkeys {
+                pk.hash(&mut set_clock_hasher);
+            }
+            sdb.hash(&mut set_clock_hasher);
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits, set_clock_hasher.finish(),
+            );
+        }
+    }
+
+    novel_count
 }
 

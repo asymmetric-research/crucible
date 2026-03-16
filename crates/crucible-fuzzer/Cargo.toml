@@ -16,10 +16,10 @@ anchor-lang = { workspace = true }
 anchor-spl = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
 libc = "0.2"
+serde_json = "1.0"
 
 [dev-dependencies]
 tempfile = "3.10"
-serde_json = "1.0"
 
 [features]
 no-entrypoint = []

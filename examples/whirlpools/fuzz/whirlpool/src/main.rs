@@ -5,7 +5,7 @@ use solana_signer::Signer;
 use solana_pubkey::Pubkey;
 use anchor_lang::system_program;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crucible_fuzzer::anchor_spl::associated_token;
 
@@ -35,39 +35,7 @@ macro_rules! debug_print {
 // Action Stats Tracking
 // ============================================================================
 
-mod action_stats {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    macro_rules! define_counters {
-        ($($name:ident),*) => {
-            $(pub static $name: (AtomicU32, AtomicU32) = (AtomicU32::new(0), AtomicU32::new(0));)*
-        }
-    }
-
-    define_counters!(
-        SWAP, INCREASE_LIQUIDITY, DECREASE_LIQUIDITY,
-        UPDATE_FEES, COLLECT_FEES, OPEN_POSITION, CLOSE_POSITION
-    );
-
-    pub fn record(counter: &(AtomicU32, AtomicU32), success: bool) {
-        if success {
-            counter.0.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counter.1.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    pub fn print_summary() {
-        eprintln!("=== Action Stats ===");
-        eprintln!("swap:           {:>5} ok / {:>5} fail", SWAP.0.load(Ordering::Relaxed), SWAP.1.load(Ordering::Relaxed));
-        eprintln!("increase_liq:   {:>5} ok / {:>5} fail", INCREASE_LIQUIDITY.0.load(Ordering::Relaxed), INCREASE_LIQUIDITY.1.load(Ordering::Relaxed));
-        eprintln!("decrease_liq:   {:>5} ok / {:>5} fail", DECREASE_LIQUIDITY.0.load(Ordering::Relaxed), DECREASE_LIQUIDITY.1.load(Ordering::Relaxed));
-        eprintln!("update_fees:    {:>5} ok / {:>5} fail", UPDATE_FEES.0.load(Ordering::Relaxed), UPDATE_FEES.1.load(Ordering::Relaxed));
-        eprintln!("collect_fees:   {:>5} ok / {:>5} fail", COLLECT_FEES.0.load(Ordering::Relaxed), COLLECT_FEES.1.load(Ordering::Relaxed));
-        eprintln!("open_position:  {:>5} ok / {:>5} fail", OPEN_POSITION.0.load(Ordering::Relaxed), OPEN_POSITION.1.load(Ordering::Relaxed));
-        eprintln!("close_position: {:>5} ok / {:>5} fail", CLOSE_POSITION.0.load(Ordering::Relaxed), CLOSE_POSITION.1.load(Ordering::Relaxed));
-    }
-}
+mod action_stats;
 
 // ============================================================================
 // Constants from Whirlpool Program
@@ -857,11 +825,11 @@ impl WhirlpoolFixture {
             action_stats::print_summary();
 
             // State snapshot - show pool stats
-            eprintln!("\n=== State Snapshot (action {}) ===", count);
-            eprintln!("positions: {}", self.positions.len());
-            eprintln!("total_swaps: {} (successful: {})", self.total_swaps, self.successful_swaps);
-            eprintln!("total_liquidity_added: {}", self.total_liquidity_added);
-            eprintln!();
+            debug_print!("\n=== State Snapshot (action {}) ===", count);
+            debug_print!("positions: {}", self.positions.len());
+            debug_print!("total_swaps: {} (successful: {})", self.total_swaps, self.successful_swaps);
+            debug_print!("total_liquidity_added: {}", self.total_liquidity_added);
+            debug_print!("");
         }
     }
 }
@@ -897,24 +865,24 @@ mod fixture_helpers {
             .create()
             .unwrap();
 
-        eprintln!("[SETUP] Admin pubkey: {} (localnet admin)", admin.pubkey());
+        debug_print!("[SETUP] Admin pubkey: {} (localnet admin)", admin.pubkey());
 
         // Initialize WhirlpoolsConfig
         let config = init_config(ctx, &admin, program_id);
-        eprintln!("[SETUP] Config: {}", config);
+        debug_print!("[SETUP] Config: {}", config);
 
         // Initialize FeeTier
         let fee_tier = init_fee_tier(ctx, &admin, &config, program_id);
-        eprintln!("[SETUP] Fee tier: {}", fee_tier);
+        debug_print!("[SETUP] Fee tier: {}", fee_tier);
 
         // Create token mints (must be ordered: mint_a < mint_b by pubkey)
         let (mint_a, mint_b) = create_ordered_mints(ctx, &admin);
-        eprintln!("[SETUP] Mint A: {}", mint_a);
-        eprintln!("[SETUP] Mint B: {}", mint_b);
+        debug_print!("[SETUP] Mint A: {}", mint_a);
+        debug_print!("[SETUP] Mint B: {}", mint_b);
 
         // Initialize Whirlpool
         let pool = init_pool(ctx, &admin, &config, &fee_tier, &mint_a, &mint_b, program_id);
-        eprintln!("[SETUP] Whirlpool: {}", pool.whirlpool);
+        debug_print!("[SETUP] Whirlpool: {}", pool.whirlpool);
 
         // Initialize tick arrays around current price
         let tick_arrays = init_tick_arrays(ctx, &admin, &pool.whirlpool, program_id);
@@ -929,7 +897,7 @@ mod fixture_helpers {
         let users: Vec<_> = (0..3)
             .map(|i| {
                 let user = create_user(ctx, &admin, &mint_a, &mint_b);
-                eprintln!("[SETUP] User {}: {}", i, user.keypair.pubkey());
+                debug_print!("[SETUP] User {}: {}", i, user.keypair.pubkey());
                 user
             })
             .collect();
@@ -971,14 +939,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeConfig SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializeConfig SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializeConfig TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializeConfig TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializeConfig");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializeConfig SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializeConfig SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializeConfig");
             }
         }
@@ -1012,14 +980,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializeFeeTier SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializeFeeTier SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializeFeeTier TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializeFeeTier");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializeFeeTier SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializeFeeTier SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializeFeeTier");
             }
         }
@@ -1099,14 +1067,14 @@ mod fixture_helpers {
             .send();
 
         match result {
-            Ok(TxOutcome::Success { .. }) => eprintln!("[SETUP] InitializePool SUCCESS"),
+            Ok(TxOutcome::Success { .. }) => debug_print!("[SETUP] InitializePool SUCCESS"),
             Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                eprintln!("[SETUP] InitializePool TX_FAILED: {:?}", error);
-                for log in &logs { eprintln!("  {}", log); }
+                debug_print!("[SETUP] InitializePool TX_FAILED: {:?}", error);
+                for log in &logs { debug_print!("  {}", log); }
                 panic!("Setup failed: InitializePool");
             }
             Err(e) => {
-                eprintln!("[SETUP] InitializePool SEND_FAILED: {:?}", e);
+                debug_print!("[SETUP] InitializePool SEND_FAILED: {:?}", e);
                 panic!("Setup failed: InitializePool");
             }
         }
@@ -1163,15 +1131,15 @@ mod fixture_helpers {
             match result {
                 Ok(TxOutcome::Success { .. }) => {
                     tick_arrays.push((start_tick_index, tick_array));
-                    eprintln!("[SETUP] TickArray SUCCESS at start_tick={}", start_tick_index);
+                    debug_print!("[SETUP] TickArray SUCCESS at start_tick={}", start_tick_index);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] TickArray TX_FAILED at start_tick={}: {:?}", start_tick_index, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: InitializeTickArray at start_tick={}", start_tick_index);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] TickArray SEND_FAILED at start_tick={}: {:?}", start_tick_index, e);
+                    debug_print!("[SETUP] TickArray SEND_FAILED at start_tick={}: {:?}", start_tick_index, e);
                     panic!("Setup failed: InitializeTickArray at start_tick={}", start_tick_index);
                 }
             }
@@ -1181,7 +1149,7 @@ mod fixture_helpers {
             panic!("Setup failed: No tick arrays were created!");
         }
 
-        eprintln!("[SETUP] Created {} tick arrays", tick_arrays.len());
+        debug_print!("[SETUP] Created {} tick arrays", tick_arrays.len());
         tick_arrays
     }
 
@@ -1287,15 +1255,15 @@ mod fixture_helpers {
                         owner_idx: user_idx,
                         has_liquidity: false,
                     });
-                    eprintln!("[SETUP] Position {} created: ticks=[{},{}]", positions.len(), tick_lower_index, tick_upper_index);
+                    debug_print!("[SETUP] Position {} created: ticks=[{},{}]", positions.len(), tick_lower_index, tick_upper_index);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] Position TX_FAILED for user {}: {:?}", user_idx, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: OpenPosition for user {}", user_idx);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] Position SEND_FAILED for user {}: {:?}", user_idx, e);
+                    debug_print!("[SETUP] Position SEND_FAILED for user {}: {:?}", user_idx, e);
                     panic!("Setup failed: OpenPosition for user {}", user_idx);
                 }
             }
@@ -1352,15 +1320,15 @@ mod fixture_helpers {
             match result {
                 Ok(TxOutcome::Success { .. }) => {
                     position.has_liquidity = true;
-                    eprintln!("[SETUP] Added initial liquidity to position {}", pos_idx);
+                    debug_print!("[SETUP] Added initial liquidity to position {}", pos_idx);
                 }
                 Ok(TxOutcome::ProgramError { error, logs, .. }) => {
-                    eprintln!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, error);
-                    for log in &logs { eprintln!("  {}", log); }
+                    debug_print!("[SETUP] Initial liquidity TX_FAILED for position {}: {:?}", pos_idx, error);
+                    for log in &logs { debug_print!("  {}", log); }
                     panic!("Setup failed: IncreaseLiquidity for position {}", pos_idx);
                 }
                 Err(e) => {
-                    eprintln!("[SETUP] Initial liquidity SEND_FAILED for position {}: {:?}", pos_idx, e);
+                    debug_print!("[SETUP] Initial liquidity SEND_FAILED for position {}: {:?}", pos_idx, e);
                     panic!("Setup failed: IncreaseLiquidity for position {}", pos_idx);
                 }
             }
@@ -1370,7 +1338,7 @@ mod fixture_helpers {
             panic!("Setup failed: No positions were created!");
         }
 
-        eprintln!("[SETUP] Created {} positions with liquidity", positions.len());
+        debug_print!("[SETUP] Created {} positions with liquidity", positions.len());
         positions
     }
 }

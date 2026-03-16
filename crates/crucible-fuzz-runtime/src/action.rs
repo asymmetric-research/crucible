@@ -40,4 +40,9 @@ pub trait FuzzAction: Clone + Debug + Send + 'static {
     /// Return the number of field bytes for a given variant index.
     /// Each field is encoded as 8 bytes (u64 LE), so this is `num_fields * 8`.
     fn field_byte_count(variant_idx: usize) -> usize;
+
+    /// Reconstruct an action from its name and JSON params (from .meta.json).
+    /// Used as fallback when binary crash file can't be deserialized (e.g., after
+    /// action enum changes). Returns None if name is unknown or params are invalid.
+    fn from_name_and_params(name: &str, params: &serde_json::Value) -> Option<Self>;
 }

@@ -16,23 +16,30 @@ use std::sync::Arc;
 fn test_value_bucket() {
     assert_eq!(value_bucket(0), 0);
     assert_eq!(value_bucket(1), 1);
-    assert_eq!(value_bucket(2), 2);
-    assert_eq!(value_bucket(5), 3);
-    assert_eq!(value_bucket(10), 3);
-    assert_eq!(value_bucket(11), 4);
-    assert_eq!(value_bucket(100), 4);
-    assert_eq!(value_bucket(101), 5);
+    assert_eq!(value_bucket(2), 2);    // 2..=9 => bucket 2
+    assert_eq!(value_bucket(5), 2);
+    assert_eq!(value_bucket(9), 2);
+    assert_eq!(value_bucket(10), 3);   // 10..=99 => bucket 3
+    assert_eq!(value_bucket(99), 3);
+    assert_eq!(value_bucket(100), 4);  // 100..=999 => bucket 4
+    assert_eq!(value_bucket(999), 4);
     assert_eq!(value_bucket(1_000), 5);
-    assert_eq!(value_bucket(1_001), 6);
+    assert_eq!(value_bucket(9_999), 5);
     assert_eq!(value_bucket(10_000), 6);
-    assert_eq!(value_bucket(10_001), 7);
+    assert_eq!(value_bucket(99_999), 6);
     assert_eq!(value_bucket(100_000), 7);
-    assert_eq!(value_bucket(100_001), 8);
+    assert_eq!(value_bucket(999_999), 7);
     assert_eq!(value_bucket(1_000_000), 8);
-    assert_eq!(value_bucket(1_000_001), 9);
-    assert_eq!(value_bucket(1_000_000_000), 9);
-    assert_eq!(value_bucket(1_000_000_001), 10);
-    assert_eq!(value_bucket(u64::MAX), 10);
+    assert_eq!(value_bucket(9_999_999), 8);
+    assert_eq!(value_bucket(10_000_000), 9);
+    assert_eq!(value_bucket(100_000_000), 10);
+    assert_eq!(value_bucket(1_000_000_000), 11);
+    assert_eq!(value_bucket(10_000_000_000), 12);
+    assert_eq!(value_bucket(100_000_000_000), 13);
+    assert_eq!(value_bucket(1_000_000_000_000), 14);
+    assert_eq!(value_bucket(9_999_999_999_999), 14);
+    assert_eq!(value_bucket(10_000_000_000_000), 15);
+    assert_eq!(value_bucket(u64::MAX), 15);
 }
 
 #[test]
@@ -668,27 +675,6 @@ fn test_slot_diff_bucket() {
     assert_eq!(slot_diff_bucket(u64::MAX), 30);
 }
 
-#[test]
-fn test_lamports_diff_bucket() {
-    use super::super::svm_snapshot::lamports_diff_bucket;
-    assert_eq!(lamports_diff_bucket(0), 0);
-    assert_eq!(lamports_diff_bucket(9), 9);
-    assert_eq!(lamports_diff_bucket(10), 10);
-    assert_eq!(lamports_diff_bucket(99), 18);
-    assert_eq!(lamports_diff_bucket(100), 19);
-    assert_eq!(lamports_diff_bucket(999), 27);
-    assert_eq!(lamports_diff_bucket(1000), 28);
-    assert_eq!(lamports_diff_bucket(9999), 36);
-    assert_eq!(lamports_diff_bucket(10_000), 37);
-    assert_eq!(lamports_diff_bucket(99_999), 45);
-    assert_eq!(lamports_diff_bucket(100_000), 46);
-    assert_eq!(lamports_diff_bucket(999_999), 54);
-    assert_eq!(lamports_diff_bucket(1_000_000), 55);
-    assert_eq!(lamports_diff_bucket(9_999_999), 63);
-    assert_eq!(lamports_diff_bucket(10_000_000), 64);
-    assert_eq!(lamports_diff_bucket(u64::MAX), 64);
-}
-
 // =========================================================================
 // Multi-step state chains (A→B→C)
 // =========================================================================
@@ -1319,4 +1305,473 @@ fn test_restore_selective_always_sets_clock() {
     initial.restore_selective(&mut svm, &divergent, &delta);
 
     assert_eq!(svm.get_sysvar::<Clock>().slot, 42);
+}
+
+// =========================================================================
+// check_account_state_novelty — bitmap-based per-account novelty detection
+// =========================================================================
+
+#[test]
+fn test_novelty_first_check_is_always_novel() {
+    let mut svm = LiteSVM::new();
+    let pk1 = Pubkey::new_unique();
+    let pk2 = Pubkey::new_unique();
+    svm.set_account(pk1, make_account(1000, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
+    svm.set_account(pk2, make_account(2000, &[10, 20, 30, 40, 50, 60, 70, 80])).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk1);
+    tracker.mark_account_dirty(&pk2);
+
+    let mut bitmap = vec![0u8; ACCOUNT_NOVELTY_BITMAP_SIZE];
+    let novel = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+
+    // First time checking these accounts — both should be novel
+    assert_eq!(novel, 2);
+}
+
+#[test]
+fn test_novelty_same_state_not_novel_twice() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    svm.set_account(pk, make_account(1000, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    let mut bitmap = vec![0u8; ACCOUNT_NOVELTY_BITMAP_SIZE];
+
+    // First check: novel
+    let novel1 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel1, 1);
+
+    // Second check with same state: not novel
+    let novel2 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel2, 0);
+}
+
+#[test]
+fn test_novelty_different_magnitude_is_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    svm.set_account(pk, make_account(100, &[0u8; 8])).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    let mut bitmap = vec![0u8; ACCOUNT_NOVELTY_BITMAP_SIZE];
+
+    // First check at lamports=100 (bucket 5)
+    let novel1 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel1, 1);
+
+    // Change lamports to different order of magnitude (1000 = bucket 6)
+    svm.set_account(pk, make_account(1000, &[0u8; 8])).unwrap();
+    let novel2 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel2, 1, "different magnitude should be novel");
+
+    // Change to same magnitude (500, still bucket 5)
+    svm.set_account(pk, make_account(500, &[0u8; 8])).unwrap();
+    let novel3 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel3, 0, "same magnitude should NOT be novel");
+}
+
+#[test]
+fn test_novelty_different_data_is_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    // Data with value 5 in first word → bucket 3
+    svm.set_account(pk, make_account(100, &5u64.to_le_bytes())).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    let mut bitmap = vec![0u8; ACCOUNT_NOVELTY_BITMAP_SIZE];
+
+    let novel1 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel1, 1);
+
+    // Change first data word to different magnitude (5000 → bucket 6)
+    svm.set_account(pk, make_account(100, &5000u64.to_le_bytes())).unwrap();
+    let novel2 = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel2, 1, "different data magnitude should be novel");
+}
+
+#[test]
+fn test_novelty_empty_tracker_returns_zero() {
+    let svm = LiteSVM::new();
+    let tracker = DirtyTracker::new();
+
+    let mut bitmap = vec![0u8; ACCOUNT_NOVELTY_BITMAP_SIZE];
+    let novel = unsafe { check_account_state_novelty(&svm, &tracker, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel, 0);
+}
+
+// =========================================================================
+// Fingerprint novelty — verifies the pool admission approach
+// =========================================================================
+
+#[test]
+fn test_fingerprint_changes_with_different_states() {
+    // Verify that compute_state_fingerprint_from_snapshot produces different
+    // fingerprints for meaningfully different states (different magnitudes).
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    let initial_clock = make_test_clock(100);
+    svm.set_sysvar(&initial_clock);
+
+    // State A: 100 lamports
+    svm.set_account(pk, make_account(100, &[0u8; 16])).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    let initial = SvmSnapshot::take(&svm, &{
+        let mut s = HashSet::new();
+        s.insert(pk);
+        s
+    });
+
+    let fp_a = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+
+    // State B: 10000 lamports (different magnitude)
+    svm.set_account(pk, make_account(10000, &[0u8; 16])).unwrap();
+    let fp_b = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+
+    assert_ne!(fp_a, fp_b, "different lamport magnitudes should produce different fingerprints");
+
+    // State C: same as A (150 lamports, same magnitude)
+    svm.set_account(pk, make_account(150, &[0u8; 16])).unwrap();
+    let fp_c = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+
+    // fp_a and fp_c might collide (same bucket) — that's expected by design.
+    // Just verify fp_b is different from fp_c.
+    assert_ne!(fp_b, fp_c, "different magnitudes should differ");
+}
+
+// =========================================================================
+// check_field_novelty — per-field diff-based novelty detection
+// =========================================================================
+
+#[test]
+fn test_field_novelty_first_change_is_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    let initial_data = vec![0u8; 32];
+    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+
+    // Take initial snapshot
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    // Modify one field (bytes 8-15)
+    let mut new_data = initial_data.clone();
+    new_data[8..16].copy_from_slice(&500u64.to_le_bytes());
+    svm.set_account(pk, make_account(1000, &new_data)).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+
+    // Should detect novelty: changed field at offset 8 + lamports check
+    assert!(novel >= 1, "first field change should be novel, got {}", novel);
+}
+
+#[test]
+fn test_field_novelty_same_bucket_not_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    let initial_data = vec![0u8; 32];
+    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // First: set field to 100
+    let mut data1 = initial_data.clone();
+    data1[8..16].copy_from_slice(&100u64.to_le_bytes());
+    svm.set_account(pk, make_account(1000, &data1)).unwrap();
+    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel1 >= 1);
+
+    // Second: set field to 150 (same bucket as 100 — both bucket 5)
+    let mut data2 = initial_data.clone();
+    data2[8..16].copy_from_slice(&150u64.to_le_bytes());
+    svm.set_account(pk, make_account(1000, &data2)).unwrap();
+    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    // Same magnitude bucket → should NOT be novel (lamports also unchanged)
+    assert_eq!(novel2, 0, "same bucket should not be novel");
+}
+
+#[test]
+fn test_field_novelty_different_bucket_is_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    let initial_data = vec![0u8; 32];
+    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // First: set field to 100 (bucket 5: 100-999)
+    let mut data1 = initial_data.clone();
+    data1[8..16].copy_from_slice(&100u64.to_le_bytes());
+    svm.set_account(pk, make_account(1000, &data1)).unwrap();
+    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel1 >= 1);
+
+    // Second: set field to 5000 (bucket 6: 1000-9999) — different bucket
+    let mut data2 = initial_data.clone();
+    data2[8..16].copy_from_slice(&5000u64.to_le_bytes());
+    svm.set_account(pk, make_account(1000, &data2)).unwrap();
+    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    // Different magnitude → at least the field should be novel
+    assert!(novel2 >= 1, "different bucket should be novel, got {}", novel2);
+}
+
+#[test]
+fn test_field_novelty_lamports_change() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    svm.set_account(pk, make_account(1000, &[0u8; 16])).unwrap();
+
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // Change lamports to different magnitude (1000 → 1_000_000)
+    svm.set_account(pk, make_account(1_000_000, &[0u8; 16])).unwrap();
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    // Lamports changed bucket → novel
+    assert!(novel >= 1, "lamports change should be novel, got {}", novel);
+}
+
+#[test]
+fn test_field_novelty_multiple_regions() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    let initial_data = vec![0u8; 64];
+    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // Change two separate regions (two fields)
+    let mut new_data = initial_data.clone();
+    new_data[0..8].copy_from_slice(&42u64.to_le_bytes()); // field at offset 0
+    new_data[32..40].copy_from_slice(&999u64.to_le_bytes()); // field at offset 32
+    svm.set_account(pk, make_account(1000, &new_data)).unwrap();
+
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    // 2 changed regions + lamports (same bucket) = at least 2 novel field bits
+    assert!(novel >= 2, "two changed regions should produce at least 2 novel bits, got {}", novel);
+}
+
+#[test]
+fn test_field_novelty_no_change_not_novel() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    svm.set_account(pk, make_account(1000, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
+
+    let mut tracked = HashSet::new();
+    tracked.insert(pk);
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // First check with same data (no actual changes) → novel due to first-time lamports bit
+    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+
+    // Second check with same data → not novel (all bits already set)
+    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(novel2, 0, "unchanged state should not be novel on second check");
+}
+
+#[test]
+fn test_field_novelty_new_account() {
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+    // pk not in initial snapshot
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: make_test_clock(0),
+    };
+
+    // Create account after initial
+    svm.set_account(pk, make_account(5000, &[10, 20, 30, 40])).unwrap();
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    // New account: lamports + all bytes differ from empty initial → novel
+    assert!(novel >= 1, "new account should be novel, got {}", novel);
+}
+
+#[test]
+fn test_fingerprint_new_accounts_different_data() {
+    // Regression test for Bug 1: two new accounts (not in initial) with same
+    // lamports/length but different data must produce different fingerprints.
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+
+    // Empty initial — pk not present
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: make_test_clock(0),
+    };
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    // State A: account with data [10, 20, 30, 40, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+    let mut data_a = vec![0u8; 16];
+    data_a[0..4].copy_from_slice(&[10, 20, 30, 40]);
+    data_a[8..16].copy_from_slice(&1u64.to_le_bytes());
+    svm.set_account(pk, make_account(5000, &data_a)).unwrap();
+    let fp_a = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+
+    // State B: same lamports/length, different data
+    let mut data_b = vec![0u8; 16];
+    data_b[0..4].copy_from_slice(&[10, 20, 30, 40]);
+    data_b[8..16].copy_from_slice(&999_999u64.to_le_bytes());
+    svm.set_account(pk, make_account(5000, &data_b)).unwrap();
+    let fp_b = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+
+    assert_ne!(fp_a, fp_b,
+        "new accounts with same lamports/length but different data should have different fingerprints");
+}
+
+#[test]
+fn test_field_novelty_new_accounts_different_data() {
+    // Regression test for Bug 1 in check_field_novelty: two new accounts with
+    // different non-zero data should produce different novelty contributions.
+    let mut svm = LiteSVM::new();
+    let pk = Pubkey::new_unique();
+
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: make_test_clock(0),
+    };
+
+    let mut tracker = DirtyTracker::new();
+    tracker.mark_account_dirty(&pk);
+
+    // State A
+    let mut data_a = vec![0u8; 16];
+    data_a[8..16].copy_from_slice(&1u64.to_le_bytes());
+    svm.set_account(pk, make_account(5000, &data_a)).unwrap();
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+    let novel_a = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel_a >= 2, "new account should have novel lamports + data fields, got {}", novel_a);
+
+    // State B: different data magnitude in same field
+    let mut data_b = vec![0u8; 16];
+    data_b[8..16].copy_from_slice(&999_999u64.to_le_bytes());
+    svm.set_account(pk, make_account(5000, &data_b)).unwrap();
+    let novel_b = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel_b >= 1, "new account with different data magnitude should be novel, got {}", novel_b);
+}
+
+// =========================================================================
+// Clock novelty — clock-only actions produce novelty bits
+// =========================================================================
+
+#[test]
+fn test_field_novelty_clock_change_is_novel() {
+    // Clock-only actions (e.g. advance_slots) must produce novelty even with
+    // no dirty accounts, so they get saved to the state pool.
+    let mut svm = LiteSVM::new();
+    let initial_clock = make_test_clock(100);
+    svm.set_sysvar(&initial_clock);
+
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: initial_clock,
+    };
+
+    // Advance clock by 1000 slots (no account changes)
+    let mut new_clock = make_test_clock(1100);
+    new_clock.epoch = 0;
+    svm.set_sysvar(&new_clock);
+
+    let tracker = DirtyTracker::new(); // empty — no dirty accounts
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+
+    assert!(novel >= 1, "clock-only change should produce novelty, got {}", novel);
+}
+
+#[test]
+fn test_field_novelty_clock_epoch_change_is_novel() {
+    // Different epochs should produce different novelty bits.
+    let mut svm = LiteSVM::new();
+    let initial_clock = make_test_clock(100);
+    svm.set_sysvar(&initial_clock);
+
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: initial_clock,
+    };
+
+    let tracker = DirtyTracker::new();
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+
+    // Epoch 1
+    let mut clock1 = make_test_clock(500);
+    clock1.epoch = 1;
+    svm.set_sysvar(&clock1);
+    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel1 >= 1, "epoch change should be novel, got {}", novel1);
+
+    // Epoch 2 (different epoch bucket)
+    let mut clock2 = make_test_clock(900);
+    clock2.epoch = 2;
+    svm.set_sysvar(&clock2);
+    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(novel2 >= 1, "different epoch should be novel, got {}", novel2);
+}
+
+#[test]
+fn test_field_novelty_same_clock_not_novel() {
+    // If clock hasn't changed from initial, no clock novelty should be produced.
+    let mut svm = LiteSVM::new();
+    let initial_clock = make_test_clock(100);
+    svm.set_sysvar(&initial_clock);
+
+    let initial = SvmSnapshot {
+        accounts: FastHashMap::default(),
+        clock: initial_clock,
+    };
+
+    let tracker = DirtyTracker::new();
+    let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
+    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+
+    assert_eq!(novel, 0, "unchanged clock should produce zero novelty, got {}", novel);
 }

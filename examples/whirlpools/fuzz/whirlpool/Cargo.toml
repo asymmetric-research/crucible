@@ -8,9 +8,9 @@ edition = "2021"
 
 [dependencies]
 # Fuzzing framework
-crucible-fuzzer = { path = "/opt/crucible/crates/crucible-fuzzer" }
-crucible-test-context = { path = "/opt/crucible/crates/crucible-test-context" }
-crucible-idl-gen = { path = "/opt/crucible/crates/crucible-idl-gen" }
+crucible-fuzzer = { path = "/Users/kai/Desktop/work/crucible/crates/crucible-fuzzer" }
+crucible-test-context = { path = "/Users/kai/Desktop/work/crucible/crates/crucible-test-context" }
+crucible-idl-gen = { path = "/Users/kai/Desktop/work/crucible/crates/crucible-idl-gen" }
 anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
 
 # Solana v3.x (required for litesvm 0.9.0)

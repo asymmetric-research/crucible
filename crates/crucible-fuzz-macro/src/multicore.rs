@@ -318,7 +318,11 @@ pub fn multicore_mode(
 
                 for line in s.lines() {
                     if line.contains("(GLOBAL)") {
-                        let mut line = line.replace("objectives", "crashes");
+                        let mut line = line.replace("objectives", "crashes").replace("(GLOBAL) ", "");
+                        // Replace LibAFL's [Testcase #N] prefix with [FUZZ_PULSE]
+                        if let Some(bracket_end) = line.find(']') {
+                            line = format!("[FUZZ_PULSE]{}", &line[bracket_end + 1..]);
+                        }
 
                         // Check if we need to refresh cached values
                         let now_ms = std::time::SystemTime::now()
@@ -381,6 +385,25 @@ pub fn multicore_mode(
                             .unwrap_or(0);
                         let total_branches = total_edges / 2;
 
+                        // Handles SI suffixes: k (1000), M (1000000)
+                        fn __parse_mc_val(s: &str, key: &str) -> f64 {
+                            s.find(key)
+                                .and_then(|i| {
+                                    let rest = &s[i + key.len()..];
+                                    let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
+                                        .unwrap_or(rest.len());
+                                    let token = rest[..end].trim();
+                                    if let Some(num) = token.strip_suffix('k') {
+                                        num.parse::<f64>().ok().map(|v| v * 1000.0)
+                                    } else if let Some(num) = token.strip_suffix('M') {
+                                        num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
+                                    } else {
+                                        token.parse().ok()
+                                    }
+                                })
+                                .unwrap_or(0.0)
+                        }
+
                         // Append program-level coverage stats to LibAFL's output
                         if line.contains("exec/sec:") {
                             let edge_pct = if total_edges > 0 { (cached_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
@@ -419,29 +442,16 @@ pub fn multicore_mode(
                                 String::new()
                             };
 
-                            println!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}",
-                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions, shared_total_ok, shared_total_actions, ok_pct, discovered_str);
+                            let __memory_kib = {
+                                let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                                unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+                                if cfg!(target_os = "macos") { (usage.ru_maxrss / 1024) as u64 } else { usage.ru_maxrss as u64 }
+                            };
+                            eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
+                                line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions, shared_total_ok, shared_total_actions, ok_pct, discovered_str, __memory_kib);
 
                             // Write CSV stats row if enabled
                             if let Some(ref csv) = __csv_ref_mc {
-                                // Handles SI suffixes: k (1000), M (1000000)
-                                fn __parse_mc_val(s: &str, key: &str) -> f64 {
-                                    s.find(key)
-                                        .and_then(|i| {
-                                            let rest = &s[i + key.len()..];
-                                            let end = rest.find(|c: char| c == ',' || c == '\n' || c == '\r')
-                                                .unwrap_or(rest.len());
-                                            let token = rest[..end].trim();
-                                            if let Some(num) = token.strip_suffix('k') {
-                                                num.parse::<f64>().ok().map(|v| v * 1000.0)
-                                            } else if let Some(num) = token.strip_suffix('M') {
-                                                num.parse::<f64>().ok().map(|v| v * 1_000_000.0)
-                                            } else {
-                                                token.parse().ok()
-                                            }
-                                        })
-                                        .unwrap_or(0.0)
-                                }
                                 let elapsed = {
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -461,7 +471,7 @@ pub fn multicore_mode(
                                 }
                             }
                         } else {
-                            println!("{}", line);
+                            eprintln!("{}", line);
                         }
                     }
                 }
@@ -735,8 +745,9 @@ pub fn multicore_mode(
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
+                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                         if std::env::var("FUZZ_VERBOSE").is_ok() {
-                            eprintln!("[VIOLATION] {}", msg);
+                            eprintln!("[FUZZ_FINDING] {}", msg);
                             crucible_test_context::print_action_sequence();
                         }
                         let input_hash = hash_std(slice);

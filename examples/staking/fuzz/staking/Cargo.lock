@@ -1128,6 +1128,7 @@ dependencies = [
  "libafl",
  "libafl_bolts",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1144,6 +1145,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "rand 0.8.5",
+ "serde_json",
 ]
 
 [[package]]

@@ -81,23 +81,29 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         // Coverage enabled flag (set by --coverage arg)
         pub static COVERAGE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-        // Multi-core mode: Track whether this iteration discovered new coverage in the shared bitmap.
-        // This is set by flush_bitmap_updates when fetch_or returns a value without the bit set.
+        // Multi-core mode: Track how many new coverage bits this iteration discovered
+        // in the shared bitmap. Incremented by flush_bitmap_updates/flush_local_bitmap_buffers
+        // when fetch_or returns a value without the bit set.
         // Reset at start of each iteration, checked by SharedBitmapFeedback.
         thread_local! {
-            pub static NEW_COVERAGE_THIS_ITERATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            pub static NEW_COVERAGE_BITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
 
         pub fn reset_new_coverage_flag() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(false));
+            NEW_COVERAGE_BITS.with(|c| c.set(0));
         }
 
         pub fn found_new_coverage() -> bool {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.get())
+            NEW_COVERAGE_BITS.with(|c| c.get() > 0)
+        }
+
+        /// Return the number of new coverage bits discovered this iteration.
+        pub fn new_coverage_count() -> u32 {
+            NEW_COVERAGE_BITS.with(|c| c.get())
         }
 
         fn mark_new_coverage() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(true));
+            NEW_COVERAGE_BITS.with(|c| c.set(c.get() + 1));
         }
 
         // Thread-local bitmaps that mirror the shared bitmaps for O(1) accumulation.
@@ -183,6 +189,32 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             });
         }
 
+        // CMIN mode: exact edge tracking via HashSet (immune to u8 wrapping)
+        // When enabled, process_trace() inserts AFL map indices into this set.
+        // Cmin reads from this instead of scanning the u8 map, avoiding the bug
+        // where edges hit exactly N*256 times wrap to 0 and become invisible.
+        thread_local! {
+            pub static CMIN_EDGE_SET: std::cell::RefCell<Option<crucible_test_context::FastHashSet<usize>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Enable cmin edge tracking. Call before each input execution.
+        pub fn cmin_edge_set_enable() {
+            CMIN_EDGE_SET.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some(ref mut set) = *s {
+                    set.clear();
+                } else {
+                    *s = Some(crucible_test_context::FastHashSet::default());
+                }
+            });
+        }
+
+        /// Take the cmin edge set (returns and disables).
+        pub fn cmin_edge_set_take() -> Option<crucible_test_context::FastHashSet<usize>> {
+            CMIN_EDGE_SET.with(|s| s.borrow_mut().take())
+        }
+
         // Force-accept mode for initial corpus loading
         // When true, SharedBitmapFeedback always returns "interesting"
         thread_local! {
@@ -261,6 +293,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     shared_branch_bitmap: None,
                     skip_global_state: false,
                 }
+            }
+
+            /// Skip global COVERAGE_STATE updates (saves mutex lock overhead).
+            /// Used in cmin mode where global state is not needed.
+            pub fn set_skip_global_state(&mut self, skip: bool) {
+                self.skip_global_state = skip;
             }
 
             pub fn with_shared_memory(
@@ -431,6 +469,13 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         let buf = std::slice::from_raw_parts_mut(self.ptr, self.len);
                         buf[edge] = buf[edge].wrapping_add(1);
                     }
+
+                    // CMIN mode: record exact edge index (immune to u8 wrapping)
+                    CMIN_EDGE_SET.with(|s| {
+                        if let Some(ref mut set) = *s.borrow_mut() {
+                            set.insert(edge);
+                        }
+                    });
 
                     // Multi-core mode: batch updates to shared bitmaps
                     // Edge bitmap is split into two halves:

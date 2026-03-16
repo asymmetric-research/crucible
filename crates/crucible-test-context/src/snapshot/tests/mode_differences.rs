@@ -1973,7 +1973,7 @@ fn test_pool_coverage_novel_3x_boost() {
         Some(0),
         vec![],
         None,
-        10, true,
+        10, 10, true, None
     );
 
     // Sample picks
@@ -2037,12 +2037,12 @@ fn test_pool_violation_penalty_reduces_weight() {
 
 #[test]
 fn test_fingerprint_truncation_causes_collisions() {
-    // FINGERPRINT_BITS = 16 means fingerprints are truncated to 16 bits.
+    // FINGERPRINT_BITS = 17 means fingerprints are truncated to 17 bits.
     // Two fingerprints that differ only in upper bits should collide.
 
     let mut pool = StatePool::new(100, 10);
 
-    // Two fingerprints with same lower 16 bits but different upper bits
+    // Two fingerprints with same lower 17 bits but different upper bits
     let fp1 = 0xAAAA_BBBB_0000_1234u64;
     let fp2 = 0xCCCC_DDDD_0000_1234u64;
 
@@ -2053,7 +2053,7 @@ fn test_fingerprint_truncation_causes_collisions() {
     let added2 = add_pool_entry(&mut pool, fp2, make_pool_snapshot(vec![(pk2, 2000)]), 1, None);
 
     assert!(added1, "first fingerprint should be added");
-    assert!(!added2, "second fingerprint should collide (same lower 16 bits)");
+    assert!(!added2, "second fingerprint should collide (same lower 17 bits)");
     assert_eq!(pool.len(), 1, "only one state in pool due to collision");
 }
 
@@ -2096,8 +2096,8 @@ fn test_pool_depth_limit_rejects_deep_states() {
 }
 
 #[test]
-fn test_pool_capacity_limit_rejects_when_full() {
-    // Pool at capacity rejects new states.
+fn test_pool_capacity_limit_evicts_when_full() {
+    // Pool at capacity evicts weakest active state to make room.
 
     let mut pool = StatePool::new(3, 10); // capacity = 3
 
@@ -2107,8 +2107,8 @@ fn test_pool_capacity_limit_rejects_when_full() {
     let added4 = add_pool_entry(&mut pool, 4, make_pool_snapshot(vec![]), 3, None);
 
     assert!(added1 && added2 && added3, "first 3 should be added");
-    assert!(!added4, "4th should be rejected (capacity=3)");
-    assert!(pool.is_full());
+    assert!(added4, "4th should evict weakest and succeed");
+    assert_eq!(pool.active_count(), 3); // one evicted, one added
 }
 
 // =========================================================================

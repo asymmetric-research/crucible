@@ -134,11 +134,62 @@ thread_local! {
     static SUCCEEDED_VARIANTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     // Cached env var: FUZZ_DEBUG (checked once per thread, avoids syscall on every send_batch)
     static FUZZ_DEBUG: Cell<bool> = Cell::new(false);
+    // Stateful chain mode: when true, action loops break on first failure
+    static STATEFUL_CHAIN_MODE: Cell<bool> = const { Cell::new(false) };
 }
 
 // Sentinel: has FUZZ_DEBUG TLS been initialized on this thread?
 thread_local! {
     static FUZZ_DEBUG_INIT: Cell<bool> = const { Cell::new(false) };
+}
+
+// Per-iteration account novelty tracking.
+// The bitmap pointer is set by stateful.rs before each chain execution.
+// The invariant macro's dispatch loop calls `record_account_novelty()` after
+// each action, which checks each dirty account's state against the bitmap.
+thread_local! {
+    /// (bitmap_ptr, bitmap_len). null_mut = disabled.
+    static NOVELTY_BITMAP: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
+    /// Count of novel account states found this iteration.
+    static NOVELTY_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Set the account novelty bitmap pointer for the current iteration.
+/// Called by stateful.rs before chain execution.
+pub fn set_novelty_bitmap(ptr: *mut u8, len: usize) {
+    NOVELTY_BITMAP.with(|c| c.set((ptr, len)));
+    NOVELTY_COUNT.with(|c| c.set(0));
+}
+
+/// Clear the novelty bitmap pointer (disable per-tx novelty tracking).
+pub fn clear_novelty_bitmap() {
+    NOVELTY_BITMAP.with(|c| c.set((std::ptr::null_mut(), 0)));
+}
+
+/// Get the count of novel account states found this iteration.
+pub fn get_novelty_count() -> u32 {
+    NOVELTY_COUNT.with(|c| c.get())
+}
+
+/// Check dirty accounts for state novelty and record in the TLS bitmap.
+///
+/// Called by the invariant macro's dispatch loop after each action.
+/// For each dirty account, exponentially bins the absolute state (lamports +
+/// sampled data words) and checks against the shared novelty bitmap.
+/// If any account is in a never-before-seen bucket, increments the TLS counter.
+pub fn record_account_novelty(svm: &litesvm::LiteSVM, dirty: &snapshot::DirtyTracker) {
+    let (ptr, len) = NOVELTY_BITMAP.with(|c| c.get());
+    if ptr.is_null() || len == 0 {
+        return; // novelty tracking disabled (non-stateful mode)
+    }
+
+    let novel = unsafe {
+        snapshot::check_account_state_novelty(svm, dirty, ptr, len)
+    };
+
+    if novel > 0 {
+        NOVELTY_COUNT.with(|c| c.set(c.get() + novel));
+    }
 }
 
 /// Check FUZZ_DEBUG env var (cached per-thread after first call).
@@ -154,6 +205,19 @@ fn is_fuzz_debug() -> bool {
             FUZZ_DEBUG.with(|c| c.get())
         }
     })
+}
+
+/// Set stateful chain mode flag. When true, invariant test loops break on
+/// first action failure (failed actions produce dead-end states in stateful mode).
+#[inline]
+pub fn set_stateful_chain_mode(v: bool) {
+    STATEFUL_CHAIN_MODE.with(|f| f.set(v));
+}
+
+/// Check if stateful chain mode is active.
+#[inline]
+pub fn is_stateful_chain_mode() -> bool {
+    STATEFUL_CHAIN_MODE.with(|f| f.get())
 }
 
 #[doc(hidden)]
@@ -373,6 +437,34 @@ pub fn get_iteration_dispatch_count() -> u64 {
     ITERATION_DISPATCH_COUNT.with(|c| c.get().max(1))
 }
 
+// ============================================================================
+// send_batch sub-phase profiling (TLS accumulators)
+// ============================================================================
+
+thread_local! {
+    pub(crate) static SEND_BATCH_PRE_NS: Cell<u64> = const { Cell::new(0) };   // dirty_tracker + capture + pre_state
+    pub(crate) static SEND_BATCH_SVM_NS: Cell<u64> = const { Cell::new(0) };   // send_transaction (actual SVM)
+    pub(crate) static SEND_BATCH_POST_NS: Cell<u64> = const { Cell::new(0) };  // tx_result_to_outcome + taint record
+}
+
+/// Reset send_batch sub-phase accumulators (call before fn_name).
+#[inline]
+pub fn reset_send_batch_timers() {
+    SEND_BATCH_PRE_NS.with(|c| c.set(0));
+    SEND_BATCH_SVM_NS.with(|c| c.set(0));
+    SEND_BATCH_POST_NS.with(|c| c.set(0));
+}
+
+/// Get send_batch sub-phase timers: (pre_ns, svm_ns, post_ns).
+#[inline]
+pub fn get_send_batch_timers() -> (u64, u64, u64) {
+    (
+        SEND_BATCH_PRE_NS.with(|c| c.get()),
+        SEND_BATCH_SVM_NS.with(|c| c.get()),
+        SEND_BATCH_POST_NS.with(|c| c.get()),
+    )
+}
+
 /// Set the total number of actions in the current sequence (for early exit tracking)
 pub fn set_total_actions(count: usize) {
     TOTAL_ACTIONS_IN_SEQUENCE.with(|t| *t.borrow_mut() = count);
@@ -576,6 +668,30 @@ pub fn format_last_action_oneline() -> String {
         }
         None => String::new(),
     }
+}
+
+/// Format ALL actions in the current history as one-line descriptions, newline-separated.
+/// Used by stateful mode to store the full chain description in a single `action_desc` field.
+pub fn format_all_actions_oneline() -> String {
+    let history = get_action_history();
+    let mut lines = Vec::with_capacity(history.len());
+    for record in &history {
+        let params_str = if let serde_json::Value::Object(map) = &record.params {
+            map.iter()
+                .map(|(k, v)| format!("{}={}", k, format_json_value(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            String::new()
+        };
+        let status = if record.success { "OK" } else { "FAIL" };
+        if params_str.is_empty() {
+            lines.push(format!("{} -> {}", record.name, status));
+        } else {
+            lines.push(format!("{}({}) -> {}", record.name, params_str, status));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Write crash metadata to a .meta.json file and save input bytes for replay
@@ -1403,11 +1519,17 @@ impl TestContext {
         // Use EmptyInvocationCallback to suppress "Error collecting register tracing" messages
         // from DefaultRegisterTracingCallback trying to find .so files for built-in programs.
         let svm = if std::env::var("ANCHOR_FUZZ_DEBUGGABLE").is_ok() {
-            let mut svm = LiteSVM::new_debuggable(true);
+            let mut svm = LiteSVM::new_debuggable(true)
+                .with_transaction_history(0)
+                .with_sigverify(false)
+                .with_blockhash_check(false);
             svm.set_invocation_inspect_callback(EmptyInvocationCallback);
             svm
         } else {
             LiteSVM::new()
+                .with_transaction_history(0)
+                .with_sigverify(false)
+                .with_blockhash_check(false)
         };
 
         Self {
@@ -2081,7 +2203,8 @@ impl TestContext {
             }
         }
 
-        // Record dirty accounts + capture metadata before instructions are consumed
+        // Pre-tx: dirty tracking, metadata capture, optional pre-state snapshot
+        let __t_pre = std::time::Instant::now();
         self.dirty_tracker.record_tx(&self.pending_instructions, &fee_payer);
         let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer);
         let pre_state = if self.taint_log.collects_diffs() {
@@ -2093,15 +2216,20 @@ impl TestContext {
         } else {
             None
         };
+        SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
-        // Send transaction with all queued instructions (take ownership to avoid clone)
+        // SVM execution: send transaction
+        let __t_svm = std::time::Instant::now();
         let instructions = std::mem::take(&mut self.pending_instructions);
         let result = instruction_builder::send_transaction(
             &mut self.svm,
             instructions,
             &unique_signers
         )?;
+        SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
+        // Post-tx: outcome parsing, taint record building
+        let __t_post = std::time::Instant::now();
         let outcome = tx_result_to_outcome(result);
 
         // Track tx success/failure for monitor display (works for all modes)
@@ -2132,16 +2260,13 @@ impl TestContext {
         }
 
         // Build taint record from captured metadata.
-        // Record for all outcomes (success + failure) so taint summaries
-        // include accounts that were *declared* writable even if the tx failed.
-        // Diffs are only meaningful for successful txs (pre_state for failures
-        // would show no change since the tx was reverted).
         let taint = snapshot::build_taint_record_from_captured(
             &self.svm,
             captured,
             if outcome.is_success() { pre_state.as_ref() } else { None },
         );
         self.taint_log.push(taint);
+        SEND_BATCH_POST_NS.with(|c| c.set(c.get() + __t_post.elapsed().as_nanos() as u64));
 
         // Clear signers queue (pending_instructions already taken via std::mem::take)
         self.pending_signers.clear();

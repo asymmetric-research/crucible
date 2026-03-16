@@ -1,4 +1,6 @@
 pub mod action;
+pub mod cmin;
+pub mod coverage_utils;
 pub mod input;
 pub mod generator;
 pub mod mutators;
@@ -17,6 +19,9 @@ pub use mutators::{
 
 // Re-export Rand trait so generated code can reference it
 pub use libafl_bolts::rands::Rand as FuzzRand;
+
+// Re-export serde_json so generated code can reference crucible_fuzzer::serde_json
+pub use serde_json;
 
 // Re-export concrete RNG type for use in generated code (e.g., success-seeking retries)
 pub use libafl_bolts::rands::StdRand;

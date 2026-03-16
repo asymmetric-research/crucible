@@ -33,8 +33,11 @@ pub use crucible_fuzz_runtime::{
 };
 pub use crucible_fuzz_runtime::FuzzRand;
 pub use crucible_fuzz_runtime::StdRand;
+// Re-export serde_json for generated from_name_and_params code
+pub use serde_json;
 pub use crucible_fuzz_runtime::SuccessTrimStage;
 pub use crucible_fuzz_runtime::SuccessPatternMetadata;
+pub use crucible_fuzz_runtime::cmin;
 
 // Re-export mimalloc for use as default global allocator in generated harnesses.
 // mimalloc dramatically improves multi-threaded performance by eliminating

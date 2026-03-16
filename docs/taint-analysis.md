@@ -71,7 +71,7 @@ When taint data is available, `crucible show --replay` prints account changes in
 
 ## Auto-enabled on replay
 
-Taint diffs are **automatically enabled** when replaying crashes (`--input` flag or `crucible show --replay`), so you always get the richest output when investigating violations.
+Taint diffs are **automatically enabled** when replaying crashes (`--replay` flag or `crucible show --replay`), so you always get the richest output when investigating violations.
 
 ## Semantic field diffs (with IDL)
 

@@ -45,7 +45,9 @@ pub fn add_test_state(
         vec![0xCC],
         None,
         0,
+        0,
         true,
+        None,
     )
 }
 
@@ -199,6 +201,8 @@ pub fn add_pool_entry(
         vec![],
         None,
         0,
+        0,
         true,
+        None,
     )
 }

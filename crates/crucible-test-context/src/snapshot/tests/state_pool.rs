@@ -46,8 +46,11 @@ fn test_state_pool_capacity_limit() {
     assert!(add_test_state(&mut pool, 2, 1, None, "", None));
     // Pool is now full
     assert!(pool.is_full());
-    assert!(!add_test_state(&mut pool, 3, 2, None, "", None));
-    assert_eq!(pool.len(), 2);
+    // Eviction: weakest active state is evicted to make room
+    assert!(add_test_state(&mut pool, 3, 2, None, "", None));
+    // states vec grows (evicted entry preserved for parent chains), active count stays bounded
+    assert_eq!(pool.len(), 3);
+    assert_eq!(pool.active_count(), 2);
 }
 
 #[test]
@@ -65,17 +68,17 @@ fn test_state_pool_depth_limit() {
 fn test_state_pool_fingerprint_dedup() {
     let mut pool = StatePool::new(100, 20);
 
-    // Fingerprints are truncated to FINGERPRINT_BITS (16 bits) for dedup.
-    // Two fingerprints with the same bottom 16 bits should collide.
+    // Fingerprints are truncated to FINGERPRINT_BITS (17 bits) for dedup.
+    // Two fingerprints with the same bottom 17 bits should collide.
     let fp1 = 0x0000_0000_0000_1234u64;
-    let fp2 = 0xFFFF_FFFF_FFFF_1234u64; // same bottom 16 bits
+    let fp2 = 0xFFFF_FFFF_FFFE_1234u64; // same bottom 17 bits
 
     assert!(add_test_state(&mut pool, fp1, 0, None, "", None));
     // Same dedup key — rejected
     assert!(!add_test_state(&mut pool, fp2, 1, None, "", None));
     assert_eq!(pool.len(), 1);
 
-    // Different bottom 16 bits — accepted
+    // Different bottom 17 bits — accepted
     let fp3 = 0x0000_0000_0000_5678u64;
     assert!(add_test_state(&mut pool, fp3, 1, None, "", None));
     assert_eq!(pool.len(), 2);
@@ -293,7 +296,7 @@ fn test_state_pool_reconstruct_action_sequence() {
         Some(0),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let reconstructed = pool.reconstruct_action_sequence(0);
@@ -345,7 +348,7 @@ fn test_state_pool_export_corpus_basic() {
         None,
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     // State with real action bytes — should be written
@@ -359,7 +362,7 @@ fn test_state_pool_export_corpus_basic() {
         Some(0),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     // Another state with different action bytes
@@ -373,7 +376,7 @@ fn test_state_pool_export_corpus_basic() {
         Some(1),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -404,7 +407,7 @@ fn test_state_pool_export_corpus_empty() {
         None,
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -427,7 +430,7 @@ fn test_state_pool_export_corpus_content() {
         Some(0),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -457,7 +460,7 @@ fn test_state_pool_export_corpus_creates_dir() {
         Some(0),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let base = tempfile::tempdir().unwrap();
@@ -483,7 +486,7 @@ fn test_state_pool_export_corpus_deterministic() {
         Some(0),
         vec![],
         None,
-        0, true,
+        0, 0, true, None,
     );
 
     let dir1 = tempfile::tempdir().unwrap();
@@ -654,18 +657,19 @@ fn test_state_pool_coverage_novel_weight_boost() {
     pool.try_add(
         1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0xAA]), "".to_string(), None, vec![], None,
-        0, true,
+        0, 0, true, None,
     );
-    // State 1: novelty_bits = 10 (gives rarity weight, decays with picks)
+    // State 1: novelty_bits = 50 (gives rarity weight via coverage floor + novelty power)
+    // With bifurcated formula: coverage_floor=10 * 2^(effective_bits/2) >> non-coverage path.
     pool.try_add(
         2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
         make_action_bytes(1, &[0xBB]), "".to_string(), None, vec![], None,
-        10, true,
+        50, 50, true, None
     );
 
     // Pick many times and count how often each is picked.
-    // State 1 (with novelty_bits) should be picked more often overall,
-    // though the bonus decays as pick_count grows.
+    // State 1 (with novelty_bits) should be picked more often overall
+    // due to early advantage, though the bonus decays as pick_count grows.
     let mut counts = [0u32; 2];
     for i in 0..10_000u64 {
         // Use spread-out rng values
@@ -686,18 +690,22 @@ fn test_state_pool_coverage_novel_weight_boost() {
 }
 
 #[test]
-fn test_state_pool_violation_penalty_reduces_picks() {
+fn test_state_pool_violation_count_tracked() {
+    // violation_count is tracked for diagnostics but no longer affects weight.
+    // Violated states are removed from active set via mark_crashed() instead.
     let mut pool = StatePool::new(100, 20);
 
     add_test_state(&mut pool, 1, 0, None, "", None); // idx 0
     add_test_state(&mut pool, 2, 1, None, "", None); // idx 1
 
-    // Give state 0 a ton of violations
+    // Record violations — should increment counter
     for _ in 0..50 {
         pool.record_violation(0);
     }
+    assert_eq!(pool.get(0).unwrap().violation_count, 50);
+    assert_eq!(pool.get(1).unwrap().violation_count, 0);
 
-    // Pick many times — state 0 should be heavily penalized
+    // Both states should still be picked roughly equally (violations don't affect weight)
     let mut counts = [0u32; 2];
     for i in 0..10_000u64 {
         let rv = i.wrapping_mul(6364136223846793005);
@@ -705,11 +713,10 @@ fn test_state_pool_violation_penalty_reduces_picks() {
             counts[idx] += 1;
         }
     }
-
-    // State 0 has penalty 1/(50+1) ≈ 0.02x weight. State 1 should dominate.
+    // Neither state should dominate (both have same picks/novelty/depth)
     assert!(
-        counts[1] > counts[0] * 5,
-        "violated state should be rarely picked: counts={:?}",
+        counts[0] > 2000 && counts[1] > 2000,
+        "both states should get picked: counts={:?}",
         counts,
     );
 }
@@ -722,7 +729,7 @@ fn test_state_pool_try_add_parent_idx_out_of_bounds() {
     // but the parent credit silently fails (get_mut returns None)
     let added = pool.try_add(
         1, SvmSnapshot::empty(make_test_clock(0)), 1, Some(99),
-        make_action_bytes(1, &[0xAA]), "test".to_string(), Some(0), vec![], None, 0, true,
+        make_action_bytes(1, &[0xAA]), "test".to_string(), Some(0), vec![], None, 0, 0, true, None,
     );
     assert!(added);
     assert_eq!(pool.len(), 1);
@@ -749,7 +756,7 @@ fn test_state_pool_fixture_state_round_trip() {
         1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0xFF]), "".to_string(), Some(0), vec![],
         Some(fixture),
-        0, true,
+        0, 0, true, None,
     );
 
     // Retrieve via get() and downcast
@@ -780,11 +787,11 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
 
     pool.try_add(
         1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
-        bytes.clone(), "a".to_string(), Some(0), vec![], None, 0, true,
+        bytes.clone(), "a".to_string(), Some(0), vec![], None, 0, 0, true, None,
     );
     pool.try_add(
         2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
-        bytes.clone(), "b".to_string(), Some(1), vec![], None, 0, true,
+        bytes.clone(), "b".to_string(), Some(1), vec![], None, 0, 0, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -815,9 +822,9 @@ fn test_pool_capacity_enforced() {
     assert_eq!(pool.len(), 3);
     assert!(pool.is_full());
 
-    // 4th entry rejected
-    assert!(!add_pool_entry(&mut pool, 4, make_pool_snapshot(vec![(pk, 40)]), 3, Some(2)));
-    assert_eq!(pool.len(), 3);
+    // 4th entry evicts weakest and succeeds
+    assert!(add_pool_entry(&mut pool, 4, make_pool_snapshot(vec![(pk, 40)]), 3, Some(2)));
+    assert_eq!(pool.active_count(), 3); // one evicted, one added
 }
 
 #[test]
@@ -838,19 +845,19 @@ fn test_pool_max_depth_enforced() {
 
 #[test]
 fn test_pool_fingerprint_dedup_truncation() {
-    // FINGERPRINT_BITS=16, so only bottom 16 bits matter for dedup.
-    // Two fingerprints with same bottom 16 bits should collide.
+    // FINGERPRINT_BITS=17, so only bottom 17 bits matter for dedup.
+    // Two fingerprints with same bottom 17 bits should collide.
     let mut pool = StatePool::new(100, 20);
     let pk = Pubkey::new_unique();
 
     let fp1 = 0xAAAA_0000_0000_1234u64;
-    let fp2 = 0xBBBB_0000_0000_1234u64; // same bottom 16 bits
+    let fp2 = 0xBBBB_0000_0000_1234u64; // same bottom 17 bits
 
     assert!(add_pool_entry(&mut pool, fp1, make_pool_snapshot(vec![(pk, 10)]), 0, None));
     assert!(!add_pool_entry(&mut pool, fp2, make_pool_snapshot(vec![(pk, 20)]), 0, None));
     assert_eq!(pool.len(), 1);
 
-    // Different bottom 16 bits → accepted
+    // Different bottom 17 bits → accepted
     let fp3 = 0xAAAA_0000_0000_5678u64;
     assert!(add_pool_entry(&mut pool, fp3, make_pool_snapshot(vec![(pk, 30)]), 0, None));
     assert_eq!(pool.len(), 2);
@@ -923,54 +930,68 @@ fn test_pool_weighted_favors_unexplored() {
     add_pool_entry(&mut pool, 2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0));
 
     // Pick state 0 many times to increase its pick_count
-    for _ in 0..100 {
-        pool.states[0].pick_count.fetch_add(1, Ordering::Relaxed);
-    }
-    // State 1 has pick_count=0 → much higher explore weight
+    pool.states[0].pick_count.store(100, Ordering::Relaxed);
+    pool.total_picks.store(100, Ordering::Relaxed);
+    // State 1 has pick_count=0 → gets 1e6 never-picked priority
 
-    // Sample many times — spread rand values across full u64 range
+    // Use batch to compute weights once
+    let rng_vals: Vec<u64> = (0..10000u64)
+        .map(|i| (i as u128 * u64::MAX as u128 / 10000) as u64)
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
+
     let mut counts = [0u32; 2];
-    for i in 0..10000u64 {
-        // Spread uniformly across [0, u64::MAX]
-        let rv = (i as u128 * u64::MAX as u128 / 10000) as u64;
-        let idx = pool.pick_weighted(rv).unwrap();
-        counts[idx] += 1;
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
     }
 
-    // State 1 (underexplored) should be picked significantly more
+    // State 1 (never-picked, weight=1e6) should dominate overwhelmingly
     assert!(
-        counts[1] > counts[0] * 2,
-        "unexplored state should be picked >2x more: state0={}, state1={}",
+        counts[1] > counts[0] * 100,
+        "unexplored state should be picked overwhelmingly more: state0={}, state1={}",
         counts[0], counts[1]
     );
 }
 
 #[test]
-fn test_pool_weighted_violation_penalty() {
+fn test_pool_weighted_novelty_differentiates() {
+    // Verify that states with higher novelty_bits get picked more often.
+    // Without pick_decay, 0-novelty states are uniform — novelty is the
+    // dominant differentiation signal.
     let mut pool = StatePool::new(10, 20);
     let pk = Pubkey::new_unique();
 
+    // State 0: no novelty (novelty_bits=0)
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
-    add_pool_entry(&mut pool, 2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0));
+    // State 1: high novelty (novelty_bits=40)
+    pool.try_add(
+        2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
+        vec![0u8; 8], "novel".into(), Some(0), vec![], None,
+        40, 40, true, None
+    );
 
-    // Give state 0 many violations
-    for _ in 0..20 {
-        pool.record_violation(0);
-    }
-    // violation_penalty for state0 = 1/(20+1) = 0.048
-    // violation_penalty for state1 = 1/(0+1) = 1.0
+    // Both picked a few times (past never-picked threshold)
+    pool.states[0].pick_count.store(10, Ordering::Relaxed);
+    pool.states[1].pick_count.store(10, Ordering::Relaxed);
+    pool.total_picks.store(20, Ordering::Relaxed);
+
+    let rng_vals: Vec<u64> = (0..10000u64)
+        .map(|i| (i as u128 * u64::MAX as u128 / 10000) as u64)
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for i in 0..10000u64 {
-        let rv = (i as u128 * u64::MAX as u128 / 10000) as u64;
-        let idx = pool.pick_weighted(rv).unwrap();
-        counts[idx] += 1;
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
     }
 
-    // State 1 should be picked overwhelmingly
+    // State 1 (novelty_bits=40) should heavily dominate state 0 (novelty_bits=0).
+    // Coverage path: floor=10 * 2^(effective/2) vs non-coverage fast-decay path.
     assert!(
-        counts[1] > counts[0] * 5,
-        "non-violated state should dominate: state0={}, state1={}",
+        counts[1] > counts[0] * 10,
+        "high-novelty state should dominate: state0={}, state1={}",
         counts[0], counts[1]
     );
 }
@@ -980,23 +1001,33 @@ fn test_pool_weighted_coverage_bonus() {
     let mut pool = StatePool::new(10, 20);
     let pk = Pubkey::new_unique();
 
-    // State 0: not coverage-novel
+    // State 0: not coverage-novel (novelty_bits=0)
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
-    // State 1: novelty_bits=10 (gives rarity weight, decays with picks)
+    // State 1: novelty_bits=50 (gives novelty weight boost)
     pool.try_add(
         2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
         vec![0u8; 8], "coverage_novel".into(), Some(0), vec![], None,
-        10, true,
+        50, 50, true, None
     );
 
+    // Give both states some picks so they're past never-picked threshold
+    pool.states[0].pick_count.store(5, Ordering::Relaxed);
+    pool.states[1].pick_count.store(5, Ordering::Relaxed);
+    pool.total_picks.store(10, Ordering::Relaxed);
+
+    // Use batch to compute weights once
+    let rng_vals: Vec<u64> = (0..10000u64)
+        .map(|i| (i as u128 * u64::MAX as u128 / 10000) as u64)
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
+
     let mut counts = [0u32; 2];
-    for i in 0..10000u64 {
-        let rv = (i as u128 * u64::MAX as u128 / 10000) as u64;
-        let idx = pool.pick_weighted(rv).unwrap();
-        counts[idx] += 1;
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
     }
 
-    // Coverage-novel state should be picked more overall (bonus decays with picks)
+    // Coverage-novel state should be picked more (higher novelty factor)
     assert!(
         counts[1] > counts[0],
         "coverage-novel state should be picked more: state0={}, state1={}",
@@ -1007,43 +1038,89 @@ fn test_pool_weighted_coverage_bonus() {
 #[test]
 fn test_pool_weighted_novelty_bits_rarity() {
     // Verify that novelty_bits affects the weight formula correctly.
-    // Weight = rarity * explore * violation_penalty
-    // rarity = novelty_bits² + 1
+    // Formula: coverage_floor(10) * 2^(effective_bits/2) * rarity vs fast-decay non-coverage.
+    // Both states start with pick_count=0 → get 1e6 priority, so we
+    // need to give them picks to test the novelty component.
     let mut pool = StatePool::new(10, 20);
     let pk = Pubkey::new_unique();
 
-    // State 0: 5 novelty_bits → rarity = 26
+    // State 0: 100 novelty_bits, picks=10 → coverage path with floor=10, novelty_power >> 1
     pool.try_add(
         1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
-        vec![0u8; 8], "state0".into(), Some(0), vec![], None, 5, true,
+        vec![0u8; 8], "state0".into(), Some(0), vec![], None, 100, 0, true, None,
     );
 
-    // State 1: 0 novelty_bits → rarity = 1
+    // State 1: 0 novelty_bits → non-coverage path with fast decay
     pool.try_add(
         2, make_pool_snapshot(vec![(pk, 20)]), 0, None,
-        vec![0u8; 8], "state1".into(), Some(1), vec![], None, 0, true,
+        vec![0u8; 8], "state1".into(), Some(1), vec![], None, 0, 0, true, None,
     );
 
-    // Compute weights (same formula as pick_weighted):
-    // Both states: pick_count=0 → explore=1.0, violation_count=0 → penalty=1.0
-    // rarity differs:
-    //   state 0: rarity = 5*5 + 1 = 26
-    //   state 1: rarity = 0*0 + 1 = 1
-    let weight0 = 26.0f64;
-    let weight1 = 1.0f64;
-    let total = weight0 + weight1;
-    let ratio = weight0 / total;
+    // Give both states equal picks so we isolate the novelty factor.
+    // Use pick_weighted_batch which computes weights once (pick_weighted
+    // mutates pick_count on each call, diluting the signal over 10K samples).
+    pool.states[0].pick_count.store(10, Ordering::Relaxed);
+    pool.states[1].pick_count.store(10, Ordering::Relaxed);
+    pool.total_picks.store(20, Ordering::Relaxed);
 
-    // State 0 should get ~96% of picks initially
-    assert!(ratio > 0.9, "state 0 should have >90% weight: {:.3}", ratio);
+    let rng_vals: Vec<u64> = (0..10000u64)
+        .map(|i| (i as u128 * u64::MAX as u128 / 10000) as u64)
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
 
-    // Verify with a single pick: very low rand_val should pick state 0 (higher cumulative weight first)
-    let idx = pool.pick_weighted(0).unwrap();
-    assert_eq!(idx, 0, "first pick should be state 0 (higher weight)");
+    let mut counts = [0u32; 2];
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
+    }
 
-    // Very high rand_val should pick state 1
-    let idx = pool.pick_weighted(u64::MAX - 1).unwrap();
-    assert_eq!(idx, 1, "high rand_val should pick state 1");
+    // State 0 (coverage path: floor=10 * novelty_power) should be picked much more than state 1 (non-coverage, fast decay)
+    assert!(
+        counts[0] > counts[1] * 2,
+        "high-novelty state should be picked >2x more: state0={}, state1={}",
+        counts[0], counts[1]
+    );
+}
+
+#[test]
+fn test_pool_weighted_zero_vs_high_novelty_ratio() {
+    // Verify the weight ratio between zero-novelty and high-novelty states.
+    let mut pool = StatePool::new(10, 20);
+    let pk = Pubkey::new_unique();
+
+    // State 0: 0 novelty_bits → novelty = 1.0
+    pool.try_add(
+        1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
+        vec![0u8; 8], "zero_novelty".into(), Some(0), vec![], None, 0, 0, true, None,
+    );
+    // State 1: 50 novelty_bits, picks=5 → coverage path with floor=10 * novelty_power
+    pool.try_add(
+        2, make_pool_snapshot(vec![(pk, 20)]), 0, None,
+        vec![0u8; 8], "high_novelty".into(), Some(1), vec![], None, 50, 50, true, None,
+    );
+
+    // Give equal picks, use batch to avoid mutation
+    pool.states[0].pick_count.store(5, Ordering::Relaxed);
+    pool.states[1].pick_count.store(5, Ordering::Relaxed);
+    pool.total_picks.store(10, Ordering::Relaxed);
+
+    let rng_vals: Vec<u64> = (0..10000u64)
+        .map(|i| (i as u128 * u64::MAX as u128 / 10000) as u64)
+        .collect();
+    let mut batch = Vec::new();
+    pool.pick_weighted_batch(&rng_vals, &mut batch);
+
+    let mut counts = [0u32; 2];
+    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+        counts[state_idx] += 1;
+    }
+
+    // High-novelty state should dominate
+    assert!(
+        counts[1] > counts[0] * 2,
+        "high-novelty (50 bits) should be picked >2x more than zero: zero={}, high={}",
+        counts[0], counts[1]
+    );
 }
 
 // ---- pick_weighted_batch correctness ----
@@ -1187,13 +1264,13 @@ fn test_pool_export_corpus_skips_shallow() {
     pool.try_add(
         1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
         vec![0, 0, 0, 0], // 4-byte header with count=0
-        "".into(), None, vec![], None, 0, true,
+        "".into(), None, vec![], None, 0, 0, true, None,
     );
     // State with real action bytes
     pool.try_add(
         2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
         vec![1, 0, 0, 0, 0xAA, 0xBB],
-        "action".into(), Some(0), vec![], None, 0, true,
+        "action".into(), Some(0), vec![], None, 0, 0, true, None,
     );
 
     let dir = "/tmp/test_pool_export_corpus";
@@ -2025,4 +2102,386 @@ fn test_two_workers_same_state_different_execution() {
 
     // Worker B: pk_extra was never in divergent_b, never existed in svm_b
     assert!(svm_b.get_account(&pk_extra).is_none());
+}
+
+// =========================================================================
+// StatePool::is_novel — lightweight admission check
+// =========================================================================
+
+#[test]
+fn test_is_novel_empty_pool() {
+    let pool = StatePool::new(100, 20);
+    // Any fingerprint is novel in an empty pool
+    assert!(pool.is_novel(42));
+    assert!(pool.is_novel(0));
+    assert!(pool.is_novel(u64::MAX));
+}
+
+#[test]
+fn test_is_novel_after_add() {
+    let mut pool = StatePool::new(100, 20);
+    let fp = 12345u64;
+    add_test_state(&mut pool, fp, 0, None, "test", None);
+
+    // Same fingerprint (truncated to 17 bits) should no longer be novel
+    assert!(!pool.is_novel(fp));
+
+    // Different fingerprint should still be novel
+    assert!(pool.is_novel(fp + 1));
+}
+
+#[test]
+fn test_is_novel_fingerprint_truncation() {
+    let mut pool = StatePool::new(100, 20);
+    // Add a state with fingerprint that has specific lower 17 bits
+    let fp = 0xABCD_1234u64;
+    add_test_state(&mut pool, fp, 0, None, "test", None);
+
+    // Different upper bits but same lower 17 bits → not novel
+    let same_lower = (fp & ((1u64 << 17) - 1)) | (0xFFFF_0000u64 << 17);
+    assert!(!pool.is_novel(same_lower));
+
+    // Different lower 17 bits → novel
+    let diff_lower = fp ^ 1;
+    assert!(pool.is_novel(diff_lower));
+}
+
+#[test]
+fn test_is_novel_full_pool() {
+    let mut pool = StatePool::new(2, 20);
+    add_test_state(&mut pool, 1, 0, None, "a", None);
+    add_test_state(&mut pool, 2, 0, None, "b", None);
+
+    // Pool is full but has active states that can be evicted — novel fingerprints are still accepted
+    assert!(pool.is_novel(999));
+    // Duplicate fingerprint is still not novel
+    assert!(!pool.is_novel(1));
+}
+
+// =========================================================================
+// StatePool — Edge rarity scoring
+// =========================================================================
+
+#[test]
+fn test_pool_edge_rarity_scoring() {
+    use super::super::extract_coverage_positions;
+
+    let mut pool = StatePool::new(100, 20);
+
+    // State 0: positions [0,1,2] — all brand new (freq=0), max rarity
+    pool.try_add(
+        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        make_action_bytes(1, &[0x01]), "rare".to_string(), Some(0), vec![], None,
+        5, 5, true, Some(vec![0, 1, 2]),
+    );
+    let s0_rarity = pool.get(0).unwrap().rarity_score;
+    // All edges at freq=0 → score = mean(1/(0+1)) = 1.0
+    assert!((s0_rarity - 1.0).abs() < 0.001, "s0 rarity should be ~1.0, got {}", s0_rarity);
+    assert!(pool.get(0).unwrap().edge_positions.is_some());
+
+    // State 1: positions [0,1,2,3,4] — shares 0,1,2 (now freq=1) + new 3,4 (freq=0)
+    pool.try_add(
+        2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
+        make_action_bytes(1, &[0x02]), "mixed".to_string(), Some(1), vec![], None,
+        5, 5, true, Some(vec![0, 1, 2, 3, 4]),
+    );
+    let s1_rarity = pool.get(1).unwrap().rarity_score;
+    // Shared edges: 1/(1+1)=0.5 each (3 of them), new edges: 1/(0+1)=1.0 each (2 of them)
+    // Mean = (0.5*3 + 1.0*2)/5 = 3.5/5 = 0.7
+    assert!((s1_rarity - 0.7).abs() < 0.001, "s1 rarity should be ~0.7, got {}", s1_rarity);
+
+    // State 0 has higher rarity (added when edges were brand new)
+    assert!(s0_rarity > s1_rarity, "s0 ({}) should have higher rarity than s1 ({})", s0_rarity, s1_rarity);
+
+    // Non-coverage state (novelty_bits=0): rarity should be 0.0 even with positions
+    pool.try_add(
+        3, SvmSnapshot::empty(make_test_clock(2)), 0, None,
+        make_action_bytes(1, &[0x03]), "nocov".to_string(), Some(2), vec![], None,
+        0, 0, true, Some(vec![10, 11, 12]),
+    );
+    assert_eq!(pool.get(2).unwrap().rarity_score, 0.0);
+    assert!(pool.get(2).unwrap().edge_positions.is_none());
+
+    // No positions provided: rarity should be 0.0
+    pool.try_add(
+        4, SvmSnapshot::empty(make_test_clock(3)), 0, None,
+        make_action_bytes(1, &[0x04]), "nopos".to_string(), Some(3), vec![], None,
+        5, 5, true, None
+    );
+    assert_eq!(pool.get(3).unwrap().rarity_score, 0.0);
+    assert!(pool.get(3).unwrap().edge_positions.is_none());
+}
+
+#[test]
+fn test_pool_edge_freq_decrement_on_eviction() {
+    let mut pool = StatePool::new(2, 20);
+
+    // Add state 0 with positions [0,1]
+    pool.try_add(
+        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
+        5, 5, true, Some(vec![0, 1]),
+    );
+    // Add state 1 with positions [0,2]
+    pool.try_add(
+        2, SvmSnapshot::empty(make_test_clock(1)), 0, None,
+        make_action_bytes(1, &[0x02]), "s1".to_string(), Some(1), vec![], None,
+        5, 5, true, Some(vec![0, 2]),
+    );
+
+    // Pool is full. edge_freq[0]=2, edge_freq[1]=1, edge_freq[2]=1
+    assert_eq!(pool.edge_freq[0], 2);
+    assert_eq!(pool.edge_freq[1], 1);
+    assert_eq!(pool.edge_freq[2], 1);
+
+    // Adding state 2 will evict the weakest → should decrement evicted state's freq
+    pool.try_add(
+        3, SvmSnapshot::empty(make_test_clock(2)), 0, None,
+        make_action_bytes(1, &[0x03]), "s2".to_string(), Some(2), vec![], None,
+        5, 5, true, Some(vec![3]),
+    );
+
+    // After eviction, one of states 0 or 1 was evicted.
+    // The new state's position [3] should have freq=1.
+    assert_eq!(pool.edge_freq[3], 1);
+}
+
+#[test]
+fn test_pool_edge_freq_decrement_on_crash() {
+    let mut pool = StatePool::new(100, 20);
+
+    pool.try_add(
+        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
+        5, 5, true, Some(vec![10, 20, 30]),
+    );
+    assert_eq!(pool.edge_freq[10], 1);
+    assert_eq!(pool.edge_freq[20], 1);
+    assert_eq!(pool.edge_freq[30], 1);
+
+    pool.mark_crashed(0);
+
+    assert_eq!(pool.edge_freq[10], 0);
+    assert_eq!(pool.edge_freq[20], 0);
+    assert_eq!(pool.edge_freq[30], 0);
+}
+
+#[test]
+fn test_extract_coverage_positions() {
+    use super::super::extract_coverage_positions;
+
+    // Empty map
+    assert!(extract_coverage_positions(&[0u8; 16]).is_empty());
+
+    // Single byte set
+    let mut map = vec![0u8; 32];
+    map[5] = 1;
+    map[17] = 42;
+    let pos = extract_coverage_positions(&map);
+    assert_eq!(pos, vec![5, 17]);
+
+    // All non-zero in one u64 chunk
+    let mut map = vec![0u8; 16];
+    for i in 0..8 { map[i] = (i + 1) as u8; }
+    let pos = extract_coverage_positions(&map);
+    assert_eq!(pos, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+    // Map not aligned to 8 bytes
+    let mut map = vec![0u8; 13];
+    map[12] = 1; // trailing byte
+    let pos = extract_coverage_positions(&map);
+    assert_eq!(pos, vec![12]);
+}
+
+// =========================================================================
+// StateRegistry — accounting and SCFuzz formula
+// =========================================================================
+
+use crate::snapshot::state_pool::{StateRegistry, FuzzPhase, state_class_from_fingerprint};
+
+#[test]
+fn test_state_registry_accounting() {
+    let mut pool = StatePool::new(1000, 20);
+
+    // Add initial state (no parent)
+    let fp_initial = 0x0001_0000_0000_0001u64; // state_class = 0x0001
+    pool.try_add(fp_initial, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        vec![0u8; 8], "initial".into(), None, vec![], None, 0, 0, true, None);
+
+    // state_class 0x0001 should have trigger_count=1
+    let sc_initial = state_class_from_fingerprint(fp_initial);
+    assert_eq!(sc_initial, 0x0001);
+    let stats = pool.registry.get(sc_initial).unwrap();
+    assert_eq!(stats.trigger_count, 1);
+    assert_eq!(stats.depth, 0);
+
+    // Add child with coverage (novelty_bits > 0), different state_class
+    let fp_child = 0x0002_0000_0000_0002u64; // state_class = 0x0002
+    pool.try_add(fp_child, SvmSnapshot::empty(make_test_clock(1)), 1, Some(0),
+        vec![0u8; 8], "action_deposit".into(), Some(0), vec![], None, 5, 0, true, None);
+
+    // Child state_class 0x0002 should have trigger_count=1
+    let sc_child = state_class_from_fingerprint(fp_child);
+    let stats_child = pool.registry.get(sc_child).unwrap();
+    assert_eq!(stats_child.trigger_count, 1);
+    assert_eq!(stats_child.depth, 1);
+
+    // Parent (0x0001) should have paths_discovered=1 (child had novelty_bits>0)
+    // and out_transitions=1 (child is different state_class)
+    let stats_parent = pool.registry.get(sc_initial).unwrap();
+    assert_eq!(stats_parent.paths_discovered, 1);
+    assert_eq!(stats_parent.out_transitions, 1);
+    assert!(stats_parent.last_new_find > 0 || pool.current_iteration == 0); // iteration 0 is valid
+
+    // Add another child from same parent, same state_class as parent
+    let fp_same = 0x0001_0000_0000_0003u64; // state_class = 0x0001 (same as parent)
+    pool.try_add(fp_same, SvmSnapshot::empty(make_test_clock(2)), 1, Some(0),
+        vec![0u8; 8], "action_withdraw".into(), Some(1), vec![], None, 0, 0, true, None);
+
+    // Parent's trigger_count should now be 2 (initial + this child share state_class)
+    let stats_parent = pool.registry.get(sc_initial).unwrap();
+    assert_eq!(stats_parent.trigger_count, 2);
+    // out_transitions should still be 1 (same state_class, not counted)
+    assert_eq!(stats_parent.out_transitions, 1);
+    // paths_discovered should still be 1 (child had novelty_bits=0)
+    assert_eq!(stats_parent.paths_discovered, 1);
+
+    // record_select
+    pool.registry.record_select(sc_initial);
+    pool.registry.record_select(sc_initial);
+    let stats_parent = pool.registry.get(sc_initial).unwrap();
+    assert_eq!(stats_parent.select_count, 2);
+}
+
+#[test]
+fn test_state_seed_weight_formula() {
+    let mut registry = StateRegistry::new();
+
+    // State A: productive (many paths, out_transitions), low trigger
+    registry.record_trigger(0x0001, 2);
+    registry.record_path_discovered(0x0001);
+    registry.record_path_discovered(0x0001);
+    registry.record_path_discovered(0x0001);
+    registry.record_out_transition(0x0001);
+    registry.record_out_transition(0x0001);
+
+    // State B: saturated (many triggers, few paths)
+    for _ in 0..20 {
+        registry.record_trigger(0x0002, 5);
+    }
+    for _ in 0..50 {
+        registry.record_select(0x0002);
+    }
+
+    let w_a = registry.state_seed_weight(0x0001, 10.0, true);
+    let w_b = registry.state_seed_weight(0x0002, 10.0, true);
+
+    // Productive state A should have higher weight than saturated state B
+    assert!(w_a > w_b, "productive state A ({}) should be weighted higher than saturated B ({})", w_a, w_b);
+
+    // Unknown state should get fallback formula
+    let w_unknown = registry.state_seed_weight(0xFFFF, 10.0, true);
+    assert!(w_unknown > 0.0);
+
+    // Success boost should double the weight
+    let w_success = registry.state_seed_weight(0x0001, 10.0, true);
+    let w_fail = registry.state_seed_weight(0x0001, 10.0, false);
+    assert!((w_success - w_fail * 2.0).abs() < 0.001,
+        "success boost should be 2x: success={}, fail={}", w_success, w_fail);
+}
+
+#[test]
+fn test_phase_transition() {
+    let mut pool = StatePool::new(200, 20);
+
+    // Start in Coverage phase
+    assert_eq!(pool.phase, FuzzPhase::Coverage);
+
+    // Add 101 states with >50 unique state classes
+    for i in 0..101u64 {
+        let sc = (i % 60) as u16; // 60 unique state classes
+        let fp = (sc as u64) << 48 | (i + 1);
+        pool.try_add(fp, SvmSnapshot::empty(make_test_clock(i)), 0, None,
+            vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
+    }
+
+    // Phase should still be Coverage until maybe_advance_phase is called
+    assert_eq!(pool.phase, FuzzPhase::Coverage);
+
+    pool.maybe_advance_phase();
+    assert_eq!(pool.phase, FuzzPhase::Blended);
+
+    // Calling again should be idempotent
+    pool.maybe_advance_phase();
+    assert_eq!(pool.phase, FuzzPhase::Blended);
+}
+
+#[test]
+fn test_state_seed_weight_fallback_in_coverage_phase() {
+    // In Coverage phase, non-coverage states use original fast-decay formula
+    let mut pool = StatePool::new(100, 20);
+    assert_eq!(pool.phase, FuzzPhase::Coverage);
+
+    // Add two non-coverage states (novelty_bits=0)
+    let fp1 = 0x0001_0000_0000_0001u64;
+    let fp2 = 0x0002_0000_0000_0002u64;
+    pool.try_add(fp1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        vec![0u8; 8], "a".into(), None, vec![], None, 0, 0, true, None);
+    pool.try_add(fp2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
+        vec![0u8; 8], "b".into(), None, vec![], None, 0, 0, true, None);
+
+    // Pick state 0 many times
+    pool.states[0].pick_count.store(100, Ordering::Relaxed);
+    pool.total_picks.store(100, Ordering::Relaxed);
+
+    // State 1 (picks=0) should have max priority (1e6)
+    let w0 = pool.compute_weight(&pool.states[0], 100.0, 20);
+    let w1 = pool.compute_weight(&pool.states[1], 100.0, 20);
+    assert_eq!(w1, 1e6, "never-picked state should get max priority");
+    assert!(w0 < w1, "heavily-picked state should have lower weight");
+
+    // Coverage-phase formula: explore_decay * success * depth
+    // picks=100: 1/(1+100/50) = 1/3, success=2.0, depth_factor=1.0
+    let expected = (1.0 / (1.0 + 100.0 / 50.0)) * 2.0 * 1.0; // ~0.667
+    assert!((w0 - expected).abs() < 0.01,
+        "Coverage phase should use original formula: got {}, expected {}", w0, expected);
+}
+
+#[test]
+fn test_blended_phase_uses_scfuzz_formula() {
+    let mut pool = StatePool::new(200, 20);
+
+    // Force into Blended phase by adding enough states
+    for i in 0..110u64 {
+        let sc = (i % 60) as u16;
+        let fp = (sc as u64) << 48 | (i + 1);
+        pool.try_add(fp, SvmSnapshot::empty(make_test_clock(i)), 0, None,
+            vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
+    }
+    pool.maybe_advance_phase();
+    assert_eq!(pool.phase, FuzzPhase::Blended);
+
+    // Add a productive parent state class (via registry manipulation)
+    let sc_good: u16 = 0x0001;
+    pool.registry.record_path_discovered(sc_good);
+    pool.registry.record_path_discovered(sc_good);
+    pool.registry.record_out_transition(sc_good);
+
+    // Compute weight for a non-coverage state in Blended phase
+    // Should use SCFuzz formula (state_seed_weight) * depth_factor, not fast-decay
+    let fp_test = (sc_good as u64) << 48 | 0xABCD;
+    pool.try_add(fp_test, SvmSnapshot::empty(make_test_clock(200)), 1, None,
+        vec![0u8; 8], "test".into(), None, vec![], None, 0, 0, true, None);
+
+    let test_idx = pool.states.len() - 1;
+    pool.states[test_idx].pick_count.store(10, Ordering::Relaxed);
+
+    let w = pool.compute_weight(&pool.states[test_idx], 100.0, 20);
+
+    // In Blended phase, weight should be from SCFuzz formula, not fast-decay
+    // Fast-decay for picks=10: 1/(1+10/50) * 2.0 * depth ≈ 1.667
+    let fast_decay_w = (1.0 / (1.0 + 10.0 / 50.0)) * 2.0 * (1.0 / (1.0 + 0.025));
+    // SCFuzz weight should differ from fast-decay
+    assert!(w != fast_decay_w, "Blended phase should use SCFuzz formula, not fast-decay");
+    assert!(w > 0.0, "SCFuzz weight should be positive");
 }
