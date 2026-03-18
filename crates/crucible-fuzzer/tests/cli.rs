@@ -5619,7 +5619,7 @@ fn test_did_not_reproduce_string() {
     let content = fs::read_to_string(
         project_root().join("crates/crucible-fuzz-macro/src/modes.rs")
     ).unwrap();
-    assert!(content.contains(r#"println!("did not reproduce")"#));
+    assert!(content.contains(r#"eprintln!("did not reproduce")"#));
 }
 
 #[test]
@@ -5721,7 +5721,7 @@ fn test_run_crashes_out_flag_exists() {
 }
 
 // =============================================================================
-// Fuzzcorp compatibility
+// Remote fuzzing compatibility
 // =============================================================================
 
 #[test]

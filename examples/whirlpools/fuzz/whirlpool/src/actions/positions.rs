@@ -656,11 +656,21 @@
         let success = match &result {
             Ok(TxOutcome::Success { .. }) => {
                 // Postcondition: verify tick array on-chain points to correct whirlpool
-                if let Ok(ta_state) = self.ctx.read_anchor_account::<whirlpool::state::TickArray>(&tick_array) {
-                    fuzz_assert_eq!(ta_state.whirlpool, self.pool.whirlpool,
-                        "init_tick_array: whirlpool mismatch {} != {}", ta_state.whirlpool, self.pool.whirlpool);
-                    fuzz_assert_eq!(ta_state.start_tick_index, start_tick_index,
-                        "init_tick_array: start_tick {} != expected {}", ta_state.start_tick_index, start_tick_index);
+                // TickArray is zero-copy, can't use read_anchor_account. Parse raw bytes.
+                // Layout: 8 (disc) + 4 (start_tick_index) + 88*113 (ticks) + 32 (whirlpool)
+                if let Ok(account) = self.ctx.read_account(&tick_array) {
+                    let data = &account.data;
+                    const WHIRLPOOL_OFFSET: usize = 8 + 4 + 88 * 113; // 9956
+                    if data.len() >= WHIRLPOOL_OFFSET + 32 {
+                        let stored_whirlpool = Pubkey::from(<[u8; 32]>::try_from(&data[WHIRLPOOL_OFFSET..WHIRLPOOL_OFFSET + 32]).unwrap());
+                        fuzz_assert_eq!(stored_whirlpool, self.pool.whirlpool,
+                            "init_tick_array: whirlpool mismatch {} != {}", stored_whirlpool, self.pool.whirlpool);
+                    }
+                    if data.len() >= 12 {
+                        let stored_start = i32::from_le_bytes(data[8..12].try_into().unwrap());
+                        fuzz_assert_eq!(stored_start, start_tick_index,
+                            "init_tick_array: start_tick {} != expected {}", stored_start, start_tick_index);
+                    }
                 }
                 self.pool.tick_arrays.push((start_tick_index, tick_array));
                 debug_print!("[INIT_TICK_ARRAY] SUCCESS: start_tick={}", start_tick_index);

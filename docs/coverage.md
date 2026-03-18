@@ -56,6 +56,13 @@ crucible run myproject invariant_test --release --coverage --timeout 60 \
   --symbols /path/to/target/sbpf-solana-solana/release/<program>.so
 ```
 
+To write the LCOV file to a custom path (e.g., for remote fuzzing integration), use `--lcov-out`:
+
+```bash
+crucible run myproject invariant_test --release --coverage --corpus-in ./corpus \
+  --lcov-out ./output/coverage.lcov
+```
+
 You should see output like:
 
 ```

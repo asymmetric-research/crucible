@@ -189,12 +189,15 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             });
         }
 
-        // CMIN mode: exact edge tracking via HashSet (immune to u8 wrapping)
-        // When enabled, process_trace() inserts AFL map indices into this set.
-        // Cmin reads from this instead of scanning the u8 map, avoiding the bug
-        // where edges hit exactly N*256 times wrap to 0 and become invisible.
+        // CMIN mode: exact edge tracking via HashSet.
+        // Tracks unique (pc, target_pc) pairs as u64 — the same metric as the
+        // normal fuzzing monitor's COVERAGE_STATE.edges. This is immune to both:
+        //  1. u8 wrapping in the AFL map (edges hit N*256 times become invisible)
+        //  2. AFL map index inflation from context-sensitivity (prev_location XOR
+        //     makes the same physical edge produce different map indices depending
+        //     on the preceding edge, inflating the count vs real unique edges)
         thread_local! {
-            pub static CMIN_EDGE_SET: std::cell::RefCell<Option<crucible_test_context::FastHashSet<usize>>> =
+            pub static CMIN_EDGE_SET: std::cell::RefCell<Option<crucible_test_context::FastHashSet<u64>>> =
                 const { std::cell::RefCell::new(None) };
         }
 
@@ -211,7 +214,7 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         }
 
         /// Take the cmin edge set (returns and disables).
-        pub fn cmin_edge_set_take() -> Option<crucible_test_context::FastHashSet<usize>> {
+        pub fn cmin_edge_set_take() -> Option<crucible_test_context::FastHashSet<u64>> {
             CMIN_EDGE_SET.with(|s| s.borrow_mut().take())
         }
 
@@ -470,10 +473,11 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         buf[edge] = buf[edge].wrapping_add(1);
                     }
 
-                    // CMIN mode: record exact edge index (immune to u8 wrapping)
+                    // CMIN mode: record exact (pc, target_pc) pair — same metric
+                    // as COVERAGE_STATE.edges used by the normal fuzzing monitor.
                     CMIN_EDGE_SET.with(|s| {
                         if let Some(ref mut set) = *s.borrow_mut() {
-                            set.insert(edge);
+                            set.insert(edge_id);
                         }
                     });
 

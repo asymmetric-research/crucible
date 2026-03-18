@@ -450,6 +450,13 @@ pub fn multicore_mode(
                             eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
                                 line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions, shared_total_ok, shared_total_actions, ok_pct, discovered_str, __memory_kib);
 
+                            // Remote-fuzzing-compliant pulse on stdout
+                            {
+                                let __fc_exec_sec = __parse_mc_val(&line, "exec/sec: ") as u64;
+                                println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
+                                    __fc_exec_sec, cached_corpus, cached_edges, __memory_kib);
+                            }
+
                             // Write CSV stats row if enabled
                             if let Some(ref csv) = __csv_ref_mc {
                                 let elapsed = {
@@ -746,10 +753,8 @@ pub fn multicore_mode(
 
                     if let Some(msg) = crucible_test_context::take_violation() {
                         println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
-                        if std::env::var("FUZZ_VERBOSE").is_ok() {
-                            eprintln!("[FUZZ_FINDING] {}", msg);
-                            crucible_test_context::print_action_sequence();
-                        }
+                        eprintln!("[FUZZ_FINDING] {}", msg);
+                        crucible_test_context::print_action_sequence();
                         let input_hash = hash_std(slice);
                         crucible_test_context::write_crash_metadata(&crash_dir_clone, input_hash, Some(seed), slice);
 

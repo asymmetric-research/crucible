@@ -32,6 +32,10 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--max-actions <N>` | Max actions per iteration (default: 10) |
 | `--taint` | Track per-action read/write account sets |
 | `--taint-diffs` | Track per-action byte-level account diffs (implies `--taint`) |
+| `--stateful` | ItyFuzz-style stateful fuzzing: single action per iteration with state pool |
+| `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
+| `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
+| `--lcov-out <PATH>` | Custom LCOV coverage output file path |
 
 **Examples:**
 
@@ -45,6 +49,9 @@ crucible run myproject invariant_test --release -j 4
 # Coverage report
 crucible run myproject invariant_test --release --coverage --timeout 120
 
+# Coverage with custom output path
+crucible run myproject invariant_test --release --coverage --lcov-out ./output/coverage.lcov
+
 # Dry-run validation
 crucible run myproject invariant_test --dry-run
 
@@ -53,6 +60,12 @@ crucible run myproject invariant_test --replay ./crashes/invariant_test/abc123
 
 # Reproducible fuzzing
 crucible run myproject invariant_test --release --seed 12345
+
+# Stateful mode (ItyFuzz-style)
+crucible run myproject invariant_test --release --stateful
+
+# Stateful with custom depth and multi-core
+crucible run myproject invariant_test --release --stateful --max-depth 20 -j 4
 ```
 
 **Environment variables:**
@@ -62,6 +75,7 @@ crucible run myproject invariant_test --release --seed 12345
 | `FUZZ_VERBOSE=1` | Enable verbose harness output |
 | `FUZZ_TAINT=1` | Track per-action read/write account sets |
 | `FUZZ_TAINT_DIFFS=1` | Track per-action byte-level account diffs (implies taint) |
+| `FUZZ_STATS_CSV=<path>` | Write per-second stats to CSV file for benchmarking |
 
 ## `crucible list`
 
@@ -78,12 +92,15 @@ crucible show <program> <crash_file>                       # View metadata
 crucible show <program> <crash_file> --replay              # Replay crash
 crucible show <program> --crashes-dir <DIR>                # List crashes from custom dir
 crucible show <program> <crash_file> --crashes-dir <DIR>   # View metadata from custom dir
+crucible show . <crash_file>                               # Auto-detect from current dir
 ```
+
+Use `"."` as the program name to auto-detect the fuzz harness when running from within the fuzz directory.
 
 | Flag | Description |
 |------|-------------|
 | `--replay` | Actually replay the crash by running the binary |
-| `--regen` | Regenerate crash metadata |
+| `--regen` | Regenerate crash metadata (requires `--replay`) |
 | `--crashes-dir <DIR>` | Custom crashes directory to read from (supports flat and nested layouts) |
 
 ## `crucible cmin`
@@ -93,7 +110,14 @@ Minimize corpus to smallest set preserving all coverage.
 ```bash
 crucible cmin <program> <test> <corpus_dir> --release
 crucible cmin <program> <test> <corpus_dir> --corpus-out ./corpus_min --release
+crucible cmin <program> <test> --corpus-in <DIR> --release
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--release` | Build in release mode |
+| `--corpus-in <DIR>` | Input corpus directory (alternative to positional arg) |
+| `--corpus-out <DIR>` | Output directory (default: overwrite input) |
 
 ## `crucible tmin`
 
@@ -129,6 +153,41 @@ crucible tmin myproject invariant_test --all --release
 4. **Coverage-Only** (`--coverage --corpus-in`) - Run corpus once for coverage report
 5. **Seeded Fuzzing** (`--corpus-in`) - Start from pre-existing corpus
 6. **Multi-Core** (`--cores N`) - Parallel fuzzer workers with shared coverage
-7. **Corpus Minimization** (`crucible cmin`) - Reduce corpus to minimal set preserving coverage
-8. **Crash Minimization** (`crucible tmin`) - Reduce crash to minimal reproducing action sequence
-9. **Taint Diffs** (`--taint-diffs`) - Track per-action byte-level account mutations
+7. **Stateful** (`--stateful`) - ItyFuzz-style single action per iteration with state pool
+8. **Corpus Minimization** (`crucible cmin`) - Reduce corpus to minimal set preserving coverage
+9. **Crash Minimization** (`crucible tmin`) - Reduce crash to minimal reproducing action sequence
+10. **Taint Diffs** (`--taint-diffs`) - Track per-action byte-level account mutations
+
+### Stateful Mode
+
+Stateful mode (`--stateful`) uses an ItyFuzz-style approach where each fuzzer iteration executes a **single action** on a state selected from a pool, rather than replaying an entire action sequence from scratch.
+
+- States form a tree: each state has a parent and a depth (action chain length)
+- New states are created by applying an action to an existing state
+- The state pool is bounded; states are evicted based on coverage novelty
+- `--max-depth <N>` controls maximum chain length (default: 15)
+- Works with both single-core and multi-core (`-j N`)
+- Crashes record the full action chain from root to violation
+
+```bash
+# Basic stateful fuzzing
+crucible run myproject invariant_test --release --stateful
+
+# With custom depth limit
+crucible run myproject invariant_test --release --stateful --max-depth 20
+
+# Multi-core stateful
+crucible run myproject invariant_test --release --stateful -j 4
+```
+
+---
+
+## Remote Fuzzing Integration
+
+For running Crucible as a managed engine on a remote fuzzing platform, see the dedicated **[Remote Fuzzing Integration Guide](remote-fuzzing.md)** covering:
+
+- All five operational modes (`dry_run`, `explore`, `reproduce`, `coverage`, `corpus_merge`)
+- Directory conventions (`./corpus`, `./input`, `./output`)
+- Structured output protocol (`[FUZZ_PULSE]`, `[FUZZ_FINDING]`, `[FUZZ_ERROR]`)
+- Bundle layout and manifest configuration
+- Exit code semantics per mode

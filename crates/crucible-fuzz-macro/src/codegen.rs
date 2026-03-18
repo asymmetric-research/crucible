@@ -184,6 +184,14 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                 eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
                     s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str, __memory_kib);
 
+                // Remote-fuzzing-compliant pulse on stdout
+                {
+                    let __fc_exec_sec = __parse_monitor_val(&s, "exec/sec: ") as u64;
+                    let __fc_corpus = __parse_monitor_val(&s, "corpus: ") as u64;
+                    println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
+                        __fc_exec_sec, __fc_corpus, true_edges, __memory_kib);
+                }
+
                 // Write CSV stats row if enabled
                 if let Some(ref csv) = __csv_ref {
                     let elapsed = #mod_name::FUZZER_START_TIME.get()

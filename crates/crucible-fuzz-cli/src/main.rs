@@ -85,12 +85,15 @@ enum Commands {
         /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
         #[arg(long)]
         symbols: Option<PathBuf>,
-        /// Fuzzcorp operational mode (dry_run, explore, coverage, reproduce)
+        /// Remote fuzzing operational mode (dry_run, explore, coverage, reproduce, corpus_merge)
         #[arg(long)]
         mode: Option<String>,
         /// LCOV coverage output path
         #[arg(long)]
         lcov_out: Option<PathBuf>,
+        /// Maximum memory in KiB (passed by remote driver, accepted but not enforced)
+        #[arg(long)]
+        max_memory_kib: Option<u64>,
     },
     /// List available fuzz tests
     List {
@@ -238,6 +241,7 @@ fn main() -> Result<()> {
             symbols,
             mode,
             lcov_out,
+            max_memory_kib: _,
         } => fuzz_run(
             &program_name,
             &test_name,
@@ -580,6 +584,16 @@ fn fuzz_run(
                     corpus_in = Some("./corpus".into());
                 }
             }
+            "corpus_merge" => {
+                // Remote fuzzing corpus_merge: read from ./corpus, write minimized corpus to ./output
+                // Delegates to the cmin (greedy set-cover) codepath via FUZZ_CMIN env var
+                if corpus_in.is_none() {
+                    corpus_in = Some("./corpus".into());
+                }
+                if corpus_out.is_none() {
+                    corpus_out = Some("./output".into());
+                }
+            }
             other => {
                 bail!("Unknown mode: {}", other);
             }
@@ -723,7 +737,11 @@ fn fuzz_run(
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());
     println!("[FUZZ] Max actions per iteration: {}", max_actions);
 
-    if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && replay.is_none() {
+    if mode.as_deref() == Some("corpus_merge") {
+        // corpus_merge uses the cmin (greedy set-cover) codepath to write minimized corpus
+        cmd.env("FUZZ_CMIN", "1");
+        println!("[FUZZ] Corpus merge mode: minimizing corpus to ./output");
+    } else if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && replay.is_none() {
         cmd.env("FUZZ_COVERAGE_ONLY", "1");
         println!("[FUZZ] Coverage-only mode: generating coverage from corpus");
     }
@@ -744,6 +762,12 @@ fn fuzz_run(
 
     let status = cmd.status().context("Failed to run cargo")?;
     if !status.success() {
+        // In reproduce mode, exit code 1 means crash reproduced (not a failure).
+        // The remote driver uses the "did not reproduce" string on stdout, not exit code.
+        if mode.as_deref() == Some("reproduce") {
+            // Pass through the exit code without treating it as an error
+            std::process::exit(status.code().unwrap_or(1));
+        }
         match status.code() {
             Some(code) => bail!("Fuzz command failed with exit code {}", code),
             None => bail!("Fuzz command killed by signal"),

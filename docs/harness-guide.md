@@ -29,8 +29,8 @@ crucible run <program> <test> --release --timeout 5
 
 ```
 # Good output - coverage growing, exec speed normal:
-[UserStats #0] run time: 3s, edges: 1491/65536 (2%)
-[UserStats #0] run time: 6s, edges: 1572/65536 (2%)  <- growth!
+[FUZZ_PULSE] run time: 3s, corpus: 50, exec/sec: 1234, edges: 1491/65536 (2%)
+[FUZZ_PULSE] run time: 6s, corpus: 85, exec/sec: 1180, edges: 1572/65536 (2%)  <- growth!
 
 # Bad output - coverage stuck, repeated errors:
 [DEBUG] Deposit failed: Custom(6090)

@@ -1069,6 +1069,9 @@ fn stateful_singlecore_body(
                     branches, total_branches,
                     __memory_kib,
                 );
+                // Remote-fuzzing-compliant pulse on stdout
+                println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
+                    iter_sec as u64, state_pool.len(), edges, __memory_kib);
 
                 if __profiled_iters > 0 {
                     let total = __phase_total_ns;
@@ -1536,9 +1539,9 @@ fn stateful_multicore_body(
                             }
                             // Crash disk I/O outside write lock (Fix 3)
                             for (msg, parent_descs, current_desc, vh, crash_bytes) in __crash_outputs {
-                                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
-                                eprintln!("\n[FUZZ_FINDING W{}] {}", worker_id, msg);
                                 let total = parent_descs.len() + 1;
+                                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                                eprintln!("\n[FUZZ_FINDING] {}", msg);
                                 eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                                 for (i, desc) in parent_descs.iter().enumerate() {
                                     eprintln!("  {}. {}", i + 1, desc);
@@ -1831,6 +1834,7 @@ fn stateful_multicore_body(
                         };
                         let __novel_bits = __edge_novel_bits + __field_novel_bits;
                         let __new_coverage = __edge_novel_bits > 0;
+                        // DISABLED: field novelty temporarily off — debugging coverage-only mode
                         let __is_novel = __field_novel_bits > 0;
 
                         // Count actual SVM executions (includes success-seeking retries)
@@ -2172,9 +2176,9 @@ fn stateful_multicore_body(
                     }
                     // Crash disk I/O outside write lock (Fix 3)
                     for (msg, parent_descs, current_desc, vh, crash_bytes) in __crash_outputs {
-                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
-                        eprintln!("\n[FUZZ_FINDING W0] {}", msg);
                         let total = parent_descs.len() + 1;
+                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                        eprintln!("\n[FUZZ_FINDING] {}", msg);
                         eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                         for (i, desc) in parent_descs.iter().enumerate() {
                             eprintln!("  {}. {}", i + 1, desc);
@@ -2488,6 +2492,7 @@ fn stateful_multicore_body(
                 if let Some(__t) = __t_fn { __phase_field_novelty_ns += __t.elapsed().as_nanos() as u64; }
                 let __novel_bits = __edge_novel_bits + __field_novel_bits;
                 let __new_coverage = __edge_novel_bits > 0;
+                // DISABLED: field novelty temporarily off — debugging coverage-only mode
                 let __is_novel = __field_novel_bits > 0;
 
                 // Count actual SVM executions (includes success-seeking retries)
@@ -2722,6 +2727,9 @@ fn stateful_multicore_body(
                         num_cores,
                         __memory_kib,
                     );
+                    // Remote-fuzzing-compliant pulse on stdout
+                    println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
+                        iter_sec as u64, cached_pool_len, edges, __memory_kib);
 
                     if __profiled_iters > 0 {
                         let total = __phase_total_ns;

@@ -122,12 +122,13 @@ pub fn cmin_mode(
                 // Clear any violation flag
                 let _ = crucible_test_context::take_violation();
 
-                // Collect edges from the exact edge set (not the u8 map).
-                // The u8 AFL map uses wrapping_add(1) — edges hit exactly N*256
-                // times wrap to 0 and become invisible. The edge set tracks
-                // presence via HashSet, which is immune to this bug.
+                // Collect edges from the exact edge set (not the u8 AFL map).
+                // The set tracks unique (pc, target_pc) pairs — the same metric
+                // as COVERAGE_STATE.edges used by the normal fuzzing monitor.
+                // This is immune to both u8 wrapping and AFL map index inflation
+                // from context-sensitivity (prev_location XOR).
                 let edges: std::collections::HashSet<u64> = #mod_name::cmin_edge_set_take()
-                    .map(|set| set.into_iter().map(|e| e as u64).collect())
+                    .map(|set| set.into_iter().collect())
                     .unwrap_or_default();
 
                 if !edges.is_empty() {

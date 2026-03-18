@@ -232,12 +232,13 @@ pub fn replay_mode(
             let violation_msg = crucible_test_context::take_violation();
 
             if let Some(msg) = violation_msg {
+                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                 crucible_test_context::print_action_sequence();
                 eprintln!("[INVARIANT] {}", msg);
                 std::process::exit(1);
             } else {
                 println!("[FUZZ_FINDING] reproduces:false summary:did not reproduce");
-                println!("did not reproduce");
+                eprintln!("did not reproduce");
                 crucible_test_context::print_action_sequence();
                 std::process::exit(0);
             }

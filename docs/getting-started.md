@@ -18,6 +18,8 @@ crucible run <project_name> <test_name> --release  # Optimized
 crucible run <project_name> <test_name> --timeout 60  # Stop after 60 seconds
 
 crucible run <project_name> <test_name> --release --coverage --timeout 120
+
+crucible run <project_name> <test_name> --release --stateful  # ItyFuzz-style stateful mode
 ```
 
 ### Feature flags
@@ -44,8 +46,10 @@ myproject/
 ├── programs/
 │   └── myproject/          # Your Solana program
 ├── fuzz/
-│   └── myproject-fuzz/
-│       ├── Cargo.toml      # Fuzzer dependencies + features
+│   └── myproject/
+│       ├── Cargo.toml      # Standalone workspace + features
+│       ├── idls/
+│       │   └── myproject.json  # Program IDL
 │       ├── src/
 │       │   └── main.rs     # Fixtures, actions, and tests
 │       └── crashes/        # Crash artifacts saved here

@@ -399,11 +399,15 @@
 
         let success = match &result {
             Ok(TxOutcome::Success { .. }) => {
-                // Postcondition: verify on-chain reward authority updated
+                // Postcondition: verify on-chain reward authority updated.
+                // update_reward_authority() always writes to reward_infos[0].extension
+                // (single shared authority, regardless of reward_index).
+                // Source: state/whirlpool.rs:210-216
                 if let Ok(pool_state) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
-                    fuzz_assert_eq!(pool_state.reward_infos[reward_index].authority, new_authority.pubkey(),
+                    let on_chain_auth = Pubkey::from(pool_state.reward_infos[0].extension);
+                    fuzz_assert_eq!(on_chain_auth, new_authority.pubkey(),
                         "set_reward_authority: on-chain authority {} != new {}",
-                        pool_state.reward_infos[reward_index].authority, new_authority.pubkey());
+                        on_chain_auth, new_authority.pubkey());
                 }
                 debug_print!("[SET_REWARD_AUTH] SUCCESS: reward_index={}", reward_index);
                 true
@@ -499,11 +503,13 @@
 
         let success = match &result {
             Ok(TxOutcome::Success { .. }) => {
-                // Postcondition: verify on-chain reward authority updated
+                // Postcondition: verify on-chain reward authority updated.
+                // Same as set_reward_authority: always writes to reward_infos[0].extension.
                 if let Ok(pool_state) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
-                    fuzz_assert_eq!(pool_state.reward_infos[reward_index].authority, new_authority.pubkey(),
+                    let on_chain_auth = Pubkey::from(pool_state.reward_infos[0].extension);
+                    fuzz_assert_eq!(on_chain_auth, new_authority.pubkey(),
                         "set_reward_auth_by_super: on-chain authority {} != new {}",
-                        pool_state.reward_infos[reward_index].authority, new_authority.pubkey());
+                        on_chain_auth, new_authority.pubkey());
                 }
                 debug_print!("[SET_RWD_AUTH_SUPER] SUCCESS: reward_index={}", reward_index);
                 true
