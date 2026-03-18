@@ -172,64 +172,64 @@ fn gen_inner_random_expr(
     constraint: Option<&RangeConstraint>,
 ) -> proc_macro2::TokenStream {
     match (inner_kind, constraint) {
-        // u64 — direct, no cast needed
+        // u64 — boundary-aware generation
         (FieldTypeKind::U64, Some(c)) => {
             let lo = c.start as u64;
             let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
-            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) }
+            quote! { crucible_fuzzer::gen_u64(rng, #lo, #hi) }
         }
-        (FieldTypeKind::U64, None) => quote! { rng.next() },
-        // u128 — dedicated function, full 128-bit range
+        (FieldTypeKind::U64, None) => quote! { crucible_fuzzer::gen_u64(rng, 0, u64::MAX) },
+        // u128 — boundary-aware generation
         (FieldTypeKind::U128, Some(c)) => {
             let lo = c.start;
             let hi = if c.inclusive { c.end + 1 } else { c.end };
-            quote! { crucible_fuzzer::gen_range_u128(rng, #lo, #hi) }
+            quote! { crucible_fuzzer::gen_u128(rng, #lo, #hi) }
         }
-        (FieldTypeKind::U128, None) => quote! { ((rng.next() as u128) << 64) | (rng.next() as u128) },
-        // u8/u16/u32 — generate as u64 then cast to target type
+        (FieldTypeKind::U128, None) => quote! { crucible_fuzzer::gen_u128(rng, 0, u128::MAX) },
+        // u8/u16/u32 — boundary-aware via gen_u64 then cast
         (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, Some(c)) => {
             let lo = c.start as u64;
             let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
             let ty = inner_ty.expect("small unsigned needs inner_ty");
-            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
+            quote! { crucible_fuzzer::gen_u64(rng, #lo, #hi) as #ty }
         }
         (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, None) => {
             let ty = inner_ty.expect("small unsigned needs inner_ty");
-            quote! { rng.next() as #ty }
+            quote! { crucible_fuzzer::gen_u64(rng, 0, (#ty::MAX as u64) + 1) as #ty }
         }
-        // i64 — direct with cast
+        // i64 — boundary-aware generation
         (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start as u64;
-            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
-            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as i64 }
+            let lo = c.start as i64;
+            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+            quote! { crucible_fuzzer::gen_i64(rng, #lo, #hi) }
         }
-        (FieldTypeKind::I64, None) => quote! { rng.next() as i64 },
-        // i128 — generate as u128 then cast
+        (FieldTypeKind::I64, None) => quote! { crucible_fuzzer::gen_i64(rng, i64::MIN, i64::MAX) },
+        // i128 — boundary-aware generation
         (FieldTypeKind::I128, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
-            quote! { crucible_fuzzer::gen_range_u128(rng, #lo, #hi) as i128 }
+            let lo = c.start as i128;
+            let hi = if c.inclusive { c.end as i128 + 1 } else { c.end as i128 };
+            quote! { crucible_fuzzer::gen_i128(rng, #lo, #hi) }
         }
-        (FieldTypeKind::I128, None) => quote! { (((rng.next() as u128) << 64) | (rng.next() as u128)) as i128 },
-        // i8/i16/i32 — generate as u64 then cast to target type
+        (FieldTypeKind::I128, None) => quote! { crucible_fuzzer::gen_i128(rng, i128::MIN, i128::MAX) },
+        // i8/i16/i32 — boundary-aware via gen_i64 then cast
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
-            let lo = c.start as u64;
-            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
+            let lo = c.start as i64;
+            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
             let ty = inner_ty.expect("small signed needs inner_ty");
-            quote! { crucible_fuzzer::gen_range_u64(rng, #lo, #hi) as #ty }
+            quote! { crucible_fuzzer::gen_i64(rng, #lo, #hi) as #ty }
         }
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, None) => {
             let ty = inner_ty.expect("small signed needs inner_ty");
-            quote! { rng.next() as #ty }
+            quote! { crucible_fuzzer::gen_i64(rng, #ty::MIN as i64, (#ty::MAX as i64) + 1) as #ty }
         }
-        // usize — dedicated function
+        // usize — boundary-aware generation
         (FieldTypeKind::Usize, Some(c)) => {
             let lo = c.start as usize;
             let hi = if c.inclusive { (c.end + 1) as usize } else { c.end as usize };
-            quote! { crucible_fuzzer::gen_range_usize(rng, #lo, #hi) }
+            quote! { crucible_fuzzer::gen_usize(rng, #lo, #hi) }
         }
-        (FieldTypeKind::Usize, None) => quote! { rng.next() as usize },
-        // bool
+        (FieldTypeKind::Usize, None) => quote! { crucible_fuzzer::gen_usize(rng, 0, usize::MAX) },
+        // bool — no boundary concept
         (FieldTypeKind::Bool, _) => quote! { crucible_fuzzer::rand_below(rng, 2) == 1 },
         (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => unreachable!("handled at top level"),
     }

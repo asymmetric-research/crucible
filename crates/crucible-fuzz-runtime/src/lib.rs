@@ -12,7 +12,8 @@ pub use action::FuzzAction;
 pub use input::{FuzzInput, ParseInfo};
 pub use generator::ActionGenerator;
 pub use mutators::{
-    gen_range_u64, gen_range_u128, gen_range_usize, mutate_u64, mutate_u128, mutate_i128, mutate_usize, mutate_bool, mutate_i64,
+    gen_range_u64, gen_range_u128, gen_range_usize, gen_u64, gen_u128, gen_i64, gen_i128, gen_usize,
+    mutate_u64, mutate_u128, mutate_i128, mutate_usize, mutate_bool, mutate_i64,
     rand_below, SequenceMutator, ParamMutator, CrossoverMutator,
     SuccessTrimStage, SuccessPatternMetadata,
 };

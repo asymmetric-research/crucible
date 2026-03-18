@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Parser)]
 #[command(name = "crucible", about = "Solana smart contract fuzzing framework")]
 struct Cli {
+    /// Change to this directory before doing anything (like git -C)
+    #[arg(short = 'C', long = "working-dir", global = true)]
+    working_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -215,6 +218,16 @@ struct FieldDelta {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(dir) = &cli.working_dir {
+        let dir = if dir.is_absolute() {
+            dir.clone()
+        } else {
+            current_dir()?.join(dir)
+        };
+        std::env::set_current_dir(&dir)
+            .with_context(|| format!("Failed to change to directory: {}", dir.display()))?;
+    }
 
     match cli.command {
         Commands::Init { program_name } => fuzz_init(&program_name),

@@ -28,8 +28,8 @@ pub use crucible_fuzz_runtime::SequenceMutator;
 pub use crucible_fuzz_runtime::ParamMutator;
 pub use crucible_fuzz_runtime::CrossoverMutator;
 pub use crucible_fuzz_runtime::{
-    gen_range_u64, gen_range_usize, mutate_u64, mutate_usize, mutate_bool, mutate_i64,
-    rand_below,
+    gen_range_u64, gen_range_usize, gen_u64, gen_u128, gen_i64, gen_i128, gen_usize,
+    mutate_u64, mutate_usize, mutate_bool, mutate_i64, rand_below,
 };
 pub use crucible_fuzz_runtime::FuzzRand;
 pub use crucible_fuzz_runtime::StdRand;

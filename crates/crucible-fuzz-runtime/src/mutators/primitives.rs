@@ -70,6 +70,39 @@ fn pick_interesting_u64<R: Rand>(lo: u64, hi: u64, rng: &mut R) -> Option<u64> {
     None
 }
 
+/// Generate a u64 in [lo, hi) with 25% boundary bias.
+/// Reuses `pick_interesting_u64` for boundary values.
+pub fn gen_u64<R: Rand>(rng: &mut R, lo: u64, hi: u64) -> u64 {
+    if hi <= lo {
+        return lo;
+    }
+    if rand_below(rng, 4) == 0 {
+        if let Some(v) = pick_interesting_u64(lo, hi, rng) {
+            return v;
+        }
+    }
+    gen_range_u64(rng, lo, hi)
+}
+
+/// Generate a usize in [lo, hi) with 25% boundary bias.
+pub fn gen_usize<R: Rand>(rng: &mut R, lo: usize, hi: usize) -> usize {
+    gen_u64(rng, lo as u64, hi as u64) as usize
+}
+
+/// Generate an i64 in [lo, hi) with 25% boundary bias.
+pub fn gen_i64<R: Rand>(rng: &mut R, lo: i64, hi: i64) -> i64 {
+    if hi <= lo {
+        return lo;
+    }
+    if rand_below(rng, 4) == 0 {
+        if let Some(v) = pick_interesting_i64(lo, hi, rng) {
+            return v;
+        }
+    }
+    let range = (hi as u64).wrapping_sub(lo as u64);
+    lo.wrapping_add((rng.next() % range) as i64)
+}
+
 /// Mutate a u64 value within [lo, hi).
 /// - 40% interesting values
 /// - 30% arithmetic (+/-1, +/-small)
@@ -212,6 +245,50 @@ fn pick_interesting_u128<R: Rand>(lo: u128, hi: u128, rng: &mut R) -> Option<u12
         }
     }
     None
+}
+
+/// Generate a u128 in [lo, hi) with 25% boundary bias.
+pub fn gen_u128<R: Rand>(rng: &mut R, lo: u128, hi: u128) -> u128 {
+    if hi <= lo {
+        return lo;
+    }
+    if rand_below(rng, 4) == 0 {
+        if let Some(v) = pick_interesting_u128(lo, hi, rng) {
+            return v;
+        }
+    }
+    gen_range_u128(rng, lo, hi)
+}
+
+/// Generate an i128 in [lo, hi) with 25% boundary bias.
+pub fn gen_i128<R: Rand>(rng: &mut R, lo: i128, hi: i128) -> i128 {
+    if hi <= lo {
+        return lo;
+    }
+    if rand_below(rng, 4) == 0 {
+        let candidates: [i128; 7] = [lo, hi - 1, 0, 1, -1, lo / 2, (hi - 1) / 2];
+        let mut count = 0u32;
+        for &v in &candidates {
+            if v >= lo && v < hi {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            let target = rand_below(rng, count as usize) as u32;
+            let mut seen = 0u32;
+            for &v in &candidates {
+                if v >= lo && v < hi {
+                    if seen == target {
+                        return v;
+                    }
+                    seen += 1;
+                }
+            }
+        }
+    }
+    let range = (hi as u128).wrapping_sub(lo as u128);
+    let raw = ((rng.next() as u128) << 64) | (rng.next() as u128);
+    lo.wrapping_add((raw % range) as i128)
 }
 
 /// Mutate a u128 value within [lo, hi).
