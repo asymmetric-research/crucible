@@ -34,6 +34,9 @@ enum Commands {
         program_name: String,
         /// Test name (corresponds to a Cargo feature)
         test_name: String,
+        /// Run a prebuilt harness binary directly
+        #[arg(long)]
+        binary_in: Option<PathBuf>,
         /// Build in release mode
         #[arg(long)]
         release: bool,
@@ -234,6 +237,7 @@ fn main() -> Result<()> {
         Commands::Run {
             program_name,
             test_name,
+            binary_in,
             release,
             coverage,
             timeout,
@@ -258,6 +262,7 @@ fn main() -> Result<()> {
         } => fuzz_run(
             &program_name,
             &test_name,
+            binary_in,
             release,
             coverage,
             timeout,
@@ -539,6 +544,7 @@ fn find_first_file_in_dir(dir: &str) -> Option<PathBuf> {
 fn fuzz_run(
     program_name: &str,
     test_name: &str,
+    binary_in: Option<PathBuf>,
     release: bool,
     coverage: bool,
     timeout: Option<u64>,
@@ -616,21 +622,36 @@ fn fuzz_run(
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
 
-    let mut args = vec!["run".to_string()];
-    if release {
-        args.push("--release".to_string());
-    }
-    args.extend(["--features".to_string(), test_name.to_string()]);
+    let mut cmd = if let Some(binary_path) = binary_in {
+        let binary_path = resolve_path(&cwd, &binary_path);
+        if !binary_path.exists() {
+            bail!("Harness binary not found: {}", binary_path.display());
+        }
+        println!("[FUZZ] Using prebuilt harness: {}", binary_path.display());
+        let mut cmd = Command::new(binary_path);
+        cmd.current_dir(&fuzz_dir);
+        if coverage {
+            cmd.arg("--coverage");
+        }
+        cmd
+    } else {
+        let mut args = vec!["run".to_string()];
+        if release {
+            args.push("--release".to_string());
+        }
+        args.extend(["--features".to_string(), test_name.to_string()]);
 
-    if coverage {
-        args.push("--".to_string());
-        args.push("--coverage".to_string());
-    }
+        if coverage {
+            args.push("--".to_string());
+            args.push("--coverage".to_string());
+        }
 
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&fuzz_dir)
-        .env("RUSTUP_TOOLCHAIN", "stable")
-        .args(&args);
+        let mut cmd = Command::new("cargo");
+        cmd.current_dir(&fuzz_dir)
+            .env("RUSTUP_TOOLCHAIN", "stable")
+            .args(&args);
+        cmd
+    };
 
     if let Some(timeout_secs) = timeout {
         cmd.env("FUZZ_TIMEOUT_SECS", timeout_secs.to_string());
@@ -2510,5 +2531,25 @@ mod tests {
             result.unwrap(),
             PathBuf::from("/project/target/debug/stake")
         );
+    }
+
+    #[test]
+    fn test_run_accepts_binary_in() {
+        let cli = Cli::try_parse_from([
+            "crucible",
+            "run",
+            "stake",
+            "invariant_test",
+            "--binary-in",
+            "/tmp/stake_fuzz",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Run { binary_in, .. } => {
+                assert_eq!(binary_in, Some(PathBuf::from("/tmp/stake_fuzz")));
+            }
+            _ => panic!("expected run command"),
+        }
     }
 }
