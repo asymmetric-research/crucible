@@ -616,21 +616,18 @@ fn fuzz_run(
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
 
-    let mut args = vec!["run".to_string()];
-    if release {
-        args.push("--release".to_string());
-    }
-    args.extend(["--features".to_string(), test_name.to_string()]);
+    // Build if cargo is available, then run the binary directly
+    try_cargo_build(&fuzz_dir, release, test_name)?;
+
+    let profile = if release { "release" } else { "debug" };
+    let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
+
+    let mut cmd = Command::new(&binary_path);
+    cmd.current_dir(&fuzz_dir);
 
     if coverage {
-        args.push("--".to_string());
-        args.push("--coverage".to_string());
+        cmd.env("FUZZ_COVERAGE", "1");
     }
-
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&fuzz_dir)
-        .env("RUSTUP_TOOLCHAIN", "stable")
-        .args(&args);
 
     if let Some(timeout_secs) = timeout {
         cmd.env("FUZZ_TIMEOUT_SECS", timeout_secs.to_string());
@@ -773,7 +770,7 @@ fn fuzz_run(
         println!("[FUZZ] LCOV output: {}", lcov_path.display());
     }
 
-    let status = cmd.status().context("Failed to run cargo")?;
+    let status = cmd.status().context("Failed to run fuzz binary")?;
     if !status.success() {
         // In reproduce mode, exit code 1 means crash reproduced (not a failure).
         // The remote driver uses the "did not reproduce" string on stdout, not exit code.
@@ -1597,33 +1594,37 @@ fn build_and_find_replay_binary(
     program_name: &str,
     test_feature: Option<&str>,
 ) -> Result<PathBuf> {
-    if let Some(feature) = test_feature {
-        if !feature.is_empty() {
-            println!("[REPLAY] Building with --features {} ...", feature);
-            let build_status = Command::new("cargo")
-                .current_dir(fuzz_dir)
-                .env("RUSTUP_TOOLCHAIN", "stable")
-                .args(["build", "--release", "--features", feature])
-                .status()
-                .context("Failed to build fuzz harness for replay")?;
-
-            if !build_status.success() {
-                // Try debug build
+    if has_cargo() {
+        if let Some(feature) = test_feature {
+            if !feature.is_empty() {
+                println!("[REPLAY] Building with --features {} ...", feature);
                 let build_status = Command::new("cargo")
                     .current_dir(fuzz_dir)
                     .env("RUSTUP_TOOLCHAIN", "stable")
-                    .args(["build", "--features", feature])
+                    .args(["build", "--release", "--features", feature])
                     .status()
                     .context("Failed to build fuzz harness for replay")?;
 
                 if !build_status.success() {
-                    bail!(
-                        "Failed to build fuzz harness with --features {}",
-                        feature
-                    );
+                    // Try debug build
+                    let build_status = Command::new("cargo")
+                        .current_dir(fuzz_dir)
+                        .env("RUSTUP_TOOLCHAIN", "stable")
+                        .args(["build", "--features", feature])
+                        .status()
+                        .context("Failed to build fuzz harness for replay")?;
+
+                    if !build_status.success() {
+                        bail!(
+                            "Failed to build fuzz harness with --features {}",
+                            feature
+                        );
+                    }
                 }
             }
         }
+    } else {
+        println!("[REPLAY] cargo not found, looking for pre-built binary...");
     }
 
     find_fuzz_binary(fuzz_dir, program_name, "release")
@@ -1755,30 +1756,9 @@ fn fuzz_tmin(
         vec![(crash_name.to_string(), binary_path)]
     };
 
-    // Build the binary
-    let mut build_args = vec!["build".to_string()];
-    if release {
-        build_args.push("--release".to_string());
-    }
-    build_args.extend(["--features".to_string(), test_name.to_string()]);
-
-    println!(
-        "[TMIN] Building {} harness...",
-        if release { "release" } else { "debug" }
-    );
-
-    let build_status = Command::new("cargo")
-        .current_dir(&fuzz_dir)
-        .env("RUSTUP_TOOLCHAIN", "stable")
-        .args(&build_args)
-        .status()
-        .context("Failed to build fuzz harness")?;
-
-    if !build_status.success() {
-        bail!("Build failed");
-    }
-
+    // Build the binary (skipped if cargo not available)
     let profile = if release { "release" } else { "debug" };
+    try_cargo_build(&fuzz_dir, release, test_name)?;
     let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
 
     // Minimize crash(es)
@@ -1989,29 +1969,8 @@ fn fuzz_cmin(
         println!("[CMIN] Output directory: {}", corpus_out_abs.display());
     }
 
-    let mut build_args = vec!["build".to_string()];
-    if release {
-        build_args.push("--release".to_string());
-    }
-    build_args.extend(["--features".to_string(), test_name.to_string()]);
-
-    println!(
-        "[CMIN] Building {} harness...",
-        if release { "release" } else { "debug" }
-    );
-
-    let build_status = Command::new("cargo")
-        .current_dir(&fuzz_dir)
-        .env("RUSTUP_TOOLCHAIN", "stable")
-        .args(&build_args)
-        .status()
-        .context("Failed to build fuzz harness")?;
-
-    if !build_status.success() {
-        bail!("Build failed");
-    }
-
     let profile = if release { "release" } else { "debug" };
+    try_cargo_build(&fuzz_dir, release, test_name)?;
     let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
 
     println!("[CMIN] Running corpus minimization...");
@@ -2085,6 +2044,59 @@ fn resolve_fuzz_dir(cwd: &Path, program_name: &str) -> Result<PathBuf> {
         program_name,
         program_name
     );
+}
+
+/// Check if a file is executable (unix).
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
+/// Check if cargo is available in PATH.
+fn has_cargo() -> bool {
+    Command::new("cargo")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Try to build the fuzz harness with cargo. Returns Ok(true) if built, Ok(false) if cargo
+/// is not available (so caller should look for a pre-built binary), or Err on build failure.
+fn try_cargo_build(fuzz_dir: &Path, release: bool, feature: &str) -> Result<bool> {
+    if !has_cargo() {
+        println!("[FUZZ] cargo not found, looking for pre-built binary...");
+        return Ok(false);
+    }
+
+    let mut args = vec!["build".to_string()];
+    if release {
+        args.push("--release".to_string());
+    }
+    args.extend(["--features".to_string(), feature.to_string()]);
+
+    let status = Command::new("cargo")
+        .current_dir(fuzz_dir)
+        .env("RUSTUP_TOOLCHAIN", "stable")
+        .args(&args)
+        .status()
+        .context("Failed to run cargo build")?;
+
+    if !status.success() {
+        bail!("Build failed");
+    }
+
+    Ok(true)
 }
 
 /// Convert a potentially relative path to absolute, relative to cwd.
@@ -2181,29 +2193,62 @@ fn resolve_binary_from_metadata(
 }
 
 fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Result<PathBuf> {
-    let output = Command::new("cargo")
-        .current_dir(fuzz_dir)
-        .args(["metadata", "--format-version=1", "--no-deps"])
-        .output()
-        .context("Failed to run cargo metadata")?;
-
-    if output.status.success() {
-        if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            return resolve_binary_from_metadata(
-                &metadata,
-                fuzz_dir,
-                program_name,
-                profile,
-                |p| p.exists(),
-            );
+    // Try cargo metadata first (if cargo is available)
+    if has_cargo() {
+        if let Ok(output) = Command::new("cargo")
+            .current_dir(fuzz_dir)
+            .args(["metadata", "--format-version=1", "--no-deps"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(metadata) =
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                {
+                    return resolve_binary_from_metadata(
+                        &metadata,
+                        fuzz_dir,
+                        program_name,
+                        profile,
+                        |p| p.exists(),
+                    );
+                }
+            }
         }
     }
 
-    // Fallback when cargo metadata fails
-    let package_name = format!("{}_fuzz", program_name);
-    let fallback = fuzz_dir.join("target").join(profile).join(&package_name);
-    if fallback.exists() {
-        return Ok(fallback);
+    // Fallback: scan target directory for binaries without cargo metadata
+    let target_dir = fuzz_dir.join("target").join(profile);
+    if target_dir.exists() {
+        // Try common naming patterns
+        let candidates = [
+            format!("{}_fuzz", program_name),
+            format!("{}-fuzz", program_name),
+            program_name.replace('-', "_"),
+            program_name.to_string(),
+        ];
+        for name in &candidates {
+            let path = target_dir.join(name);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        // If there's exactly one executable in target/<profile>/, use it
+        if let Ok(entries) = fs::read_dir(&target_dir) {
+            let executables: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    path.is_file()
+                        && !path.extension().map_or(false, |ext| ext == "d" || ext == "json" || ext == "rmeta")
+                        && !e.file_name().to_string_lossy().starts_with('.')
+                        && is_executable(&path)
+                })
+                .collect();
+            if executables.len() == 1 {
+                return Ok(executables[0].path());
+            }
+        }
     }
 
     bail!(
@@ -2510,5 +2555,105 @@ mod tests {
             result.unwrap(),
             PathBuf::from("/project/target/debug/stake")
         );
+    }
+
+    // === No-cargo binary fallback tests ===
+    // These test the fallback path in find_fuzz_binary that scans the target
+    // directory directly without cargo metadata (for environments without cargo).
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_finds_program_name_fuzz_binary() {
+        // Simulates: no cargo, binary at target/release/stake_fuzz
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        make_executable(&target_dir.join("stake_fuzz"));
+
+        // resolve_binary_from_metadata would fail without cargo metadata,
+        // so test the fallback scan directly by calling find_fuzz_binary
+        // with a fuzz_dir that has no Cargo.toml (cargo metadata will fail)
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_ok(), "should find stake_fuzz binary: {:?}", result);
+        assert!(result.unwrap().ends_with("stake_fuzz"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_finds_hyphenated_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        make_executable(&target_dir.join("stake-fuzz"));
+
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_ok(), "should find stake-fuzz binary: {:?}", result);
+        assert!(result.unwrap().ends_with("stake-fuzz"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_finds_exact_name_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        make_executable(&target_dir.join("stake"));
+
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_ok(), "should find stake binary: {:?}", result);
+        assert!(result.unwrap().ends_with("stake"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_finds_sole_executable() {
+        // When there's only one executable in target/release/, use it
+        // regardless of name (matches the single-package cargo metadata logic)
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        make_executable(&target_dir.join("solana_program_fuzz"));
+        // Also create non-executable files that should be ignored
+        fs::write(target_dir.join("solana_program_fuzz.d"), "dep info").unwrap();
+        fs::write(target_dir.join(".fingerprint"), "").unwrap();
+
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_ok(), "should find sole executable: {:?}", result);
+        assert!(result.unwrap().ends_with("solana_program_fuzz"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_fails_when_no_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        // Empty target dir, no binaries
+
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_err(), "should fail when no binary found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_fallback_fails_when_no_target_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        // No target/ directory at all
+
+        let result = find_fuzz_binary(temp.path(), "stake", "release");
+        assert!(result.is_err(), "should fail when target dir missing");
+    }
+
+    #[test]
+    fn test_try_cargo_build_returns_true_when_cargo_available() {
+        // has_cargo() should return true in test environment
+        assert!(has_cargo(), "cargo should be available in test env");
     }
 }

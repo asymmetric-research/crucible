@@ -145,15 +145,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         ty: &Type,
         constraint: &RangeConstraint,
     ) -> proc_macro2::TokenStream {
-        let start = constraint.start;
-        let range_size = if constraint.inclusive {
-            constraint.end - constraint.start + 1
-        } else {
-            constraint.end - constraint.start
-        };
-        quote! {
-            #param_name = (#start as #ty) + (#param_name % (#range_size as #ty));
-        }
+        constraint.generate_local_constraint(param_name, ty)
     }
 
     // Build parameter parsing - skip first param which is fixture
@@ -465,8 +457,9 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
                 return;
             }
 
-            // Parse --coverage flag
-            let coverage_enabled = std::env::args().any(|a| a == "--coverage");
+            // Parse --coverage flag (CLI arg or env var)
+            let coverage_enabled = std::env::args().any(|a| a == "--coverage")
+                || std::env::var("FUZZ_COVERAGE").is_ok();
             #mod_name::COVERAGE_ENABLED.store(coverage_enabled, std::sync::atomic::Ordering::Relaxed);
             if coverage_enabled {
                 eprintln!("[COVERAGE] Coverage output enabled. Files will be written when new coverage is discovered.");

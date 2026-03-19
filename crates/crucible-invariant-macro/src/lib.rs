@@ -174,22 +174,19 @@ fn gen_inner_random_expr(
     match (inner_kind, constraint) {
         // u64 — boundary-aware generation
         (FieldTypeKind::U64, Some(c)) => {
-            let lo = c.start as u64;
-            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { u64 });
             quote! { crucible_fuzzer::gen_u64(rng, #lo, #hi) }
         }
         (FieldTypeKind::U64, None) => quote! { crucible_fuzzer::gen_u64(rng, 0, u64::MAX) },
         // u128 — boundary-aware generation
         (FieldTypeKind::U128, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let (lo, hi) = c.exclusive_bounds(&quote! { u128 });
             quote! { crucible_fuzzer::gen_u128(rng, #lo, #hi) }
         }
         (FieldTypeKind::U128, None) => quote! { crucible_fuzzer::gen_u128(rng, 0, u128::MAX) },
         // u8/u16/u32 — boundary-aware via gen_u64 then cast
         (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, Some(c)) => {
-            let lo = c.start as u64;
-            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { u64 });
             let ty = inner_ty.expect("small unsigned needs inner_ty");
             quote! { crucible_fuzzer::gen_u64(rng, #lo, #hi) as #ty }
         }
@@ -199,22 +196,19 @@ fn gen_inner_random_expr(
         }
         // i64 — boundary-aware generation
         (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start as i64;
-            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { i64 });
             quote! { crucible_fuzzer::gen_i64(rng, #lo, #hi) }
         }
         (FieldTypeKind::I64, None) => quote! { crucible_fuzzer::gen_i64(rng, i64::MIN, i64::MAX) },
         // i128 — boundary-aware generation
         (FieldTypeKind::I128, Some(c)) => {
-            let lo = c.start as i128;
-            let hi = if c.inclusive { c.end as i128 + 1 } else { c.end as i128 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { i128 });
             quote! { crucible_fuzzer::gen_i128(rng, #lo, #hi) }
         }
         (FieldTypeKind::I128, None) => quote! { crucible_fuzzer::gen_i128(rng, i128::MIN, i128::MAX) },
         // i8/i16/i32 — boundary-aware via gen_i64 then cast
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
-            let lo = c.start as i64;
-            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { i64 });
             let ty = inner_ty.expect("small signed needs inner_ty");
             quote! { crucible_fuzzer::gen_i64(rng, #lo, #hi) as #ty }
         }
@@ -224,8 +218,7 @@ fn gen_inner_random_expr(
         }
         // usize — boundary-aware generation
         (FieldTypeKind::Usize, Some(c)) => {
-            let lo = c.start as usize;
-            let hi = if c.inclusive { (c.end + 1) as usize } else { c.end as usize };
+            let (lo, hi) = c.exclusive_bounds(&quote! { usize });
             quote! { crucible_fuzzer::gen_usize(rng, #lo, #hi) }
         }
         (FieldTypeKind::Usize, None) => quote! { crucible_fuzzer::gen_usize(rng, 0, usize::MAX) },
@@ -246,8 +239,7 @@ fn gen_inner_mutate_stmt(
     match (inner_kind, constraint) {
         // u64 — direct call
         (FieldTypeKind::U64, Some(c)) => {
-            let lo = c.start as u64;
-            let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { u64 });
             quote! { crucible_fuzzer::mutate_u64(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::U64, None) => {
@@ -255,8 +247,7 @@ fn gen_inner_mutate_stmt(
         }
         // u128 — direct call
         (FieldTypeKind::U128, Some(c)) => {
-            let lo = c.start;
-            let hi = if c.inclusive { c.end + 1 } else { c.end };
+            let (lo, hi) = c.exclusive_bounds(&quote! { u128 });
             quote! { crucible_fuzzer::mutate_u128(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::U128, None) => {
@@ -266,11 +257,7 @@ fn gen_inner_mutate_stmt(
         (FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32, c) => {
             let ty = inner_ty.expect("small unsigned needs inner_ty");
             let (lo, hi) = match c {
-                Some(c) => {
-                    let lo = c.start as u64;
-                    let hi = if c.inclusive { c.end as u64 + 1 } else { c.end as u64 };
-                    (quote! { #lo }, quote! { #hi })
-                }
+                Some(c) => c.exclusive_bounds(&quote! { u64 }),
                 None => (quote! { 0u64 }, quote! { (#ty::MAX as u64) + 1 }),
             };
             quote! {
@@ -283,8 +270,7 @@ fn gen_inner_mutate_stmt(
         }
         // i64 — direct call
         (FieldTypeKind::I64, Some(c)) => {
-            let lo = c.start as i64;
-            let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { i64 });
             quote! { crucible_fuzzer::mutate_i64(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::I64, None) => {
@@ -292,8 +278,7 @@ fn gen_inner_mutate_stmt(
         }
         // i128 — direct call
         (FieldTypeKind::I128, Some(c)) => {
-            let lo = c.start as i128;
-            let hi = if c.inclusive { c.end as i128 + 1 } else { c.end as i128 };
+            let (lo, hi) = c.exclusive_bounds(&quote! { i128 });
             quote! { crucible_fuzzer::mutate_i128(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::I128, None) => {
@@ -303,11 +288,7 @@ fn gen_inner_mutate_stmt(
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, c) => {
             let ty = inner_ty.expect("small signed needs inner_ty");
             let (lo, hi) = match c {
-                Some(c) => {
-                    let lo = c.start as i64;
-                    let hi = if c.inclusive { c.end as i64 + 1 } else { c.end as i64 };
-                    (quote! { #lo }, quote! { #hi })
-                }
+                Some(c) => c.exclusive_bounds(&quote! { i64 }),
                 None => (quote! { #ty::MIN as i64 }, quote! { (#ty::MAX as i64) + 1 }),
             };
             quote! {
@@ -320,8 +301,7 @@ fn gen_inner_mutate_stmt(
         }
         // usize — dedicated function
         (FieldTypeKind::Usize, Some(c)) => {
-            let lo = c.start as usize;
-            let hi = if c.inclusive { (c.end + 1) as usize } else { c.end as usize };
+            let (lo, hi) = c.exclusive_bounds(&quote! { usize });
             quote! { crucible_fuzzer::mutate_usize(#ref_tok, #lo, #hi, rng); }
         }
         (FieldTypeKind::Usize, None) => {
@@ -697,37 +677,16 @@ fn gen_from_json_kind(name: &Ident, name_str: &str, ty: &Type, kind: &FieldTypeK
     }
 }
 
-/// Generate constraint expression, handling Option<T> by constraining the inner value.
+/// Generate constraint expression, handling Option<T> and Vec<T> by constraining inner values.
 fn gen_constraint_code(
     field_name: &Ident,
     field_type: &Type,
     constraint: &RangeConstraint,
 ) -> proc_macro2::TokenStream {
     if let Some(inner_ty) = extract_vec_inner(field_type) {
-        let start = constraint.start;
-        let range_size = if constraint.inclusive {
-            constraint.end - constraint.start + 1
-        } else {
-            constraint.end - constraint.start
-        };
-        return quote! {
-            for __e in #field_name.iter_mut() {
-                *__e = (#start as #inner_ty) + (*__e % (#range_size as #inner_ty));
-            }
-        };
-    }
-    if let Some(inner_ty) = extract_option_inner(field_type) {
-        let start = constraint.start;
-        let range_size = if constraint.inclusive {
-            constraint.end - constraint.start + 1
-        } else {
-            constraint.end - constraint.start
-        };
-        quote! {
-            if let Some(ref mut __inner) = *#field_name {
-                *__inner = (#start as #inner_ty) + (*__inner % (#range_size as #inner_ty));
-            }
-        }
+        constraint.generate_vec_constraint_expr(field_name, &inner_ty)
+    } else if let Some(inner_ty) = extract_option_inner(field_type) {
+        constraint.generate_option_constraint_expr(field_name, &inner_ty)
     } else {
         constraint.generate_constraint_expr(field_name, field_type)
     }

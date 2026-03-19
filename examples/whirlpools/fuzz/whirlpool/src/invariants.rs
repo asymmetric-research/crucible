@@ -184,24 +184,14 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
             pool_state.fee_growth_global_b, fixture.prev_fee_growth_global_b
         );
 
-        // ---- Step 7: Zero-Liquidity Fee Growth Freeze ----
-        // When pool had zero liquidity at BOTH the previous and current check,
-        // fee_growth_global must not change (no fees can accrue without liquidity).
-        // We require both checks to be zero because actions between checks could
-        // include a swap (with liquidity) followed by a liquidity removal.
+        // ---- Step 7: Zero-Liquidity Fee Growth Freeze ---- REMOVED
+        // False positive: tick-crossing swaps can start at 0 liquidity, cross into
+        // a range with liquidity (generating fees), and return to 0 liquidity — all
+        // in one swap instruction. This makes fee_growth change even though liquidity
+        // is 0 at both check points. Source: swap_manager.rs:147-155 calls
+        // calculate_fees(curr_liquidity) at each step, and curr_liquidity changes
+        // when crossing initialized ticks.
         let p1_zero_now = pool_state.liquidity == 0;
-        if p1_zero_now && fixture.prev_p1_zero_liquidity {
-            fuzz_assert!(
-                pool_state.fee_growth_global_a == fixture.prev_fee_growth_global_a,
-                "Zero-liquidity pool1: fee_growth_global_a changed {} -> {}",
-                fixture.prev_fee_growth_global_a, pool_state.fee_growth_global_a
-            );
-            fuzz_assert!(
-                pool_state.fee_growth_global_b == fixture.prev_fee_growth_global_b,
-                "Zero-liquidity pool1: fee_growth_global_b changed {} -> {}",
-                fixture.prev_fee_growth_global_b, pool_state.fee_growth_global_b
-            );
-        }
         fixture.prev_p1_zero_liquidity = p1_zero_now;
 
         fixture.prev_fee_growth_global_a = pool_state.fee_growth_global_a;
@@ -591,20 +581,8 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
                     "Pool2 fee growth B decreased: {} < {}",
                     p2_state.fee_growth_global_b, fixture.prev_p2_fee_growth_b
                 );
-                // Zero-liquidity fee growth freeze for pool two
+                // Zero-liquidity fee growth freeze for pool two — REMOVED (same FP as pool1)
                 let p2_zero_now = p2_state.liquidity == 0;
-                if p2_zero_now && fixture.prev_p2_zero_liquidity {
-                    fuzz_assert!(
-                        p2_state.fee_growth_global_a == fixture.prev_p2_fee_growth_a,
-                        "Zero-liquidity pool2: fee_growth_global_a changed {} -> {}",
-                        fixture.prev_p2_fee_growth_a, p2_state.fee_growth_global_a
-                    );
-                    fuzz_assert!(
-                        p2_state.fee_growth_global_b == fixture.prev_p2_fee_growth_b,
-                        "Zero-liquidity pool2: fee_growth_global_b changed {} -> {}",
-                        fixture.prev_p2_fee_growth_b, p2_state.fee_growth_global_b
-                    );
-                }
                 fixture.prev_p2_zero_liquidity = p2_zero_now;
                 fixture.prev_p2_fee_growth_a = p2_state.fee_growth_global_a;
                 fixture.prev_p2_fee_growth_b = p2_state.fee_growth_global_b;
@@ -740,16 +718,8 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
                 fuzz_assert!(p3_state.fee_growth_global_b >= fixture.prev_p3_fee_growth_global_b,
                     "Pool3 fee growth B decreased: {} < {}",
                     p3_state.fee_growth_global_b, fixture.prev_p3_fee_growth_global_b);
-                // Zero-liquidity fee growth freeze
+                // Zero-liquidity fee growth freeze — REMOVED (same FP as pool1)
                 let p3_zero_now = p3_state.liquidity == 0;
-                if p3_zero_now && fixture.prev_p3_zero_liquidity {
-                    fuzz_assert!(p3_state.fee_growth_global_a == fixture.prev_p3_fee_growth_global_a,
-                        "Zero-liquidity pool3: fee_growth_a changed {} -> {}",
-                        fixture.prev_p3_fee_growth_global_a, p3_state.fee_growth_global_a);
-                    fuzz_assert!(p3_state.fee_growth_global_b == fixture.prev_p3_fee_growth_global_b,
-                        "Zero-liquidity pool3: fee_growth_b changed {} -> {}",
-                        fixture.prev_p3_fee_growth_global_b, p3_state.fee_growth_global_b);
-                }
                 fixture.prev_p3_zero_liquidity = p3_zero_now;
                 fixture.prev_p3_fee_growth_global_a = p3_state.fee_growth_global_a;
                 fixture.prev_p3_fee_growth_global_b = p3_state.fee_growth_global_b;
