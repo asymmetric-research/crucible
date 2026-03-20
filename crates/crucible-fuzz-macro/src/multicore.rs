@@ -26,6 +26,7 @@ pub fn multicore_mode(
     call_args: &[proc_macro2::TokenStream],
     structured: bool,
     action_type: Option<&proc_macro2::TokenStream>,
+    contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
 
@@ -97,6 +98,15 @@ pub fn multicore_mode(
             let mut stages = tuple_list!(power_stage);
         }
     };
+
+    // Generate per-context code blocks
+    let ctx_take_snapshot = codegen::contexts_take_snapshot(contexts);
+    let ctx_swap_out = codegen::contexts_swap_out(contexts);
+    let ctx_reset = codegen::contexts_reset_check(contexts);
+    let ctx_swap_in = codegen::contexts_swap_in(fixture_param_name, contexts);
+    let ctx_restore = codegen::contexts_restore_and_clear(fixture_param_name, contexts);
+    let ctx_swap_back = codegen::contexts_swap_back(fixture_param_name, contexts);
+    let ctx_no_tracing = codegen::contexts_no_tracing_switch(fixture_name, contexts);
 
     quote! {
         // === MULTI-CORE MODE ===
@@ -450,13 +460,6 @@ pub fn multicore_mode(
                             eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
                                 line.trim_end(), cached_edges, total_edges, edge_pct, cached_branches, total_branches, branch_pct, avg_actions, shared_total_ok, shared_total_actions, ok_pct, discovered_str, __memory_kib);
 
-                            // Remote-fuzzing-compliant pulse on stdout
-                            {
-                                let __fc_exec_sec = __parse_mc_val(&line, "exec/sec: ") as u64;
-                                println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
-                                    __fc_exec_sec, cached_corpus, cached_edges, __memory_kib);
-                            }
-
                             // Write CSV stats row if enabled
                             if let Some(ref csv) = __csv_ref_mc {
                                 let elapsed = {
@@ -477,9 +480,8 @@ pub fn multicore_mode(
                                     let _ = f.flush();
                                 }
                             }
-                        } else {
-                            eprintln!("{}", line);
                         }
+                        // Non-GLOBAL lines (e.g. per-client heartbeats) are suppressed
                     }
                 }
             });
@@ -518,16 +520,21 @@ pub fn multicore_mode(
                 let mut coverage_map = vec![0u8; #mod_name::MAP_SIZE];
                 let cov_ptr = coverage_map.as_mut_ptr();
 
-                // Setup template fixture per worker (fresh SVM instance)
+                // Clone the pre-fork fixture so every worker sees the exact same
+                // initial environment (pubkeys, accounts, programs, etc.). This is
+                // required for diff fuzzing because workers share corpus entries:
+                // re-executing the same input against per-worker `setup()` output
+                // can produce spurious mismatches when setup uses fresh keypairs.
+                //
                 // Always enable tracing so corpus loading establishes coverage baseline.
                 // If --no-tracing, we switch to non-instrumented SVM after corpus loading.
                 std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
-                let template_fixture = #fixture_name::setup();
+                let template_fixture = template_fixture.clone();
 
-                // Take snapshot of initial SVM state for reference
+                // Take snapshot of initial SVM state for all contexts
                 #[allow(unused_mut)]
                 let mut template_fixture = template_fixture;
-                template_fixture.ctx.take_snapshot();
+                #ctx_take_snapshot
                 if worker_id == 0 {
                     eprintln!("[FUZZ] Worker 0: snapshot taken ({} tracked accounts)",
                         template_fixture.ctx.tracked_accounts_count());
@@ -537,11 +544,7 @@ pub fn multicore_mode(
                 // The real SVM is swapped in/out of each iteration's clone, never deep-copied.
                 // Keep a pristine copy for periodic full reset (prevents unbounded internal state growth
                 // in LiteSVM's accounts HashMap, program cache, etc.)
-                let __pristine_svm = std::cell::RefCell::new(template_fixture.ctx.svm.clone());
-                let __saved_svm = std::cell::RefCell::new(std::mem::replace(
-                    &mut template_fixture.ctx.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
-                ));
+                #ctx_swap_out
 
                 // Periodic full SVM reset interval (0 = disabled)
                 let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
@@ -651,17 +654,15 @@ pub fn multicore_mode(
 
                     // Periodic full SVM reset: replace working SVM with pristine clone to prevent
                     // unbounded growth in LiteSVM internals (accounts HashMap, program cache, etc.)
-                    if __svm_reset_interval > 0 && current_iteration > 0 && current_iteration % __svm_reset_interval == 0 {
-                        *__saved_svm.borrow_mut() = __pristine_svm.borrow().clone();
-                    }
+                    #ctx_reset
 
                     #(#deser_stmts)*
 
                     // Clone template for clean non-SVM state (cheap: empty SVM + Arc programs)
                     let mut #fixture_param_name = template_fixture.clone();
 
-                    // Swap real SVM into the clone
-                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
+                    // Swap real SVMs into the clone
+                    #ctx_swap_in
 
                     let callback = #mod_name::FuzzCallback::with_shared_memory(
                         cov_ptr,
@@ -734,15 +735,10 @@ pub fn multicore_mode(
                     }
 
                     // Restore dirty accounts from snapshot (O(dirty) not O(all))
-                    if let Some(ref snap) = template_fixture.ctx.snapshot {
-                        snap.restore(&mut #fixture_param_name.ctx.svm, &#fixture_param_name.ctx.dirty_tracker);
-                    }
-                    // Clear all tracked dirty state after restore
-                    #fixture_param_name.ctx.dirty_tracker.clear();
-                    #fixture_param_name.ctx.taint_log.clear();
+                    #ctx_restore
 
-                    // Swap restored SVM back for next iteration
-                    std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut *__saved_svm.borrow_mut());
+                    // Swap restored SVMs back for next iteration
+                    #ctx_swap_back
                     // fixture is dropped here (cheap: only empty SVM + small fields)
 
                     // On panic: resume unwinding so the default panic handler prints
@@ -829,19 +825,7 @@ pub fn multicore_mode(
                 // The corpus was loaded with tracing enabled so the coverage baseline
                 // (shared edge/branch bitmaps) is populated. Now recreate the fixture
                 // without JIT instrumentation for maximum exec/sec during fuzzing.
-                if std::env::var("FUZZ_NO_TRACING").is_ok() {
-                    std::env::remove_var("ANCHOR_FUZZ_DEBUGGABLE");
-                    if worker_id == 0 {
-                        eprintln!("[FUZZ] Corpus loaded with tracing. Switching to no-tracing mode for fuzzing.");
-                    }
-                    let mut __new_fixture = #fixture_name::setup();
-                    __new_fixture.ctx.take_snapshot();
-                    *__pristine_svm.borrow_mut() = __new_fixture.ctx.svm.clone();
-                    *__saved_svm.borrow_mut() = std::mem::replace(
-                        &mut __new_fixture.ctx.svm,
-                        crucible_test_context::litesvm::LiteSVM::new(),
-                    );
-                }
+                #ctx_no_tracing
 
                 #mutator_setup
 

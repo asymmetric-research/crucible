@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse_macro_input, ItemFn, FnArg, Type,
+    parse::{Parse, ParseStream},
 };
 use crucible_macro_utils::RangeConstraint;
 
@@ -12,6 +13,61 @@ mod modes;
 mod multicore;
 mod singlecore;
 mod stateful;
+
+/// Parsed arguments for `#[anchor_fuzz(...)]`
+///
+/// Supports:
+/// - `#[anchor_fuzz]` — default: arbitrary mode, contexts = [ctx]
+/// - `#[anchor_fuzz(structured)]` — structured mutation mode
+/// - `#[anchor_fuzz(contexts = [ctx, ctx_b])]` — multiple TestContext fields
+/// - `#[anchor_fuzz(structured, contexts = [ctx, ctx_b])]` — both
+struct FuzzArgs {
+    structured: bool,
+    contexts: Vec<syn::Ident>,
+}
+
+impl Default for FuzzArgs {
+    fn default() -> Self {
+        FuzzArgs {
+            structured: false,
+            contexts: vec![quote::format_ident!("ctx")],
+        }
+    }
+}
+
+impl Parse for FuzzArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut structured = false;
+        let mut contexts = None;
+
+        while !input.is_empty() {
+            let ident: syn::Ident = input.parse()?;
+            if ident == "structured" {
+                structured = true;
+            } else if ident == "contexts" {
+                input.parse::<syn::Token![=]>()?;
+                let content;
+                syn::bracketed!(content in input);
+                let fields = content.parse_terminated(syn::Ident::parse, syn::Token![,])?;
+                contexts = Some(fields.into_iter().collect());
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected 'structured' or 'contexts = [...]'",
+                ));
+            }
+
+            if !input.is_empty() {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+
+        Ok(FuzzArgs {
+            structured,
+            contexts: contexts.unwrap_or_else(|| vec![quote::format_ident!("ctx")]),
+        })
+    }
+}
 
 /// Extract the inner type T from Vec<T>
 fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
@@ -31,21 +87,14 @@ fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
 
 #[proc_macro_attribute]
 pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
-    // Parse args: accept empty (arbitrary mode) or "structured" (structured mutation mode)
-    let args_stream = proc_macro2::TokenStream::from(args.clone());
-    let structured = if args_stream.is_empty() {
-        false
+    // Parse attribute arguments: structured, contexts = [field1, field2, ...]
+    let fuzz_args: FuzzArgs = if args.is_empty() {
+        FuzzArgs::default()
     } else {
-        let args_str = args_stream.to_string();
-        if args_str.trim() == "structured" {
-            true
-        } else {
-            return syn::Error::new_spanned(
-                args_stream,
-                "anchor_fuzz accepts no arguments or 'structured'"
-            ).to_compile_error().into();
-        }
+        parse_macro_input!(args as FuzzArgs)
     };
+    let structured = fuzz_args.structured;
+    let contexts = fuzz_args.contexts;
 
     let mut input_fn = parse_macro_input!(item as ItemFn);
 
@@ -400,6 +449,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &call_args,
         structured,
         action_type_tokens.as_ref(),
+        &contexts,
     );
 
     let singlecore_code = singlecore::singlecore_mode(
@@ -412,6 +462,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &call_args,
         structured,
         action_type_tokens.as_ref(),
+        &contexts,
     );
 
     let stateful_code = stateful::stateful_mode(
@@ -422,6 +473,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &feature_name,
         structured,
         action_type_tokens.as_ref(),
+        &contexts,
     );
 
     // Conditionally include Unstructured import

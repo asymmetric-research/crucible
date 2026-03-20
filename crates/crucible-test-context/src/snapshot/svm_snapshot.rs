@@ -1,8 +1,14 @@
 use crate::{FastHashMap, FastHashSet};
-use anchor_lang::prelude::Clock;
+use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
+use anchor_lang::prelude::sysvar::SysvarId;
 use litesvm::LiteSVM;
-use solana_account::Account;
+use solana_account::{Account, ReadableAccount};
 use solana_pubkey::Pubkey;
+use solana_sysvar::epoch_rewards::EpochRewards;
+use solana_sysvar::fees::Fees;
+use solana_sysvar::last_restart_slot::LastRestartSlot;
+use solana_sysvar::recent_blockhashes::RecentBlockhashes;
+use solana_sysvar::rent::Rent;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -22,8 +28,8 @@ pub struct SvmSnapshot {
     /// Account data at snapshot time. FxHash for fast lookups during restore.
     /// Arc-wrapped to make snapshot cloning O(n * 40B) instead of O(n * avg_data_len).
     pub(crate) accounts: FastHashMap<Pubkey, Arc<Account>>,
-    /// Full Clock sysvar at snapshot time.
-    pub(crate) clock: Clock,
+    /// All sysvar account data at snapshot time.
+    pub sysvars: Vec<(Pubkey, Option<Vec<u8>>)>,
 }
 
 impl SvmSnapshot {
@@ -36,8 +42,8 @@ impl SvmSnapshot {
                 accounts.insert(*pubkey, Arc::new(account));
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+        let sysvars = Self::take_sysvars(svm);
+        Self { accounts, sysvars }
     }
 
     /// Restore only dirty accounts from snapshot. Returns count of accounts restored.
@@ -67,9 +73,7 @@ impl SvmSnapshot {
             }
             count += 1;
         }
-        if dirty.is_clock_dirty() {
-            svm.set_sysvar(&self.clock);
-        }
+        self.restore_sysvars(svm);
         count
     }
 
@@ -95,8 +99,8 @@ impl SvmSnapshot {
                 accounts.remove(pubkey);
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+        let sysvars = Self::take_sysvars(svm);
+        Self { accounts, sysvars }
     }
 
     /// Snapshot ALL accounts in the SVM, not just tracked ones.
@@ -115,8 +119,8 @@ impl SvmSnapshot {
                 accounts.insert(*pubkey, Arc::new(account));
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+        let sysvars = Self::take_sysvars(svm);
+        Self { accounts, sysvars }
     }
 
     /// Restore ALL accounts in snapshot to the SVM (full state restore).
@@ -125,7 +129,7 @@ impl SvmSnapshot {
         for (pubkey, account) in &self.accounts {
             let _ = svm.set_account(*pubkey, (**account).clone());
         }
-        svm.set_sysvar(&self.clock);
+        self.restore_sysvars(svm);
         self.accounts.len()
     }
 
@@ -167,8 +171,8 @@ impl SvmSnapshot {
             count += 1;
         }
 
-        // 3. Set clock from delta (target state's clock)
-        svm.set_sysvar(&delta.clock);
+        // 3. Restore sysvars from delta
+        delta.restore_sysvars(svm);
 
         count
     }
@@ -223,8 +227,8 @@ impl SvmSnapshot {
             count += 1;
         }
 
-        // 3. Set clock from next delta
-        svm.set_sysvar(&next_delta.clock);
+        // 3. Restore sysvars from next delta
+        next_delta.restore_sysvars(svm);
 
         count
     }
@@ -234,17 +238,28 @@ impl SvmSnapshot {
         &self.accounts
     }
 
-    /// Get a reference to the stored Clock sysvar.
-    pub fn clock(&self) -> &Clock {
-        &self.clock
+    /// Get the stored Clock sysvar by deserializing from sysvars.
+    pub fn clock(&self) -> Clock {
+        let clock_id = Clock::id();
+        for (id, data) in &self.sysvars {
+            if id == &clock_id {
+                if let Some(bytes) = data {
+                    if let Ok(clock) = bincode::deserialize::<Clock>(bytes) {
+                        return clock;
+                    }
+                }
+            }
+        }
+        Clock::default()
     }
 
     /// Create an empty snapshot (no accounts differ from initial state).
     /// Used as the initial delta in the state pool.
     pub fn empty(clock: Clock) -> Self {
+        let clock_data = bincode::serialize(&clock).unwrap_or_default();
         Self {
             accounts: FastHashMap::default(),
-            clock,
+            sysvars: vec![(Clock::id(), Some(clock_data))],
         }
     }
 
@@ -272,8 +287,60 @@ impl SvmSnapshot {
                 }
             }
         }
-        let clock = svm.get_sysvar::<Clock>();
-        Self { accounts, clock }
+        let sysvars = Self::take_sysvars(svm);
+        Self { accounts, sysvars }
+    }
+
+    fn take_sysvars(svm: &LiteSVM) -> Vec<(Pubkey, Option<Vec<u8>>)> {
+        [
+            Clock::id(),
+            EpochRewards::id(),
+            EpochSchedule::id(),
+            Fees::id(),
+            LastRestartSlot::id(),
+            RecentBlockhashes::id(),
+            Rent::id(),
+            SlotHashes::id(),
+            SlotHistory::id(),
+            StakeHistory::id(),
+        ]
+        .iter()
+        .map(|sysvar| {
+            (
+                *sysvar,
+                svm.accounts_db()
+                    .get_account_ref(sysvar)
+                    .map(|a| a.data().to_vec()),
+            )
+        })
+        .collect()
+    }
+
+    fn restore_sysvars(&self, svm: &mut LiteSVM) -> usize {
+        for (sysvar, data) in &self.sysvars {
+            if let Some(account_data) = data {
+                let _ = svm.set_account(
+                    *sysvar,
+                    Account {
+                        lamports: 1,
+                        owner: Pubkey::from_str_const(
+                            "Sysvar1111111111111111111111111111111111111",
+                        ),
+                        data: account_data.clone(),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                let _ = svm.set_account(
+                    *sysvar,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        self.sysvars.len()
     }
 }
 
@@ -369,7 +436,8 @@ pub fn compute_state_fingerprint_from_snapshot(
 
     // Use differential slot: how much slot advanced from initial, not absolute value.
     let clock: Clock = svm.get_sysvar();
-    let slot_diff = clock.slot.saturating_sub(initial.clock.slot);
+    let initial_clock = initial.clock();
+    let slot_diff = clock.slot.saturating_sub(initial_clock.slot);
     slot_diff_bucket(slot_diff).hash(&mut hasher);
     clock.epoch.hash(&mut hasher);
 
@@ -622,14 +690,15 @@ pub unsafe fn check_field_novelty(
 
     // Read clock once for both clock novelty and combined account×clock novelty.
     let clock: Clock = svm.get_sysvar();
-    let slot_diff = clock.slot.saturating_sub(initial.clock.slot);
+    let initial_clock = initial.clock();
+    let slot_diff = clock.slot.saturating_sub(initial_clock.slot);
     let sdb = slot_diff_bucket(slot_diff);
 
     // Detect clock changes by comparing against initial snapshot.
     // This catches ALL clock modifications regardless of how the harness sets
     // the clock (ctx.advance_slots, svm.set_sysvar, etc.) without relying on
     // DirtyTracker's clock_dirty flag.
-    if slot_diff > 0 || clock.epoch != initial.clock.epoch {
+    if slot_diff > 0 || clock.epoch != initial_clock.epoch {
         novel_count += check_and_set_bit_atomic(
             bitmap_ptr, total_bits,
             field_hash(CLOCK_TYPE_KEY, 0, sdb),

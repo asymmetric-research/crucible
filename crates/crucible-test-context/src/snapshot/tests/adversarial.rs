@@ -24,12 +24,12 @@ fn test_adversarial_cpi_account_collides_with_next_delta() {
     // State A: just pk_base modified
     let mut a_accts = FastHashMap::default();
     a_accts.insert(pk_base, Arc::new(make_account(200, &[0xAA])));
-    let delta_a = SvmSnapshot { accounts: a_accts, clock: initial.clock().clone() };
+    let delta_a = SvmSnapshot { accounts: a_accts, sysvars: initial.sysvars.clone() };
 
     // State B: has pk_collide with SPECIFIC value (this is the delta value)
     let mut b_accts = FastHashMap::default();
     b_accts.insert(pk_collide, Arc::new(make_account(999, &[0xBB; 128])));
-    let delta_b = SvmSnapshot { accounts: b_accts, clock: initial.clock().clone() };
+    let delta_b = SvmSnapshot { accounts: b_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
@@ -78,7 +78,7 @@ fn test_adversarial_phantom_account_not_in_any_tracking() {
 
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk_tracked, Arc::new(make_account(200, &[0xAA])));
-    let delta_1 = SvmSnapshot { accounts: s1_accts, clock: initial.clock().clone() };
+    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
 
     let empty_delta = SvmSnapshot::empty(initial.clock().clone());
 
@@ -129,7 +129,7 @@ fn test_adversarial_account_in_initial_but_never_in_divergent() {
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk_normal, Arc::new(make_account(200, &[0xAA])));
     // pk_hidden NOT in delta
-    let delta_1 = SvmSnapshot { accounts: s1_accts, clock: initial.clock().clone() };
+    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
@@ -176,11 +176,11 @@ fn test_adversarial_arc_optimization_unsound_without_exec_dirty() {
     let shared_arc = Arc::new(make_account(100, &[0xAA]));
     let mut a_accts = FastHashMap::default();
     a_accts.insert(pk, shared_arc.clone());
-    let delta_a = SvmSnapshot { accounts: a_accts, clock: initial.clock().clone() };
+    let delta_a = SvmSnapshot { accounts: a_accts, sysvars: initial.sysvars.clone() };
 
     let mut b_accts = FastHashMap::default();
     b_accts.insert(pk, shared_arc.clone());
-    let delta_b = SvmSnapshot { accounts: b_accts, clock: initial.clock().clone() };
+    let delta_b = SvmSnapshot { accounts: b_accts, sysvars: initial.sysvars.clone() };
 
     assert!(Arc::ptr_eq(&delta_a.accounts()[&pk], &delta_b.accounts()[&pk]));
 
@@ -237,7 +237,7 @@ fn test_adversarial_dual_svm_divergent_tracking() {
         let mut accts = FastHashMap::default();
         accts.insert(pk_a, Arc::new(make_account(i * 100, &[i as u8 * 10])));
         accts.insert(pk_b, Arc::new(make_account(i * 200, &[i as u8 * 20])));
-        SvmSnapshot { accounts: accts, clock: initial.clock().clone() }
+        SvmSnapshot { accounts: accts, sysvars: initial.sysvars.clone() }
     }).collect();
 
     // Fast SVM tracking
@@ -319,15 +319,15 @@ fn test_adversarial_clock_divergence_across_states() {
 
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk, Arc::new(make_account(200, &[0xAA])));
-    let delta_1 = SvmSnapshot { accounts: s1_accts, clock: clock_100.clone() };
+    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: clock_to_sysvars(&clock_100) };
 
     let mut s2_accts = FastHashMap::default();
     s2_accts.insert(pk, Arc::new(make_account(300, &[0xBB])));
-    let delta_2 = SvmSnapshot { accounts: s2_accts, clock: clock_200.clone() };
+    let delta_2 = SvmSnapshot { accounts: s2_accts, sysvars: clock_to_sysvars(&clock_200) };
 
     let delta_3 = SvmSnapshot {
         accounts: FastHashMap::default(), // empty delta = initial
-        clock: clock_300.clone(),
+        sysvars: clock_to_sysvars(&clock_300),
     };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -386,17 +386,17 @@ fn test_adversarial_fee_payer_drift_across_chain() {
     let mut l1_accts = FastHashMap::default();
     l1_accts.insert(fee_payer, Arc::new(make_account(9_995_000, &[]))); // -5000
     l1_accts.insert(pk_data, Arc::new(make_account(200, &[2])));
-    let l1 = SvmSnapshot { accounts: l1_accts, clock: initial.clock().clone() };
+    let l1 = SvmSnapshot { accounts: l1_accts, sysvars: initial.sysvars.clone() };
 
     let mut l2_accts = FastHashMap::default();
     l2_accts.insert(fee_payer, Arc::new(make_account(9_990_000, &[]))); // -10000 total
     l2_accts.insert(pk_data, l1.accounts()[&pk_data].clone()); // inherited
-    let l2 = SvmSnapshot { accounts: l2_accts, clock: initial.clock().clone() };
+    let l2 = SvmSnapshot { accounts: l2_accts, sysvars: initial.sysvars.clone() };
 
     let mut l3_accts = FastHashMap::default();
     l3_accts.insert(fee_payer, Arc::new(make_account(9_985_000, &[]))); // -15000 total
     l3_accts.insert(pk_data, Arc::new(make_account(300, &[3])));
-    let l3 = SvmSnapshot { accounts: l3_accts, clock: initial.clock().clone() };
+    let l3 = SvmSnapshot { accounts: l3_accts, sysvars: initial.sysvars.clone() };
 
     // Verify fee_payer Arcs are NOT shared (different values)
     assert!(!Arc::ptr_eq(&l1.accounts()[&fee_payer], &l2.accounts()[&fee_payer]));
@@ -445,7 +445,7 @@ fn test_adversarial_divergent_keys_must_include_exec_dirty_for_cpi_cleanup() {
 
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk, Arc::new(make_account(200, &[0xAA])));
-    let delta_1 = SvmSnapshot { accounts: s1_accts, clock: initial.clock().clone() };
+    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
 
     let empty = SvmSnapshot::empty(initial.clock().clone());
 
@@ -528,7 +528,7 @@ fn test_adversarial_10_iteration_full_state_verification() {
             m.insert(pks[0], Arc::new(make_account(100, &[0x10])));
             m.insert(pks[1], Arc::new(make_account(200, &[0x20])));
             m.insert(pks[2], Arc::new(make_account(300, &[0x30])));
-            SvmSnapshot { accounts: m, clock: initial.clock().clone() }
+            SvmSnapshot { accounts: m, sysvars: initial.sysvars.clone() }
         },
         {   // state 2: modify middle 3, tombstone first
             let mut m = FastHashMap::default();
@@ -536,21 +536,21 @@ fn test_adversarial_10_iteration_full_state_verification() {
             m.insert(pks[4], Arc::new(make_account(400, &[0x40])));
             m.insert(pks[5], Arc::new(make_account(500, &[0x50])));
             m.insert(pks[6], Arc::new(make_account(600, &[0x60])));
-            SvmSnapshot { accounts: m, clock: initial.clock().clone() }
+            SvmSnapshot { accounts: m, sysvars: initial.sysvars.clone() }
         },
         {   // state 3: add CPI account (not in initial)
             let mut m = FastHashMap::default();
             let pk_cpi = Pubkey::new_unique();
             m.insert(pk_cpi, Arc::new(make_account(999, &[0xCC])));
             m.insert(pks[9], Arc::new(make_account(900, &[0x90])));
-            SvmSnapshot { accounts: m, clock: initial.clock().clone() }
+            SvmSnapshot { accounts: m, sysvars: initial.sysvars.clone() }
         },
         {   // state 4: modify last 3
             let mut m = FastHashMap::default();
             m.insert(pks[7], Arc::new(make_account(700, &[0x70])));
             m.insert(pks[8], Arc::new(make_account(800, &[0x80])));
             m.insert(pks[9], Arc::new(make_account(901, &[0x91])));
-            SvmSnapshot { accounts: m, clock: initial.clock().clone() }
+            SvmSnapshot { accounts: m, sysvars: initial.sysvars.clone() }
         },
     ];
 
@@ -705,7 +705,7 @@ fn test_adversarial_multiple_cpi_accounts_tracked_and_cleaned() {
 
     let mut s_accts = FastHashMap::default();
     s_accts.insert(pk_base, Arc::new(make_account(200, &[0xAA])));
-    let delta = SvmSnapshot { accounts: s_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: s_accts, sysvars: initial.sysvars.clone() };
     let empty = SvmSnapshot::empty(initial.clock().clone());
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -775,7 +775,7 @@ fn test_adversarial_stale_cpi_from_old_iteration_leaks() {
 
     let mut s_accts = FastHashMap::default();
     s_accts.insert(pk, Arc::new(make_account(200, &[0xAA])));
-    let delta = SvmSnapshot { accounts: s_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: s_accts, sysvars: initial.sysvars.clone() };
     let empty = SvmSnapshot::empty(initial.clock().clone());
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -885,7 +885,7 @@ fn test_adversarial_divergent_keys_growth_bounded() {
 
     let mut s_accts = FastHashMap::default();
     s_accts.insert(pk, Arc::new(make_account(200, &[0xAA])));
-    let delta = SvmSnapshot { accounts: s_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: s_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
@@ -933,12 +933,12 @@ fn test_adversarial_prev_delta_none_after_failure_forces_full_restore() {
     let shared_arc = Arc::new(make_account(100, &[0xAA]));
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk_a, shared_arc.clone());
-    let delta_1 = SvmSnapshot { accounts: s1_accts, clock: initial.clock().clone() };
+    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
 
     let mut s2_accts = FastHashMap::default();
     s2_accts.insert(pk_a, shared_arc.clone()); // SAME Arc as delta_1
     s2_accts.insert(pk_b, Arc::new(make_account(200, &[0xBB])));
-    let delta_2 = SvmSnapshot { accounts: s2_accts, clock: initial.clock().clone() };
+    let delta_2 = SvmSnapshot { accounts: s2_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
@@ -991,7 +991,7 @@ fn test_adversarial_take_delta_with_empty_dirty_tracker() {
 
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk, Arc::new(make_account(200, &[0xBB])));
-    let parent = SvmSnapshot { accounts: parent_accts, clock: _initial.clock().clone() };
+    let parent = SvmSnapshot { accounts: parent_accts, sysvars: _initial.sysvars.clone() };
 
     let empty_dirty = DirtyTracker::new();
     let child = SvmSnapshot::take_delta(&svm, &parent, &empty_dirty);
@@ -1020,7 +1020,7 @@ fn test_adversarial_restore_selective_empty_divergent_nonempty_delta() {
 
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk_a, Arc::new(make_account(100, &[0xAA])));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default(); // EMPTY
     let count = initial.restore_selective(&mut svm, &divergent, &delta);
@@ -1064,7 +1064,7 @@ fn test_adversarial_restore_all_account_fields() {
         executable: false,
         rent_epoch: 99,
     }));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk);
@@ -1110,13 +1110,13 @@ fn test_adversarial_disjoint_delta_key_sets() {
     let mut prev_accts = FastHashMap::default();
     prev_accts.insert(pk_a, Arc::new(make_account(100, &[0xAA])));
     prev_accts.insert(pk_b, Arc::new(make_account(200, &[0xBB])));
-    let prev_delta = SvmSnapshot { accounts: prev_accts, clock: initial.clock().clone() };
+    let prev_delta = SvmSnapshot { accounts: prev_accts, sysvars: initial.sysvars.clone() };
 
     // next: {C=300, D=400} — completely disjoint!
     let mut next_accts = FastHashMap::default();
     next_accts.insert(pk_c, Arc::new(make_account(300, &[0xCC])));
     next_accts.insert(pk_d, Arc::new(make_account(400, &[0xDD])));
-    let next_delta = SvmSnapshot { accounts: next_accts, clock: initial.clock().clone() };
+    let next_delta = SvmSnapshot { accounts: next_accts, sysvars: initial.sysvars.clone() };
 
     // Setup: restore to prev
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1155,7 +1155,7 @@ fn test_adversarial_large_data_mutation_integrity() {
     let data_modified: Vec<u8> = (0..10_000).map(|i| ((i * 7 + 13) % 256) as u8).collect();
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk, Arc::new(make_account(200, &data_modified)));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
 
@@ -1193,7 +1193,7 @@ fn test_adversarial_empty_data_and_zero_lamports_distinction() {
     // Delta: tombstone pk_has_data, keep pk_no_data as-is
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk_has_data, Arc::new(Account { lamports: 0, ..Default::default() }));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective(&mut svm, &divergent, &delta);

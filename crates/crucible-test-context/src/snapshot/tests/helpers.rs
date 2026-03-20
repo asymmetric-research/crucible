@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::{FastHashMap, FastHashSet};
 use anchor_lang::prelude::Clock;
+use anchor_lang::prelude::sysvar::SysvarId;
 use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_pubkey::Pubkey;
@@ -14,6 +15,16 @@ pub fn make_test_clock(slot: u64) -> Clock {
         leader_schedule_epoch: 0,
         unix_timestamp: slot as i64,
     }
+}
+
+/// Convert a Clock into a sysvars vec suitable for SvmSnapshot construction.
+pub fn clock_to_sysvars(clock: &Clock) -> Vec<(Pubkey, Option<Vec<u8>>)> {
+    vec![(Clock::id(), Some(bincode::serialize(clock).unwrap()))]
+}
+
+/// Create test sysvars (containing a Clock with the given slot) for SvmSnapshot construction.
+pub fn make_test_sysvars(slot: u64) -> Vec<(Pubkey, Option<Vec<u8>>)> {
+    clock_to_sysvars(&make_test_clock(slot))
 }
 
 /// Build action_bytes in the FuzzInput format: 4-byte LE count header + payload.
@@ -182,7 +193,7 @@ pub fn make_pool_snapshot(accounts: Vec<(Pubkey, u64)>) -> SvmSnapshot {
     for (pk, lamports) in accounts {
         map.insert(pk, std::sync::Arc::new(make_account(lamports, &[])));
     }
-    SvmSnapshot { accounts: map, clock: make_test_clock(0) }
+    SvmSnapshot { accounts: map, sysvars: make_test_sysvars(0) }
 }
 
 /// Helper to create a pool entry with minimal boilerplate.

@@ -1304,7 +1304,7 @@ fn test_pool_arc_sharing_parent_child_deltas() {
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_shared, Arc::new(make_account(150, &[7, 8, 9])));
     parent_accts.insert(pk_dirty, Arc::new(make_account(250, &[10, 11, 12])));
-    let parent_delta = SvmSnapshot { accounts: parent_accts, clock: make_test_clock(10) };
+    let parent_delta = SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(10) };
 
     // Set SVM to match parent delta state
     svm.set_account(pk_shared, make_account(150, &[7, 8, 9])).unwrap();
@@ -1385,13 +1385,13 @@ fn test_multiworker_independent_divergent_keys() {
     let mut delta_a_accts = FastHashMap::default();
     delta_a_accts.insert(pk_a, Arc::new(make_account(200, &[0xAA])));
     delta_a_accts.insert(pk_common, Arc::new(make_account(300, &[0xCC])));
-    let delta_a = SvmSnapshot { accounts: delta_a_accts, clock: make_test_clock(1) };
+    let delta_a = SvmSnapshot { accounts: delta_a_accts, sysvars: make_test_sysvars(1) };
 
     // Delta B modifies pk_b + pk_common (differently)
     let mut delta_b_accts = FastHashMap::default();
     delta_b_accts.insert(pk_b, Arc::new(make_account(400, &[0xBB])));
     delta_b_accts.insert(pk_common, Arc::new(make_account(500, &[0xDD])));
-    let delta_b = SvmSnapshot { accounts: delta_b_accts, clock: make_test_clock(2) };
+    let delta_b = SvmSnapshot { accounts: delta_b_accts, sysvars: make_test_sysvars(2) };
 
     // Worker 1 restores delta A
     let mut divergent_w1: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1462,7 +1462,7 @@ fn test_multiworker_dual_svm_traced_divergent_isolation() {
     // Delta that modifies pk1
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[0xFF])));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: make_test_clock(1) };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
 
     // Fast SVM path (iterations 1-9): uses divergent_keys + delta-to-delta
     let mut divergent_keys: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1643,19 +1643,19 @@ fn test_pool_delta_to_delta_restore_with_shared_ancestry() {
     let parent_acct = Arc::new(make_account(200, &[1]));
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_parent, parent_acct.clone());
-    let _parent_delta = SvmSnapshot { accounts: parent_accts, clock: make_test_clock(1) };
+    let _parent_delta = SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(1) };
 
     // Child A: inherits pk_parent from parent, adds pk_only_a
     let mut child_a_accts = FastHashMap::default();
     child_a_accts.insert(pk_parent, parent_acct.clone()); // SAME Arc
     child_a_accts.insert(pk_only_a, Arc::new(make_account(300, &[0xAA])));
-    let child_a = SvmSnapshot { accounts: child_a_accts, clock: make_test_clock(2) };
+    let child_a = SvmSnapshot { accounts: child_a_accts, sysvars: make_test_sysvars(2) };
 
     // Child B: inherits pk_parent from parent, adds pk_only_b
     let mut child_b_accts = FastHashMap::default();
     child_b_accts.insert(pk_parent, parent_acct.clone()); // SAME Arc
     child_b_accts.insert(pk_only_b, Arc::new(make_account(400, &[0xBB])));
-    let child_b = SvmSnapshot { accounts: child_b_accts, clock: make_test_clock(3) };
+    let child_b = SvmSnapshot { accounts: child_b_accts, sysvars: make_test_sysvars(3) };
 
     // Verify Arc sharing
     assert!(Arc::ptr_eq(
@@ -1707,7 +1707,7 @@ fn test_worker_failure_clears_prev_delta_forces_full_restore() {
 
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[0xFF])));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: make_test_clock(1) };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
     let delta_arc = Arc::new(delta);
 
     // Iteration 1: success → prev_delta_arc = Some
@@ -1728,7 +1728,7 @@ fn test_worker_failure_clears_prev_delta_forces_full_restore() {
     // Iteration 3: must use restore_selective (not _from) since prev_delta_arc is None
     let mut delta2_accts = FastHashMap::default();
     delta2_accts.insert(pk1, Arc::new(make_account(600, &[0xEE])));
-    let delta2 = SvmSnapshot { accounts: delta2_accts, clock: make_test_clock(2) };
+    let delta2 = SvmSnapshot { accounts: delta2_accts, sysvars: make_test_sysvars(2) };
 
     // This is the correct path when prev_delta_arc is None:
     initial.restore_selective(&mut svm, &divergent, &delta2);
@@ -1769,7 +1769,7 @@ fn test_stress_rapid_state_switching_from_pool() {
         let idx2 = (2 * i + 1) % 10;
         accts.insert(pks[idx1], Arc::new(make_account((i as u64 + 1) * 1000, &[i as u8])));
         accts.insert(pks[idx2], Arc::new(make_account((i as u64 + 1) * 2000, &[i as u8 + 10])));
-        let delta = SvmSnapshot { accounts: accts, clock: make_test_clock(i as u64) };
+        let delta = SvmSnapshot { accounts: accts, sysvars: make_test_sysvars(i as u64) };
         deltas.push(Arc::new(delta));
     }
 
@@ -1841,7 +1841,7 @@ fn test_traced_svm_stale_divergent_causes_leak() {
     // Delta modifying pk1
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[])));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: make_test_clock(1) };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
 
     // Traced iteration 1: restore delta, execution dirties pk2
     let mut traced_divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1909,14 +1909,14 @@ fn test_restore_from_overlapping_delta_keys_different_values() {
     for (i, pk) in pks.iter().enumerate() {
         prev_accts.insert(*pk, Arc::new(make_account(1000 + i as u64, &[])));
     }
-    let prev = SvmSnapshot { accounts: prev_accts, clock: make_test_clock(1) };
+    let prev = SvmSnapshot { accounts: prev_accts, sysvars: make_test_sysvars(1) };
 
     // next delta: all pks at 2000+i (DIFFERENT Arcs, different values)
     let mut next_accts = FastHashMap::default();
     for (i, pk) in pks.iter().enumerate() {
         next_accts.insert(*pk, Arc::new(make_account(2000 + i as u64, &[])));
     }
-    let next = SvmSnapshot { accounts: next_accts, clock: make_test_clock(2) };
+    let next = SvmSnapshot { accounts: next_accts, sysvars: make_test_sysvars(2) };
 
     // Restore prev first
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1952,7 +1952,7 @@ fn test_snapshot_empty_has_no_accounts() {
     // Modify via a delta
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk, Arc::new(make_account(500, &[])));
-    let delta = SvmSnapshot { accounts: delta_accts, clock: make_test_clock(10) };
+    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(10) };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective(&mut svm, &divergent, &delta);
@@ -1983,7 +1983,7 @@ fn test_take_delta_from_arc_wrapped_parent() {
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_inherited, parent_arc_account.clone());
     parent_accts.insert(pk_modified, Arc::new(make_account(600, &[3, 4])));
-    let parent = Arc::new(SvmSnapshot { accounts: parent_accts, clock: make_test_clock(5) });
+    let parent = Arc::new(SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(5) });
 
     // Set SVM to parent state
     svm.set_account(pk_inherited, make_account(500, &[1, 2])).unwrap();
@@ -2054,7 +2054,7 @@ fn test_two_workers_same_state_different_execution() {
     // Shared delta (from pool, Arc)
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[])));
-    let delta = Arc::new(SvmSnapshot { accounts: delta_accts, clock: make_test_clock(1) });
+    let delta = Arc::new(SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) });
 
     // Both workers restore same delta
     let mut divergent_a: FastHashSet<Pubkey> = FastHashSet::default();
@@ -2082,7 +2082,7 @@ fn test_two_workers_same_state_different_execution() {
     // Now workers pick different next states
     let mut next_delta_accts = FastHashMap::default();
     next_delta_accts.insert(pk1, Arc::new(make_account(600, &[])));
-    let next_delta = Arc::new(SvmSnapshot { accounts: next_delta_accts, clock: make_test_clock(2) });
+    let next_delta = Arc::new(SvmSnapshot { accounts: next_delta_accts, sysvars: make_test_sysvars(2) });
 
     // Worker A uses _from (prev succeeded)
     let prev_a = delta.clone();

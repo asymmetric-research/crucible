@@ -184,14 +184,6 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                 eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
                     s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str, __memory_kib);
 
-                // Remote-fuzzing-compliant pulse on stdout
-                {
-                    let __fc_exec_sec = __parse_monitor_val(&s, "exec/sec: ") as u64;
-                    let __fc_corpus = __parse_monitor_val(&s, "corpus: ") as u64;
-                    println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
-                        __fc_exec_sec, __fc_corpus, true_edges, __memory_kib);
-                }
-
                 // Write CSV stats row if enabled
                 if let Some(ref csv) = __csv_ref {
                     let elapsed = #mod_name::FUZZER_START_TIME.get()
@@ -466,6 +458,254 @@ pub fn structured_add_default_seed(action_type: &proc_macro2::TokenStream) -> pr
             }
         }
     }
+}
+
+// ── Multi-context helpers ──────────────────────────────────────────────
+//
+// These helpers generate per-context code blocks by iterating over
+// the `contexts` slice.  When `contexts = [ctx]` (the default), the
+// generated code is equivalent to the old single-context codegen.
+
+/// Take snapshots on all contexts.
+pub fn contexts_take_snapshot(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .map(|field| {
+            quote! { template_fixture.#field.take_snapshot(); }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Create `RefCell`-based `__pristine_svm_{i}` and `__saved_svm_{i}` for
+/// every context.  Moves the real SVM out of the template so that
+/// `template.clone()` is cheap (empty SVM + Arc programs).
+pub fn contexts_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let pristine = quote::format_ident!("__pristine_svm_{}", i);
+            let saved = quote::format_ident!("__saved_svm_{}", i);
+            quote! {
+                let #pristine = std::cell::RefCell::new(template_fixture.#field.svm.clone());
+                let #saved = std::cell::RefCell::new(std::mem::replace(
+                    &mut template_fixture.#field.svm,
+                    crucible_test_context::litesvm::LiteSVM::new(),
+                ));
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Periodic SVM reset: replace each saved SVM with a pristine clone.
+pub fn contexts_reset_check(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .map(|(i, _field)| {
+            let pristine = quote::format_ident!("__pristine_svm_{}", i);
+            let saved = quote::format_ident!("__saved_svm_{}", i);
+            quote! {
+                *#saved.borrow_mut() = #pristine.borrow().clone();
+            }
+        })
+        .collect();
+    quote! {
+        if __svm_reset_interval > 0 && current_iteration > 0 && current_iteration % __svm_reset_interval == 0 {
+            #(#stmts)*
+        }
+    }
+}
+
+/// Swap real SVMs from `__saved_svm_{i}` RefCells into `fixture`.
+pub fn contexts_swap_in(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let saved = quote::format_ident!("__saved_svm_{}", i);
+            quote! {
+                std::mem::swap(&mut #fixture_param.#field.svm, &mut *#saved.borrow_mut());
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Restore dirty accounts from snapshot and clear dirty/taint state.
+pub fn contexts_restore_and_clear(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .map(|field| {
+            quote! {
+                if let Some(ref snap) = template_fixture.#field.snapshot {
+                    snap.restore(&mut #fixture_param.#field.svm, &#fixture_param.#field.dirty_tracker);
+                }
+                #fixture_param.#field.dirty_tracker.clear();
+                #fixture_param.#field.taint_log.clear();
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Swap clean SVMs back into `__saved_svm_{i}` RefCells.
+pub fn contexts_swap_back(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let saved = quote::format_ident!("__saved_svm_{}", i);
+            quote! {
+                std::mem::swap(&mut #fixture_param.#field.svm, &mut *#saved.borrow_mut());
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// No-tracing switch: recreate fixture without JIT instrumentation and
+/// replace both pristine and saved SVMs for all contexts.
+pub fn contexts_no_tracing_switch(
+    fixture_name: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let take_snapshots: Vec<_> = contexts
+        .iter()
+        .map(|field| quote! { __new_fixture.#field.take_snapshot(); })
+        .collect();
+    let swap_svms: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let pristine = quote::format_ident!("__pristine_svm_{}", i);
+            let saved = quote::format_ident!("__saved_svm_{}", i);
+            quote! {
+                *#pristine.borrow_mut() = __new_fixture.#field.svm.clone();
+                *#saved.borrow_mut() = std::mem::replace(
+                    &mut __new_fixture.#field.svm,
+                    crucible_test_context::litesvm::LiteSVM::new(),
+                );
+            }
+        })
+        .collect();
+    quote! {
+        if std::env::var("FUZZ_NO_TRACING").is_ok() {
+            std::env::remove_var("ANCHOR_FUZZ_DEBUGGABLE");
+            eprintln!("[FUZZ] Corpus loaded with tracing. Switching to no-tracing mode for fuzzing.");
+            let mut __new_fixture = #fixture_name::setup();
+            #(#take_snapshots)*
+            #(#swap_svms)*
+        }
+    }
+}
+
+// ── Stateful-mode multi-context helpers ───────────────────────────────
+//
+// Stateful mode uses `mut` variables (not RefCells) for SVM swap.
+// These helpers generate code for contexts[1..] (additional contexts);
+// the primary context (index 0) is handled by the existing stateful logic.
+
+/// Take snapshots on additional contexts (index 1+).
+pub fn stateful_extra_take_snapshot(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .skip(1)
+        .map(|field| quote! { template_fixture.#field.take_snapshot(); })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Swap out additional context SVMs into `mut` variables at setup.
+pub fn stateful_extra_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, field)| {
+            let svm_name = quote::format_ident!("__extra_svm_{}", i);
+            quote! {
+                let mut #svm_name = std::mem::replace(
+                    &mut template_fixture.#field.svm,
+                    crucible_test_context::litesvm::LiteSVM::new(),
+                );
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Swap additional context SVMs into a fixture (stateful iteration start).
+pub fn stateful_extra_swap_in(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, field)| {
+            let svm_name = quote::format_ident!("__extra_svm_{}", i);
+            quote! {
+                std::mem::swap(&mut #fixture_param.#field.svm, &mut #svm_name);
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Restore additional contexts from snapshot, clear dirty, and swap back.
+pub fn stateful_extra_restore_and_swap_back(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, field)| {
+            let svm_name = quote::format_ident!("__extra_svm_{}", i);
+            quote! {
+                if let Some(ref snap) = template_fixture.#field.snapshot {
+                    snap.restore(&mut #fixture_param.#field.svm, &#fixture_param.#field.dirty_tracker);
+                }
+                #fixture_param.#field.dirty_tracker.clear();
+                #fixture_param.#field.taint_log.clear();
+                std::mem::swap(&mut #fixture_param.#field.svm, &mut #svm_name);
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
+}
+
+/// Swap additional context SVMs back without restoring (e.g., after seed action).
+pub fn stateful_extra_swap_back(
+    fixture_param: &syn::Ident,
+    contexts: &[syn::Ident],
+) -> proc_macro2::TokenStream {
+    let stmts: Vec<_> = contexts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, field)| {
+            let svm_name = quote::format_ident!("__extra_svm_{}", i);
+            quote! {
+                std::mem::swap(&mut #fixture_param.#field.svm, &mut #svm_name);
+            }
+        })
+        .collect();
+    quote! { #(#stmts)* }
 }
 
 /// Generate the is_corpus_input helper function

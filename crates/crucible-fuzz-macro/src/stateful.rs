@@ -30,6 +30,7 @@ pub fn stateful_mode(
     feature_name: &str,
     structured: bool,
     action_type: Option<&proc_macro2::TokenStream>,
+    contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
     if !structured {
         // Stateful mode only works with structured/invariant tests
@@ -55,11 +56,15 @@ pub fn stateful_mode(
 
     let template_setup_code = codegen::template_setup(fixture_name, mod_name);
 
+    // Extra context helpers for the parent quote block (snapshot + swap-out)
+    let extra_take_snapshot = codegen::stateful_extra_take_snapshot(contexts);
+    let extra_swap_out = codegen::stateful_extra_swap_out(contexts);
+
     let singlecore_body = stateful_singlecore_body(
-        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty,
+        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty, contexts,
     );
     let multicore_body = stateful_multicore_body(
-        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty,
+        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty, contexts,
     );
 
     quote! {
@@ -141,10 +146,11 @@ pub fn stateful_mode(
             // Setup fixture (always with tracing initially for coverage baseline)
             #template_setup_code
 
-            // Take snapshot of initial state
+            // Take snapshot of initial state (all contexts)
             #[allow(unused_mut)]
             let mut template_fixture = template_fixture;
             template_fixture.ctx.take_snapshot();
+            #extra_take_snapshot
 
             let base_snapshot = template_fixture.ctx.snapshot.as_ref()
                 .expect("snapshot must exist after take_snapshot()")
@@ -155,6 +161,8 @@ pub fn stateful_mode(
                 &mut template_fixture.ctx.svm,
                 crucible_test_context::litesvm::LiteSVM::new(),
             );
+            // Swap out additional context SVMs
+            #extra_swap_out
 
             // Create initial snapshot capturing ALL accounts (not just dirty-tracked ones).
             // This is critical for multicore: workers restore from this snapshot
@@ -245,7 +253,15 @@ fn stateful_singlecore_body(
     fixture_param_name: &syn::Ident,
     feature_name: &str,
     action_ty: &proc_macro2::TokenStream,
+    contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
+    // Extra context helpers (for contexts[1..])
+    let extra_swap_in_fixture = codegen::stateful_extra_swap_in(fixture_param_name, contexts);
+    let extra_restore_swap_back_fixture = codegen::stateful_extra_restore_and_swap_back(fixture_param_name, contexts);
+    // For seed phase, we use __seed_fixture as the param name
+    let seed_ident = quote::format_ident!("__seed_fixture");
+    let extra_swap_in_seed = codegen::stateful_extra_swap_in(&seed_ident, contexts);
+    let extra_swap_back_seed = codegen::stateful_extra_swap_back(&seed_ident, contexts);
     quote! {
         // === SINGLE-THREADED STATEFUL ===
         let mut state_pool = StatePool::new(pool_capacity, max_depth);
@@ -337,8 +353,9 @@ fn stateful_singlecore_body(
                     if __current_depth >= max_depth { break; }
                     if state_pool.is_full() { break; }
 
-                    // Swap SVM into fixture
+                    // Swap SVMs into fixture (primary + additional contexts)
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #extra_swap_in_seed
 
                     let callback = #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE);
                     __seed_fixture.ctx.set_invocation_callback(callback);
@@ -356,7 +373,8 @@ fn stateful_singlecore_body(
                     };
 
                     if !__seed_ok {
-                        // Swap SVM back and stop this sequence
+                        // Swap SVMs back and stop this sequence
+                        #extra_swap_back_seed
                         std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                         break;
                     }
@@ -392,11 +410,13 @@ fn stateful_singlecore_body(
                         __single_bytes[2..].to_vec()
                     } else { Vec::new() };
 
-                    // Store fixture state (swap SVM out for cheap clone)
+                    // Store fixture state (swap SVMs out for cheap clone)
+                    #extra_swap_back_seed
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                     let __fs: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                         Some(std::sync::Arc::new(__FixtureWrapper(__seed_fixture.clone())));
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #extra_swap_in_seed
 
                     if __fp != 0 && state_pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
@@ -410,7 +430,8 @@ fn stateful_singlecore_body(
                     __current_delta = std::sync::Arc::new(__new_delta);
                     __current_action_bytes = __accum;
 
-                    // Swap SVM back for next action (SVM stays modified = correct sequential state)
+                    // Swap SVMs back for next action (SVM stays modified = correct sequential state)
+                    #extra_swap_back_seed
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                 }
             }
@@ -710,6 +731,7 @@ fn stateful_singlecore_body(
                 template_fixture.clone()
             };
             std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __real_svm);
+            #extra_swap_in_fixture
 
             // Set up coverage callback only when tracing is active this iteration
             if has_tracing {
@@ -934,12 +956,14 @@ fn stateful_singlecore_body(
 
                         let action_desc = crucible_test_context::format_all_actions_oneline();
 
-                        // Swap SVM out before storing fixture (makes clone cheap)
+                        // Swap SVMs out before storing fixture (makes clone cheap)
+                        #extra_restore_swap_back_fixture
                         std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __real_svm);
                         let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                             Some(std::sync::Arc::new(__FixtureWrapper(#fixture_param_name.clone())));
                         // Swap SVM back in for remaining iteration logic (divergent_keys)
                         std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __real_svm);
+                        #extra_swap_in_fixture
 
                         let __coverage_positions: Option<Vec<u16>> = if __novel_bits > 0 && has_tracing {
                             Some(crucible_test_context::snapshot::extract_coverage_positions(&__stateful_coverage_map))
@@ -994,7 +1018,8 @@ fn stateful_singlecore_body(
                 }
             }
 
-            // 8. Swap SVM back out of fixture
+            // 8. Swap SVMs back out of fixture
+            #extra_restore_swap_back_fixture
             std::mem::swap(&mut #fixture_param_name.ctx.svm, &mut __real_svm);
             // If traced iteration, swap traced SVM back to its dedicated slot
             if is_traced_iter {
@@ -1069,9 +1094,6 @@ fn stateful_singlecore_body(
                     branches, total_branches,
                     __memory_kib,
                 );
-                // Remote-fuzzing-compliant pulse on stdout
-                println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
-                    iter_sec as u64, state_pool.len(), edges, __memory_kib);
 
                 if __profiled_iters > 0 {
                     let total = __phase_total_ns;
@@ -1179,7 +1201,17 @@ fn stateful_multicore_body(
     _fixture_param_name: &syn::Ident,
     feature_name: &str,
     action_ty: &proc_macro2::TokenStream,
+    contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
+    // Extra context helpers (for contexts[1..]) — multicore stateful
+    // For multicore, the iteration fixture is __iter_fixture
+    let iter_ident = quote::format_ident!("__iter_fixture");
+    let extra_swap_in_iter = codegen::stateful_extra_swap_in(&iter_ident, contexts);
+    let extra_restore_swap_back_iter = codegen::stateful_extra_restore_and_swap_back(&iter_ident, contexts);
+    // Seed phase uses __seed_fixture
+    let seed_ident_mc = quote::format_ident!("__seed_fixture");
+    let extra_swap_in_seed_mc = codegen::stateful_extra_swap_in(&seed_ident_mc, contexts);
+    let extra_swap_back_seed_mc = codegen::stateful_extra_swap_back(&seed_ident_mc, contexts);
     quote! {
         // === MULTI-THREADED STATEFUL ===
         use std::sync::{Arc, RwLock, atomic::{AtomicU64, AtomicBool, Ordering}};
@@ -1296,8 +1328,9 @@ fn stateful_multicore_body(
                     if __current_depth >= max_depth { break; }
                     if pool.is_full() { break; }
 
-                    // Swap SVM into fixture
+                    // Swap SVMs into fixture (primary + additional contexts)
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #extra_swap_in_seed_mc
 
                     let callback = #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE);
                     __seed_fixture.ctx.set_invocation_callback(callback);
@@ -1315,6 +1348,7 @@ fn stateful_multicore_body(
                     };
 
                     if !__seed_ok {
+                        #extra_swap_back_seed_mc
                         std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                         break;
                     }
@@ -1350,11 +1384,13 @@ fn stateful_multicore_body(
                         __single_bytes[2..].to_vec()
                     } else { Vec::new() };
 
-                    // Store fixture state (swap SVM out for cheap clone)
+                    // Store fixture state (swap SVMs out for cheap clone)
+                    #extra_swap_back_seed_mc
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                     let __fs: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                         Some(std::sync::Arc::new(__FixtureWrapper(__seed_fixture.clone())));
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #extra_swap_in_seed_mc
 
                     if __fp != 0 && pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
@@ -1368,7 +1404,8 @@ fn stateful_multicore_body(
                     __current_delta = std::sync::Arc::new(__new_delta);
                     __current_action_bytes = __accum;
 
-                    // Swap SVM back for next action
+                    // Swap SVMs back for next action
+                    #extra_swap_back_seed_mc
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                 }
             }
@@ -1790,8 +1827,9 @@ fn stateful_multicore_body(
                         let __action_variant_idx = __action_chain.last().unwrap().variant_index();
 
                         // 4. Execute chain — use per-iteration fixture clone (correct mutable state).
-                        //    Swap SVM into fixture, run test, swap back.
+                        //    Swap SVMs into fixture, run test, swap back.
                         std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
+                        #extra_swap_in_iter
 
                         // Set coverage callback only when tracing is active this iteration
                         if has_tracing {
@@ -1922,9 +1960,10 @@ fn stateful_multicore_body(
                                         Vec::new()
                                     };
 
-                                    // Store fixture alongside novel state (SVM swapped out = cheap clone).
+                                    // Store fixture alongside novel state (SVMs swapped out = cheap clone).
                                     // Use try_lock to avoid blocking: if another worker holds the mutex,
                                     // skip fixture storage (None). State will use template_fixture fallback.
+                                    #extra_restore_swap_back_iter
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
                                     let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                                         match fixture_clone_lock.try_lock() {
@@ -1932,6 +1971,7 @@ fn stateful_multicore_body(
                                             Err(_) => None, // Skip fixture storage — reduces contention
                                         };
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
+                                    #extra_swap_in_iter
 
                                     let action_desc = crucible_test_context::format_all_actions_oneline();
                                     let __coverage_positions: Option<Vec<u16>> = if __novel_bits > 0 && has_tracing {
@@ -1969,7 +2009,8 @@ fn stateful_multicore_body(
                             }
                         }
 
-                        // 7. Swap SVM back out of per-iteration fixture
+                        // 7. Swap SVMs back out of per-iteration fixture
+                        #extra_restore_swap_back_iter
                         std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
                         // If traced iteration, swap traced SVM back to its dedicated slot
                         if is_traced_iter {
@@ -2433,9 +2474,10 @@ fn stateful_multicore_body(
                 if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 4. Execute — use per-iteration fixture clone (correct mutable state).
-                //    Swap SVM into fixture, run test, swap back.
+                //    Swap SVMs into fixture, run test, swap back.
                 let __t_clone = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
+                #extra_swap_in_iter
 
                 // Set coverage callback only when tracing is active this iteration
                 if has_tracing {
@@ -2590,8 +2632,9 @@ fn stateful_multicore_body(
                                 Vec::new()
                             };
 
-                            // Store fixture alongside novel state (SVM swapped out = cheap clone)
+                            // Store fixture alongside novel state (SVMs swapped out = cheap clone)
                             // Use try_lock to avoid blocking: if contended, skip fixture storage.
+                            #extra_restore_swap_back_iter
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
                             let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                                 match fixture_clone_mutex.try_lock() {
@@ -2599,6 +2642,7 @@ fn stateful_multicore_body(
                                     Err(_) => None,
                                 };
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
+                            #extra_swap_in_iter
 
                             let action_desc = crucible_test_context::format_all_actions_oneline();
                             let __coverage_positions: Option<Vec<u16>> = if __novel_bits > 0 && has_tracing {
@@ -2638,7 +2682,8 @@ fn stateful_multicore_body(
                     }
                 }
 
-                // 7. Swap SVM back out of per-iteration fixture
+                // 7. Swap SVMs back out of per-iteration fixture
+                #extra_restore_swap_back_iter
                 std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
                 // If traced iteration, swap traced SVM back to its dedicated slot
                 if is_traced_iter {
@@ -2727,9 +2772,6 @@ fn stateful_multicore_body(
                         num_cores,
                         __memory_kib,
                     );
-                    // Remote-fuzzing-compliant pulse on stdout
-                    println!("[FUZZ_PULSE] execs/s:{} corpus_count:{} coverage:{} memory_kib:{}",
-                        iter_sec as u64, cached_pool_len, edges, __memory_kib);
 
                     if __profiled_iters > 0 {
                         let total = __phase_total_ns;

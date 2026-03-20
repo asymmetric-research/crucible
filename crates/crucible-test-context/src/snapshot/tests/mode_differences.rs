@@ -107,7 +107,7 @@ fn test_restore_selective_from_equivalent_to_restore_selective() {
         map.insert(pk2, Arc::new(make_account(2000, &[0xA2; 16])));
         SvmSnapshot {
             accounts: map,
-            clock: make_test_clock(10),
+            sysvars: make_test_sysvars(10),
         }
     };
 
@@ -118,7 +118,7 @@ fn test_restore_selective_from_equivalent_to_restore_selective() {
         map.insert(pk3, Arc::new(make_account(3000, &[0xB3; 16])));
         SvmSnapshot {
             accounts: map,
-            clock: make_test_clock(20),
+            sysvars: make_test_sysvars(20),
         }
     };
 
@@ -361,7 +361,7 @@ fn test_stateful_3_iteration_cycle_state_switching() {
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
         SvmSnapshot {
             accounts: map,
-            clock: clock.clone(),
+            sysvars: clock_to_sysvars(&clock),
         }
     };
     let delta_b = {
@@ -370,7 +370,7 @@ fn test_stateful_3_iteration_cycle_state_switching() {
         map.insert(pk3, Arc::new(make_account(3000, &[0xB3; 8])));
         SvmSnapshot {
             accounts: map,
-            clock: clock.clone(),
+            sysvars: clock_to_sysvars(&clock),
         }
     };
 
@@ -445,7 +445,7 @@ fn test_stateful_iteration_with_failed_action_clears_prev_delta() {
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
         SvmSnapshot {
             accounts: map,
-            clock: clock.clone(),
+            sysvars: clock_to_sysvars(&clock),
         }
     };
     let delta_b = {
@@ -453,7 +453,7 @@ fn test_stateful_iteration_with_failed_action_clears_prev_delta() {
         map.insert(pk2, Arc::new(make_account(2000, &[0xB2; 8])));
         SvmSnapshot {
             accounts: map,
-            clock: clock.clone(),
+            sysvars: clock_to_sysvars(&clock),
         }
     };
 
@@ -534,7 +534,7 @@ fn test_stateful_failed_action_dirty_accounts_in_divergent_keys() {
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
         SvmSnapshot {
             accounts: map,
-            clock: clock.clone(),
+            sysvars: clock_to_sysvars(&clock),
         }
     };
 
@@ -826,7 +826,7 @@ fn test_restore_full_vs_restore_selective_with_all_accounts_as_delta() {
     delta_map.insert(pk3, Arc::new(make_account(3000, &[0xA3; 8])));
     let full_delta = SvmSnapshot {
         accounts: delta_map,
-        clock: make_test_clock(42),
+        sysvars: make_test_sysvars(42),
     };
 
     // SVM 1: restore_full
@@ -888,7 +888,7 @@ fn test_dual_svm_traced_and_fast_same_state_after_restore() {
         let mut map = FastHashMap::default();
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 16])));
         map.insert(pk2, Arc::new(make_account(2000, &[0xA2; 16])));
-        SvmSnapshot { accounts: map, clock: clock.clone() }
+        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
     };
 
     let delta_next = {
@@ -897,7 +897,7 @@ fn test_dual_svm_traced_and_fast_same_state_after_restore() {
         map.insert(pk1, delta_prev.accounts.get(&pk1).unwrap().clone());
         // pk3 is new in this delta
         map.insert(pk3, Arc::new(make_account(3000, &[0xB3; 16])));
-        SvmSnapshot { accounts: map, clock: clock.clone() }
+        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
     };
 
     // Apply delta_prev to both SVMs first
@@ -970,7 +970,7 @@ fn test_dual_svm_separate_divergent_keys() {
     let target_delta = {
         let mut map = FastHashMap::default();
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
-        SvmSnapshot { accounts: map, clock: clock.clone() }
+        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
     };
 
     // Traced SVM: execution modifies pk2, pk3
@@ -1197,7 +1197,7 @@ fn test_arc_pointer_equality_skips_redundant_set_account() {
             m.insert(pk2, shared_pk2_arc.clone()); // Arc shared with child
             m
         },
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     };
 
     // Child delta: pk1=same Arc (inherited), pk2=different value, pk3=3000
@@ -1209,7 +1209,7 @@ fn test_arc_pointer_equality_skips_redundant_set_account() {
             m.insert(pk3, Arc::new(make_account(3000, &[0xB3; 16]))); // new
             m
         },
-        clock: make_test_clock(20),
+        sysvars: make_test_sysvars(20),
     };
 
     // Apply parent delta first
@@ -1277,7 +1277,7 @@ fn test_arc_skip_overridden_by_exec_dirty() {
             m.insert(pk1, shared_arc.clone());
             m
         },
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     };
 
     // Apply delta
@@ -1348,7 +1348,7 @@ fn test_sibling_deltas_share_parent_arcs() {
             m.insert(pk2, Arc::new(make_account(2000, &[0xAA; 16])));
             m
         },
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     };
 
     // Sibling B: inherits pk1 from parent, modifies pk3
@@ -1359,7 +1359,7 @@ fn test_sibling_deltas_share_parent_arcs() {
             m.insert(pk3, Arc::new(make_account(3000, &[0xBB; 16])));
             m
         },
-        clock: make_test_clock(20),
+        sysvars: make_test_sysvars(20),
     };
 
     // Verify Arc sharing
@@ -1464,7 +1464,7 @@ fn test_stateful_divergent_accumulates_across_iterations() {
             m.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
     let delta_b = SvmSnapshot {
         accounts: {
@@ -1472,7 +1472,7 @@ fn test_stateful_divergent_accumulates_across_iterations() {
             m.insert(pk2, Arc::new(make_account(2000, &[0xB2; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
 
     let mut divergent_keys = FastHashSet::default();
@@ -1524,7 +1524,7 @@ fn test_divergent_keys_cleared_then_rebuilt_each_iteration() {
             m.insert(pk2, Arc::new(make_account(2000, &[0xA2; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
 
     let delta_2 = SvmSnapshot {
@@ -1533,7 +1533,7 @@ fn test_divergent_keys_cleared_then_rebuilt_each_iteration() {
             m.insert(pk3, Arc::new(make_account(3000, &[0xB3; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
 
     let mut divergent_keys = FastHashSet::default();
@@ -2191,7 +2191,7 @@ fn test_simulate_fuzzer_iteration_5_rounds_no_stale_state() {
             m.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
     let delta_b = SvmSnapshot {
         accounts: {
@@ -2199,7 +2199,7 @@ fn test_simulate_fuzzer_iteration_5_rounds_no_stale_state() {
             m.insert(pk2, Arc::new(make_account(2000, &[0xB2; 8])));
             m
         },
-        clock: clock.clone(),
+        sysvars: clock_to_sysvars(&clock),
     };
     let empty_delta = SvmSnapshot::empty(clock.clone());
 
@@ -2415,7 +2415,7 @@ fn test_stateful_restore_selective_uses_delta_clock() {
             m.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
             m
         },
-        clock: make_test_clock(42),
+        sysvars: make_test_sysvars(42),
     };
 
     initial.restore_selective(&mut svm, &FastHashSet::default(), &delta);
@@ -2440,7 +2440,7 @@ fn test_restore_selective_from_uses_next_delta_clock() {
             m.insert(pk1, Arc::new(make_account(500, &[0x55; 8])));
             m
         },
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     };
 
     let delta_next = SvmSnapshot {
@@ -2449,7 +2449,7 @@ fn test_restore_selective_from_uses_next_delta_clock() {
             m.insert(pk1, Arc::new(make_account(1000, &[0xAA; 8])));
             m
         },
-        clock: make_test_clock(99),
+        sysvars: make_test_sysvars(99),
     };
 
     // Apply prev first

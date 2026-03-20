@@ -786,7 +786,7 @@ fn test_three_workers_overlapping_cpi_cleanup() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_common, Arc::new(make_account(1100, &[])));
         m.insert(cpi_w1, Arc::new(make_account(50, &[1])));
-        SvmSnapshot { accounts: m, clock: make_test_clock(5) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(5) }
     };
     let div: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective(&mut svm, &div, &delta_w1);
@@ -800,7 +800,7 @@ fn test_three_workers_overlapping_cpi_cleanup() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_common, Arc::new(make_account(1200, &[])));
         m.insert(cpi_w2, Arc::new(make_account(75, &[2])));
-        SvmSnapshot { accounts: m, clock: make_test_clock(6) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(6) }
     };
     let prev_delta = Arc::new(delta_w1);
     initial.restore_selective_from(&mut svm, &divergent, &prev_delta, &delta_w2, &prev_exec_dirty);
@@ -818,7 +818,7 @@ fn test_three_workers_overlapping_cpi_cleanup() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_common, Arc::new(make_account(800, &[])));
         m.insert(cpi_w3, Arc::new(make_account(99, &[3])));
-        SvmSnapshot { accounts: m, clock: make_test_clock(7) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(7) }
     };
     let prev_delta2 = Arc::new(delta_w2);
     initial.restore_selective_from(&mut svm, &divergent3, &prev_delta2, &delta_w3, &prev_exec_dirty2);
@@ -937,7 +937,7 @@ fn test_restore_selective_from_same_arc_skips_unchanged() {
     delta_accounts.insert(pk_b, arc_b.clone());
     let delta = Arc::new(SvmSnapshot {
         accounts: delta_accounts,
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     });
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1089,7 +1089,7 @@ fn test_same_state_picked_three_times_idempotent() {
     accts.insert(pk_b, arc_b.clone());
     let delta = Arc::new(SvmSnapshot {
         accounts: accts,
-        clock: make_test_clock(10),
+        sysvars: make_test_sysvars(10),
     });
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1194,7 +1194,7 @@ fn test_tombstone_account_deleted_after_restore() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_alive, Arc::new(make_account(500, &[1, 2, 3])));
         m.insert(pk_tomb,  Arc::new(make_account(100, &[4, 5, 6])));
-        SvmSnapshot { accounts: m, clock: make_test_clock(1) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(1) }
     };
 
     let mut svm = LiteSVM::new();
@@ -1205,7 +1205,7 @@ fn test_tombstone_account_deleted_after_restore() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_alive, Arc::new(make_account(600, &[1, 2, 3])));
         m.insert(pk_tomb,  Arc::new(Account { lamports: 0, ..Default::default() }));
-        SvmSnapshot { accounts: m, clock: make_test_clock(2) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(2) }
     };
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1475,7 +1475,7 @@ fn test_take_delta_tombstone_propagation() {
     let parent_delta = {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_deleted, Arc::new(Account { lamports: 0, ..Default::default() }));
-        SvmSnapshot { accounts: m, clock: make_test_clock(3) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(3) }
     };
 
     let mut svm = LiteSVM::new();
@@ -1553,7 +1553,7 @@ fn test_restore_selective_from_new_account_in_next_delta() {
         let mut m: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         m.insert(pk_existing, Arc::new(make_account(300, &[])));
         m.insert(pk_new_only, Arc::new(make_account(555, &[7, 8])));
-        SvmSnapshot { accounts: m, clock: make_test_clock(9) }
+        SvmSnapshot { accounts: m, sysvars: make_test_sysvars(9) }
     };
 
     let divergent: FastHashSet<Pubkey> = [pk_existing].iter().copied().collect();
@@ -1600,7 +1600,7 @@ fn test_restore_selective_large_data_account_byte_for_byte() {
     delta_accounts.insert(pk, Arc::new(make_account(initial_lamports + 1, &mutated_data)));
     let delta = SvmSnapshot {
         accounts: delta_accounts,
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1683,7 +1683,7 @@ fn test_clock_restored_in_restore_selective_and_selective_from() {
     };
     let mut delta_accounts: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
     delta_accounts.insert(pk, Arc::new(make_account(2_000_000, &[9])));
-    let delta = SvmSnapshot { accounts: delta_accounts, clock: target_clock.clone() };
+    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: clock_to_sysvars(&target_clock) };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk);
@@ -1700,11 +1700,11 @@ fn test_clock_restored_in_restore_selective_and_selective_from() {
     let shared_arc = Arc::new(make_account(1_000_000, &[1, 2, 3]));
     let mut prev_accounts: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
     prev_accounts.insert(pk, shared_arc.clone());
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, clock: prev_clock };
+    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: clock_to_sysvars(&prev_clock) };
 
     let mut next_accounts: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
     next_accounts.insert(pk, shared_arc.clone());
-    let next_delta = SvmSnapshot { accounts: next_accounts, clock: next_clock.clone() };
+    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: clock_to_sysvars(&next_clock) };
 
     let prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective_from(&mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty);
@@ -1730,7 +1730,7 @@ fn test_take_delta_empty_dirty_produces_arc_clone_of_parent() {
     parent_accounts.insert(pk_a, arc_a.clone());
     parent_accounts.insert(pk_b, arc_b.clone());
     let parent_clock = svm.get_sysvar::<Clock>();
-    let parent_delta = SvmSnapshot { accounts: parent_accounts, clock: parent_clock };
+    let parent_delta = SvmSnapshot { accounts: parent_accounts, sysvars: clock_to_sysvars(&parent_clock) };
 
     let dirty = DirtyTracker::new();
     let child_delta = SvmSnapshot::take_delta(&svm, &parent_delta, &dirty);
@@ -1892,7 +1892,7 @@ fn test_restore_selective_from_empty_next_delta_restores_to_initial() {
     for (i, pk) in pks.iter().enumerate() {
         prev_accounts.insert(*pk, Arc::new(make_account(9999, &[0xBB, i as u8])));
     }
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, clock: initial.clock().clone() };
+    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
 
     let next_delta = SvmSnapshot::empty(initial.clock().clone());
 
@@ -2047,7 +2047,7 @@ fn test_restore_selective_count_matches_actual_writes() {
     let mut delta_accounts: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
     delta_accounts.insert(pk_a, Arc::new(make_account(111, &[0xA1])));
     delta_accounts.insert(pk_b, Arc::new(make_account(222, &[0xB2])));
-    let delta = SvmSnapshot { accounts: delta_accounts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: initial.sysvars.clone() };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk_a);
@@ -2133,7 +2133,7 @@ fn test_dirty_tracker_clock_flag_drives_clock_restore() {
         epoch_start_timestamp: 1500,
         leader_schedule_epoch: 9,
     };
-    let delta = SvmSnapshot { accounts: FastHashMap::default(), clock: delta_clock.clone() };
+    let delta = SvmSnapshot { accounts: FastHashMap::default(), sysvars: clock_to_sysvars(&delta_clock) };
 
     let current_clock = Clock {
         slot: 999,
@@ -2165,13 +2165,13 @@ fn test_dirty_tracker_clock_flag_drives_clock_restore() {
     assert_eq!(after_restore.slot, 50, "restore() with clock_dirty should restore snapshot clock slot");
     assert_eq!(after_restore.epoch, 2, "restore() with clock_dirty should restore snapshot clock epoch");
 
+    // All sysvars are now always restored regardless of clock_dirty flag
     let dirty_no_clock = DirtyTracker::new();
-    assert!(!dirty_no_clock.is_clock_dirty());
 
     let advanced_clock = Clock { slot: 888, ..snapshot_clock };
     svm.set_sysvar(&advanced_clock);
 
     initial.restore(&mut svm, &dirty_no_clock);
     let after_no_flag = svm.get_sysvar::<Clock>();
-    assert_eq!(after_no_flag.slot, 888, "restore() without clock_dirty should leave clock alone");
+    assert_eq!(after_no_flag.slot, 50, "restore() always restores sysvars now");
 }

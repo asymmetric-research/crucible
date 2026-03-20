@@ -127,7 +127,8 @@ fn test_svm_snapshot_accounts_and_clock() {
         executable: false,
         rent_epoch: 0,
     }));
-    let snap = SvmSnapshot { accounts, clock };
+    let sysvars = clock_to_sysvars(&clock);
+    let snap = SvmSnapshot { accounts, sysvars };
     assert_eq!(snap.account_count(), 1);
     assert!(snap.accounts().contains_key(&pk));
     assert_eq!(snap.accounts()[&pk].lamports, 999);
@@ -225,7 +226,7 @@ fn test_svm_snapshot_restore_clock() {
 }
 
 #[test]
-fn test_svm_snapshot_restore_skips_clean_clock() {
+fn test_svm_snapshot_restore_always_restores_sysvars() {
     let mut svm = LiteSVM::new();
     let original_clock = svm.get_sysvar::<Clock>();
 
@@ -239,12 +240,12 @@ fn test_svm_snapshot_restore_skips_clean_clock() {
     };
     svm.set_sysvar(&new_clock);
 
-    // Restore WITHOUT clock_dirty flag — clock should NOT be restored
+    // Restore — all sysvars are always restored now
     let dirty = DirtyTracker::new();
     snap.restore(&mut svm, &dirty);
 
     let after = svm.get_sysvar::<Clock>();
-    assert_eq!(after.slot, new_clock.slot); // still advanced
+    assert_eq!(after.slot, original_clock.slot); // restored to original
 }
 
 #[test]
@@ -360,7 +361,7 @@ fn test_svm_snapshot_restore_selective() {
     delta_accounts.insert(pk_b, Arc::new(make_account(222, &[0xBB])));
     let delta = SvmSnapshot {
         accounts: delta_accounts,
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
 
     // Scramble SVM state (simulates previous iteration left garbage)
@@ -404,7 +405,7 @@ fn test_svm_snapshot_restore_selective_from_skips_shared_arcs() {
     prev_accounts.insert(pk_changed, Arc::new(make_account(888, &[8])));
     let prev_delta = SvmSnapshot {
         accounts: prev_accounts,
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
 
     let mut next_accounts = FastHashMap::default();
@@ -412,7 +413,7 @@ fn test_svm_snapshot_restore_selective_from_skips_shared_arcs() {
     next_accounts.insert(pk_changed, Arc::new(make_account(999, &[9])));
     let next_delta = SvmSnapshot {
         accounts: next_accounts,
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
 
     // Set SVM to prev_delta values (simulate previous iteration)
@@ -459,11 +460,11 @@ fn test_svm_snapshot_restore_selective_from_respects_exec_dirty() {
     delta_accounts.insert(pk, shared_arc.clone());
     let prev_delta = SvmSnapshot {
         accounts: delta_accounts.clone(),
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
     let next_delta = SvmSnapshot {
         accounts: delta_accounts,
-        clock: initial.clock().clone(),
+        sysvars: initial.sysvars.clone(),
     };
 
     // Simulate execution dirtied pk (SVM now has garbage, not the delta value)
@@ -593,7 +594,7 @@ fn test_fingerprint_empty_dirty_set() {
     let dirty = DirtyTracker::new();
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
     assert_eq!(compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial), 0);
 }
@@ -606,7 +607,7 @@ fn test_fingerprint_changes_with_data() {
     // Create initial snapshot before modifications (empty accounts = 0 initial lamports)
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     // Use data that crosses log2_bucket boundaries:
@@ -642,7 +643,7 @@ fn test_fingerprint_deterministic() {
 
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let mut dirty = DirtyTracker::new();
@@ -905,14 +906,14 @@ fn test_restore_selective_from_next_has_new_accounts() {
     // prev_delta: only X=500
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk_x, Arc::new(make_account(500, &[5])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, clock: initial.clock().clone() };
+    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
 
     // next_delta: X=500 (same Arc) + Y=700 (new)
     let shared_x = prev_delta.accounts()[&pk_x].clone();
     let mut next_accounts = FastHashMap::default();
     next_accounts.insert(pk_x, shared_x);
     next_accounts.insert(pk_y, Arc::new(make_account(700, &[7])));
-    let next_delta = SvmSnapshot { accounts: next_accounts, clock: initial.clock().clone() };
+    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: initial.sysvars.clone() };
 
     // SVM starts at prev_delta state
     svm.set_account(pk_x, make_account(500, &[5])).unwrap();
@@ -949,12 +950,12 @@ fn test_restore_selective_from_prev_accounts_not_in_divergent() {
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk_x, Arc::new(make_account(500, &[5])));
     prev_accounts.insert(pk_y, Arc::new(make_account(600, &[6])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, clock: initial.clock().clone() };
+    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
 
     let mut next_accounts = FastHashMap::default();
     next_accounts.insert(pk_x, Arc::new(make_account(700, &[7])));
     // next_delta does NOT have Y
-    let next_delta = SvmSnapshot { accounts: next_accounts, clock: initial.clock().clone() };
+    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: initial.sysvars.clone() };
 
     // SVM at prev_delta state
     svm.set_account(pk_x, make_account(500, &[5])).unwrap();
@@ -998,7 +999,7 @@ fn test_restore_selective_empty_divergent_with_delta() {
     delta_accounts.insert(pk_a, Arc::new(make_account(111, &[0xAA])));
     delta_accounts.insert(pk_b, Arc::new(make_account(222, &[0xBB])));
     delta_accounts.insert(pk_c, Arc::new(make_account(333, &[0xCC])));
-    let delta = SvmSnapshot { accounts: delta_accounts, clock: initial.clock().clone() };
+    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: initial.sysvars.clone() };
 
     // Empty divergent (first iteration, SVM has initial state)
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1032,7 +1033,7 @@ fn test_take_delta_empty_dirty_tracker() {
     parent_accounts.insert(pk_y, Arc::new(make_account(200, &[2])));
     let parent_delta = SvmSnapshot {
         accounts: parent_accounts,
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let dirty = DirtyTracker::new(); // empty
@@ -1067,7 +1068,7 @@ fn test_take_delta_overwrites_parent_value() {
     parent_accounts.insert(pk_x, Arc::new(make_account(200, &[2])));
     let parent_delta = SvmSnapshot {
         accounts: parent_accounts,
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let mut dirty = DirtyTracker::new();
@@ -1097,7 +1098,7 @@ fn test_take_delta_deletes_account_from_parent() {
     parent_accounts.insert(pk_x, Arc::new(make_account(200, &[2])));
     let parent_delta = SvmSnapshot {
         accounts: parent_accounts,
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let mut dirty = DirtyTracker::new();
@@ -1130,7 +1131,7 @@ fn test_take_full_deleted_account_removes_key() {
     base_accounts.insert(pk_y, Arc::new(make_account(200, &[2])));
     let base = SvmSnapshot {
         accounts: base_accounts,
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let mut dirty = DirtyTracker::new();
@@ -1160,7 +1161,7 @@ fn test_take_full_adds_new_cpi_account() {
     base_accounts.insert(pk_x, Arc::new(make_account(100, &[1])));
     let base = SvmSnapshot {
         accounts: base_accounts,
-        clock: svm.get_sysvar::<Clock>(),
+        sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
 
     let mut dirty = DirtyTracker::new();
@@ -1258,11 +1259,11 @@ fn test_restore_selective_from_different_clocks() {
 
     let prev_delta = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(100),
+        sysvars: make_test_sysvars(100),
     };
     let next_delta = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(200),
+        sysvars: make_test_sysvars(200),
     };
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1296,7 +1297,7 @@ fn test_restore_selective_always_sets_clock() {
     // Delta has clock at slot 42
     let delta = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(42),
+        sysvars: make_test_sysvars(42),
     };
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1618,7 +1619,7 @@ fn test_field_novelty_new_account() {
     // pk not in initial snapshot
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(0),
+        sysvars: make_test_sysvars(0),
     };
 
     // Create account after initial
@@ -1643,7 +1644,7 @@ fn test_fingerprint_new_accounts_different_data() {
     // Empty initial — pk not present
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(0),
+        sysvars: make_test_sysvars(0),
     };
 
     let mut tracker = DirtyTracker::new();
@@ -1676,7 +1677,7 @@ fn test_field_novelty_new_accounts_different_data() {
 
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: make_test_clock(0),
+        sysvars: make_test_sysvars(0),
     };
 
     let mut tracker = DirtyTracker::new();
@@ -1712,7 +1713,7 @@ fn test_field_novelty_clock_change_is_novel() {
 
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: initial_clock,
+        sysvars: clock_to_sysvars(&initial_clock),
     };
 
     // Advance clock by 1000 slots (no account changes)
@@ -1736,7 +1737,7 @@ fn test_field_novelty_clock_epoch_change_is_novel() {
 
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: initial_clock,
+        sysvars: clock_to_sysvars(&initial_clock),
     };
 
     let tracker = DirtyTracker::new();
@@ -1766,7 +1767,7 @@ fn test_field_novelty_same_clock_not_novel() {
 
     let initial = SvmSnapshot {
         accounts: FastHashMap::default(),
-        clock: initial_clock,
+        sysvars: clock_to_sysvars(&initial_clock),
     };
 
     let tracker = DirtyTracker::new();

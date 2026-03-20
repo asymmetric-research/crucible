@@ -5763,3 +5763,177 @@ fn test_run_lcov_out_flag_exists() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("unexpected argument"), "--lcov-out should be a valid flag, got: {}", stderr);
 }
+
+// =============================================================================
+// Multi-context generalization verification
+// =============================================================================
+
+/// Helper to read a macro source file relative to the project root.
+fn read_macro_src(filename: &str) -> String {
+    let path = project_root()
+        .join("crates/crucible-fuzz-macro/src")
+        .join(filename);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+}
+
+#[test]
+fn test_no_self_b_in_codegen() {
+    // The feature/diff branch used hardcoded `self_b` references.
+    // Multi-context generalization must have zero such references.
+    for file in &["lib.rs", "codegen.rs", "singlecore.rs", "multicore.rs", "stateful.rs", "modes.rs"] {
+        let src = read_macro_src(file);
+        assert!(
+            !src.contains("self_b"),
+            "{} still contains 'self_b' — multi-context generalization is incomplete",
+            file,
+        );
+    }
+}
+
+#[test]
+fn test_contexts_helpers_exist() {
+    // All 11 (6 normal + 5 stateful) multi-context helpers must exist in codegen.rs.
+    let src = read_macro_src("codegen.rs");
+    let normal_helpers = [
+        "fn contexts_take_snapshot(",
+        "fn contexts_swap_out(",
+        "fn contexts_reset_check(",
+        "fn contexts_swap_in(",
+        "fn contexts_restore_and_clear(",
+        "fn contexts_swap_back(",
+    ];
+    let stateful_helpers = [
+        "fn stateful_extra_take_snapshot(",
+        "fn stateful_extra_swap_out(",
+        "fn stateful_extra_swap_in(",
+        "fn stateful_extra_restore_and_swap_back(",
+        "fn stateful_extra_swap_back(",
+    ];
+
+    for h in normal_helpers.iter().chain(stateful_helpers.iter()) {
+        assert!(
+            src.contains(h),
+            "codegen.rs missing helper: {}",
+            h,
+        );
+    }
+}
+
+#[test]
+fn test_contexts_param_in_all_modes() {
+    // singlecore_mode, multicore_mode, stateful_mode, stateful_singlecore_body,
+    // and stateful_multicore_body should all accept a `contexts` parameter.
+    let cases: &[(&str, &str)] = &[
+        ("singlecore.rs", "fn singlecore_mode("),
+        ("multicore.rs", "fn multicore_mode("),
+        ("stateful.rs", "fn stateful_mode("),
+        ("stateful.rs", "fn stateful_singlecore_body("),
+        ("stateful.rs", "fn stateful_multicore_body("),
+    ];
+    for (file, fn_sig) in cases {
+        let src = read_macro_src(file);
+        // Find the function signature and verify it contains `contexts:`
+        let fn_pos = src.find(fn_sig)
+            .unwrap_or_else(|| panic!("{} missing function: {}", file, fn_sig));
+        // Look at the next ~500 chars for the closing paren of the signature
+        let sig_region = &src[fn_pos..std::cmp::min(fn_pos + 500, src.len())];
+        assert!(
+            sig_region.contains("contexts:"),
+            "{} function {} does not accept a `contexts` parameter",
+            file, fn_sig,
+        );
+    }
+}
+
+#[test]
+fn test_contexts_helpers_called_in_singlecore() {
+    let src = read_macro_src("singlecore.rs");
+    let calls = [
+        "contexts_take_snapshot(",
+        "contexts_swap_out(",
+        "contexts_reset_check(",
+        "contexts_swap_in(",
+        "contexts_restore_and_clear(",
+        "contexts_swap_back(",
+    ];
+    for call in &calls {
+        assert!(
+            src.contains(call),
+            "singlecore.rs does not call codegen::{}",
+            call,
+        );
+    }
+}
+
+#[test]
+fn test_contexts_helpers_called_in_multicore() {
+    let src = read_macro_src("multicore.rs");
+    let calls = [
+        "contexts_take_snapshot(",
+        "contexts_swap_out(",
+        "contexts_reset_check(",
+        "contexts_swap_in(",
+        "contexts_restore_and_clear(",
+        "contexts_swap_back(",
+    ];
+    for call in &calls {
+        assert!(
+            src.contains(call),
+            "multicore.rs does not call codegen::{}",
+            call,
+        );
+    }
+}
+
+#[test]
+fn test_stateful_extra_helpers_called() {
+    let src = read_macro_src("stateful.rs");
+    let calls = [
+        "stateful_extra_take_snapshot(",
+        "stateful_extra_swap_out(",
+        "stateful_extra_swap_in(",
+        "stateful_extra_restore_and_swap_back(",
+        "stateful_extra_swap_back(",
+    ];
+    for call in &calls {
+        assert!(
+            src.contains(call),
+            "stateful.rs does not call codegen::{}",
+            call,
+        );
+    }
+}
+
+#[test]
+fn test_fuzz_pulse_no_duplicate() {
+    // FUZZ_PULSE should only be written via eprintln! (or format!/write! inside
+    // monitor callbacks that pipe to stderr). Never via println! to stdout —
+    // stdout is reserved for machine-parseable output like [FUZZ_FINDING].
+    for file in &["codegen.rs", "singlecore.rs", "multicore.rs", "stateful.rs"] {
+        let src = read_macro_src(file);
+        // Check there is no `println!(...FUZZ_PULSE...)` pattern
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("FUZZ_PULSE") && line.contains("println!") && !line.contains("eprintln!") {
+                panic!(
+                    "{}:{} uses println! for FUZZ_PULSE (should use eprintln!): {}",
+                    file, i + 1, line.trim(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_no_client_heartbeat() {
+    // The multicore monitor should suppress non-GLOBAL lines (per-client heartbeats).
+    let src = read_macro_src("multicore.rs");
+    assert!(
+        src.contains("(GLOBAL)"),
+        "multicore.rs should filter for (GLOBAL) lines in monitor callback",
+    );
+    assert!(
+        src.contains("Non-GLOBAL") || src.contains("non-GLOBAL") || src.contains("suppressed"),
+        "multicore.rs should document that non-GLOBAL lines are suppressed",
+    );
+}
