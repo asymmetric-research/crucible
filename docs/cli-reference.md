@@ -16,6 +16,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
+| `--binary-in <PATH>` | Run a prebuilt harness binary directly |
 | `--release` | Build in release mode (recommended) |
 | `--coverage` | Enable LCOV coverage output |
 | `--timeout <SECS>` | Stop after N seconds |
@@ -42,6 +43,9 @@ crucible run <program_name> <test_name> [OPTIONS]
 ```bash
 # Basic fuzzing
 crucible run myproject invariant_test --release --timeout 60
+
+# Run a prebuilt harness directly
+crucible run myproject invariant_test --binary-in ./fuzz/myproject/target/release/myproject_fuzz
 
 # Multi-core fuzzing (4 workers)
 crucible run myproject invariant_test --release -j 4
