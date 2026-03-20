@@ -1,4 +1,4 @@
-use std::env::current_dir;
+use std::env::{self, current_dir};
 use std::fs::{self, create_dir_all};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Parser)]
 #[command(name = "crucible", about = "Solana smart contract fuzzing framework")]
 struct Cli {
-    /// Change to this directory before doing anything (like git -C)
-    #[arg(short = 'C', long = "working-dir", global = true)]
-    working_dir: Option<PathBuf>,
+    /// Specify location of fuzz dir
+    #[arg(short = 'C', long = "fuzz-dir", global = true)]
+    fuzz_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -220,20 +220,13 @@ struct FieldDelta {
 // ============================================================================
 
 fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    eprintln!("{:?}", args);
+
     let cli = Cli::parse();
 
-    if let Some(dir) = &cli.working_dir {
-        let dir = if dir.is_absolute() {
-            dir.clone()
-        } else {
-            current_dir()?.join(dir)
-        };
-        std::env::set_current_dir(&dir)
-            .with_context(|| format!("Failed to change to directory: {}", dir.display()))?;
-    }
-
     match cli.command {
-        Commands::Init { program_name } => fuzz_init(&program_name),
+        Commands::Init { program_name } => fuzz_init(&program_name, &cli.fuzz_dir),
         Commands::Run {
             program_name,
             test_name,
@@ -263,6 +256,7 @@ fn main() -> Result<()> {
             &program_name,
             &test_name,
             binary_in,
+            &cli.fuzz_dir,
             release,
             coverage,
             timeout,
@@ -291,14 +285,27 @@ fn main() -> Result<()> {
             replay,
             regen,
             crashes_dir,
-        } => fuzz_show(&program_name, crash_file.as_deref(), replay, regen, crashes_dir.as_deref()),
+        } => fuzz_show(
+            &program_name,
+            crash_file.as_deref(),
+            replay,
+            regen,
+            crashes_dir.as_deref(),
+        ),
         Commands::Tmin {
             program_name,
             test_name,
             crash_file,
             all,
             release,
-        } => fuzz_tmin(&program_name, &test_name, crash_file.as_deref(), all, release),
+        } => fuzz_tmin(
+            &program_name,
+            &test_name,
+            &cli.fuzz_dir,
+            crash_file.as_deref(),
+            all,
+            release,
+        ),
         Commands::Cmin {
             program_name,
             test_name,
@@ -309,9 +316,18 @@ fn main() -> Result<()> {
         } => {
             let input = corpus_in.or(corpus_dir);
             let input = input.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("Corpus directory required. Provide as positional arg or --corpus-in")
+                anyhow::anyhow!(
+                    "Corpus directory required. Provide as positional arg or --corpus-in"
+                )
             })?;
-            fuzz_cmin(&program_name, &test_name, input, corpus_out.as_deref(), release)
+            fuzz_cmin(
+                &program_name,
+                &test_name,
+                &cli.fuzz_dir,
+                input,
+                corpus_out.as_deref(),
+                release,
+            )
         }
     }
 }
@@ -320,15 +336,18 @@ fn main() -> Result<()> {
 // Init Command
 // ============================================================================
 
-fn fuzz_init(program_name: &str) -> Result<()> {
+fn fuzz_init(program_name: &str, fuzz_dir: &Option<PathBuf>) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = cwd.join("fuzz");
+    let fuzz_dir = fuzz_dir.clone().unwrap_or(cwd.join("fuzz"));
 
     // Create fuzz/ directory and .gitignore
     if !fuzz_dir.exists() {
         create_dir_all(&fuzz_dir)?;
-        fs::write(fuzz_dir.join(".gitignore"), "*/target/\n*/crashes/\n.fuzz-cache/\n")
-            .context("Failed to create .gitignore")?;
+        fs::write(
+            fuzz_dir.join(".gitignore"),
+            "*/target/\n*/crashes/\n.fuzz-cache/\n",
+        )
+        .context("Failed to create .gitignore")?;
     }
 
     // Create standalone fuzz package
@@ -358,8 +377,11 @@ fn fuzz_init(program_name: &str) -> Result<()> {
     fs::write(src_dir.join("main.rs"), generate_harness(program_name))
         .context("Failed to write harness")?;
 
-    fs::write(idls_dir.join("README.md"), generate_idl_readme(program_name))
-        .context("Failed to write IDL README")?;
+    fs::write(
+        idls_dir.join("README.md"),
+        generate_idl_readme(program_name),
+    )
+    .context("Failed to write IDL README")?;
 
     println!("\nCreated fuzz harness at: fuzz/{}/", program_name);
     println!("\nNext steps:");
@@ -376,7 +398,10 @@ fn fuzz_init(program_name: &str) -> Result<()> {
         "  3. Implement action_* methods in: fuzz/{}/src/main.rs",
         program_name
     );
-    println!("  4. Run: crucible run {} invariant_test --release", program_name);
+    println!(
+        "  4. Run: crucible run {} invariant_test --release",
+        program_name
+    );
 
     Ok(())
 }
@@ -545,6 +570,7 @@ fn fuzz_run(
     program_name: &str,
     test_name: &str,
     binary_in: Option<PathBuf>,
+    fuzz_dir: &Option<PathBuf>,
     release: bool,
     coverage: bool,
     timeout: Option<u64>,
@@ -620,7 +646,7 @@ fn fuzz_run(
     }
 
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd.clone()), program_name)?;
 
     let mut cmd = if let Some(binary_path) = binary_in {
         let binary_path = resolve_path(&cwd, &binary_path);
@@ -705,7 +731,11 @@ fn fuzz_run(
             } else {
                 fuzz_dir.join("crashes")
             };
-            match find_crash_file(&crashes_search_root, program_name, &replay_path.to_string_lossy()) {
+            match find_crash_file(
+                &crashes_search_root,
+                program_name,
+                &replay_path.to_string_lossy(),
+            ) {
                 Ok((found_path, _)) => found_path,
                 Err(_) => abs_path,
             }
@@ -914,9 +944,18 @@ fn list_program_tests(fuzz_dir: &Path, program_name: &str) -> Result<()> {
 // Show Command
 // ============================================================================
 
-fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, regen: bool, custom_crashes_dir: Option<&Path>) -> Result<()> {
+fn fuzz_show(
+    program_name: &str,
+    crash_file: Option<&str>,
+    replay: bool,
+    regen: bool,
+    custom_crashes_dir: Option<&Path>,
+) -> Result<()> {
     if regen && !replay {
-        bail!("--regen requires --replay. Usage: crucible show {} --replay --regen", program_name);
+        bail!(
+            "--regen requires --replay. Usage: crucible show {} --replay --regen",
+            program_name
+        );
     }
 
     let cwd = current_dir()?;
@@ -945,13 +984,21 @@ fn fuzz_show(program_name: &str, crash_file: Option<&str>, replay: bool, regen: 
     match crash_file {
         None if replay && regen => regen_crashes(&fuzz_dir, &display_name, custom_crashes_dir),
         None => list_crashes(&fuzz_dir, &display_name, custom_crashes_dir),
-        Some(crash_name) if !replay => show_crash_metadata(&fuzz_dir, &display_name, crash_name, custom_crashes_dir),
+        Some(crash_name) if !replay => {
+            show_crash_metadata(&fuzz_dir, &display_name, crash_name, custom_crashes_dir)
+        }
         Some(crash_name) => replay_crash(&fuzz_dir, &display_name, crash_name, custom_crashes_dir),
     }
 }
 
-fn list_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<&Path>) -> Result<()> {
-    let crashes_dir = custom_crashes_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| fuzz_dir.join("crashes"));
+fn list_crashes(
+    fuzz_dir: &Path,
+    program_name: &str,
+    custom_crashes_dir: Option<&Path>,
+) -> Result<()> {
+    let crashes_dir = custom_crashes_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| fuzz_dir.join("crashes"));
     if !crashes_dir.exists() {
         println!("No crashes directory found at: {}", crashes_dir.display());
         println!("Run the fuzzer first to generate crashes.");
@@ -980,10 +1027,7 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<
         for file_entry in fs::read_dir(&test_dir)? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
-            let filename = file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if filename.ends_with(".meta.json") {
                 if let Ok(content) = fs::read_to_string(&file_path) {
                     if let Ok(meta) = serde_json::from_str::<CrashMetadata>(&content) {
@@ -1121,10 +1165,7 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<
     }
 
     let total = crashes_with_meta.len() + raw_crashes.len();
-    println!(
-        "\n=== Crashes for {} ({} total) ===\n",
-        program_name, total
-    );
+    println!("\n=== Crashes for {} ({} total) ===\n", program_name, total);
 
     // Show crashes with metadata first
     if !crashes_with_meta.is_empty() {
@@ -1157,10 +1198,7 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<
     }
 
     println!();
-    println!(
-        "To view a crash: crucible show {} <crash_id>",
-        program_name
-    );
+    println!("To view a crash: crucible show {} <crash_id>", program_name);
     println!(
         "To replay a crash: crucible show {} <crash_id> --replay",
         program_name
@@ -1169,8 +1207,15 @@ fn list_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<
     Ok(())
 }
 
-fn show_crash_metadata(fuzz_dir: &Path, program_name: &str, crash_name: &str, custom_crashes_dir: Option<&Path>) -> Result<()> {
-    let crashes_dir = custom_crashes_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| fuzz_dir.join("crashes"));
+fn show_crash_metadata(
+    fuzz_dir: &Path,
+    program_name: &str,
+    crash_name: &str,
+    custom_crashes_dir: Option<&Path>,
+) -> Result<()> {
+    let crashes_dir = custom_crashes_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| fuzz_dir.join("crashes"));
 
     // Search for .meta.json and/or raw crash file
     let mut meta_path = None;
@@ -1322,7 +1367,11 @@ fn show_crash_metadata(fuzz_dir: &Path, program_name: &str, crash_name: &str, cu
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("\nHex preview: {}{}", hex, if bytes.len() > 64 { " ..." } else { "" });
+        println!(
+            "\nHex preview: {}{}",
+            hex,
+            if bytes.len() > 64 { " ..." } else { "" }
+        );
 
         println!("\nNote: No .meta.json found. This crash was likely from a panic,");
         println!("not an invariant violation. Use --replay to reproduce it.");
@@ -1364,8 +1413,15 @@ fn format_json_compact(v: &serde_json::Value) -> String {
     }
 }
 
-fn replay_crash(fuzz_dir: &Path, program_name: &str, crash_name: &str, custom_crashes_dir: Option<&Path>) -> Result<()> {
-    let crashes_dir = custom_crashes_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| fuzz_dir.join("crashes"));
+fn replay_crash(
+    fuzz_dir: &Path,
+    program_name: &str,
+    crash_name: &str,
+    custom_crashes_dir: Option<&Path>,
+) -> Result<()> {
+    let crashes_dir = custom_crashes_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| fuzz_dir.join("crashes"));
 
     // Check if crash_name is a directory — replay all crashes in it
     let replay_dir = resolve_replay_directory(crash_name, &crashes_dir);
@@ -1414,9 +1470,7 @@ fn replay_crash_directory(fuzz_dir: &Path, program_name: &str, dir: &Path) -> Re
         let entry = entry?;
         let path = entry.path();
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.')
-                || name.ends_with(".metadata")
-                || name.ends_with(".meta.json")
+            if name.starts_with('.') || name.ends_with(".metadata") || name.ends_with(".meta.json")
             {
                 continue;
             }
@@ -1451,12 +1505,7 @@ fn replay_crash_directory(fuzz_dir: &Path, program_name: &str, dir: &Path) -> Re
     let mut errors = 0usize;
 
     for (i, (crash_id, crash_path)) in crash_files.iter().enumerate() {
-        println!(
-            "--- [{}/{}] {} ---",
-            i + 1,
-            crash_files.len(),
-            crash_id
-        );
+        println!("--- [{}/{}] {} ---", i + 1, crash_files.len(), crash_id);
 
         match run_replay(&binary_path, fuzz_dir, crash_path) {
             Ok(status) => {
@@ -1638,10 +1687,7 @@ fn build_and_find_replay_binary(
                     .context("Failed to build fuzz harness for replay")?;
 
                 if !build_status.success() {
-                    bail!(
-                        "Failed to build fuzz harness with --features {}",
-                        feature
-                    );
+                    bail!("Failed to build fuzz harness with --features {}", feature);
                 }
             }
         }
@@ -1668,10 +1714,7 @@ fn print_replay_result(status: &ExitStatus) {
         if status.code() == Some(1) {
             println!("[REPLAY] SUCCESS: Crash reproduced!");
         } else {
-            eprintln!(
-                "\nReplay failed with exit code: {:?}",
-                status.code()
-            );
+            eprintln!("\nReplay failed with exit code: {:?}", status.code());
         }
     } else {
         println!("[REPLAY] Replay completed without crash.");
@@ -1685,16 +1728,18 @@ fn print_replay_result(status: &ExitStatus) {
 fn fuzz_tmin(
     program_name: &str,
     test_name: &str,
+    fuzz_dir: &Option<PathBuf>,
     crash_file: Option<&str>,
     all: bool,
     release: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd), program_name)?;
 
     // Auto-detect: if test_name looks like a crash ID and no crash_file was given,
     // search all test directories for it. Allows: crucible tmin stake crash_abc123
-    let (test_name, crash_file) = if crash_file.is_none() && !all && test_name.starts_with("crash_") {
+    let (test_name, crash_file) = if crash_file.is_none() && !all && test_name.starts_with("crash_")
+    {
         let crashes_root = fuzz_dir.join("crashes");
         let mut found_test = None;
         if crashes_root.is_dir() {
@@ -1714,7 +1759,10 @@ fn fuzz_tmin(
             None => bail!(
                 "Could not find crash '{}' in any test directory under: {}\n\
                  Usage: crucible tmin {} <test_name> {} --release",
-                test_name, crashes_root.display(), program_name, test_name
+                test_name,
+                crashes_root.display(),
+                program_name,
+                test_name
             ),
         }
     } else {
@@ -1761,7 +1809,10 @@ fn fuzz_tmin(
                 "Provide a crash file or use --all to minimize all crashes.\n\
                  Usage: crucible tmin {} {} <crash_id> --release\n\
                  Usage: crucible tmin {} {} --all --release",
-                program_name, test_name, program_name, test_name
+                program_name,
+                test_name,
+                program_name,
+                test_name
             )
         })?;
         let binary_path = crashes_dir.join(crash_name);
@@ -1806,7 +1857,10 @@ fn fuzz_tmin(
     if all {
         // --all mode: single process invocation, binary iterates all crashes internally
         // This avoids re-running setup() for each crash (major perf win)
-        println!("[TMIN] Minimizing all {} crashes in a single process...", crash_files.len());
+        println!(
+            "[TMIN] Minimizing all {} crashes in a single process...",
+            crash_files.len()
+        );
         let status = Command::new(&binary_path)
             .current_dir(&fuzz_dir)
             .env("FUZZ_TMIN_ALL_DIR", &crashes_dir)
@@ -1846,8 +1900,14 @@ fn fuzz_tmin(
     Ok(())
 }
 
-fn regen_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option<&Path>) -> Result<()> {
-    let crashes_dir = custom_crashes_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| fuzz_dir.join("crashes"));
+fn regen_crashes(
+    fuzz_dir: &Path,
+    program_name: &str,
+    custom_crashes_dir: Option<&Path>,
+) -> Result<()> {
+    let crashes_dir = custom_crashes_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| fuzz_dir.join("crashes"));
     if !crashes_dir.exists() {
         bail!(
             "No crashes directory found at: {}\nRun the fuzzer first to generate crashes.",
@@ -1900,20 +1960,11 @@ fn regen_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option
         }
 
         crash_files.sort_by(|a, b| a.0.cmp(&b.0));
-        println!(
-            "\n[REGEN] {} — {} crash(es)",
-            test_name,
-            crash_files.len()
-        );
+        println!("\n[REGEN] {} — {} crash(es)", test_name, crash_files.len());
 
         for (idx, (crash_id, crash_path)) in crash_files.iter().enumerate() {
             total_count += 1;
-            print!(
-                "[REGEN] {}/{} {}... ",
-                idx + 1,
-                crash_files.len(),
-                crash_id
-            );
+            print!("[REGEN] {}/{} {}... ", idx + 1, crash_files.len(), crash_id);
 
             let status = Command::new(&binary_path)
                 .current_dir(fuzz_dir)
@@ -1962,12 +2013,13 @@ fn regen_crashes(fuzz_dir: &Path, program_name: &str, custom_crashes_dir: Option
 fn fuzz_cmin(
     program_name: &str,
     test_name: &str,
+    fuzz_dir: &Option<PathBuf>,
     corpus_in: &Path,
     corpus_out: Option<&Path>,
     release: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd.clone()), program_name)?;
 
     let corpus_in_abs = resolve_path(&cwd, corpus_in);
     if !corpus_in_abs.exists() {
@@ -1985,9 +2037,7 @@ fn fuzz_cmin(
                 return false;
             }
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            !name.starts_with('.')
-                && !name.ends_with(".metadata")
-                && !name.ends_with(".meta.json")
+            !name.starts_with('.') && !name.ends_with(".metadata") && !name.ends_with(".meta.json")
         })
         .count();
 
@@ -2137,13 +2187,11 @@ fn resolve_binary_from_metadata(
                 if let Some(targets) = package["targets"].as_array() {
                     for target in targets {
                         let kinds = target["kind"].as_array();
-                        let is_bin = kinds.map_or(false, |k| {
-                            k.iter().any(|v| v.as_str() == Some("bin"))
-                        });
+                        let is_bin =
+                            kinds.map_or(false, |k| k.iter().any(|v| v.as_str() == Some("bin")));
                         if is_bin {
                             if let Some(bin_name) = target["name"].as_str() {
-                                let binary =
-                                    PathBuf::from(target_dir).join(profile).join(bin_name);
+                                let binary = PathBuf::from(target_dir).join(profile).join(bin_name);
                                 if exists_fn(&binary) {
                                     return Some(binary);
                                 }
@@ -2210,13 +2258,9 @@ fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Resul
 
     if output.status.success() {
         if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            return resolve_binary_from_metadata(
-                &metadata,
-                fuzz_dir,
-                program_name,
-                profile,
-                |p| p.exists(),
-            );
+            return resolve_binary_from_metadata(&metadata, fuzz_dir, program_name, profile, |p| {
+                p.exists()
+            });
         }
     }
 
@@ -2278,7 +2322,10 @@ mod tests {
         // This is the exact scenario: package is "solana_program_fuzz", program is "stake"
         let metadata = make_metadata(
             "/project/fuzz/stake/target",
-            json!([make_package("solana_program_fuzz", &["solana_program_fuzz"])]),
+            json!([make_package(
+                "solana_program_fuzz",
+                &["solana_program_fuzz"]
+            )]),
         );
         let existing = exists_set(&["/project/fuzz/stake/target/release/solana_program_fuzz"]);
 
@@ -2370,10 +2417,7 @@ mod tests {
         // Two packages, neither contains "stake" — should fail (no single-package fallback)
         let metadata = make_metadata(
             "/project/target",
-            json!([
-                make_package("foo", &["foo"]),
-                make_package("bar", &["bar"])
-            ]),
+            json!([make_package("foo", &["foo"]), make_package("bar", &["bar"])]),
         );
         let existing = exists_set(&["/project/target/release/foo", "/project/target/release/bar"]);
 
@@ -2502,12 +2546,10 @@ mod tests {
             existing,
         );
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Fuzz binary not found")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Fuzz binary not found"));
     }
 
     // === Debug profile ===
