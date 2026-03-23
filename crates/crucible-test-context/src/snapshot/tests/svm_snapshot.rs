@@ -198,6 +198,151 @@ fn test_svm_snapshot_restore_removes_created_accounts() {
     assert!(svm.get_account(&pk_new).is_none());
 }
 
+// =========================================================================
+// Executable (program) account protection — prevents programs_cache desync
+// =========================================================================
+
+/// Helper: create an executable (program) account that LiteSVM will accept.
+/// Uses the native_loader as owner so LiteSVM stores it without ELF validation.
+fn make_executable_account(lamports: u64, data: &[u8]) -> Account {
+    Account {
+        lamports,
+        data: data.to_vec(),
+        owner: solana_pubkey::pubkey!("NativeLoader1111111111111111111111111111111"),
+        executable: true,
+        rent_epoch: 0,
+    }
+}
+
+#[test]
+fn test_restore_skips_zeroing_executable_accounts() {
+    // Executable accounts created during an iteration must NOT be zeroed on
+    // restore — zeroing removes them from accounts_db but not programs_cache,
+    // causing a desync panic in litesvm.
+    let mut svm = LiteSVM::new();
+    let pk_original = Pubkey::new_unique();
+    svm.set_account(pk_original, make_account(100, &[1])).unwrap();
+
+    let tracked: HashSet<Pubkey> = [pk_original].into_iter().collect();
+    let snap = SvmSnapshot::take(&svm, &tracked);
+
+    // Simulate a program being deployed during an iteration
+    let pk_program = Pubkey::new_unique();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    assert!(svm.get_account(&pk_program).is_some());
+
+    // Restore — pk_program should be SKIPPED (not zeroed)
+    let mut dirty = DirtyTracker::new();
+    dirty.mark_account_dirty(&pk_program);
+    snap.restore(&mut svm, &dirty);
+
+    // Executable account must still exist
+    let prog = svm.get_account(&pk_program);
+    assert!(prog.is_some(), "executable account should NOT be zeroed by restore");
+    assert_eq!(prog.unwrap().lamports, 5000);
+}
+
+#[test]
+fn test_restore_zeroes_non_executable_but_skips_executable() {
+    // When both executable and non-executable accounts are created during an
+    // iteration, restore should zero only the non-executable ones.
+    let mut svm = LiteSVM::new();
+    let pk_initial = Pubkey::new_unique();
+    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+
+    let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
+    let snap = SvmSnapshot::take(&svm, &tracked);
+
+    let pk_data = Pubkey::new_unique();
+    let pk_program = Pubkey::new_unique();
+    svm.set_account(pk_data, make_account(500, &[9, 9])).unwrap();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+
+    let mut dirty = DirtyTracker::new();
+    dirty.mark_account_dirty(&pk_data);
+    dirty.mark_account_dirty(&pk_program);
+    snap.restore(&mut svm, &dirty);
+
+    // Non-executable gets zeroed (deleted)
+    assert!(svm.get_account(&pk_data).is_none(),
+        "non-executable created account should be zeroed");
+    // Executable survives
+    assert!(svm.get_account(&pk_program).is_some(),
+        "executable account should NOT be zeroed");
+}
+
+#[test]
+fn test_restore_selective_skips_zeroing_executable_accounts() {
+    // restore_selective: executable accounts in divergent_keys but not in
+    // initial snapshot must not be zeroed.
+    let mut svm = LiteSVM::new();
+    let pk_initial = Pubkey::new_unique();
+    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+
+    let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    // Simulate: previous iteration deployed a program
+    let pk_program = Pubkey::new_unique();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    // And created a data account
+    let pk_data = Pubkey::new_unique();
+    svm.set_account(pk_data, make_account(300, &[7, 8])).unwrap();
+
+    // Both are in divergent_keys (dirtied by previous iteration)
+    let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
+    divergent.insert(pk_program);
+    divergent.insert(pk_data);
+
+    // Restore to empty delta (= initial state, neither account in delta)
+    let empty_delta = SvmSnapshot::empty(initial.clock());
+    initial.restore_selective(&mut svm, &divergent, &empty_delta);
+
+    // Data account gets zeroed
+    assert!(svm.get_account(&pk_data).is_none(),
+        "non-executable divergent account should be zeroed");
+    // Program account survives
+    assert!(svm.get_account(&pk_program).is_some(),
+        "executable divergent account should NOT be zeroed by restore_selective");
+}
+
+#[test]
+fn test_restore_selective_from_skips_zeroing_executable_accounts() {
+    // restore_selective_from: same protection applies when restoring with
+    // delta-to-delta comparison.
+    let mut svm = LiteSVM::new();
+    let pk_initial = Pubkey::new_unique();
+    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+
+    let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
+    let initial = SvmSnapshot::take(&svm, &tracked);
+
+    // Simulate: previous iteration deployed a program and created a data account
+    let pk_program = Pubkey::new_unique();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    let pk_data = Pubkey::new_unique();
+    svm.set_account(pk_data, make_account(300, &[7, 8])).unwrap();
+
+    let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
+    divergent.insert(pk_program);
+    divergent.insert(pk_data);
+
+    let prev_delta = SvmSnapshot::empty(initial.clock());
+    let next_delta = SvmSnapshot::empty(initial.clock());
+    let prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
+
+    initial.restore_selective_from(
+        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+    );
+
+    // Data account gets zeroed
+    assert!(svm.get_account(&pk_data).is_none(),
+        "non-executable divergent account should be zeroed");
+    // Program account survives
+    assert!(svm.get_account(&pk_program).is_some(),
+        "executable divergent account should NOT be zeroed by restore_selective_from");
+}
+
 #[test]
 fn test_svm_snapshot_restore_clock() {
     let mut svm = LiteSVM::new();

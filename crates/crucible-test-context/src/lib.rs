@@ -1848,22 +1848,31 @@ impl TestContext {
     // Snapshot/Restore API (always-on in fuzz mode)
     // =========================================================================
 
-    /// Take a snapshot of all tracked accounts + Clock sysvar.
+    /// Take a snapshot of ALL accounts in the SVM.
     /// Called once after setup, before the fuzz loop begins.
     ///
-    /// Also includes accounts that were touched during setup transactions
-    /// (from the dirty tracker), which captures CPI-created accounts like PDAs
-    /// that aren't in `tracked_accounts`.
+    /// Uses `take_all` to capture every account in the SVM's accounts_db,
+    /// not just explicitly tracked or dirty-tracked accounts. This prevents
+    /// a critical bug where accounts created during setup (e.g., via direct
+    /// `ctx.svm.set_account()` calls or as side effects of SVM execution)
+    /// would be missing from the snapshot. When a fuzz action later touches
+    /// such an account, restore() would zero it (treating it as "created
+    /// during iteration"), corrupting state for all subsequent iterations.
     pub fn take_snapshot(&mut self) {
-        // Merge dirty tracker accounts into tracked set so CPI-created accounts
-        // (e.g., PDAs created by Initialize instructions) are included in the snapshot
-        for pubkey in self.dirty_tracker.dirty_accounts() {
-            Arc::make_mut(&mut self.tracked_accounts).insert(*pubkey);
+        // Sync tracked_accounts with everything in the SVM so that
+        // tracked_accounts_count() reflects reality (used in diagnostics).
+        let db_keys: Vec<Pubkey> = self.svm.accounts_db().inner.keys().copied().collect();
+        {
+            let tracked = Arc::make_mut(&mut self.tracked_accounts);
+            for pubkey in &db_keys {
+                tracked.insert(*pubkey);
+            }
         }
-        self.snapshot = Some(snapshot::SvmSnapshot::take(
-            &self.svm,
-            &self.tracked_accounts,
-        ));
+        // Snapshot ALL accounts — not just tracked/dirty ones.
+        // This is the same approach used by stateful multicore mode (take_all)
+        // and costs only a one-time O(all_accounts) at setup. Per-iteration
+        // restore remains O(dirty) since it only touches dirty_tracker accounts.
+        self.snapshot = Some(snapshot::SvmSnapshot::take_all(&self.svm));
         // Clear the dirty tracker so it's fresh for the first iteration
         self.dirty_tracker.clear();
     }

@@ -61,7 +61,15 @@ impl SvmSnapshot {
                     let _ = svm.set_account(*pubkey, (**original).clone());
                 }
                 None => {
-                    // Created during iteration — remove by zeroing
+                    // Created during iteration — remove by zeroing.
+                    // Skip executable (program) accounts: zeroing them removes from
+                    // accounts_db but NOT from programs_cache, causing a desync that
+                    // panics in litesvm (lib.rs:981 unwrap on None).
+                    if let Some(existing) = svm.get_account(pubkey) {
+                        if existing.executable {
+                            continue;
+                        }
+                    }
                     let _ = svm.set_account(
                         *pubkey,
                         Account {
@@ -159,7 +167,14 @@ impl SvmSnapshot {
             if let Some(initial_account) = self.accounts.get(pubkey) {
                 let _ = svm.set_account(*pubkey, (**initial_account).clone());
             } else {
-                // Account was created during prev iteration but doesn't exist in initial — zero it
+                // Account was created during prev iteration but doesn't exist in initial — zero it.
+                // Skip executable (program) accounts: zeroing them removes from accounts_db but
+                // NOT from programs_cache, causing a desync that panics in litesvm (lib.rs:981).
+                if let Some(existing) = svm.get_account(pubkey) {
+                    if existing.executable {
+                        continue;
+                    }
+                }
                 let _ = svm.set_account(*pubkey, Account { lamports: 0, ..Default::default() });
             }
             count += 1;
@@ -208,6 +223,12 @@ impl SvmSnapshot {
             if let Some(initial_account) = self.accounts.get(pubkey) {
                 let _ = svm.set_account(*pubkey, (**initial_account).clone());
             } else {
+                // Skip executable (program) accounts — see restore_selective comment.
+                if let Some(existing) = svm.get_account(pubkey) {
+                    if existing.executable {
+                        continue;
+                    }
+                }
                 let _ = svm.set_account(*pubkey, Account { lamports: 0, ..Default::default() });
             }
             count += 1;
