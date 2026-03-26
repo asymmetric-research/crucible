@@ -42,6 +42,10 @@ pub struct PositionData {
     pub owner_idx: usize,
     pub has_liquidity: bool,
     pub bundle_info: Option<BundlePositionInfo>,  // None for regular positions
+    /// True if position was opened with Token-2022 (open_position_with_token_extensions)
+    pub is_token_2022: bool,
+    /// True if position has been locked via lock_position
+    pub is_locked: bool,
     /// Previous fee_owed values for monotonicity tracking (detects wrapping_add overflow)
     pub prev_fee_owed_a: u64,
     pub prev_fee_owed_b: u64,

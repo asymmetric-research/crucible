@@ -88,6 +88,9 @@ enum Commands {
         /// Track per-action byte-level account diffs (implies --taint)
         #[arg(long)]
         taint_diffs: bool,
+        /// Path to alternative program .so binary (for coverage with debug builds)
+        #[arg(long)]
+        program_so: Option<PathBuf>,
         /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
         #[arg(long)]
         symbols: Option<PathBuf>,
@@ -248,6 +251,7 @@ fn main() -> Result<()> {
             max_depth,
             taint,
             taint_diffs,
+            program_so,
             symbols,
             mode,
             lcov_out,
@@ -274,6 +278,7 @@ fn main() -> Result<()> {
             max_depth,
             taint,
             taint_diffs,
+            program_so,
             symbols,
             mode,
             lcov_out,
@@ -588,6 +593,7 @@ fn fuzz_run(
     max_depth: Option<u32>,
     taint: bool,
     taint_diffs: bool,
+    program_so: Option<PathBuf>,
     symbols: Option<PathBuf>,
     mode: Option<String>,
     lcov_out: Option<PathBuf>,
@@ -607,9 +613,6 @@ fn fuzz_run(
                 dry_run = true;
             }
             "explore" => {
-                if corpus_in.is_none() && Path::new("./corpus").is_dir() {
-                    corpus_in = Some("./corpus".into());
-                }
                 if corpus_out.is_none() {
                     corpus_out = Some("./output".into());
                 }
@@ -782,6 +785,12 @@ fn fuzz_run(
     } else if taint {
         cmd.env("FUZZ_TAINT", "1");
         println!("[FUZZ] Taint enabled: per-action read/write account tracking");
+    }
+
+    if let Some(ref program_so_path) = program_so {
+        let abs_path = resolve_path(&cwd, program_so_path);
+        cmd.env("FUZZ_PROGRAM_SO", &abs_path);
+        println!("[FUZZ] Program binary override: {}", abs_path.display());
     }
 
     if let Some(ref symbols_path) = symbols {

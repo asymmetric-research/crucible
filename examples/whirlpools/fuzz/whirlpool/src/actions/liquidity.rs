@@ -341,8 +341,6 @@
         #[range(0..5)] position_idx: usize,
         liquidity_amount: u64,
     ) -> bool {
-        // Disabled: binary/IDL mismatch causes access violation
-        return false;
         if position_idx >= self.positions.len() {
             return false;
         }
@@ -423,8 +421,6 @@
         #[range(0..5)] position_idx: usize,
         liquidity_amount: u64,
     ) -> bool {
-        // Disabled: binary/IDL mismatch causes access violation
-        return false;
         if position_idx >= self.positions.len() {
             return false;
         }

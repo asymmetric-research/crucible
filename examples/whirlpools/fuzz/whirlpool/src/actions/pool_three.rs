@@ -675,6 +675,8 @@
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,

@@ -229,15 +229,25 @@ where
     //   - /Users/runner/... (Solana platform-tools stdlib)
     //   - bare "src/..." (dependency crates compiled in the registry)
     let is_user_source = |file: &str| -> bool {
-        // Absolute paths outside the workspace (stdlib, platform-tools)
         if file.starts_with('/') {
-            // Keep files under the workspace root (inferred from FUZZ_SYMBOLS)
+            // Exclude known non-user paths (stdlib, platform-tools, registry crates)
+            if file.contains("/.cargo/registry/")
+                || file.contains("/.rustup/toolchains/")
+                || file.contains("/platform-tools/")
+                || file.contains("/Users/runner/")
+                || file.contains("/home/runner/")
+            {
+                return false;
+            }
+            // If we can infer workspace root from FUZZ_SYMBOLS, restrict to it
             if let Some(root) = std::env::var("FUZZ_SYMBOLS").ok().and_then(|p| {
                 p.find("/target/").map(|idx| p[..idx].to_string())
             }) {
                 return file.starts_with(&root);
             }
-            return false;
+            // No workspace root available (e.g. bundled symbols.so) — keep all
+            // absolute paths that weren't excluded above
+            return true;
         }
         // Relative paths: "programs/..." is user code.
         // Bare "src/..." is typically a dependency crate (anchor, borsh, serde, etc.)

@@ -84,6 +84,8 @@
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,
@@ -286,6 +288,8 @@
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,
@@ -386,6 +390,8 @@
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,
@@ -469,6 +475,8 @@
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,
@@ -824,6 +832,8 @@
                         bundle_idx: bi,
                         bundle_index,
                     }),
+                    is_token_2022: false,
+                    is_locked: false,
                     prev_fee_owed_a: 0,
                     prev_fee_owed_b: 0,
                     fees_just_collected: false,
@@ -979,5 +989,329 @@
             }
         };
         action_stats::record(&action_stats::DELETE_POSITION_BUNDLE, success);
+        success
+    }
+
+    // =========================================================================
+    // Token-2022 Position Lifecycle
+    // =========================================================================
+
+    /// Open a position using Token-2022 (required for lock_position).
+    /// Creates a position mint via Token-2022 with optional metadata extension.
+    pub fn action_open_position_with_token_extensions(
+        &mut self,
+        #[range(0..3)] user_idx: usize,
+        tick_lower_offset: i64,
+        tick_upper_offset: i64,
+        with_metadata: bool,
+    ) -> bool {
+        if self.positions.len() >= 20 {
+            return false;
+        }
+
+        let tick_lower_offset = tick_lower_offset as i32;
+        let tick_upper_offset = tick_upper_offset as i32;
+
+        let chosen_array_idx = (tick_lower_offset.unsigned_abs() as usize) % self.pool.tick_arrays.len();
+        let base_start = self.pool.tick_arrays[chosen_array_idx].0;
+        let inner_offset = ((tick_lower_offset.abs() % (TICK_ARRAY_SIZE as i32)).max(0)) * (TICK_SPACING as i32);
+        let tick_lower_raw = base_start + inner_offset;
+        let span = ((tick_upper_offset.abs() % 20) + 1) * (TICK_SPACING as i32);
+        let tick_upper_raw = tick_lower_raw + span;
+
+        let tick_lower_index = tick_lower_raw.max(MIN_TICK_INDEX).min(MAX_TICK_INDEX - TICK_SPACING as i32);
+        let tick_upper_index = tick_upper_raw.max(tick_lower_index + TICK_SPACING as i32).min(MAX_TICK_INDEX);
+
+        let user = &self.users[user_idx];
+        let position_mint = Keypair::new();
+
+        let (position, _) = Pubkey::find_program_address(
+            &[b"position", position_mint.pubkey().as_ref()],
+            &self.program_id,
+        );
+
+        // Token-2022 ATA derivation (different from SPL Token)
+        let (position_token_account, _) = Pubkey::find_program_address(
+            &[
+                user.keypair.pubkey().as_ref(),
+                TOKEN_2022_PROGRAM_ID.as_ref(),
+                position_mint.pubkey().as_ref(),
+            ],
+            &associated_token::ID,
+        );
+
+        let result = self.ctx.program(self.program_id)
+            .call(instruction::OpenPositionWithTokenExtensions {
+                tick_lower_index,
+                tick_upper_index,
+                with_token_metadata_extension: with_metadata,
+            })
+            .accounts(accounts::OpenPositionWithTokenExtensions {
+                funder: user.keypair.pubkey(),
+                owner: user.keypair.pubkey(),
+                position,
+                position_mint: position_mint.pubkey(),
+                position_token_account,
+                whirlpool: self.pool.whirlpool,
+            })
+            .signers(&[&*user.keypair, &position_mint])
+            .send();
+
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
+                if let Ok(pos_state) = self.ctx.read_anchor_account::<whirlpool::state::Position>(&position) {
+                    fuzz_assert_eq!(pos_state.tick_lower_index, tick_lower_index,
+                        "open_pos_te: tick_lower mismatch");
+                    fuzz_assert_eq!(pos_state.tick_upper_index, tick_upper_index,
+                        "open_pos_te: tick_upper mismatch");
+                    fuzz_assert_eq!(pos_state.liquidity, 0,
+                        "open_pos_te: new position has non-zero liquidity");
+                }
+                self.positions.push(PositionData {
+                    position,
+                    position_mint: position_mint.pubkey(),
+                    position_token_account,
+                    tick_lower_index,
+                    tick_upper_index,
+                    owner_idx: user_idx,
+                    has_liquidity: false,
+                    bundle_info: None,
+                    is_token_2022: true,
+                    is_locked: false,
+                    prev_fee_owed_a: 0,
+                    prev_fee_owed_b: 0,
+                    fees_just_collected: false,
+                });
+                debug_print!("[OPEN_POS_TE] SUCCESS: user={} ticks=[{},{}] meta={}",
+                    user_idx, tick_lower_index, tick_upper_index, with_metadata);
+                true
+            }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[OPEN_POS_TE] TX_FAILED: user={} ticks=[{},{}]",
+                    user_idx, tick_lower_index, tick_upper_index);
+                for log in logs { debug_print!("  {}", log); }
+                false
+            }
+            Err(e) => {
+                debug_print!("[OPEN_POS_TE] SEND_FAILED: {:?}", e);
+                false
+            }
+        };
+        action_stats::record(&action_stats::OPEN_POS_TOKEN_EXT, success);
+        success
+    }
+
+    /// Close a Token-2022 position (burns Token-2022 mint).
+    /// Only works for empty positions opened with open_position_with_token_extensions.
+    pub fn action_close_position_with_token_extensions(&mut self, #[range(0..5)] position_idx: usize) -> bool {
+        if position_idx >= self.positions.len() {
+            return false;
+        }
+        let pos = &self.positions[position_idx];
+        // Must be a Token-2022 position
+        if !pos.is_token_2022 {
+            return false;
+        }
+        // Must be empty and unlocked
+        if pos.has_liquidity || pos.is_locked {
+            return false;
+        }
+        // Skip bundled positions
+        if pos.bundle_info.is_some() {
+            return false;
+        }
+
+        // Verify on-chain emptiness
+        if let Ok(pos_state) = self.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+            if pos_state.liquidity > 0 || pos_state.fee_owed_a > 0 || pos_state.fee_owed_b > 0 {
+                return false;
+            }
+            for ri in &pos_state.reward_infos {
+                if ri.amount_owed > 0 {
+                    return false;
+                }
+            }
+        }
+
+        let user = &self.users[pos.owner_idx];
+        let result = self.ctx.program(self.program_id)
+            .call(instruction::ClosePositionWithTokenExtensions {})
+            .accounts(accounts::ClosePositionWithTokenExtensions {
+                position_authority: user.keypair.pubkey(),
+                receiver: user.keypair.pubkey(),
+                position: pos.position,
+                position_mint: pos.position_mint,
+                position_token_account: pos.position_token_account,
+            })
+            .signers(&[&*user.keypair])
+            .send();
+
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
+                debug_print!("[CLOSE_POS_TE] SUCCESS: pos={}", position_idx);
+                self.positions.remove(position_idx);
+                true
+            }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[CLOSE_POS_TE] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
+            }
+            Err(e) => {
+                debug_print!("[CLOSE_POS_TE] SEND_FAILED: {:?}", e);
+                false
+            }
+        };
+        action_stats::record(&action_stats::CLOSE_POS_TOKEN_EXT, success);
+        success
+    }
+
+    /// Lock a Token-2022 position to prevent liquidity changes.
+    /// Position must have liquidity and be created with token extensions.
+    pub fn action_lock_position(&mut self, #[range(0..5)] position_idx: usize) -> bool {
+        if position_idx >= self.positions.len() {
+            return false;
+        }
+        // Extract values to avoid borrow conflict
+        let pos_is_t22 = self.positions[position_idx].is_token_2022;
+        let pos_has_liq = self.positions[position_idx].has_liquidity;
+        let pos_locked = self.positions[position_idx].is_locked;
+        if !pos_is_t22 || !pos_has_liq || pos_locked {
+            return false;
+        }
+
+        let pos_pubkey = self.positions[position_idx].position;
+        let pos_mint = self.positions[position_idx].position_mint;
+        let pos_token_account = self.positions[position_idx].position_token_account;
+        let owner_idx = self.positions[position_idx].owner_idx;
+        let user_kp = self.users[owner_idx].keypair.clone();
+
+        // Derive LockConfig PDA: seeds = [b"lock_config", position_pubkey]
+        let (lock_config, _) = Pubkey::find_program_address(
+            &[b"lock_config", pos_pubkey.as_ref()],
+            &self.program_id,
+        );
+
+        let result = self.ctx.program(self.program_id)
+            .call(instruction::LockPosition {
+                lock_type: whirlpool::types::LockType::Permanent,
+            })
+            .accounts(accounts::LockPosition {
+                funder: user_kp.pubkey(),
+                position_authority: user_kp.pubkey(),
+                position: pos_pubkey,
+                position_mint: pos_mint,
+                position_token_account: pos_token_account,
+                lock_config,
+                whirlpool: self.pool.whirlpool,
+            })
+            .signers(&[&*user_kp])
+            .send();
+
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
+                // Verify LockConfig was created
+                if let Ok(lock_state) = self.ctx.read_anchor_account::<whirlpool::state::LockConfig>(&lock_config) {
+                    fuzz_assert_eq!(lock_state.position, pos_pubkey,
+                        "lock_position: LockConfig.position mismatch");
+                    fuzz_assert_eq!(lock_state.whirlpool, self.pool.whirlpool,
+                        "lock_position: LockConfig.whirlpool mismatch");
+                    fuzz_assert!(lock_state.locked_timestamp > 0,
+                        "lock_position: LockConfig.locked_timestamp is zero");
+                }
+                self.positions[position_idx].is_locked = true;
+                debug_print!("[LOCK_POS] SUCCESS: pos={}", position_idx);
+                true
+            }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[LOCK_POS] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
+            }
+            Err(e) => {
+                debug_print!("[LOCK_POS] SEND_FAILED: {:?}", e);
+                false
+            }
+        };
+        action_stats::record(&action_stats::LOCK_POSITION, success);
+        success
+    }
+
+    /// Transfer a locked Token-2022 position to a different user.
+    pub fn action_transfer_locked_position(
+        &mut self,
+        #[range(0..5)] position_idx: usize,
+        #[range(0..3)] dest_user_idx: usize,
+    ) -> bool {
+        if position_idx >= self.positions.len() || dest_user_idx >= self.users.len() {
+            return false;
+        }
+        // Extract values to avoid borrow conflict
+        let pos_locked = self.positions[position_idx].is_locked;
+        let pos_is_t22 = self.positions[position_idx].is_token_2022;
+        let pos_owner_idx = self.positions[position_idx].owner_idx;
+        if !pos_locked || !pos_is_t22 {
+            return false;
+        }
+        if pos_owner_idx == dest_user_idx {
+            return false;
+        }
+
+        let pos_pubkey = self.positions[position_idx].position;
+        let pos_mint = self.positions[position_idx].position_mint;
+        let pos_token_account = self.positions[position_idx].position_token_account;
+        let src_kp = self.users[pos_owner_idx].keypair.clone();
+        let dest_kp = self.users[dest_user_idx].keypair.clone();
+
+        // Derive LockConfig PDA
+        let (lock_config, _) = Pubkey::find_program_address(
+            &[b"lock_config", pos_pubkey.as_ref()],
+            &self.program_id,
+        );
+
+        // Derive destination Token-2022 ATA
+        let (destination_token_account, _) = Pubkey::find_program_address(
+            &[
+                dest_kp.pubkey().as_ref(),
+                TOKEN_2022_PROGRAM_ID.as_ref(),
+                pos_mint.as_ref(),
+            ],
+            &associated_token::ID,
+        );
+
+        let result = self.ctx.program(self.program_id)
+            .call(instruction::TransferLockedPosition {})
+            .accounts(accounts::TransferLockedPosition {
+                position_authority: src_kp.pubkey(),
+                receiver: dest_kp.pubkey(),
+                position: pos_pubkey,
+                position_mint: pos_mint,
+                position_token_account: pos_token_account,
+                destination_token_account,
+                lock_config,
+            })
+            .signers(&[&*src_kp])
+            .send();
+
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
+                // Update position tracking: new owner + new token account
+                self.positions[position_idx].owner_idx = dest_user_idx;
+                self.positions[position_idx].position_token_account = destination_token_account;
+                debug_print!("[TRANSFER_LOCKED] SUCCESS: pos={} from user {} to user {}",
+                    position_idx, pos_owner_idx, dest_user_idx);
+                true
+            }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[TRANSFER_LOCKED] TX_FAILED: pos={}", position_idx);
+                for log in logs { debug_print!("  {}", log); }
+                false
+            }
+            Err(e) => {
+                debug_print!("[TRANSFER_LOCKED] SEND_FAILED: {:?}", e);
+                false
+            }
+        };
+        action_stats::record(&action_stats::TRANSFER_LOCKED_POSITION, success);
         success
     }

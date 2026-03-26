@@ -22,3 +22,15 @@ pub const MIN_SQRT_PRICE_X64: u128 = 4295048016;
 // Fee rate bounds from whirlpool program (math/token_math.rs)
 pub const MAX_FEE_RATE: u16 = 60_000;       // 6%
 pub const MAX_PROTOCOL_FEE_RATE: u16 = 2_500; // 25%
+
+// Token-2022 program ID (for open_position_with_token_extensions, lock_position, etc.)
+pub const TOKEN_2022_PROGRAM_ID: solana_pubkey::Pubkey =
+    solana_pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+// Metadata update auth for position token extensions (fixed in IDL)
+pub const METADATA_UPDATE_AUTH: solana_pubkey::Pubkey =
+    solana_pubkey::Pubkey::from_str_const("3axbTs2z5GBy6usVbNVoqEgZMng3vZvMnAoX29BFfwhr");
+
+// Rent sysvar (for initialize_reward_v2)
+pub const RENT_SYSVAR_ID: solana_pubkey::Pubkey =
+    solana_pubkey::Pubkey::from_str_const("SysvarRent111111111111111111111111111111111");

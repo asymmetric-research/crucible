@@ -1684,7 +1684,16 @@ impl TestContext {
     }
 
     pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
-        let program_data = std::fs::read(program_path)?;
+        let actual_path = if let Ok(override_path) = std::env::var("FUZZ_PROGRAM_SO") {
+            eprintln!(
+                "[COVERAGE] Program binary override: {} -> {}",
+                program_path, override_path
+            );
+            override_path
+        } else {
+            program_path.to_string()
+        };
+        let program_data = std::fs::read(&actual_path)?;
         self.add_program_from_bytes(program_id, &program_data)
     }
 
@@ -4607,5 +4616,80 @@ mod tests {
         ctx.restore_snapshot();
         let acc = ctx.svm.get_account(&pk).unwrap();
         assert_eq!(acc.data, original_data, "10KB data should be perfectly restored");
+    }
+
+    // -------------------------------------------------------------------------
+    // add_program() FUZZ_PROGRAM_SO override tests
+    // -------------------------------------------------------------------------
+
+    // Env var mutex: these tests manipulate FUZZ_PROGRAM_SO so must not run concurrently.
+    use std::sync::Mutex;
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Find any valid SBF .so in the repo for testing.
+    fn find_test_so() -> String {
+        let candidates = [
+            "examples/staking/target/deploy/staking.so",
+            "examples/whirlpools/whirlpool.so",
+        ];
+        for c in &candidates {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(c);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+        panic!("No test .so found — build examples/staking first");
+    }
+
+    #[test]
+    fn test_add_program_override_env_var() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let so_path = find_test_so();
+
+        // Set override to the known-good .so
+        std::env::set_var("FUZZ_PROGRAM_SO", &so_path);
+
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+
+        // Call with a bogus path — override should redirect to the real .so
+        let result = ctx.add_program(&program_id, "/nonexistent/bogus.so");
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        assert!(result.is_ok(), "Override should load from FUZZ_PROGRAM_SO, not the bogus path");
+    }
+
+    #[test]
+    fn test_add_program_normal_path() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        let so_path = find_test_so();
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+
+        let result = ctx.add_program(&program_id, &so_path);
+        assert!(result.is_ok(), "Normal add_program should work without override");
+    }
+
+    #[test]
+    fn test_add_program_override_nonexistent_errors() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        // Point override to a nonexistent file
+        std::env::set_var("FUZZ_PROGRAM_SO", "/tmp/does_not_exist_xyz.so");
+
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+
+        let result = ctx.add_program(&program_id, "/also/bogus.so");
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        assert!(result.is_err(), "Override pointing to nonexistent file should error");
     }
 }

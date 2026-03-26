@@ -527,3 +527,93 @@
         action_stats::record(&action_stats::SET_REWARD_AUTH_BY_SUPER, success);
         success
     }
+
+    /// Initialize reward using V2 instruction (Token-2022 compatible, requires token badge).
+    /// Targets pool two's reward slots since pool one already uses V1.
+    pub fn action_initialize_reward_v2(&mut self, #[range(0..3)] reward_index: usize) -> bool {
+        let pool_two = match &self.pool_two {
+            Some(p) => p,
+            None => return false,
+        };
+
+        if reward_index >= 3 || pool_two.reward_initialized[reward_index] {
+            return false;
+        }
+        // Must initialize sequentially
+        if reward_index > 0 && !pool_two.reward_initialized[reward_index - 1] {
+            return false;
+        }
+        if reward_index >= pool_two.reward_mints.len() {
+            return false;
+        }
+
+        let reward_mint = pool_two.reward_mints[reward_index];
+        let whirlpool = pool_two.whirlpool;
+        let reward_vault = Keypair::new();
+
+        // Derive token_badge PDA for the reward mint
+        let (reward_token_badge, _) = Pubkey::find_program_address(
+            &[b"token_badge", self.config.as_ref(), reward_mint.as_ref()],
+            &self.program_id,
+        );
+
+        // Use SPL Token program for standard mints
+        let token_program_id = spl_token::ID;
+
+        let result = self.ctx.program(self.program_id)
+            .call(instruction::InitializeRewardV2 {
+                reward_index: reward_index as u8,
+            })
+            .accounts(accounts::InitializeRewardV2 {
+                reward_authority: self.admin.pubkey(),
+                funder: self.admin.pubkey(),
+                whirlpool,
+                reward_mint,
+                reward_token_badge,
+                reward_vault: reward_vault.pubkey(),
+                reward_token_program: token_program_id,
+            })
+            .signers(&[&*self.admin, &reward_vault])
+            .send();
+
+        let success = match &result {
+            Ok(TxOutcome::Success { .. }) => {
+                if let Some(ref mut p2) = self.pool_two {
+                    p2.reward_initialized[reward_index] = true;
+                    if reward_index < p2.reward_vaults.len() {
+                        p2.reward_vaults[reward_index] = reward_vault.pubkey();
+                    } else {
+                        p2.reward_vaults.push(reward_vault.pubkey());
+                    }
+                }
+                // Postcondition: verify pool reward_info
+                if let Ok(pool_state) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&whirlpool) {
+                    let ri = &pool_state.reward_infos[reward_index];
+                    fuzz_assert_eq!(ri.mint, reward_mint,
+                        "init_reward_v2: reward_info[{}].mint mismatch", reward_index);
+                    fuzz_assert_eq!(ri.vault, reward_vault.pubkey(),
+                        "init_reward_v2: reward_info[{}].vault mismatch", reward_index);
+                }
+                // Fund the vault
+                let _ = self.ctx.mint_to(
+                    &reward_mint,
+                    &reward_vault.pubkey(),
+                    1_000_000_000_000,
+                    &self.admin,
+                );
+                debug_print!("[INIT_REWARD_V2] SUCCESS: pool_two index={}", reward_index);
+                true
+            }
+            Ok(TxOutcome::ProgramError { logs, .. }) => {
+                debug_print!("[INIT_REWARD_V2] TX_FAILED: index={}", reward_index);
+                for log in logs { debug_print!("  {}", log); }
+                false
+            }
+            Err(e) => {
+                debug_print!("[INIT_REWARD_V2] SEND_FAILED: {:?}", e);
+                false
+            }
+        };
+        action_stats::record(&action_stats::INIT_REWARD_V2, success);
+        success
+    }

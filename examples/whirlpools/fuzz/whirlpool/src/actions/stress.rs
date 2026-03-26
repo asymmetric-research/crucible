@@ -294,6 +294,8 @@ pub fn action_high_liquidity_fee_stress(&mut self) -> bool {
         owner_idx: 0,
         has_liquidity,
         bundle_info: None,
+        is_token_2022: false,
+        is_locked: false,
         prev_fee_owed_a: 0,
         prev_fee_owed_b: 0,
         fees_just_collected: false,

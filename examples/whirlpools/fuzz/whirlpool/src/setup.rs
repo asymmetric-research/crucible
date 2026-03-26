@@ -781,9 +781,11 @@ fn create_initial_positions(
                     owner_idx: user_idx,
                     has_liquidity: false,
                     bundle_info: None,
-                prev_fee_owed_a: 0,
-                prev_fee_owed_b: 0,
-                fees_just_collected: false,
+                    is_token_2022: false,
+                    is_locked: false,
+                    prev_fee_owed_a: 0,
+                    prev_fee_owed_b: 0,
+                    fees_just_collected: false,
                 });
             }
             Ok(TxOutcome::ProgramError { .. }) => {
@@ -1058,6 +1060,8 @@ fn add_pool_two_liquidity(
                 owner_idx: 0,
                 has_liquidity: true,
                 bundle_info: None,
+                is_token_2022: false,
+                is_locked: false,
                 prev_fee_owed_a: 0,
                 prev_fee_owed_b: 0,
                 fees_just_collected: false,
@@ -1185,6 +1189,8 @@ fn add_pool_three_liquidity(
                 owner_idx: 0,
                 has_liquidity: true,
                 bundle_info: None,
+                is_token_2022: false,
+                is_locked: false,
                 prev_fee_owed_a: 0,
                 prev_fee_owed_b: 0,
                 fees_just_collected: false,

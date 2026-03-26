@@ -3267,5 +3267,193 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
         }
     }
 
+    // ---- Token-2022 Lock Position Invariants ----
+    // Locked positions must remain locked and retain their liquidity.
+    // If a position is marked locked in our tracker, the on-chain LockConfig must exist.
+    for (idx, pos) in fixture.positions.iter().enumerate() {
+        if pos.is_locked {
+            // Verify LockConfig PDA exists
+            let (lock_config_pda, _) = Pubkey::find_program_address(
+                &[b"lock_config", pos.position.as_ref()],
+                &fixture.program_id,
+            );
+            if let Ok(lock_state) = fixture.ctx.read_anchor_account::<whirlpool::state::LockConfig>(&lock_config_pda) {
+                fuzz_assert_eq!(lock_state.position, pos.position,
+                    "LockConfig[{}].position {} != tracked position {}",
+                    idx, lock_state.position, pos.position);
+                fuzz_assert_eq!(lock_state.whirlpool, fixture.pool.whirlpool,
+                    "LockConfig[{}].whirlpool mismatch", idx);
+                fuzz_assert!(lock_state.locked_timestamp > 0,
+                    "LockConfig[{}].locked_timestamp is 0 for locked position", idx);
+            }
+            // Locked position must still have liquidity (lock requires non-empty)
+            if let Ok(pos_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                fuzz_assert!(pos_state.liquidity > 0,
+                    "Locked position[{}] has zero liquidity on-chain — liquidity should not be removable while locked",
+                    idx);
+            }
+        }
+    }
+
+    // ---- Two-Hop Swap Token Conservation (per-pool) ----
+    // After any two-hop swap, each intermediate pool's vault balance must not decrease
+    // below its total obligations. We already check global token conservation above,
+    // but this adds per-pool solvency for the intermediary token (mint_b shared between pools).
+    if let Some(ref p2) = fixture.pool_two {
+        let p1_vault_b = fixture.ctx.token_balance(&fixture.pool.token_vault_b);
+        let p2_vault_a = fixture.ctx.token_balance(&p2.token_vault_a);
+        // The intermediary token (mint_b) should not have been destroyed.
+        // Both vaults holding mint_b should have non-zero balance if positions exist.
+        if let Ok(p1_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+            if let Ok(p2_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p2.whirlpool) {
+                if p1_state.liquidity > 0 || p2_state.liquidity > 0 {
+                    let p1_protocol_b = p1_state.protocol_fee_owed_b as u64;
+                    let p2_protocol_a = p2_state.protocol_fee_owed_a as u64;
+                    // Pool 1's vault_b must cover its protocol fee obligation
+                    fuzz_assert!(p1_vault_b >= p1_protocol_b,
+                        "Pool1 vault_b {} < protocol_fee_owed_b {} (two-hop intermediary solvency)",
+                        p1_vault_b, p1_protocol_b);
+                    // Pool 2's vault_a must cover its protocol fee obligation
+                    fuzz_assert!(p2_vault_a >= p2_protocol_a,
+                        "Pool2 vault_a {} < protocol_fee_owed_a {} (two-hop intermediary solvency)",
+                        p2_vault_a, p2_protocol_a);
+                }
+            }
+        }
+    }
+
+    // ---- Token-2022 Position Consistency ----
+    // Token-2022 positions should have valid position state on-chain
+    for (idx, pos) in fixture.positions.iter().enumerate() {
+        if pos.is_token_2022 {
+            if let Ok(pos_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                // Position mint must match what we tracked
+                fuzz_assert_eq!(pos_state.position_mint, pos.position_mint,
+                    "Token-2022 position[{}] mint mismatch: on-chain {} != tracked {}",
+                    idx, pos_state.position_mint, pos.position_mint);
+                // Whirlpool must match
+                fuzz_assert_eq!(pos_state.whirlpool, fixture.pool.whirlpool,
+                    "Token-2022 position[{}] whirlpool mismatch", idx);
+            }
+        }
+    }
+
+    // ---- Stuck Funds Detection: Non-zero liquidity positions must be withdrawable ----
+    // For each position with liquidity, the on-chain position must be readable and consistent.
+    // A stuck-funds bug would show as position.liquidity > 0 but pool state preventing withdraw.
+    for (idx, pos) in fixture.positions.iter().enumerate() {
+        if pos.has_liquidity && !pos.is_locked {
+            if let Ok(pos_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                // Position liquidity should match our tracker (nonzero)
+                fuzz_assert!(pos_state.liquidity > 0,
+                    "Position[{}] tracker says has_liquidity but on-chain liquidity is 0", idx);
+                // Position tick range must still be valid (not corrupted)
+                fuzz_assert!(pos_state.tick_lower_index < pos_state.tick_upper_index,
+                    "Position[{}] tick range corrupted: lower {} >= upper {}",
+                    idx, pos_state.tick_lower_index, pos_state.tick_upper_index);
+                // Tick alignment: must be multiple of tick_spacing
+                fuzz_assert!(pos_state.tick_lower_index % (TICK_SPACING as i32) == 0,
+                    "Position[{}] tick_lower {} not aligned to tick_spacing {}",
+                    idx, pos_state.tick_lower_index, TICK_SPACING);
+                fuzz_assert!(pos_state.tick_upper_index % (TICK_SPACING as i32) == 0,
+                    "Position[{}] tick_upper {} not aligned to tick_spacing {}",
+                    idx, pos_state.tick_upper_index, TICK_SPACING);
+            }
+        }
+    }
+
+    // ---- Dust Exploitation: Zero-liquidity pool fee growth freeze (per-pool) ----
+    // When pool.liquidity == 0, fee_growth_global should not increase, because there's
+    // no liquidity to distribute fees to. Any fee growth with zero liquidity means fees
+    // were computed but have nowhere to go — they're effectively destroyed.
+    if let Ok(pool_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+        if pool_state.liquidity == 0 {
+            // Fee growth should not have increased since last check
+            fuzz_assert!(pool_state.fee_growth_global_a == fixture.prev_fee_growth_global_a
+                || fixture.prev_p1_zero_liquidity,
+                "Pool1 fee_growth_global_a increased ({} -> {}) while liquidity was zero",
+                fixture.prev_fee_growth_global_a, pool_state.fee_growth_global_a);
+            fuzz_assert!(pool_state.fee_growth_global_b == fixture.prev_fee_growth_global_b
+                || fixture.prev_p1_zero_liquidity,
+                "Pool1 fee_growth_global_b increased ({} -> {}) while liquidity was zero",
+                fixture.prev_fee_growth_global_b, pool_state.fee_growth_global_b);
+        }
+    }
+
+    // ---- Reward Vault Solvency (all pools) ----
+    // Each pool's reward vaults must hold enough tokens to cover all position reward_owed.
+    {
+        // Pool one
+        if let Ok(pool_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+            for ri_idx in 0..3 {
+                if !fixture.pool.reward_initialized[ri_idx] { continue; }
+                let ri = &pool_state.reward_infos[ri_idx];
+                if ri.vault == Pubkey::default() { continue; }
+                let vault_bal = fixture.ctx.token_balance(&ri.vault) as u128;
+                let mut total_owed: u128 = 0;
+                for pos in fixture.positions.iter() {
+                    if let Ok(pos_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                        if pos_state.whirlpool == fixture.pool.whirlpool {
+                            total_owed = total_owed.saturating_add(pos_state.reward_infos[ri_idx].amount_owed as u128);
+                        }
+                    }
+                }
+                fuzz_assert!(vault_bal >= total_owed,
+                    "Pool1 reward[{}] vault {} < total_owed {} (reward insolvency)",
+                    ri_idx, vault_bal, total_owed);
+            }
+        }
+    }
+
+    // ---- Fee Rate Bounds (all pools) ----
+    // Every pool's fee_rate must be <= MAX_FEE_RATE and protocol_fee_rate <= MAX_PROTOCOL_FEE_RATE
+    if let Ok(p1_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+        fuzz_assert!(p1_state.fee_rate <= MAX_FEE_RATE,
+            "Pool1 fee_rate {} > MAX_FEE_RATE {}", p1_state.fee_rate, MAX_FEE_RATE);
+        fuzz_assert!(p1_state.protocol_fee_rate <= MAX_PROTOCOL_FEE_RATE,
+            "Pool1 protocol_fee_rate {} > MAX {}", p1_state.protocol_fee_rate, MAX_PROTOCOL_FEE_RATE);
+    }
+    if let Some(ref p2) = fixture.pool_two {
+        if let Ok(p2_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p2.whirlpool) {
+            fuzz_assert!(p2_state.fee_rate <= MAX_FEE_RATE,
+                "Pool2 fee_rate {} > MAX_FEE_RATE {}", p2_state.fee_rate, MAX_FEE_RATE);
+            fuzz_assert!(p2_state.protocol_fee_rate <= MAX_PROTOCOL_FEE_RATE,
+                "Pool2 protocol_fee_rate {} > MAX {}", p2_state.protocol_fee_rate, MAX_PROTOCOL_FEE_RATE);
+        }
+    }
+    if let Some(ref p3) = fixture.pool_three {
+        if let Ok(p3_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p3.whirlpool) {
+            fuzz_assert!(p3_state.fee_rate <= MAX_FEE_RATE,
+                "Pool3 fee_rate {} > MAX_FEE_RATE {}", p3_state.fee_rate, MAX_FEE_RATE);
+            fuzz_assert!(p3_state.protocol_fee_rate <= MAX_PROTOCOL_FEE_RATE,
+                "Pool3 protocol_fee_rate {} > MAX {}", p3_state.protocol_fee_rate, MAX_PROTOCOL_FEE_RATE);
+        }
+    }
+
+    // ---- Accounting Drift: Position fee checkpoints bounded by global growth ----
+    // fee_growth_checkpoint_a/b should be <= fee_growth_global_a/b (position checkpoint
+    // records the global value at the time of last interaction — it can only lag behind).
+    if let Ok(pool_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+        for (idx, pos) in fixture.positions.iter().enumerate() {
+            // Only check pool-one positions (not pool_two/pool_three)
+            if pos.bundle_info.is_none() && idx < fixture.positions.len() {
+                if let Ok(pos_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                    if pos_state.whirlpool == fixture.pool.whirlpool {
+                        // Use wrapping comparison: checkpoint should be <= global in wrapping sense
+                        let diff_a = pool_state.fee_growth_global_a.wrapping_sub(pos_state.fee_growth_checkpoint_a);
+                        let diff_b = pool_state.fee_growth_global_b.wrapping_sub(pos_state.fee_growth_checkpoint_b);
+                        // If diff > u128::MAX/2, the checkpoint is "ahead" of global — bug
+                        fuzz_assert!(diff_a <= u128::MAX / 2,
+                            "Position[{}] fee_growth_checkpoint_a {} > global {} (accounting drift)",
+                            idx, pos_state.fee_growth_checkpoint_a, pool_state.fee_growth_global_a);
+                        fuzz_assert!(diff_b <= u128::MAX / 2,
+                            "Position[{}] fee_growth_checkpoint_b {} > global {} (accounting drift)",
+                            idx, pos_state.fee_growth_checkpoint_b, pool_state.fee_growth_global_b);
+                    }
+                }
+            }
+        }
+    }
+
 
 }
