@@ -34,6 +34,19 @@
         self.do_swap(user_idx, 1, a_to_b, None, true, 0)
     }
 
+    /// Drain-swap: use the user's entire balance to push price to the boundary.
+    /// Exercises swap_tick_sequence boundary paths (min/max tick arrays, array exhaustion).
+    pub fn action_drain_swap(&mut self, #[range(0..3)] user_idx: usize, a_to_b: bool) -> bool {
+        let user = &self.users[user_idx];
+        let amount = if a_to_b {
+            self.ctx.token_balance(&user.token_account_a)
+        } else {
+            self.ctx.token_balance(&user.token_account_b)
+        };
+        if amount == 0 { return false; }
+        self.do_swap(user_idx, amount, a_to_b, None, true, 0)
+    }
+
     /// Swap with a partial price limit (not all the way to MIN/MAX)
     /// This can trigger different code paths when the swap stops early
     pub fn action_swap_with_limit(

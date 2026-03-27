@@ -690,12 +690,15 @@ fn fuzz_run(
         if has_inputs {
             cmd.env("FUZZ_CORPUS_IN", &abs_path);
             println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
+        } else if mode.is_some() {
+            // In remote --mode, always pass FUZZ_CORPUS_IN — the dir may be
+            // populated by the remote driver after the CLI checks it.
+            cmd.env("FUZZ_CORPUS_IN", &abs_path);
+            println!(
+                "[FUZZ] Corpus directory passed to harness: {}",
+                abs_path.display()
+            );
         } else if abs_path.exists() {
-            // In coverage mode, always pass the corpus dir so the harness can
-            // give a proper error instead of "corpus-in required"
-            if coverage {
-                cmd.env("FUZZ_CORPUS_IN", &abs_path);
-            }
             println!(
                 "[FUZZ] Corpus directory is empty, skipping: {}",
                 corpus_in_path.display()
@@ -792,18 +795,32 @@ fn fuzz_run(
         println!("[FUZZ] Taint enabled: per-action read/write account tracking");
     }
 
+    // --program-so: CLI flag takes priority, then fall back to env var (remote --mode)
     if let Some(ref program_so_path) = program_so {
         let abs_path = resolve_path(&cwd, program_so_path);
         cmd.env("FUZZ_PROGRAM_SO", &abs_path);
         println!("[FUZZ] Program binary override: {}", abs_path.display());
+    } else if mode.is_some() {
+        if let Ok(env_val) = env::var("FUZZ_PROGRAM_SO") {
+            let abs_path = resolve_path(&cwd, &PathBuf::from(&env_val));
+            cmd.env("FUZZ_PROGRAM_SO", &abs_path);
+            println!("[FUZZ] Program binary override (env): {}", abs_path.display());
+        }
     }
 
+    // --symbols: CLI flag takes priority, then fall back to env var (remote --mode)
     if let Some(ref symbols_path) = symbols {
         let abs_path = resolve_path(&cwd, symbols_path);
-        // Canonicalize to resolve symlinks and ".." so DWARF workspace-root detection works
         let canonical = abs_path.canonicalize().unwrap_or(abs_path);
         cmd.env("FUZZ_SYMBOLS", &canonical);
         println!("[FUZZ] Debug symbols: {}", canonical.display());
+    } else if mode.is_some() {
+        if let Ok(env_val) = env::var("FUZZ_SYMBOLS") {
+            let abs_path = resolve_path(&cwd, &PathBuf::from(&env_val));
+            let canonical = abs_path.canonicalize().unwrap_or(abs_path);
+            cmd.env("FUZZ_SYMBOLS", &canonical);
+            println!("[FUZZ] Debug symbols (env): {}", canonical.display());
+        }
     }
 
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());

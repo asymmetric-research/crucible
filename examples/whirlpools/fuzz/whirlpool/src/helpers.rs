@@ -22,14 +22,21 @@ impl WhirlpoolFixture {
     pub(crate) fn get_tick_array_for_tick(&self, tick_index: i32) -> Pubkey {
         let target_start = self.get_start_tick_index(tick_index);
 
-        // Find the tick array that covers this tick
+        // Prefer dynamic tick arrays when available (exercises DynamicTickArrayLoader)
+        for (pubkey, start) in &self.dynamic_tick_arrays {
+            if *start == target_start {
+                return *pubkey;
+            }
+        }
+
+        // Find the fixed tick array that covers this tick
         for (start, pubkey) in &self.pool.tick_arrays {
             if *start == target_start {
                 return *pubkey;
             }
         }
 
-        // Fallback: find the closest tick array
+        // Fallback: find the closest tick array (fixed or dynamic)
         let mut closest = self.pool.tick_arrays[0];
         let mut closest_dist = i32::MAX;
         for (start, pubkey) in &self.pool.tick_arrays {
@@ -102,13 +109,17 @@ impl WhirlpoolFixture {
             .map(|&o| base + o * ticks_in_array)
             .collect();
 
-        // Find matching tick arrays or use fallback
+        // Find matching tick arrays, preferring dynamic tick arrays
+        let dyn_arrays = &self.dynamic_tick_arrays;
         let find_or_fallback = |target: i32| -> Pubkey {
+            // Prefer dynamic tick arrays (exercises DynamicTickArrayLoader code paths)
+            if let Some((pk, _)) = dyn_arrays.iter().find(|(_, start)| *start == target) {
+                return *pk;
+            }
             pool.tick_arrays.iter()
                 .find(|(start, _)| *start == target)
                 .map(|(_, pk)| *pk)
                 .unwrap_or_else(|| {
-                    // Fallback: find closest tick array
                     pool.tick_arrays.iter()
                         .min_by_key(|(start, _)| (start - target).abs())
                         .map(|(_, pk)| *pk)
