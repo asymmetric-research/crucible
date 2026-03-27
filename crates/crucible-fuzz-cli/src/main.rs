@@ -688,9 +688,14 @@ fn fuzz_run(
                 .map(|mut d| d.any(|e| e.is_ok()))
                 .unwrap_or(false);
         if has_inputs {
-            cmd.env("FUZZ_CORPUS_IN", abs_path);
+            cmd.env("FUZZ_CORPUS_IN", &abs_path);
             println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
         } else if abs_path.exists() {
+            // In coverage mode, always pass the corpus dir so the harness can
+            // give a proper error instead of "corpus-in required"
+            if coverage {
+                cmd.env("FUZZ_CORPUS_IN", &abs_path);
+            }
             println!(
                 "[FUZZ] Corpus directory is empty, skipping: {}",
                 corpus_in_path.display()
