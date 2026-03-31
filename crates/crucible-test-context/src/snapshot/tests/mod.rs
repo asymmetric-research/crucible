@@ -1,7 +1,6 @@
 mod helpers;
 mod dirty_tracker;
 mod account_diff;
-mod taint;
 mod svm_snapshot;
 mod state_pool;
 mod stateful;

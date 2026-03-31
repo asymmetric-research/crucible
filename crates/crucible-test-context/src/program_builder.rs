@@ -51,15 +51,9 @@ impl ProgramBuilder<'_> {
         let fee_payer = self.signers.first().map(|k| k.pubkey()).unwrap_or_default();
         let ixs = std::slice::from_ref(&self.instruction);
 
-        // Pre-tx: dirty tracking + metadata capture
+        // Pre-tx: dirty tracking
         let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer);
-        let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer);
-        let pre_state = if self.ctx.taint_log.collects_diffs() {
-            Some(crate::snapshot::snapshot_writable_accounts(&self.ctx.svm, ixs, &fee_payer))
-        } else {
-            None
-        };
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
         // SVM execution
@@ -67,7 +61,7 @@ impl ProgramBuilder<'_> {
         let result = instruction_builder::send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)?;
         crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
-        // Post-tx: outcome parsing + taint record
+        // Post-tx: outcome parsing
         let __t_post = std::time::Instant::now();
         let outcome = tx_result_to_outcome(result);
 
@@ -75,14 +69,6 @@ impl ProgramBuilder<'_> {
         crate::increment_action_count();
         if outcome.is_success() {
             crate::increment_action_success_count();
-        }
-
-        // Build taint record from captured metadata (only for successful txs)
-        if outcome.is_success() {
-            let taint = crate::snapshot::build_taint_record_from_captured(
-                &self.ctx.svm, captured, pre_state.as_ref(),
-            );
-            self.ctx.taint_log.push(taint);
         }
         crate::SEND_BATCH_POST_NS.with(|c| c.set(c.get() + __t_post.elapsed().as_nanos() as u64));
 

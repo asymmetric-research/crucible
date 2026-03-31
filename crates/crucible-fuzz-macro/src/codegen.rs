@@ -537,7 +537,7 @@ pub fn contexts_swap_in(
     quote! { #(#stmts)* }
 }
 
-/// Restore dirty accounts from snapshot and clear dirty/taint state.
+/// Restore dirty accounts from snapshot and clear dirty state.
 pub fn contexts_restore_and_clear(
     fixture_param: &syn::Ident,
     contexts: &[syn::Ident],
@@ -550,7 +550,6 @@ pub fn contexts_restore_and_clear(
                     snap.restore(&mut #fixture_param.#field.svm, &#fixture_param.#field.dirty_tracker);
                 }
                 #fixture_param.#field.dirty_tracker.clear();
-                #fixture_param.#field.taint_log.clear();
             }
         })
         .collect();
@@ -681,7 +680,6 @@ pub fn stateful_extra_restore_and_swap_back(
                     snap.restore(&mut #fixture_param.#field.svm, &#fixture_param.#field.dirty_tracker);
                 }
                 #fixture_param.#field.dirty_tracker.clear();
-                #fixture_param.#field.taint_log.clear();
                 std::mem::swap(&mut #fixture_param.#field.svm, &mut #svm_name);
             }
         })

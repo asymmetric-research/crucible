@@ -753,7 +753,7 @@ fn stateful_singlecore_body(
             } else { 0 };
             if let Some(__t) = __t_clone { __phase_clone_ns += __t.elapsed().as_nanos() as u64; }
 
-            // Execute action chain (reuses all invariant/dispatch/taint logic)
+            // Execute action chain (reuses all invariant/dispatch logic)
             let __t_exec = if __do_profile { Some(std::time::Instant::now()) } else { None };
             if __do_profile { crucible_test_context::reset_send_batch_timers(); }
             crucible_test_context::reset_iteration_dispatch_count();
@@ -1126,7 +1126,7 @@ fn stateful_singlecore_body(
                         pct(other_ns), avg(other_ns),
                         avg_us,
                     );
-                    // exec breakdown: tx_pre (dirty+capture), tx_svm (litesvm), tx_post (taint), dispatch overhead
+                    // exec breakdown: tx_pre (dirty), tx_svm (litesvm), tx_post (outcome), dispatch overhead
                     let tx_total = __phase_tx_pre_ns + __phase_tx_svm_ns + __phase_tx_post_ns;
                     let dispatch_ns = __phase_svm_exec_ns.saturating_sub(tx_total);
                     let epct = |ns: u64| -> f64 { if __phase_svm_exec_ns > 0 { (ns as f64 / __phase_svm_exec_ns as f64) * 100.0 } else { 0.0 } };
@@ -1961,15 +1961,15 @@ fn stateful_multicore_body(
                                     };
 
                                     // Store fixture alongside novel state (SVMs swapped out = cheap clone).
-                                    // Use try_lock to avoid blocking: if another worker holds the mutex,
-                                    // skip fixture storage (None). State will use template_fixture fallback.
+                                    // Must use blocking lock to guarantee fixture is always stored.
+                                    // Without this, fixture_state=None causes stale template fallback
+                                    // on restore, desyncing harness tracking from SVM state.
                                     #extra_restore_swap_back_iter
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
-                                    let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                                        match fixture_clone_lock.try_lock() {
-                                            Ok(_guard) => Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone()))),
-                                            Err(_) => None, // Skip fixture storage — reduces contention
-                                        };
+                                    let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> = {
+                                        let _guard = fixture_clone_lock.lock().unwrap();
+                                        Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone())))
+                                    };
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
                                     #extra_swap_in_iter
 
@@ -2632,15 +2632,14 @@ fn stateful_multicore_body(
                                 Vec::new()
                             };
 
-                            // Store fixture alongside novel state (SVMs swapped out = cheap clone)
-                            // Use try_lock to avoid blocking: if contended, skip fixture storage.
+                            // Store fixture alongside novel state (SVMs swapped out = cheap clone).
+                            // Must use blocking lock to guarantee fixture is always stored.
                             #extra_restore_swap_back_iter
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
-                            let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                                match fixture_clone_mutex.try_lock() {
-                                    Ok(_guard) => Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone()))),
-                                    Err(_) => None,
-                                };
+                            let __fixture_for_storage: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> = {
+                                let _guard = fixture_clone_mutex.lock().unwrap();
+                                Some(std::sync::Arc::new(__FixtureWrapper(__iter_fixture.clone())))
+                            };
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
                             #extra_swap_in_iter
 
@@ -2804,7 +2803,7 @@ fn stateful_multicore_body(
                             pct(other_ns), avg(other_ns),
                             avg_us,
                         );
-                        // exec breakdown: tx_pre (dirty+capture), tx_svm (litesvm), tx_post (taint), dispatch overhead
+                        // exec breakdown: tx_pre (dirty), tx_svm (litesvm), tx_post (outcome), dispatch overhead
                         let tx_total = __phase_tx_pre_ns + __phase_tx_svm_ns + __phase_tx_post_ns;
                         let dispatch_ns = __phase_svm_exec_ns.saturating_sub(tx_total);
                         let epct = |ns: u64| -> f64 { if __phase_svm_exec_ns > 0 { (ns as f64 / __phase_svm_exec_ns as f64) * 100.0 } else { 0.0 } };

@@ -82,12 +82,6 @@ enum Commands {
         /// Maximum state depth (action chain length) in stateful mode (default: 15)
         #[arg(long)]
         max_depth: Option<u32>,
-        /// Track per-action read/write account sets (cheap)
-        #[arg(long)]
-        taint: bool,
-        /// Track per-action byte-level account diffs (implies --taint)
-        #[arg(long)]
-        taint_diffs: bool,
         /// Path to alternative program .so binary (for coverage with debug builds)
         #[arg(long)]
         program_so: Option<PathBuf>,
@@ -181,41 +175,6 @@ struct ActionRecord {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    taint: Option<ActionTaintSummary>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ActionTaintSummary {
-    tx_count: usize,
-    written_accounts: Vec<String>,
-    read_accounts: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    account_changes: Option<Vec<AccountChangeSummary>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AccountChangeSummary {
-    pubkey: String,
-    kind: AccountChangeKind,
-    lamports: (u64, u64),
-    changed_ranges: Vec<(usize, usize)>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    field_diffs: Option<Vec<FieldDelta>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum AccountChangeKind {
-    Created,
-    Modified,
-    Deleted,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct FieldDelta {
-    field: String,
-    old_value: String,
-    new_value: String,
 }
 
 // ============================================================================
@@ -249,8 +208,6 @@ fn main() -> Result<()> {
             no_tracing,
             stateful,
             max_depth,
-            taint,
-            taint_diffs,
             program_so,
             symbols,
             mode,
@@ -276,8 +233,6 @@ fn main() -> Result<()> {
             no_tracing,
             stateful,
             max_depth,
-            taint,
-            taint_diffs,
             program_so,
             symbols,
             mode,
@@ -591,8 +546,6 @@ fn fuzz_run(
     no_tracing: bool,
     stateful: bool,
     max_depth: Option<u32>,
-    taint: bool,
-    taint_diffs: bool,
     program_so: Option<PathBuf>,
     symbols: Option<PathBuf>,
     mode: Option<String>,
@@ -759,8 +712,6 @@ fn fuzz_run(
             }
         };
         cmd.env("FUZZ_INPUT_FILE", &resolved_path);
-        // Auto-enable taint diffs on input replay for rich output
-        cmd.env("FUZZ_TAINT_DIFFS", "1");
         println!("[FUZZ] Replaying input: {}", resolved_path.display());
     }
 
@@ -797,15 +748,6 @@ fn fuzz_run(
     if let Some(depth) = max_depth {
         cmd.env("FUZZ_MAX_DEPTH", depth.to_string());
         println!("[FUZZ] Max state depth: {}", depth);
-    }
-
-    if taint_diffs {
-        // --taint-diffs implies --taint (FUZZ_TAINT_DIFFS enables both)
-        cmd.env("FUZZ_TAINT_DIFFS", "1");
-        println!("[FUZZ] Taint diffs enabled: per-action byte-level account diffs");
-    } else if taint {
-        cmd.env("FUZZ_TAINT", "1");
-        println!("[FUZZ] Taint enabled: per-action read/write account tracking");
     }
 
     // --program-so: CLI flag takes priority, then fall back to env var (remote --mode)
@@ -1339,60 +1281,6 @@ fn show_crash_metadata(
             } else {
                 println!("  {}. {}({}) -> {}", i + 1, action.name, params_str, status);
             }
-
-            // Print taint info if available
-            if let Some(ref taint) = action.taint {
-                if let Some(ref changes) = taint.account_changes {
-                    for change in changes {
-                        let short_key = &change.pubkey[..8.min(change.pubkey.len())];
-                        let mut parts = Vec::new();
-
-                        // Lamports change
-                        let (pre_l, post_l) = change.lamports;
-                        if pre_l != post_l {
-                            let delta = post_l as i128 - pre_l as i128;
-                            let sign = if delta >= 0 { "+" } else { "" };
-                            parts.push(format!("{}{}lamports", sign, delta));
-                        }
-
-                        // Field diffs take priority over byte ranges
-                        if let Some(ref field_diffs) = change.field_diffs {
-                            for fd in field_diffs {
-                                parts.push(format!(
-                                    "{}: {} -> {}",
-                                    fd.field, fd.old_value, fd.new_value
-                                ));
-                            }
-                        } else if !change.changed_ranges.is_empty() {
-                            let ranges_str: Vec<String> = change
-                                .changed_ranges
-                                .iter()
-                                .map(|(off, len)| format!("data[{}..{}]", off, off + len))
-                                .collect();
-                            parts.push(ranges_str.join(", "));
-                        }
-
-                        let kind_str = match change.kind {
-                            AccountChangeKind::Created => "created",
-                            AccountChangeKind::Modified => "modified",
-                            AccountChangeKind::Deleted => "deleted",
-                        };
-
-                        if parts.is_empty() {
-                            println!("     {}...({}) {}", short_key, kind_str, change.pubkey);
-                        } else {
-                            println!("     {}...({})", short_key, parts.join(", "));
-                        }
-                    }
-                } else if !taint.written_accounts.is_empty() {
-                    let short_keys: Vec<String> = taint
-                        .written_accounts
-                        .iter()
-                        .map(|k| format!("{}...", &k[..8.min(k.len())]))
-                        .collect();
-                    println!("     wrote: {}", short_keys.join(", "));
-                }
-            }
         }
         println!("================================\n");
         println!(
@@ -1756,7 +1644,6 @@ fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<
     Command::new(binary_path)
         .current_dir(fuzz_dir)
         .env("FUZZ_INPUT_FILE", crash_path)
-        .env("FUZZ_TAINT_DIFFS", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -2002,7 +1889,6 @@ fn regen_crashes(
             let status = Command::new(&binary_path)
                 .current_dir(fuzz_dir)
                 .env("FUZZ_INPUT_FILE", crash_path)
-                .env("FUZZ_TAINT_DIFFS", "1")
                 .env("FUZZ_CRASHES_DIR", &test_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

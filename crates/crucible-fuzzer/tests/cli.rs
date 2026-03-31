@@ -1192,40 +1192,6 @@ fn test_run_max_depth_message() {
 }
 
 #[test]
-fn test_run_taint_message() {
-    ensure_cli_built();
-    let temp = TempDir::new().unwrap();
-    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
-
-    let output = run_crucible_in(
-        temp.path(),
-        &["run", "test_prog", "test_feature", "--taint", "--dry-run"],
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Taint enabled"),
-        "expected 'Taint enabled' in stdout, got: {}", stdout
-    );
-}
-
-#[test]
-fn test_run_taint_diffs_message() {
-    ensure_cli_built();
-    let temp = TempDir::new().unwrap();
-    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
-
-    let output = run_crucible_in(
-        temp.path(),
-        &["run", "test_prog", "test_feature", "--taint-diffs", "--dry-run"],
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Taint diffs enabled"),
-        "expected 'Taint diffs enabled' in stdout, got: {}", stdout
-    );
-}
-
-#[test]
 fn test_run_symbols_message() {
     ensure_cli_built();
     let temp = TempDir::new().unwrap();
@@ -1320,28 +1286,6 @@ fn test_run_cores_with_timeout() {
 }
 
 #[test]
-fn test_run_taint_diffs_suppresses_taint() {
-    ensure_cli_built();
-    let temp = TempDir::new().unwrap();
-    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
-
-    // When both --taint and --taint-diffs are given, only taint-diffs message should appear
-    let output = run_crucible_in(
-        temp.path(),
-        &["run", "test_prog", "test_feature", "--taint", "--taint-diffs", "--dry-run"],
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Taint diffs enabled"),
-        "expected taint-diffs message, got: {}", stdout
-    );
-    assert!(
-        !stdout.contains("Taint enabled: per-action read/write"),
-        "taint-diffs should suppress plain taint message, got: {}", stdout
-    );
-}
-
-#[test]
 fn test_run_coverage_corpus_in_triggers_coverage_only() {
     ensure_cli_built();
     let temp = TempDir::new().unwrap();
@@ -1400,7 +1344,7 @@ fn test_run_all_flags_together() {
         &[
             "run", "test_prog", "test_feature",
             "--stateful", "--max-depth", "20",
-            "--no-tracing", "--taint-diffs",
+            "--no-tracing",
             "--cores", "2", "--timeout", "10",
             "--seed", "42",
             "--stop-on-crash",
@@ -1415,7 +1359,6 @@ fn test_run_all_flags_together() {
     assert!(stdout.contains("Stateful mode"), "missing stateful, got: {}", stdout);
     assert!(stdout.contains("Max state depth: 20"), "missing depth, got: {}", stdout);
     assert!(stdout.contains("Tracing disabled"), "missing no-tracing, got: {}", stdout);
-    assert!(stdout.contains("Taint diffs enabled"), "missing taint-diffs, got: {}", stdout);
     assert!(stdout.contains("2 parallel workers"), "missing cores, got: {}", stdout);
     assert!(stdout.contains("10s timeout"), "missing timeout, got: {}", stdout);
     assert!(stdout.contains("Using seed: 42"), "missing seed, got: {}", stdout);
@@ -1916,24 +1859,6 @@ fn test_run_stateful_no_tracing_combination() {
 }
 
 #[test]
-fn test_run_replay_auto_enables_taint_diffs() {
-    ensure_cli_built();
-    let temp = TempDir::new().unwrap();
-    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
-
-    let input_file = temp.path().join("dummy_input");
-    fs::write(&input_file, b"fuzz bytes").unwrap();
-
-    // --replay auto-enables taint diffs via env var (no message, but replay message should appear)
-    let output = run_crucible_in(
-        temp.path(),
-        &["run", "test_prog", "test_feature", "--replay", input_file.to_str().unwrap()],
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Replaying input:"), "missing replay message, got: {}", stdout);
-}
-
-#[test]
 fn test_run_corpus_out_creates_message() {
     ensure_cli_built();
     let temp = TempDir::new().unwrap();
@@ -2136,22 +2061,6 @@ fn test_run_replay_does_not_trigger_coverage_only() {
         !stdout.contains("Coverage-only mode"),
         "replay should suppress coverage-only mode, got: {}", stdout
     );
-}
-
-#[test]
-fn test_run_stateful_with_taint_and_cores() {
-    ensure_cli_built();
-    let temp = TempDir::new().unwrap();
-    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
-
-    let output = run_crucible_in(
-        temp.path(),
-        &["run", "test_prog", "test_feature", "--stateful", "--taint", "--cores", "4", "--dry-run"],
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Stateful mode"), "missing stateful, got: {}", stdout);
-    assert!(stdout.contains("Taint enabled"), "missing taint, got: {}", stdout);
-    assert!(stdout.contains("4 parallel workers"), "missing cores, got: {}", stdout);
 }
 
 // =============================================================================
@@ -5287,264 +5196,6 @@ fn test_e2e_inmemory_vs_ondisk_corpus() {
     let corpus_count = common::count_corpus_files(&corpus_out);
     eprintln!("[INMEM-VS-ONDISK] Corpus entries (on-disk): {}", corpus_count);
     assert!(corpus_count > 0, "On-disk mode should create corpus entries");
-}
-
-// =============================================================================
-// TAINT TRACKING TESTS
-// =============================================================================
-
-/// Test that --taint flag prints the expected CLI message
-#[test]
-fn test_run_taint_flag_message() {
-    ensure_cli_built();
-
-    let temp = TempDir::new().unwrap();
-    let _ = run_crucible_in(temp.path(), &["init", "my_program"]);
-
-    // Run with --taint flag (will fail because no binary, but should print taint message)
-    let output = run_crucible_in(temp.path(), &["run", "my_program", "invariant_test", "--taint"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    assert!(
-        combined.contains("Taint enabled"),
-        "Should print taint enabled message. Output: {}", combined
-    );
-}
-
-/// Test that --taint-diffs flag prints the expected CLI message
-#[test]
-fn test_run_taint_diffs_flag_message() {
-    ensure_cli_built();
-
-    let temp = TempDir::new().unwrap();
-    let _ = run_crucible_in(temp.path(), &["init", "my_program"]);
-
-    // Run with --taint-diffs flag
-    let output = run_crucible_in(temp.path(), &["run", "my_program", "invariant_test", "--taint-diffs"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    assert!(
-        combined.contains("Taint diffs enabled"),
-        "Should print taint diffs enabled message. Output: {}", combined
-    );
-}
-
-/// Test that --taint and --taint-diffs flags are mutually exclusive in output
-/// (--taint-diffs implies --taint, so only diffs message should appear)
-#[test]
-fn test_run_taint_diffs_implies_taint() {
-    ensure_cli_built();
-
-    let temp = TempDir::new().unwrap();
-    let _ = run_crucible_in(temp.path(), &["init", "my_program"]);
-
-    // Run with both --taint and --taint-diffs
-    let output = run_crucible_in(temp.path(), &[
-        "run", "my_program", "invariant_test", "--taint", "--taint-diffs",
-    ]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    // --taint-diffs takes precedence, so its message should appear
-    assert!(
-        combined.contains("Taint diffs enabled"),
-        "Should print taint diffs message. Output: {}", combined
-    );
-}
-
-/// Test that crash metadata includes taint field when FUZZ_TAINT_DIFFS is set
-#[test]
-#[ignore]
-fn test_e2e_crash_metadata_with_taint_diffs() {
-    if !ensure_test_program_built() { return; }
-
-    let temp = TempDir::new().unwrap();
-    let crashes_dir = temp.path().join("crashes");
-
-    // Run with taint diffs enabled
-    let (stdout, stderr, _) = common::run_test_program_fuzz(&[
-        ("FUZZ_TIMEOUT_SECS", "30"),
-        ("FUZZ_TAINT_DIFFS", "1"),
-        ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
-    ]);
-
-    let combined = format!("{}\n{}", stdout, stderr);
-    let crashes = common::find_crash_files(&crashes_dir);
-
-    if crashes.is_empty() {
-        eprintln!("[TAINT-DIFFS] No crashes found in 30s - skipping");
-        eprintln!("[TAINT-DIFFS] Output: {}", combined);
-        return;
-    }
-
-    // Read crash metadata and verify taint field exists on at least some actions
-    let (meta_path, _) = &crashes[0];
-    let meta_content = fs::read_to_string(meta_path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&meta_content).unwrap();
-
-    eprintln!("[TAINT-DIFFS] Metadata: {}", serde_json::to_string_pretty(&json).unwrap());
-
-    let actions = json.get("actions")
-        .expect("Missing 'actions' field")
-        .as_array()
-        .expect("'actions' should be array");
-
-    // With FUZZ_TAINT_DIFFS=1, at least some actions should have taint field
-    let taint_count = actions.iter()
-        .filter(|a| a.get("taint").is_some() && !a["taint"].is_null())
-        .count();
-
-    eprintln!("[TAINT-DIFFS] {} of {} actions have taint data", taint_count, actions.len());
-
-    // At least some actions should have taint data (those that sent transactions)
-    assert!(
-        taint_count > 0,
-        "With FUZZ_TAINT_DIFFS=1, at least some actions should have taint data. Actions: {:?}",
-        actions
-    );
-
-    // Verify taint structure
-    for action in actions {
-        if let Some(taint) = action.get("taint") {
-            if taint.is_null() { continue; }
-
-            // tx_count should be present (can be 0 for non-tx actions like advance_slots)
-            let tx_count = taint.get("tx_count")
-                .expect("taint should have tx_count")
-                .as_u64()
-                .expect("tx_count should be a number");
-
-            // written_accounts should be an array
-            let written = taint.get("written_accounts")
-                .expect("taint should have written_accounts")
-                .as_array()
-                .expect("written_accounts should be array");
-            eprintln!("[TAINT-DIFFS] Action '{}': tx_count={}, written_accounts={}",
-                action.get("name").unwrap(), tx_count, written.len());
-
-            // read_accounts should be an array
-            assert!(
-                taint.get("read_accounts").unwrap().as_array().is_some(),
-                "read_accounts should be array"
-            );
-
-            // account_changes should be present (may be null/absent if no changes)
-            if let Some(changes) = taint.get("account_changes") {
-                if !changes.is_null() {
-                    let changes_arr = changes.as_array().expect("account_changes should be array");
-                    for change in changes_arr {
-                        // Verify change structure
-                        assert!(change.get("pubkey").is_some(), "change should have pubkey");
-                        assert!(change.get("kind").is_some(), "change should have kind");
-                        assert!(change.get("lamports").is_some(), "change should have lamports");
-                        assert!(change.get("changed_ranges").is_some(), "change should have changed_ranges");
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Test that crash metadata without FUZZ_TAINT_DIFFS has taint but NO account_changes
-/// (Basic taint tracking is always active since it's nearly free — just pubkey sets.
-///  Only byte-level diffs require FUZZ_TAINT_DIFFS=1.)
-#[test]
-#[ignore]
-fn test_e2e_crash_metadata_without_taint_diffs() {
-    if !ensure_test_program_built() { return; }
-
-    let temp = TempDir::new().unwrap();
-    let crashes_dir = temp.path().join("crashes");
-
-    // Run without FUZZ_TAINT_DIFFS — basic taint (pubkey sets) is always active
-    let (stdout, stderr, _) = common::run_test_program_fuzz(&[
-        ("FUZZ_TIMEOUT_SECS", "30"),
-        ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
-    ]);
-
-    let _combined = format!("{}\n{}", stdout, stderr);
-    let crashes = common::find_crash_files(&crashes_dir);
-
-    if crashes.is_empty() {
-        eprintln!("[NO-DIFFS] No crashes found in 30s - skipping");
-        return;
-    }
-
-    let (meta_path, _) = &crashes[0];
-    let meta_content = fs::read_to_string(meta_path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&meta_content).unwrap();
-
-    let actions = json.get("actions")
-        .expect("Missing 'actions' field")
-        .as_array()
-        .expect("'actions' should be array");
-
-    // Taint should be present (always active) but account_changes should be absent
-    for action in actions {
-        if let Some(taint) = action.get("taint") {
-            if taint.is_null() { continue; }
-
-            // Basic taint should have tx_count and written/read accounts
-            assert!(taint.get("tx_count").is_some(), "taint should have tx_count");
-            assert!(taint.get("written_accounts").is_some(), "taint should have written_accounts");
-            assert!(taint.get("read_accounts").is_some(), "taint should have read_accounts");
-
-            // Without FUZZ_TAINT_DIFFS, account_changes should be absent (skip_serializing_if)
-            let changes = taint.get("account_changes");
-            assert!(
-                changes.is_none() || changes.unwrap().is_null(),
-                "Without FUZZ_TAINT_DIFFS, account_changes should be absent. Got: {:?}",
-                changes
-            );
-        }
-    }
-
-    eprintln!("[NO-DIFFS] Confirmed: taint present but no account_changes without FUZZ_TAINT_DIFFS");
-}
-
-/// Test that --input replay auto-enables taint diffs (FUZZ_TAINT_DIFFS=1)
-#[test]
-#[ignore]
-fn test_e2e_replay_auto_enables_taint_diffs() {
-    if !ensure_test_program_built() { return; }
-
-    let temp = TempDir::new().unwrap();
-    let crashes_dir = temp.path().join("crashes");
-
-    // First, generate a crash
-    let (_, _, _) = common::run_test_program_fuzz(&[
-        ("FUZZ_TIMEOUT_SECS", "30"),
-        ("FUZZ_CRASHES_DIR", crashes_dir.to_str().unwrap()),
-    ]);
-
-    let crashes = common::find_crash_files(&crashes_dir);
-    if crashes.is_empty() {
-        eprintln!("[REPLAY-TAINT] No crashes found - skipping");
-        return;
-    }
-
-    // Replay the crash input — should auto-enable taint diffs
-    let (_, input_path) = &crashes[0];
-    let (stdout, stderr, _) = common::run_test_program_fuzz(&[
-        ("FUZZ_INPUT_FILE", input_path.to_str().unwrap()),
-    ]);
-
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    // The replay output should show account changes (taint info)
-    // Look for the taint output markers in the action sequence print
-    eprintln!("[REPLAY-TAINT] Replay output:\n{}", combined);
-
-    // Verify replay succeeded (should have action sequence output)
-    assert!(
-        combined.contains("FUZZ SEQUENCE") || combined.contains("action_"),
-        "Replay should show action sequence. Output: {}", combined
-    );
 }
 
 /// Helper to extract execution count from fuzzer output

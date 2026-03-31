@@ -2,7 +2,6 @@ use solana_account::Account;
 use solana_pubkey::Pubkey;
 
 /// Before/after diff for a single account across a transaction.
-/// Only collected when `FUZZ_TAINT_DIFFS=1` is set.
 pub struct AccountDiff {
     pub pubkey: Pubkey,
     /// Account state before the transaction. None if account didn't exist.

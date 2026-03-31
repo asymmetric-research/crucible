@@ -31,8 +31,6 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
 | `--max-actions <N>` | Max actions per iteration (default: 10) |
-| `--taint` | Track per-action read/write account sets |
-| `--taint-diffs` | Track per-action byte-level account diffs (implies `--taint`) |
 | `--stateful` | ItyFuzz-style stateful fuzzing: single action per iteration with state pool |
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
 | `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
@@ -77,8 +75,6 @@ crucible run myproject invariant_test --release --stateful --max-depth 20 -j 4
 | Variable | Description |
 |----------|-------------|
 | `FUZZ_VERBOSE=1` | Enable verbose harness output |
-| `FUZZ_TAINT=1` | Track per-action read/write account sets |
-| `FUZZ_TAINT_DIFFS=1` | Track per-action byte-level account diffs (implies taint) |
 | `FUZZ_STATS_CSV=<path>` | Write per-second stats to CSV file for benchmarking |
 
 ## `crucible list`
@@ -160,7 +156,6 @@ crucible tmin myproject invariant_test --all --release
 7. **Stateful** (`--stateful`) - ItyFuzz-style single action per iteration with state pool
 8. **Corpus Minimization** (`crucible cmin`) - Reduce corpus to minimal set preserving coverage
 9. **Crash Minimization** (`crucible tmin`) - Reduce crash to minimal reproducing action sequence
-10. **Taint Diffs** (`--taint-diffs`) - Track per-action byte-level account mutations
 
 ### Stateful Mode
 
