@@ -38,7 +38,7 @@ define_counters!(
     HIGH_LIQ_FEE_COLLECT, VOLATILITY_INFLATION,
     OPEN_POS_TOKEN_EXT, CLOSE_POS_TOKEN_EXT,
     LOCK_POSITION, TRANSFER_LOCKED_POSITION,
-    INIT_REWARD_V2
+    INIT_REWARD_V2, DRAIN_SWAP
 );
 
 pub fn record(counter: &(AtomicU32, AtomicU32), success: bool) {

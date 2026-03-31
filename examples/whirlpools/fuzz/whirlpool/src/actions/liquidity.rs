@@ -666,7 +666,7 @@
             .send();
 
         // Step 3: Collect fees
-        let _ = self.ctx.program(self.program_id)
+        let fee_result = self.ctx.program(self.program_id)
             .call(instruction::CollectFees {})
             .accounts(accounts::CollectFees {
                 whirlpool: pool_whirlpool,
@@ -680,6 +680,11 @@
             })
             .signers(&[&*user_keypair])
             .send();
+        if matches!(&fee_result, Ok(TxOutcome::Success { .. })) {
+            self.positions[position_idx].fees_just_collected = true;
+            self.positions[position_idx].prev_fee_owed_a = 0;
+            self.positions[position_idx].prev_fee_owed_b = 0;
+        }
 
         // Step 4: Collect all initialized rewards
         for i in 0..3 {

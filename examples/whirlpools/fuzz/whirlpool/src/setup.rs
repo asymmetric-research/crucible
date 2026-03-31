@@ -84,7 +84,119 @@ pub fn initialize_state(ctx: &mut TestContext, program_id: &Pubkey) -> Whirlpool
         .collect();
 
     // Create some initial positions with liquidity
-    let positions = create_initial_positions(ctx, &users, &pool, program_id);
+    let mut positions = create_initial_positions(ctx, &users, &pool, program_id);
+
+    // Create Token-2022 position with liquidity (for lock_position / transfer_locked_position coverage)
+    if let Some(t22_pos) = create_token_2022_position(ctx, &users[0], &pool, program_id) {
+        positions.push(t22_pos);
+    }
+
+    // Initialize dynamic tick arrays at the same start ticks as our fixed arrays.
+    // When swaps use these, they exercise DynamicTickArrayLoader and
+    // tick_array_manager's variable-size branches (rent transfer, size update).
+    let mut dynamic_tick_arrays = Vec::new();
+    for (start_tick, _) in &pool.tick_arrays {
+        let (tick_array_pda, _) = Pubkey::find_program_address(
+            &[b"tick_array", pool.whirlpool.as_ref(), start_tick.to_string().as_bytes()],
+            program_id,
+        );
+        // Only create if the PDA doesn't already exist (fixed array uses same PDA seeds)
+        // Dynamic tick arrays use a different discriminator, so we try to create one
+        // at an ADJACENT start tick instead (offset by one array span)
+        let dyn_start = *start_tick + TICK_ARRAY_SIZE * (TICK_SPACING as i32);
+        let (dyn_pda, _) = Pubkey::find_program_address(
+            &[b"tick_array", pool.whirlpool.as_ref(), dyn_start.to_string().as_bytes()],
+            program_id,
+        );
+        let result = ctx.program(*program_id)
+            .call(instruction::InitializeDynamicTickArray {
+                start_tick_index: dyn_start,
+                idempotent: true,
+            })
+            .accounts(accounts::InitializeDynamicTickArray {
+                whirlpool: pool.whirlpool,
+                funder: admin.pubkey(),
+                tick_array: dyn_pda,
+            })
+            .signers(&[&*admin])
+            .send();
+        if matches!(&result, Ok(TxOutcome::Success { .. })) {
+            dynamic_tick_arrays.push((dyn_pda, dyn_start));
+        }
+    }
+
+    // Create a position spanning a dynamic tick array so liquidity ops exercise
+    // tick_array_manager's variable-size branches (rent transfer, realloc)
+    if !dynamic_tick_arrays.is_empty() {
+        let (dyn_pk, dyn_start) = dynamic_tick_arrays[0];
+        let tick_lower = dyn_start;
+        let tick_upper = dyn_start + 10 * (TICK_SPACING as i32);
+        let pos_mint = next_keypair();
+        let pos_mint_pk = pos_mint.pubkey();
+        let (pos_pda, pos_bump) = Pubkey::find_program_address(
+            &[b"position", pos_mint_pk.as_ref()],
+            program_id,
+        );
+        let pos_ata = associated_token::get_associated_token_address(
+            &users[1].keypair.pubkey(),
+            &pos_mint_pk,
+        );
+        let open_res = ctx.program(*program_id)
+            .call(instruction::OpenPosition {
+                bumps: OpenPositionBumps { position_bump: pos_bump as u8 },
+                tick_lower_index: tick_lower,
+                tick_upper_index: tick_upper,
+            })
+            .accounts(accounts::OpenPosition {
+                funder: users[1].keypair.pubkey(),
+                owner: users[1].keypair.pubkey(),
+                position: pos_pda,
+                position_mint: pos_mint_pk,
+                position_token_account: pos_ata,
+                whirlpool: pool.whirlpool,
+            })
+            .signers(&[&*users[1].keypair, &pos_mint])
+            .send();
+        if matches!(&open_res, Ok(TxOutcome::Success { .. })) {
+            // Add liquidity — tick arrays will include the dynamic one
+            let liq_res = ctx.program(*program_id)
+                .call(instruction::IncreaseLiquidity {
+                    liquidity_amount: 100_000_000,
+                    token_max_a: u64::MAX,
+                    token_max_b: u64::MAX,
+                })
+                .accounts(accounts::IncreaseLiquidity {
+                    whirlpool: pool.whirlpool,
+                    position_authority: users[1].keypair.pubkey(),
+                    position: pos_pda,
+                    position_token_account: pos_ata,
+                    token_owner_account_a: users[1].token_account_a,
+                    token_owner_account_b: users[1].token_account_b,
+                    token_vault_a: pool.token_vault_a,
+                    token_vault_b: pool.token_vault_b,
+                    tick_array_lower: dyn_pk,
+                    tick_array_upper: dyn_pk,
+                })
+                .signers(&[&*users[1].keypair])
+                .send();
+            let has_liq = matches!(&liq_res, Ok(TxOutcome::Success { .. }));
+            positions.push(PositionData {
+                position: pos_pda,
+                position_mint: pos_mint_pk,
+                position_token_account: pos_ata,
+                tick_lower_index: tick_lower,
+                tick_upper_index: tick_upper,
+                owner_idx: 1,
+                has_liquidity: has_liq,
+                bundle_info: None,
+                is_token_2022: false,
+                is_locked: false,
+                prev_fee_owed_a: 0,
+                prev_fee_owed_b: 0,
+                fees_just_collected: false,
+            });
+        }
+    }
 
     // Initialize second pool for TwoHopSwap: mint_b / mint_c
     // Pool two needs mint_b < mint_c for ordering; if not, swap them
@@ -358,7 +470,7 @@ pub fn initialize_state(ctx: &mut TestContext, program_id: &Pubkey) -> Whirlpool
         prev_p2_reward_timestamp: 0,
         prev_p3_reward_growths: [0u128; 3],
         prev_p3_reward_timestamp: 0,
-        dynamic_tick_arrays: vec![],
+        dynamic_tick_arrays,
         prev_p2_tick_current: 0,
         prev_p2_sqrt_price_val: INITIAL_SQRT_PRICE,
         prev_p2_protocol_fee_owed_a: 0,
@@ -1198,6 +1310,145 @@ fn add_pool_three_liquidity(
         }
         _ => {
             None
+        }
+    }
+}
+
+/// Create a Token-2022 position with liquidity on pool one.
+/// This enables lock_position and transfer_locked_position to fire during fuzzing.
+fn create_token_2022_position(
+    ctx: &mut TestContext,
+    user: &UserData,
+    pool: &PoolData,
+    program_id: &Pubkey,
+) -> Option<PositionData> {
+    use crate::constants::TOKEN_2022_PROGRAM_ID;
+
+    let tick_lower_index = -10 * (TICK_SPACING as i32);
+    let tick_upper_index = 10 * (TICK_SPACING as i32);
+
+    let position_mint = next_keypair();
+    let pos_mint_pubkey = position_mint.pubkey();
+
+    let (position, _) = Pubkey::find_program_address(
+        &[b"position", pos_mint_pubkey.as_ref()],
+        program_id,
+    );
+
+    // Token-2022 ATA derivation (different seeds from SPL Token)
+    let (position_token_account, _) = Pubkey::find_program_address(
+        &[
+            user.keypair.pubkey().as_ref(),
+            TOKEN_2022_PROGRAM_ID.as_ref(),
+            pos_mint_pubkey.as_ref(),
+        ],
+        &associated_token::ID,
+    );
+
+    // Open position with Token-2022 extensions
+    let result = ctx.program(*program_id)
+        .call(instruction::OpenPositionWithTokenExtensions {
+            tick_lower_index,
+            tick_upper_index,
+            with_token_metadata_extension: true,
+        })
+        .accounts(accounts::OpenPositionWithTokenExtensions {
+            funder: user.keypair.pubkey(),
+            owner: user.keypair.pubkey(),
+            position,
+            position_mint: pos_mint_pubkey,
+            position_token_account,
+            whirlpool: pool.whirlpool,
+        })
+        .signers(&[&*user.keypair, &position_mint])
+        .send();
+
+    match &result {
+        Ok(TxOutcome::Success { .. }) => {}
+        _ => {
+            eprintln!("[SETUP] Token-2022 position open failed (non-fatal)");
+            return None;
+        }
+    }
+
+    // Add liquidity via V1 IncreaseLiquidity (V1 accepts InterfaceAccount for position token)
+    let ticks_in_array = TICK_ARRAY_SIZE * (TICK_SPACING as i32);
+    let lower_array_start = if tick_lower_index >= 0 {
+        (tick_lower_index / ticks_in_array) * ticks_in_array
+    } else {
+        ((tick_lower_index - ticks_in_array + 1) / ticks_in_array) * ticks_in_array
+    };
+    let upper_array_start = if tick_upper_index >= 0 {
+        (tick_upper_index / ticks_in_array) * ticks_in_array
+    } else {
+        ((tick_upper_index - ticks_in_array + 1) / ticks_in_array) * ticks_in_array
+    };
+
+    let tick_array_lower = pool.tick_arrays.iter()
+        .find(|(start, _)| *start == lower_array_start)
+        .map(|(_, pk)| *pk)
+        .unwrap_or(pool.tick_arrays[0].1);
+    let tick_array_upper = pool.tick_arrays.iter()
+        .find(|(start, _)| *start == upper_array_start)
+        .map(|(_, pk)| *pk)
+        .unwrap_or(pool.tick_arrays[0].1);
+
+    let liq_result = ctx.program(*program_id)
+        .call(instruction::IncreaseLiquidity {
+            liquidity_amount: 500_000_000,
+            token_max_a: u64::MAX,
+            token_max_b: u64::MAX,
+        })
+        .accounts(accounts::IncreaseLiquidity {
+            whirlpool: pool.whirlpool,
+            position_authority: user.keypair.pubkey(),
+            position,
+            position_token_account,
+            token_owner_account_a: user.token_account_a,
+            token_owner_account_b: user.token_account_b,
+            token_vault_a: pool.token_vault_a,
+            token_vault_b: pool.token_vault_b,
+            tick_array_lower,
+            tick_array_upper,
+        })
+        .signers(&[&*user.keypair])
+        .send();
+
+    match &liq_result {
+        Ok(TxOutcome::Success { .. }) => {
+            Some(PositionData {
+                position,
+                position_mint: pos_mint_pubkey,
+                position_token_account,
+                tick_lower_index,
+                tick_upper_index,
+                owner_idx: 0,
+                has_liquidity: true,
+                bundle_info: None,
+                is_token_2022: true,
+                is_locked: false,
+                prev_fee_owed_a: 0,
+                prev_fee_owed_b: 0,
+                fees_just_collected: false,
+            })
+        }
+        _ => {
+            eprintln!("[SETUP] Token-2022 position liquidity failed (non-fatal)");
+            Some(PositionData {
+                position,
+                position_mint: pos_mint_pubkey,
+                position_token_account,
+                tick_lower_index,
+                tick_upper_index,
+                owner_idx: 0,
+                has_liquidity: false,
+                bundle_info: None,
+                is_token_2022: true,
+                is_locked: false,
+                prev_fee_owed_a: 0,
+                prev_fee_owed_b: 0,
+                fees_just_collected: false,
+            })
         }
     }
 }
