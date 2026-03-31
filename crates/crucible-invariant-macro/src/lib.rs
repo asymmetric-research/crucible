@@ -1282,9 +1282,6 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
 
                 let variant_idx = crucible_fuzzer::FuzzAction::variant_index(&action);
 
-                // Capture taint log index before dispatch (action may produce 0..N txs)
-                let taint_start = fixture.ctx.taint_log.len();
-
                 // Execute the action and get success status
                 let success = fixture.__dispatch_action(action.clone());
 
