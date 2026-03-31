@@ -1,7 +1,7 @@
 use std::env::{self, current_dir};
 use std::fs::{self, create_dir_all};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{exit, Command, ExitStatus, Stdio};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -614,7 +614,7 @@ fn fuzz_run(
             }
             "explore" => {
                 if corpus_out.is_none() {
-                    corpus_out = Some("./output".into());
+                    corpus_out = Some("./corpus".into());
                 }
                 if crashes_out.is_none() {
                     crashes_out = Some("./output".into());
@@ -674,6 +674,15 @@ fn fuzz_run(
 
     if coverage {
         cmd.env("FUZZ_COVERAGE", "1");
+        cmd.env(
+            "FUZZ_CORPUS_IN",
+            resolve_path(
+                &cwd,
+                &corpus_in.clone().expect("Need corpus in for coverage"),
+            )
+            .to_str()
+            .unwrap(),
+        );
     }
 
     if let Some(timeout_secs) = timeout {
@@ -709,10 +718,14 @@ fn fuzz_run(
         println!("[FUZZ] Writing corpus to: {}", corpus_out_path.display());
     }
 
+    if mode.as_deref() == Some("explore") {
+        assert!(corpus_out.is_some());
+    }
+
     let crashes_abs_path = if let Some(ref crashes_path) = crashes_out {
         resolve_path(&cwd, crashes_path)
     } else {
-        fuzz_dir.join("crashes").join(test_name)
+        fuzz_dir.join("output").join(test_name)
     };
     cmd.env("FUZZ_CRASHES_DIR", &crashes_abs_path);
     println!("[FUZZ] Crashes directory: {}", crashes_abs_path.display());
@@ -726,7 +739,7 @@ fn fuzz_run(
             let crashes_search_root = if let Some(ref cp) = crashes_out {
                 resolve_path(&cwd, cp)
             } else {
-                fuzz_dir.join("crashes")
+                fuzz_dir.join("output")
             };
             match find_crash_file(
                 &crashes_search_root,
@@ -807,9 +820,18 @@ fn fuzz_run(
     if mode.as_deref() == Some("corpus_merge") {
         // corpus_merge uses the cmin (greedy set-cover) codepath to write minimized corpus
         cmd.env("FUZZ_CMIN", "1");
-        println!("[FUZZ] Corpus merge mode: minimizing corpus to ./output");
+        println!("[FUZZ] Corpus merge mode: minimizing corpus to ./corpus");
     } else if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && replay.is_none() {
         cmd.env("FUZZ_COVERAGE_ONLY", "1");
+        cmd.env(
+            "FUZZ_CORPUS_IN",
+            resolve_path(
+                &cwd,
+                &corpus_in.clone().expect("Need corpus in for coverage"),
+            )
+            .to_str()
+            .unwrap(),
+        );
         println!("[FUZZ] Coverage-only mode: generating coverage from corpus");
     }
 
@@ -820,12 +842,15 @@ fn fuzz_run(
         println!("[FUZZ] LCOV output: {}", abs_path.display());
     } else if mode.as_deref() == Some("coverage") {
         // Default coverage output for coverage mode
-        let output_dir = cwd.join("output");
+        let output_dir = resolve_path(&cwd, &PathBuf::from("./output"));
         let _ = fs::create_dir_all(&output_dir);
         let lcov_path = output_dir.join("coverage.lcov");
         cmd.env("FUZZ_COVERAGE_OUT", &lcov_path);
         println!("[FUZZ] LCOV output: {}", lcov_path.display());
     }
+
+    eprintln!("Debug env: {:?}", cmd.get_envs());
+    eprintln!("Debug pwd: {:?}", cmd.get_current_dir());
 
     let status = cmd.status().context("Failed to run fuzz binary")?;
     if !status.success() {
@@ -1691,10 +1716,7 @@ fn build_and_find_replay_binary(
                         .context("Failed to build fuzz harness for replay")?;
 
                     if !build_status.success() {
-                        bail!(
-                            "Failed to build fuzz harness with --features {}",
-                            feature
-                        );
+                        bail!("Failed to build fuzz harness with --features {}", feature);
                     }
                 }
             }
@@ -2279,9 +2301,7 @@ fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Resul
             .output()
         {
             if output.status.success() {
-                if let Ok(metadata) =
-                    serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                {
+                if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
                     return resolve_binary_from_metadata(
                         &metadata,
                         fuzz_dir,
@@ -2318,7 +2338,9 @@ fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Resul
                 .filter(|e| {
                     let path = e.path();
                     path.is_file()
-                        && !path.extension().map_or(false, |ext| ext == "d" || ext == "json" || ext == "rmeta")
+                        && !path
+                            .extension()
+                            .map_or(false, |ext| ext == "d" || ext == "json" || ext == "rmeta")
                         && !e.file_name().to_string_lossy().starts_with('.')
                         && is_executable(&path)
                 })
@@ -2657,7 +2679,11 @@ mod tests {
         // so test the fallback scan directly by calling find_fuzz_binary
         // with a fuzz_dir that has no Cargo.toml (cargo metadata will fail)
         let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_ok(), "should find stake_fuzz binary: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "should find stake_fuzz binary: {:?}",
+            result
+        );
         assert!(result.unwrap().ends_with("stake_fuzz"));
     }
 
@@ -2670,7 +2696,11 @@ mod tests {
         make_executable(&target_dir.join("stake-fuzz"));
 
         let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_ok(), "should find stake-fuzz binary: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "should find stake-fuzz binary: {:?}",
+            result
+        );
         assert!(result.unwrap().ends_with("stake-fuzz"));
     }
 
