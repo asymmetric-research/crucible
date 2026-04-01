@@ -85,11 +85,13 @@ pub static TOTAL_ACTIONS_DISPATCHED: std::sync::atomic::AtomicU64 =
 
 /// Global counter of total actions that succeeded across all iterations.
 /// Used by monitor to display success rate (ok/total).
-pub static TOTAL_ACTIONS_SUCCEEDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static TOTAL_ACTIONS_SUCCEEDED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Total number of action variants available (set once at startup).
 /// Used by monitor to display "discovered: N/M actions".
-pub static TOTAL_ACTION_VARIANTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static TOTAL_ACTION_VARIANTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Increment the global action counter by one.
 /// Also increments the thread-local per-iteration counter for accurate
@@ -183,9 +185,7 @@ pub fn record_account_novelty(svm: &litesvm::LiteSVM, dirty: &snapshot::DirtyTra
         return; // novelty tracking disabled (non-stateful mode)
     }
 
-    let novel = unsafe {
-        snapshot::check_account_state_novelty(svm, dirty, ptr, len)
-    };
+    let novel = unsafe { snapshot::check_account_state_novelty(svm, dirty, ptr, len) };
 
     if novel > 0 {
         NOVELTY_COUNT.with(|c| c.set(c.get() + novel));
@@ -502,7 +502,9 @@ pub fn has_variant_succeeded(variant_idx: usize) -> bool {
 
 /// Mark an action variant index as having succeeded at least once.
 pub fn mark_variant_succeeded(variant_idx: usize) {
-    SUCCEEDED_VARIANTS.with(|s| { s.borrow_mut().insert(variant_idx); });
+    SUCCEEDED_VARIANTS.with(|s| {
+        s.borrow_mut().insert(variant_idx);
+    });
 }
 
 /// Get the number of action variants that have ever succeeded.
@@ -540,7 +542,11 @@ pub fn format_action_sequence() -> String {
     let skipped = total_actions.saturating_sub(executed);
 
     let mut out = String::new();
-    let _ = writeln!(out, "\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===", executed, skipped);
+    let _ = writeln!(
+        out,
+        "\n=== FUZZ SEQUENCE ({} executed, {} skipped) ===",
+        executed, skipped
+    );
 
     for (i, record) in history.iter().enumerate() {
         let params_str = if let serde_json::Value::Object(map) = &record.params {
@@ -553,12 +559,31 @@ pub fn format_action_sequence() -> String {
         };
 
         let status = if record.success { "OK" } else { "FAIL" };
-        let violation_marker = if violation_idx == Some(i) { " [VIOLATION]" } else { "" };
+        let violation_marker = if violation_idx == Some(i) {
+            " [VIOLATION]"
+        } else {
+            ""
+        };
 
         if params_str.is_empty() {
-            let _ = writeln!(out, "  {}. {} -> {}{}", i + 1, record.name, status, violation_marker);
+            let _ = writeln!(
+                out,
+                "  {}. {} -> {}{}",
+                i + 1,
+                record.name,
+                status,
+                violation_marker
+            );
         } else {
-            let _ = writeln!(out, "  {}. {}({}) -> {}{}", i + 1, record.name, params_str, status, violation_marker);
+            let _ = writeln!(
+                out,
+                "  {}. {}({}) -> {}{}",
+                i + 1,
+                record.name,
+                params_str,
+                status,
+                violation_marker
+            );
         }
 
         if let Some(ref taint) = record.taint {
@@ -578,10 +603,15 @@ pub fn format_action_sequence() -> String {
 
                         if let Some(ref field_diffs) = change.field_diffs {
                             for fd in field_diffs {
-                                parts.push(format!("{}: {} -> {}", fd.field, fd.old_value, fd.new_value));
+                                parts.push(format!(
+                                    "{}: {} -> {}",
+                                    fd.field, fd.old_value, fd.new_value
+                                ));
                             }
                         } else if !change.changed_ranges.is_empty() {
-                            let ranges_str: Vec<String> = change.changed_ranges.iter()
+                            let ranges_str: Vec<String> = change
+                                .changed_ranges
+                                .iter()
                                 .map(|(off, len)| format!("data[{}..{}]", off, off + len))
                                 .collect();
                             parts.push(ranges_str.join(", "));
@@ -594,13 +624,16 @@ pub fn format_action_sequence() -> String {
                         };
 
                         if parts.is_empty() {
-                            let _ = writeln!(out, "     {}...({}) {}", label, kind_str, change.pubkey);
+                            let _ =
+                                writeln!(out, "     {}...({}) {}", label, kind_str, change.pubkey);
                         } else {
                             let _ = writeln!(out, "     {}...({})", label, parts.join(", "));
                         }
                     }
                 } else {
-                    let short_keys: Vec<String> = taint.written_accounts.iter()
+                    let short_keys: Vec<String> = taint
+                        .written_accounts
+                        .iter()
                         .map(|k| format!("{}...", &k[..8.min(k.len())]))
                         .collect();
                     let _ = writeln!(out, "     wrote: {}", short_keys.join(", "));
@@ -610,7 +643,11 @@ pub fn format_action_sequence() -> String {
     }
 
     if skipped > 0 {
-        let _ = writeln!(out, "  ... {} action(s) not executed (stopped on violation)", skipped);
+        let _ = writeln!(
+            out,
+            "  ... {} action(s) not executed (stopped on violation)",
+            skipped
+        );
     }
 
     let _ = writeln!(out, "================================");
@@ -1061,6 +1098,7 @@ pub enum TxOutcome {
     Success {
         compute_units: u64,
         logs: Vec<String>,
+        return_data: Vec<u8>,
     },
     /// Transaction failed with program error
     ProgramError {
@@ -1072,6 +1110,8 @@ pub enum TxOutcome {
         instruction_index: Option<u8>,
         /// Program logs up to failure
         logs: Vec<String>,
+        /// Return data
+        return_data: Vec<u8>,
     },
 }
 
@@ -1082,6 +1122,7 @@ pub struct TxError {
     pub error_code: Option<u32>,
     pub instruction_index: Option<u8>,
     pub logs: Vec<String>,
+    pub return_data: Vec<u8>,
 }
 
 impl std::error::Error for TxError {}
@@ -1175,11 +1216,13 @@ impl TxOutcome {
                 error_code,
                 instruction_index,
                 logs,
+                return_data,
             } => Err(TxError {
                 error,
                 error_code,
                 instruction_index,
                 logs,
+                return_data,
             }),
         }
     }
@@ -1216,12 +1259,14 @@ pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutc
         Ok(meta) => TxOutcome::Success {
             compute_units: meta.compute_units_consumed,
             logs: meta.logs,
+            return_data: meta.return_data.data,
         },
         Err(failed) => TxOutcome::ProgramError {
             error: failed.err.clone(),
             error_code: parse_error_code(&failed.err),
             instruction_index: parse_instruction_index(&failed.err),
             logs: failed.meta.logs,
+            return_data: failed.meta.return_data.data,
         },
     };
     // Store error code in TLS for push_action_record to pick up
@@ -2271,6 +2316,7 @@ impl TestContext {
             ctx: self,
             instruction,
             signers: vec![],
+            fee_payer: None,
         }
     }
 
@@ -2284,6 +2330,7 @@ impl TestContext {
                 data: vec![],
             },
             signers: vec![],
+            fee_payer: None, // Use first signer by default
         }
     }
 
@@ -2313,10 +2360,16 @@ impl TestContext {
             .filter(|k| seen.insert(k.pubkey()))
             .collect();
 
-        let fee_payer = unique_signers
+        let fee_payer_pubkey = unique_signers
             .first()
             .map(|k| k.pubkey())
             .unwrap_or_default();
+
+        let default_kp = Keypair::new();
+
+        let fee_payer = unique_signers.first().map(|k| *k).ok_or(anyhow::anyhow!(
+            "At least one signer required for send_batch. The first signer is the fee payer."
+        ))?;
 
         if debug {
             eprintln!("[TX] Sending batch with {} instructions", num_ixs);
@@ -2327,13 +2380,14 @@ impl TestContext {
 
         // Pre-tx: dirty tracking, metadata capture, optional pre-state snapshot
         let __t_pre = std::time::Instant::now();
-        self.dirty_tracker.record_tx(&self.pending_instructions, &fee_payer);
-        let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer);
+        self.dirty_tracker
+            .record_tx(&self.pending_instructions, &fee_payer_pubkey);
+        let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer_pubkey);
         let pre_state = if self.taint_log.collects_diffs() {
             Some(snapshot::snapshot_writable_accounts(
                 &self.svm,
                 &self.pending_instructions,
-                &fee_payer,
+                &fee_payer_pubkey,
             ))
         } else {
             None
@@ -2346,7 +2400,8 @@ impl TestContext {
         let result = instruction_builder::send_transaction(
             &mut self.svm,
             instructions,
-            &unique_signers
+            &unique_signers,
+            fee_payer,
         )?;
         SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
@@ -2365,11 +2420,13 @@ impl TestContext {
                 TxOutcome::Success {
                     compute_units,
                     logs,
+                    return_data,
                 } => {
                     eprintln!("[TX] SUCCESS - compute_units={}, logs:", compute_units);
                     for log in logs {
                         eprintln!("[TX]   {}", log);
                     }
+                    eprintln!("[TX] Return data: {:x?}", return_data);
                 }
                 TxOutcome::ProgramError {
                     error,
@@ -2820,6 +2877,7 @@ mod tests {
         let success = TxOutcome::Success {
             compute_units: 100,
             logs: vec!["log1".to_string()],
+            return_data: vec![],
         };
 
         assert!(success.is_success());
@@ -2833,6 +2891,7 @@ mod tests {
             error_code: Some(6051),
             instruction_index: Some(0),
             logs: vec!["error log".to_string()],
+            return_data: vec![],
         };
 
         assert!(!error.is_success());
@@ -2846,6 +2905,7 @@ mod tests {
         let success = TxOutcome::Success {
             compute_units: 100,
             logs: vec![],
+            return_data: vec![1, 2, 3],
         };
         assert!(success.into_result().is_ok());
 
@@ -2854,8 +2914,13 @@ mod tests {
             error_code: Some(6051),
             instruction_index: Some(0),
             logs: vec![],
+            return_data: vec![1, 2, 3, 4],
         };
-        assert!(error.into_result().is_err());
+        assert!(error.clone().into_result().is_err());
+        assert_eq!(
+            error.into_result().unwrap_err().return_data,
+            vec![1, 2, 3, 4]
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3431,7 +3496,10 @@ mod tests {
 
         let out = format_action_sequence();
         assert!(out.contains("1 executed, 0 skipped"), "header: {out}");
-        assert!(out.contains("action_deposit(amount=500) -> OK"), "body: {out}");
+        assert!(
+            out.contains("action_deposit(amount=500) -> OK"),
+            "body: {out}"
+        );
     }
 
     #[test]
@@ -3448,14 +3516,21 @@ mod tests {
     fn format_action_sequence_multiple_params() {
         clear_format_tls();
         set_total_actions(3);
-        push_action_record("action_deposit", serde_json::json!({"user": 0, "amount": 100}), true);
+        push_action_record(
+            "action_deposit",
+            serde_json::json!({"user": 0, "amount": 100}),
+            true,
+        );
         push_action_record("action_borrow", serde_json::json!({"user": 1}), true);
         push_action_record("action_repay", serde_json::json!({}), false);
 
         let out = format_action_sequence();
         assert!(out.contains("3 executed, 0 skipped"), "header: {out}");
         assert!(out.contains("1. action_deposit("), "first: {out}");
-        assert!(out.contains("2. action_borrow(user=1) -> OK"), "second: {out}");
+        assert!(
+            out.contains("2. action_borrow(user=1) -> OK"),
+            "second: {out}"
+        );
         assert!(out.contains("3. action_repay -> FAIL"), "third: {out}");
     }
 
@@ -3470,9 +3545,17 @@ mod tests {
 
         let out = format_action_sequence();
         assert!(out.contains("2 executed, 1 skipped"), "header: {out}");
-        assert!(!out.contains("1. action_a") || !out.contains("[VIOLATION]") || out.contains("action_a -> OK\n") || !out.matches("[VIOLATION]").count() > 1,
-            "violation should only be on action_b");
-        assert!(out.contains("action_b -> OK [VIOLATION]"), "violation marker: {out}");
+        assert!(
+            !out.contains("1. action_a")
+                || !out.contains("[VIOLATION]")
+                || out.contains("action_a -> OK\n")
+                || !out.matches("[VIOLATION]").count() > 1,
+            "violation should only be on action_b"
+        );
+        assert!(
+            out.contains("action_b -> OK [VIOLATION]"),
+            "violation marker: {out}"
+        );
         assert!(out.contains("1 action(s) not executed"), "skipped: {out}");
     }
 
@@ -3505,7 +3588,10 @@ mod tests {
         let out = format_action_sequence();
         // Should NOT have parentheses for null params
         assert!(out.contains("action_foo -> OK"), "body: {out}");
-        assert!(!out.contains("action_foo("), "should not have parens: {out}");
+        assert!(
+            !out.contains("action_foo("),
+            "should not have parens: {out}"
+        );
     }
 
     // =========================================================================
@@ -3544,7 +3630,10 @@ mod tests {
         push_action_record("action_second", serde_json::json!({"x": 1}), false);
 
         let out = format_last_action_oneline();
-        assert!(out.starts_with("action_second"), "should return last: {out}");
+        assert!(
+            out.starts_with("action_second"),
+            "should return last: {out}"
+        );
         assert!(out.contains("FAIL"), "last was failure: {out}");
     }
 
@@ -3639,8 +3728,11 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
 
         // seed should be absent (skip_serializing_if = None)
-        assert!(meta.get("seed").is_none() || meta["seed"].is_null(),
-            "seed should be absent or null: {:?}", meta.get("seed"));
+        assert!(
+            meta.get("seed").is_none() || meta["seed"].is_null(),
+            "seed should be absent or null: {:?}",
+            meta.get("seed")
+        );
     }
 
     // =========================================================================
@@ -3850,7 +3942,8 @@ mod tests {
         let pk = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        let addr = ctx.create_account()
+        let addr = ctx
+            .create_account()
             .pubkey(pk)
             .owner(owner)
             .lamports(1_000_000)
@@ -3886,10 +3979,7 @@ mod tests {
     #[test]
     fn generic_builder_default_address_errors() {
         let mut ctx = TestContext::new();
-        let err = ctx.create_account()
-            .lamports(100)
-            .create()
-            .unwrap_err();
+        let err = ctx.create_account().lamports(100).create().unwrap_err();
 
         assert!(
             err.to_string().contains("Address must be set"),
@@ -3904,10 +3994,7 @@ mod tests {
         let pk = Pubkey::new_unique();
         let before = ctx.tracked_accounts_count();
 
-        ctx.create_account()
-            .pubkey(pk)
-            .create()
-            .unwrap();
+        ctx.create_account().pubkey(pk).create().unwrap();
 
         assert_eq!(ctx.tracked_accounts_count(), before + 1);
     }
@@ -3922,7 +4009,8 @@ mod tests {
         let mint_pk = Pubkey::new_unique();
         let authority = Pubkey::new_unique();
 
-        let addr = ctx.create_mint()
+        let addr = ctx
+            .create_mint()
             .pubkey(mint_pk)
             .mint_authority(authority)
             .decimals(6)
@@ -3949,10 +4037,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let pk = Pubkey::new_unique();
 
-        ctx.create_mint()
-            .pubkey(pk)
-            .create()
-            .unwrap();
+        ctx.create_mint().pubkey(pk).create().unwrap();
 
         let acc = ctx.svm.get_account(&pk).unwrap();
         let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
@@ -3995,12 +4080,13 @@ mod tests {
     #[test]
     fn mint_builder_default_address_errors() {
         let mut ctx = TestContext::new();
-        let err = ctx.create_mint()
-            .decimals(9)
-            .create()
-            .unwrap_err();
+        let err = ctx.create_mint().decimals(9).create().unwrap_err();
 
-        assert!(err.to_string().contains("Address must be set"), "expected address error: {}", err);
+        assert!(
+            err.to_string().contains("Address must be set"),
+            "expected address error: {}",
+            err
+        );
     }
 
     #[test]
@@ -4008,15 +4094,15 @@ mod tests {
         let mut ctx = TestContext::new();
         let pk = Pubkey::new_unique();
 
-        ctx.create_mint()
-            .pubkey(pk)
-            .create()
-            .unwrap();
+        ctx.create_mint().pubkey(pk).create().unwrap();
 
         let acc = ctx.svm.get_account(&pk).unwrap();
         let rent = Rent::default();
         let min_lamports = rent.minimum_balance(spl_token::state::Mint::LEN);
-        assert_eq!(acc.lamports, min_lamports, "mint should have rent-exempt lamports by default");
+        assert_eq!(
+            acc.lamports, min_lamports,
+            "mint should have rent-exempt lamports by default"
+        );
     }
 
     // =========================================================================
@@ -4030,7 +4116,8 @@ mod tests {
         let mint_pk = Pubkey::new_unique();
         let owner_pk = Pubkey::new_unique();
 
-        let addr = ctx.create_token_account()
+        let addr = ctx
+            .create_token_account()
             .pubkey(token_pk)
             .mint(mint_pk)
             .token_owner(owner_pk)
@@ -4057,13 +4144,18 @@ mod tests {
         let pk = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        let err = ctx.create_token_account()
+        let err = ctx
+            .create_token_account()
             .pubkey(pk)
             .token_owner(owner)
             .create()
             .unwrap_err();
 
-        assert!(err.to_string().contains("Mint must be set"), "expected mint error: {}", err);
+        assert!(
+            err.to_string().contains("Mint must be set"),
+            "expected mint error: {}",
+            err
+        );
     }
 
     #[test]
@@ -4072,13 +4164,18 @@ mod tests {
         let pk = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
 
-        let err = ctx.create_token_account()
+        let err = ctx
+            .create_token_account()
             .pubkey(pk)
             .mint(mint)
             .create()
             .unwrap_err();
 
-        assert!(err.to_string().contains("Owner must be set"), "expected owner error: {}", err);
+        assert!(
+            err.to_string().contains("Owner must be set"),
+            "expected owner error: {}",
+            err
+        );
     }
 
     #[test]
@@ -4087,13 +4184,18 @@ mod tests {
         let mint = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
-        let err = ctx.create_token_account()
+        let err = ctx
+            .create_token_account()
             .mint(mint)
             .token_owner(owner)
             .create()
             .unwrap_err();
 
-        assert!(err.to_string().contains("Address must be set"), "expected address error: {}", err);
+        assert!(
+            err.to_string().contains("Address must be set"),
+            "expected address error: {}",
+            err
+        );
     }
 
     #[test]
@@ -4177,7 +4279,10 @@ mod tests {
         let acc = ctx.svm.get_account(&pk).unwrap();
         let rent = Rent::default();
         let min_lamports = rent.minimum_balance(spl_token::state::Account::LEN);
-        assert_eq!(acc.lamports, min_lamports, "token account should have rent-exempt lamports by default");
+        assert_eq!(
+            acc.lamports, min_lamports,
+            "token account should have rent-exempt lamports by default"
+        );
     }
 
     // =========================================================================
@@ -4206,11 +4311,7 @@ mod tests {
         let pk = Pubkey::new_unique();
 
         // Override default rent-exempt lamports
-        ctx.create_mint()
-            .pubkey(pk)
-            .lamports(999)
-            .create()
-            .unwrap();
+        ctx.create_mint().pubkey(pk).lamports(999).create().unwrap();
 
         let acc = ctx.svm.get_account(&pk).unwrap();
         assert_eq!(acc.lamports, 999);
@@ -4253,11 +4354,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let pk = Pubkey::new_unique();
 
-        ctx.create_mint()
-            .pubkey(pk)
-            .decimals(0)
-            .create()
-            .unwrap();
+        ctx.create_mint().pubkey(pk).decimals(0).create().unwrap();
 
         let acc = ctx.svm.get_account(&pk).unwrap();
         let mint = spl_token::state::Mint::unpack(&acc.data).unwrap();
@@ -4370,8 +4467,14 @@ mod tests {
         set_violation_action_index(0);
 
         let out = format_action_sequence();
-        assert!(out.contains("action_first -> FAIL [VIOLATION]"), "violation should be on first: {out}");
-        assert!(!out.contains("action_second -> OK [VIOLATION]"), "second should not have marker: {out}");
+        assert!(
+            out.contains("action_first -> FAIL [VIOLATION]"),
+            "violation should be on first: {out}"
+        );
+        assert!(
+            !out.contains("action_second -> OK [VIOLATION]"),
+            "second should not have marker: {out}"
+        );
     }
 
     #[test]
@@ -4399,7 +4502,10 @@ mod tests {
 
         let out = format_action_sequence();
         // Should still format (total_actions=0 but history non-empty → skipped = 0 - 1 = saturating_sub → 0)
-        assert!(out.contains("1 executed, 0 skipped"), "should handle mismatch: {out}");
+        assert!(
+            out.contains("1 executed, 0 skipped"),
+            "should handle mismatch: {out}"
+        );
     }
 
     #[test]
@@ -4467,15 +4573,36 @@ mod tests {
 
         let out = format_action_sequence();
         // All params must appear in the output
-        assert!(out.contains("authority=null"), "authority param missing: {out}");
-        assert!(out.contains("stake_account=1340788527"), "stake_account param missing: {out}");
-        assert!(out.contains("vote_account=640494879"), "vote_account param missing: {out}");
+        assert!(
+            out.contains("authority=null"),
+            "authority param missing: {out}"
+        );
+        assert!(
+            out.contains("stake_account=1340788527"),
+            "stake_account param missing: {out}"
+        );
+        assert!(
+            out.contains("vote_account=640494879"),
+            "vote_account param missing: {out}"
+        );
         assert!(out.contains("slots=54177"), "slots param missing: {out}");
-        assert!(out.contains("leave_reserve=true"), "leave_reserve param missing: {out}");
-        assert!(out.contains("lamports=1000"), "lamports param missing: {out}");
+        assert!(
+            out.contains("leave_reserve=true"),
+            "leave_reserve param missing: {out}"
+        );
+        assert!(
+            out.contains("lamports=1000"),
+            "lamports param missing: {out}"
+        );
         // Status markers
-        assert!(out.contains("delegate_stake(") && out.contains(") -> OK"), "delegate_stake format: {out}");
-        assert!(out.contains("withdraw(") && out.contains(") -> FAIL"), "withdraw format: {out}");
+        assert!(
+            out.contains("delegate_stake(") && out.contains(") -> OK"),
+            "delegate_stake format: {out}"
+        );
+        assert!(
+            out.contains("withdraw(") && out.contains(") -> FAIL"),
+            "withdraw format: {out}"
+        );
     }
 
     #[test]
@@ -4506,8 +4633,14 @@ mod tests {
 
         let out = format_action_sequence();
         // Lite records have no params — should NOT have parentheses
-        assert!(out.contains("delegate_stake -> OK"), "should have no params: {out}");
-        assert!(!out.contains("delegate_stake("), "should not have parens: {out}");
+        assert!(
+            out.contains("delegate_stake -> OK"),
+            "should have no params: {out}"
+        );
+        assert!(
+            !out.contains("delegate_stake("),
+            "should not have parens: {out}"
+        );
     }
 
     // =========================================================================
@@ -4525,13 +4658,18 @@ mod tests {
     fn parse_error_code_insufficient_funds() {
         use solana_instruction::error::InstructionError;
         let err = TransactionError::InstructionError(0, InstructionError::InsufficientFunds);
-        assert_eq!(parse_error_code(&err), None, "InsufficientFunds has no Custom(N)");
+        assert_eq!(
+            parse_error_code(&err),
+            None,
+            "InsufficientFunds has no Custom(N)"
+        );
     }
 
     #[test]
     fn parse_error_code_account_already_initialized() {
         use solana_instruction::error::InstructionError;
-        let err = TransactionError::InstructionError(2, InstructionError::AccountAlreadyInitialized);
+        let err =
+            TransactionError::InstructionError(2, InstructionError::AccountAlreadyInitialized);
         assert_eq!(parse_error_code(&err), None);
         // But instruction index should still parse
         assert_eq!(parse_instruction_index(&err), Some(2));
@@ -4547,41 +4685,56 @@ mod tests {
         let pk = Pubkey::new_unique();
 
         // Initial state
-        ctx.write_account(&pk, Account {
-            lamports: 100,
-            data: vec![1],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 100,
+                data: vec![1],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         ctx.dirty_tracker.mark_account_dirty(&pk);
 
         ctx.take_snapshot();
 
         // Write #1 during iteration
-        ctx.write_account(&pk, Account {
-            lamports: 200,
-            data: vec![2],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 200,
+                data: vec![2],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         ctx.dirty_tracker.mark_account_dirty(&pk);
 
         // Write #2 during iteration
-        ctx.write_account(&pk, Account {
-            lamports: 300,
-            data: vec![3],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 300,
+                data: vec![3],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         ctx.dirty_tracker.mark_account_dirty(&pk);
 
         // Restore should go back to snapshot state (lamports=100, data=[1])
         ctx.restore_snapshot();
         let acc = ctx.svm.get_account(&pk).unwrap();
-        assert_eq!(acc.lamports, 100, "restore should use snapshot value, not intermediate");
+        assert_eq!(
+            acc.lamports, 100,
+            "restore should use snapshot value, not intermediate"
+        );
         assert_eq!(acc.data, vec![1]);
     }
 
@@ -4592,30 +4745,41 @@ mod tests {
 
         // Create a large account (10KB)
         let original_data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
-        ctx.write_account(&pk, Account {
-            lamports: 1_000_000,
-            data: original_data.clone(),
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 1_000_000,
+                data: original_data.clone(),
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         ctx.dirty_tracker.mark_account_dirty(&pk);
 
         ctx.take_snapshot();
 
         // Modify during iteration
-        ctx.write_account(&pk, Account {
-            lamports: 1_000_000,
-            data: vec![0xFF; 10_000],
-            owner: Pubkey::new_unique(),
-            executable: false,
-            rent_epoch: 0,
-        }).unwrap();
+        ctx.write_account(
+            &pk,
+            Account {
+                lamports: 1_000_000,
+                data: vec![0xFF; 10_000],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
         ctx.dirty_tracker.mark_account_dirty(&pk);
 
         ctx.restore_snapshot();
         let acc = ctx.svm.get_account(&pk).unwrap();
-        assert_eq!(acc.data, original_data, "10KB data should be perfectly restored");
+        assert_eq!(
+            acc.data, original_data,
+            "10KB data should be perfectly restored"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -4661,7 +4825,10 @@ mod tests {
         let result = ctx.add_program(&program_id, "/nonexistent/bogus.so");
         std::env::remove_var("FUZZ_PROGRAM_SO");
 
-        assert!(result.is_ok(), "Override should load from FUZZ_PROGRAM_SO, not the bogus path");
+        assert!(
+            result.is_ok(),
+            "Override should load from FUZZ_PROGRAM_SO, not the bogus path"
+        );
     }
 
     #[test]
@@ -4674,7 +4841,10 @@ mod tests {
         let program_id = Pubkey::new_unique();
 
         let result = ctx.add_program(&program_id, &so_path);
-        assert!(result.is_ok(), "Normal add_program should work without override");
+        assert!(
+            result.is_ok(),
+            "Normal add_program should work without override"
+        );
     }
 
     #[test]
@@ -4690,6 +4860,35 @@ mod tests {
         let result = ctx.add_program(&program_id, "/also/bogus.so");
         std::env::remove_var("FUZZ_PROGRAM_SO");
 
-        assert!(result.is_err(), "Override pointing to nonexistent file should error");
+        assert!(
+            result.is_err(),
+            "Override pointing to nonexistent file should error"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test ProgramBuilder
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_program_builder_fee_payer() {
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+        let fee_payer = Keypair::new();
+        let signer = Keypair::new();
+
+        let builder = ctx
+            .program(program_id)
+            .fee_payer(&fee_payer)
+            .signers(&[&signer]);
+
+        assert_eq!(builder.fee_payer, Some(fee_payer.insecure_clone()));
+
+        let builder = ctx
+            .program(program_id)
+            .signers(&[&signer])
+            .fee_payer(&fee_payer);
+
+        assert_eq!(builder.fee_payer, Some(fee_payer));
     }
 }

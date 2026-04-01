@@ -1,20 +1,21 @@
-use crate::{TestContext, TxOutcome, tx_result_to_outcome};
-use solana_pubkey::Pubkey;
-use solana_keypair::Keypair;
-use solana_signer::Signer;
-use anchor_lang::solana_program::instruction::{Instruction, AccountMeta};
-use anchor_lang::{InstructionData, ToAccountMetas};
-use anyhow::Result;
 use crate::instruction_builder;
+use crate::{tx_result_to_outcome, TestContext, TxOutcome};
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
+use anchor_lang::{InstructionData, ToAccountMetas};
+use anyhow::{Context, Result};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
 
 pub struct ProgramBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,
     pub(crate) instruction: Instruction,
     pub(crate) signers: Vec<Keypair>,
+    pub(crate) fee_payer: Option<Keypair>,
 }
 
 impl ProgramBuilder<'_> {
-    pub fn call<I>(mut self, instruction: I) -> Self 
+    pub fn call<I>(mut self, instruction: I) -> Self
     where
         I: InstructionData,
     {
@@ -22,9 +23,9 @@ impl ProgramBuilder<'_> {
         self
     }
 
-    pub fn accounts<A>(mut self, accounts: A) -> Self 
+    pub fn accounts<A>(mut self, accounts: A) -> Self
     where
-        A: ToAccountMetas, 
+        A: ToAccountMetas,
     {
         self.instruction.accounts = accounts.to_account_metas(None);
         self
@@ -32,7 +33,9 @@ impl ProgramBuilder<'_> {
 
     pub fn remaining_accounts(mut self, accounts: Vec<Pubkey>) -> Self {
         for pubkey in accounts {
-            self.instruction.accounts.push(AccountMeta::new_readonly(pubkey, false));
+            self.instruction
+                .accounts
+                .push(AccountMeta::new_readonly(pubkey, false));
         }
         self
     }
@@ -47,16 +50,37 @@ impl ProgramBuilder<'_> {
         self
     }
 
+    pub fn fee_payer(mut self, fee_payer: &Keypair) -> Self {
+        self.fee_payer = Some(fee_payer.insecure_clone());
+        self
+    }
+
     pub fn send(self) -> Result<TxOutcome> {
-        let fee_payer = self.signers.first().map(|k| k.pubkey()).unwrap_or_default();
+        let fee_payer_pubkey = self
+            .fee_payer
+            .as_ref()
+            .map(|kp| kp.pubkey())
+            .context("At least one signer required if fee payer is not set explicitly")?;
+
+        let fee_payer = self
+            .fee_payer
+            .as_ref()
+            .or(self.signers.first())
+            .context("At least one signer required if fee payer is not set explicitly")?
+            .insecure_clone();
+
         let ixs = std::slice::from_ref(&self.instruction);
 
         // Pre-tx: dirty tracking + metadata capture
         let __t_pre = std::time::Instant::now();
-        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer);
-        let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer);
+        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
+        let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer_pubkey);
         let pre_state = if self.ctx.taint_log.collects_diffs() {
-            Some(crate::snapshot::snapshot_writable_accounts(&self.ctx.svm, ixs, &fee_payer))
+            Some(crate::snapshot::snapshot_writable_accounts(
+                &self.ctx.svm,
+                ixs,
+                &fee_payer_pubkey,
+            ))
         } else {
             None
         };
@@ -64,7 +88,12 @@ impl ProgramBuilder<'_> {
 
         // SVM execution
         let __t_svm = std::time::Instant::now();
-        let result = instruction_builder::send_instruction(&mut self.ctx.svm, self.instruction, &self.signers)?;
+        let result = instruction_builder::send_instruction(
+            &mut self.ctx.svm,
+            self.instruction,
+            &self.signers,
+            &fee_payer,
+        )?;
         crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
         // Post-tx: outcome parsing + taint record
@@ -80,7 +109,9 @@ impl ProgramBuilder<'_> {
         // Build taint record from captured metadata (only for successful txs)
         if outcome.is_success() {
             let taint = crate::snapshot::build_taint_record_from_captured(
-                &self.ctx.svm, captured, pre_state.as_ref(),
+                &self.ctx.svm,
+                captured,
+                pre_state.as_ref(),
             );
             self.ctx.taint_log.push(taint);
         }
