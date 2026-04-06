@@ -61,9 +61,15 @@ fn generate_struct(
         }
         Some(IdlDefinedFields::Tuple(tuple_fields)) => {
             let field_tokens = tuple_fields.iter().map(idl_type_to_tokens);
-            // Tuple struct
+            // Tuple struct — check if all fields support Copy
+            let can_copy = tuple_fields.iter().all(|t| is_copy_type(t, all_types));
+            let derives = if can_copy {
+                quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+            } else {
+                quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+            };
             return quote! {
-                #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)]
+                #derives
                 pub struct #name(#(pub #field_tokens),*);
             };
         }
@@ -74,7 +80,7 @@ fn generate_struct(
     let extra_impls = generate_extra_impls(type_name, fields);
 
     // Determine if we should add Copy and Eq based on field types
-    let can_copy = should_derive_copy(fields);
+    let can_copy = should_derive_copy(fields, all_types);
     let can_eq = fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types));
     let can_derive_default = fields.as_ref().map_or(true, |f| can_derive_default_fields(f));
 
@@ -251,12 +257,21 @@ fn generate_enum(
         }
     });
 
+    // Check if enum can derive Copy (all variant fields must be Copy)
+    let can_derive_copy = variants.iter().all(|v| {
+        v.fields.as_ref().map_or(true, |f| should_derive_copy(&Some(f.clone()), all_types))
+    });
+
     // Build derives based on what's possible
-    let derives = match (can_derive_default, can_derive_eq) {
-        (true, true) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (true, false) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] },
-        (false, true) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (false, false) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq)] },
+    let derives = match (can_derive_copy, can_derive_default, can_derive_eq) {
+        (true, true, true) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
+        (true, true, false) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] },
+        (true, false, true) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
+        (true, false, false) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq)] },
+        (false, true, true) => quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
+        (false, true, false) => quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] },
+        (false, false, true) => quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
+        (false, false, false) => quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq)] },
     };
 
     // Generate manual Default impl for enums where first variant has fields
@@ -465,29 +480,46 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlType
     }
 }
 
-fn should_derive_copy(fields: &Option<IdlDefinedFields>) -> bool {
+fn should_derive_copy(fields: &Option<IdlDefinedFields>, all_types: &[IdlTypeDef]) -> bool {
     match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
-            named_fields.iter().all(|f| is_copy_type(&f.ty))
+            named_fields.iter().all(|f| is_copy_type(&f.ty, all_types))
         }
         Some(IdlDefinedFields::Tuple(tuple_fields)) => {
-            tuple_fields.iter().all(is_copy_type)
+            tuple_fields.iter().all(|t| is_copy_type(t, all_types))
         }
         None => true,
     }
 }
 
-fn is_copy_type(ty: &anchor_lang_idl::types::IdlType) -> bool {
+fn is_copy_type(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) -> bool {
     use anchor_lang_idl::types::IdlType;
 
     match ty {
         IdlType::Bool | IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
         | IdlType::U32 | IdlType::I32 | IdlType::F32 | IdlType::U64 | IdlType::I64
         | IdlType::F64 | IdlType::U128 | IdlType::I128 | IdlType::Pubkey => true,
-        IdlType::Array(inner, _) => is_copy_type(inner),
-        IdlType::Option(inner) => is_copy_type(inner),
-        // Defined types - assume copy for now, might need refinement
-        IdlType::Defined { .. } => true,
+        IdlType::Array(inner, _) => is_copy_type(inner, all_types),
+        IdlType::Option(inner) => is_copy_type(inner, all_types),
+        // Defined types - look up in IDL and recursively check their fields
+        IdlType::Defined { name, .. } => {
+            if let Some(typedef) = all_types.iter().find(|t| &t.name == name) {
+                match &typedef.ty {
+                    IdlTypeDefTy::Struct { fields } => should_derive_copy(fields, all_types),
+                    IdlTypeDefTy::Enum { variants } => {
+                        // Enum is Copy if all variant fields are Copy
+                        variants.iter().all(|v| match &v.fields {
+                            Some(fields) => should_derive_copy(&Some(fields.clone()), all_types),
+                            None => true,
+                        })
+                    }
+                    IdlTypeDefTy::Type { alias } => is_copy_type(alias, all_types),
+                }
+            } else {
+                // Type not found in IDL — be conservative, assume not Copy
+                false
+            }
+        }
         // String and Vec are not Copy
         IdlType::String | IdlType::Bytes | IdlType::Vec(_) => false,
         _ => false,
@@ -992,20 +1024,21 @@ mod tests {
 
     #[test]
     fn test_should_derive_copy() {
+        let empty_types = vec![];
         // Primitives → Copy
         assert!(should_derive_copy(&Some(IdlDefinedFields::Named(vec![
             make_field("x", IdlType::U64),
-        ]))));
+        ])), &empty_types));
         // String → no Copy
         assert!(!should_derive_copy(&Some(IdlDefinedFields::Named(vec![
             make_field("s", IdlType::String),
-        ]))));
+        ])), &empty_types));
         // Vec → no Copy
         assert!(!should_derive_copy(&Some(IdlDefinedFields::Named(vec![
             make_field("v", IdlType::Vec(Box::new(IdlType::U8))),
-        ]))));
+        ])), &empty_types));
         // None → Copy
-        assert!(should_derive_copy(&None));
+        assert!(should_derive_copy(&None, &empty_types));
     }
 
     #[test]

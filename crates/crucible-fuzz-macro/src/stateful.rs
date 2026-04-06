@@ -84,7 +84,7 @@ pub fn stateful_mode(
             let pool_capacity: usize = std::env::var("FUZZ_STATE_POOL_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(128_000); // 128k
+                .unwrap_or(256_000); // 256k
 
             // Parse max depth from env or default to 15
             let max_depth: u32 = std::env::var("FUZZ_MAX_DEPTH")

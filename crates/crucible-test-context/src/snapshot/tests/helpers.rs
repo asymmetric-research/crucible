@@ -18,12 +18,18 @@ pub fn make_test_clock(slot: u64) -> Clock {
 }
 
 /// Convert a Clock into a sysvars vec suitable for SvmSnapshot construction.
-pub fn clock_to_sysvars(clock: &Clock) -> Vec<(Pubkey, Option<Vec<u8>>)> {
-    vec![(Clock::id(), Some(bincode::serialize(clock).unwrap()))]
+pub fn clock_to_sysvars(clock: &Clock) -> Vec<(Pubkey, Option<Account>)> {
+    vec![(Clock::id(), Some(Account {
+        lamports: 1,
+        data: bincode::serialize(clock).unwrap(),
+        owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
+        executable: false,
+        rent_epoch: 0,
+    }))]
 }
 
 /// Create test sysvars (containing a Clock with the given slot) for SvmSnapshot construction.
-pub fn make_test_sysvars(slot: u64) -> Vec<(Pubkey, Option<Vec<u8>>)> {
+pub fn make_test_sysvars(slot: u64) -> Vec<(Pubkey, Option<Account>)> {
     clock_to_sysvars(&make_test_clock(slot))
 }
 

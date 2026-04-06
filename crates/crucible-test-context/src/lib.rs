@@ -15,6 +15,9 @@ use solana_account::Account;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
+use solana_message::inner_instruction::InnerInstructionsList;
+use solana_signature::Signature;
+use solana_transaction_context::TransactionReturnData;
 use solana_transaction_error::TransactionError;
 
 // Re-export types from anchor-lang for anchor program interactions
@@ -143,53 +146,6 @@ thread_local! {
 // Sentinel: has FUZZ_DEBUG TLS been initialized on this thread?
 thread_local! {
     static FUZZ_DEBUG_INIT: Cell<bool> = const { Cell::new(false) };
-}
-
-// Per-iteration account novelty tracking.
-// The bitmap pointer is set by stateful.rs before each chain execution.
-// The invariant macro's dispatch loop calls `record_account_novelty()` after
-// each action, which checks each dirty account's state against the bitmap.
-thread_local! {
-    /// (bitmap_ptr, bitmap_len). null_mut = disabled.
-    static NOVELTY_BITMAP: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
-    /// Count of novel account states found this iteration.
-    static NOVELTY_COUNT: Cell<u32> = const { Cell::new(0) };
-}
-
-/// Set the account novelty bitmap pointer for the current iteration.
-/// Called by stateful.rs before chain execution.
-pub fn set_novelty_bitmap(ptr: *mut u8, len: usize) {
-    NOVELTY_BITMAP.with(|c| c.set((ptr, len)));
-    NOVELTY_COUNT.with(|c| c.set(0));
-}
-
-/// Clear the novelty bitmap pointer (disable per-tx novelty tracking).
-pub fn clear_novelty_bitmap() {
-    NOVELTY_BITMAP.with(|c| c.set((std::ptr::null_mut(), 0)));
-}
-
-/// Get the count of novel account states found this iteration.
-pub fn get_novelty_count() -> u32 {
-    NOVELTY_COUNT.with(|c| c.get())
-}
-
-/// Check dirty accounts for state novelty and record in the TLS bitmap.
-///
-/// Called by the invariant macro's dispatch loop after each action.
-/// For each dirty account, exponentially bins the absolute state (lamports +
-/// sampled data words) and checks against the shared novelty bitmap.
-/// If any account is in a never-before-seen bucket, increments the TLS counter.
-pub fn record_account_novelty(svm: &litesvm::LiteSVM, dirty: &snapshot::DirtyTracker) {
-    let (ptr, len) = NOVELTY_BITMAP.with(|c| c.get());
-    if ptr.is_null() || len == 0 {
-        return; // novelty tracking disabled (non-stateful mode)
-    }
-
-    let novel = unsafe { snapshot::check_account_state_novelty(svm, dirty, ptr, len) };
-
-    if novel > 0 {
-        NOVELTY_COUNT.with(|c| c.set(c.get() + novel));
-    }
 }
 
 /// Check FUZZ_DEBUG env var (cached per-thread after first call).
@@ -525,61 +481,6 @@ pub fn format_action_sequence() -> String {
                 status,
                 violation_marker
             );
-        }
-
-        if let Some(ref taint) = record.taint {
-            if !taint.written_accounts.is_empty() {
-                if let Some(ref changes) = taint.account_changes {
-                    for change in changes {
-                        let label = &change.pubkey[..8.min(change.pubkey.len())];
-
-                        let mut parts = Vec::new();
-
-                        let (pre_l, post_l) = change.lamports;
-                        if pre_l != post_l {
-                            let delta = post_l as i128 - pre_l as i128;
-                            let sign = if delta >= 0 { "+" } else { "" };
-                            parts.push(format!("{}{}lamports", sign, delta));
-                        }
-
-                        if let Some(ref field_diffs) = change.field_diffs {
-                            for fd in field_diffs {
-                                parts.push(format!(
-                                    "{}: {} -> {}",
-                                    fd.field, fd.old_value, fd.new_value
-                                ));
-                            }
-                        } else if !change.changed_ranges.is_empty() {
-                            let ranges_str: Vec<String> = change
-                                .changed_ranges
-                                .iter()
-                                .map(|(off, len)| format!("data[{}..{}]", off, off + len))
-                                .collect();
-                            parts.push(ranges_str.join(", "));
-                        }
-
-                        let kind_str = match change.kind {
-                            AccountChangeKind::Created => "created",
-                            AccountChangeKind::Modified => "modified",
-                            AccountChangeKind::Deleted => "deleted",
-                        };
-
-                        if parts.is_empty() {
-                            let _ =
-                                writeln!(out, "     {}...({}) {}", label, kind_str, change.pubkey);
-                        } else {
-                            let _ = writeln!(out, "     {}...({})", label, parts.join(", "));
-                        }
-                    }
-                } else {
-                    let short_keys: Vec<String> = taint
-                        .written_accounts
-                        .iter()
-                        .map(|k| format!("{}...", &k[..8.min(k.len())]))
-                        .collect();
-                    let _ = writeln!(out, "     wrote: {}", short_keys.join(", "));
-                }
-            }
         }
     }
 
@@ -1039,7 +940,10 @@ pub enum TxOutcome {
     Success {
         compute_units: u64,
         logs: Vec<String>,
-        return_data: Vec<u8>,
+        signature: Signature,
+        inner_instructions: InnerInstructionsList,
+        return_data: TransactionReturnData,
+        fee: u64,
     },
     /// Transaction failed with program error
     ProgramError {
@@ -1049,10 +953,11 @@ pub enum TxOutcome {
         error_code: Option<u32>,
         /// Instruction index that failed
         instruction_index: Option<u8>,
-        /// Program logs up to failure
         logs: Vec<String>,
-        /// Return data
-        return_data: Vec<u8>,
+        signature: Signature,
+        inner_instructions: InnerInstructionsList,
+        return_data: TransactionReturnData,
+        fee: u64,
     },
 }
 
@@ -1063,7 +968,10 @@ pub struct TxError {
     pub error_code: Option<u32>,
     pub instruction_index: Option<u8>,
     pub logs: Vec<String>,
-    pub return_data: Vec<u8>,
+    pub signature: Signature,
+    pub inner_instructions: InnerInstructionsList,
+    pub return_data: TransactionReturnData,
+    pub fee: u64,
 }
 
 impl std::error::Error for TxError {}
@@ -1108,6 +1016,34 @@ impl TxOutcome {
         match self {
             TxOutcome::Success { compute_units, .. } => Some(*compute_units),
             _ => None,
+        }
+    }
+
+    pub fn signature(&self) -> &Signature {
+        match self {
+            TxOutcome::Success { signature, .. } => signature,
+            TxOutcome::ProgramError { signature, .. } => signature,
+        }
+    }
+
+    pub fn fee(&self) -> u64 {
+        match self {
+            TxOutcome::Success { fee, .. } => *fee,
+            TxOutcome::ProgramError { fee, .. } => *fee,
+        }
+    }
+
+    pub fn inner_instructions(&self) -> &InnerInstructionsList {
+        match self {
+            TxOutcome::Success { inner_instructions, .. } => inner_instructions,
+            TxOutcome::ProgramError { inner_instructions, .. } => inner_instructions,
+        }
+    }
+
+    pub fn return_data(&self) -> &TransactionReturnData {
+        match self {
+            TxOutcome::Success { return_data, .. } => return_data,
+            TxOutcome::ProgramError { return_data, .. } => return_data,
         }
     }
 
@@ -1157,13 +1093,19 @@ impl TxOutcome {
                 error_code,
                 instruction_index,
                 logs,
+                signature,
+                inner_instructions,
                 return_data,
+                fee,
             } => Err(TxError {
                 error,
                 error_code,
                 instruction_index,
                 logs,
+                signature,
+                inner_instructions,
                 return_data,
+                fee,
             }),
         }
     }
@@ -1193,15 +1135,25 @@ pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutc
         Ok(meta) => TxOutcome::Success {
             compute_units: meta.compute_units_consumed,
             logs: meta.logs,
-            return_data: meta.return_data.data,
+            signature: meta.signature,
+            inner_instructions: meta.inner_instructions,
+            return_data: meta.return_data,
+            fee: meta.fee,
         },
-        Err(failed) => TxOutcome::ProgramError {
-            error: failed.err.clone(),
-            error_code: parse_error_code(&failed.err),
-            instruction_index: parse_instruction_index(&failed.err),
-            logs: failed.meta.logs,
-            return_data: failed.meta.return_data.data,
-        },
+        Err(failed) => {
+            let error_code = parse_error_code(&failed.err);
+            let instruction_index = parse_instruction_index(&failed.err);
+            TxOutcome::ProgramError {
+                error: failed.err,
+                error_code,
+                instruction_index,
+                logs: failed.meta.logs,
+                signature: failed.meta.signature,
+                inner_instructions: failed.meta.inner_instructions,
+                return_data: failed.meta.return_data,
+                fee: failed.meta.fee,
+            }
+        }
     };
     // Store error code in TLS for push_action_record to pick up
     set_last_error_code(outcome.error_code());
@@ -1234,9 +1186,10 @@ pub struct TestContext {
     programs: std::sync::Arc<Vec<ProgramData>>,
     /// Account pubkeys that have been set (for copying to debuggable SVMs)
     tracked_accounts: Arc<HashSet<Pubkey>>,
-    /// Total CFG edges and instructions per program (for coverage percentage calculation)
-    /// Value is (total_edges, total_instructions)
-    program_coverage_totals: HashMap<Pubkey, (usize, usize)>,
+    /// Total CFG edges and instructions per program (for coverage percentage calculation).
+    /// Arc-wrapped: set once during setup, shared cheaply across multicore fixture clones.
+    /// Value is (total_edges, total_instructions).
+    program_coverage_totals: Arc<HashMap<Pubkey, (usize, usize)>>,
     /// Snapshot of initial state for fast restore (always-on in fuzz mode)
     pub snapshot: Option<snapshot::SvmSnapshot>,
     /// Tracks dirty accounts across all transactions in an iteration
@@ -1311,7 +1264,7 @@ impl TestContext {
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: Arc::new(HashSet::new()),
-            program_coverage_totals: HashMap::new(),
+            program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
         }
@@ -1329,13 +1282,14 @@ impl TestContext {
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: Arc::new(HashSet::new()),
-            program_coverage_totals: HashMap::new(),
+            program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
         }
     }
 
     /// Analyze a program binary and return (total_edges, total_instructions).
+    /// Only counts reachable code from the program entrypoint via BFS.
     /// Only counts edges from conditional jump instructions (matching runtime tracking).
     /// Used for coverage percentage calculation.
     pub fn analyze_program_coverage(program_data: &[u8]) -> Option<(usize, usize)> {
@@ -1345,50 +1299,72 @@ impl TestContext {
         use solana_sbpf::static_analysis::Analysis;
         use solana_sbpf::vm::ContextObject;
 
-        // Minimal ContextObject implementation for static analysis
         struct DummyContext;
         impl ContextObject for DummyContext {
             fn consume(&mut self, _amount: u64) {}
-            fn get_remaining(&self) -> u64 {
-                0
+            fn get_remaining(&self) -> u64 { 0 }
+        }
+
+        let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
+        let executable = Executable::from_elf(program_data, loader).ok()?;
+        let analysis = Analysis::from_executable(&executable).ok()?;
+
+        // BFS from entrypoint + all registered function entries to find reachable CFG nodes.
+        // Function entries are seeded because CALL targets are encoded in instruction
+        // immediates, not in cfg_node.destinations.
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        // Seed with program entrypoint
+        if analysis.cfg_nodes.contains_key(&analysis.entrypoint) {
+            visited.insert(analysis.entrypoint);
+            queue.push_back(analysis.entrypoint);
+        }
+
+        // Seed all function entry points (reachable via CALL instructions).
+        // analysis.functions maps PC → (key, name); cfg_nodes are keyed by node index.
+        for (&pc, _) in &analysis.functions {
+            if analysis.cfg_nodes.contains_key(&pc) {
+                if visited.insert(pc) {
+                    queue.push_back(pc);
+                }
             }
         }
 
-        // Create a dummy loader for parsing
-        let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
+        while let Some(node_id) = queue.pop_front() {
+            if let Some(cfg_node) = analysis.cfg_nodes.get(&node_id) {
+                for &dest in &cfg_node.destinations {
+                    if visited.insert(dest) {
+                        queue.push_back(dest);
+                    }
+                }
+            }
+        }
 
-        // Load as executable (may fail for invalid binaries)
-        let executable = Executable::from_elf(program_data, loader).ok()?;
-
-        // Run static analysis
-        let analysis = Analysis::from_executable(&executable).ok()?;
-
-        // Count conditional jump edges for coverage percentage calculation
-        // Only count BPF_JMP edges (matching runtime tracking in process_trace)
+        // Count edges and instructions only for reachable nodes
         let mut total_conditional: usize = 0;
-        for cfg_node in analysis.cfg_nodes.values() {
+        let mut total_instructions: usize = 0;
+        for (&node_id, cfg_node) in &analysis.cfg_nodes {
+            if !visited.contains(&node_id) {
+                continue;
+            }
+
+            total_instructions += cfg_node.instructions.end - cfg_node.instructions.start;
+
             if cfg_node.instructions.is_empty() {
                 continue;
             }
 
-            // Get last instruction (the terminator)
             let last_insn = &analysis.instructions[cfg_node.instructions.end - 1];
-
-            // Same check as runtime: opc & 7 == BPF_JMP
             let is_jmp = last_insn.opc & 7 == ebpf::BPF_JMP;
-
             if is_jmp {
                 let opc = last_insn.opc;
-                // Only count conditional jumps for coverage purposes
-                // Exclude: CALL (0x85), EXIT (0x95), JA unconditional (0x05), CALLX (0x8d)
                 let is_conditional = opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
                 if is_conditional {
                     total_conditional += cfg_node.destinations.len();
                 }
             }
         }
-
-        let total_instructions = analysis.instructions.len();
 
         Some((total_conditional, total_instructions))
     }
@@ -1420,7 +1396,7 @@ impl TestContext {
         if let Some((total_edges, total_instructions)) =
             Self::analyze_program_coverage(program_data)
         {
-            self.program_coverage_totals
+            Arc::make_mut(&mut self.program_coverage_totals)
                 .insert(*program_id, (total_edges, total_instructions));
         }
 
@@ -1451,7 +1427,7 @@ impl TestContext {
             pending_signers: Vec::new(),
             programs: std::sync::Arc::new(Vec::new()),
             tracked_accounts: Arc::new(HashSet::new()),
-            program_coverage_totals: HashMap::new(),
+            program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
         }
@@ -1567,14 +1543,6 @@ impl TestContext {
 
     /// Take a snapshot of ALL accounts in the SVM.
     /// Called once after setup, before the fuzz loop begins.
-    ///
-    /// Uses `take_all` to capture every account in the SVM's accounts_db,
-    /// not just explicitly tracked or dirty-tracked accounts. This prevents
-    /// a critical bug where accounts created during setup (e.g., via direct
-    /// `ctx.svm.set_account()` calls or as side effects of SVM execution)
-    /// would be missing from the snapshot. When a fuzz action later touches
-    /// such an account, restore() would zero it (treating it as "created
-    /// during iteration"), corrupting state for all subsequent iterations.
     pub fn take_snapshot(&mut self) {
         // Sync tracked_accounts with everything in the SVM so that
         // tracked_accounts_count() reflects reality (used in diagnostics).
@@ -1757,6 +1725,30 @@ impl TestContext {
     pub fn next_slot(&self) -> u64 {
         self.slot() + 1
     }
+
+    // =========================================================================
+    // Account Read/Write API
+    //
+    // **Raw Account** (any format):
+    //   - `read_account` / `get_account` — returns raw `Account`
+    //   - `write_account` — sets raw `Account`
+    //   - `update_account` — closure-based read-modify-write on raw bytes
+    //
+    // **Anchor / Borsh** (`#[account]` structs):
+    //   - `read_anchor_account<T>` — auto discriminator via `T::DISCRIMINATOR`
+    //   - `read_account_with_discriminator<T>` — explicit discriminator length
+    //   - `write_anchor_account<T>` — serializes with discriminator
+    //
+    // **Zero-Copy / Bytemuck** (`#[account(zero_copy)]` structs):
+    //   - `read_zero_copy_account<T>` — 8-byte discriminator (standard Anchor)
+    //   - `read_zero_copy_account_with_discriminator<T>` — explicit discriminator length
+    //   - `write_zero_copy_account<T>` — preserves 8-byte discriminator
+    //   - `write_zero_copy_account_with_discriminator<T>` — explicit discriminator length
+    //
+    // **Utilities:**
+    //   - `account_has_data` — existence + minimum size check
+    //   - `token_balance` — SPL token amount shorthand
+    // =========================================================================
 
     /// Check if account exists AND has at least `min_size` bytes of data
     pub fn account_has_data(&self, pubkey: &Pubkey, min_size: usize) -> bool {
@@ -2039,16 +2031,6 @@ impl TestContext {
         let __t_pre = std::time::Instant::now();
         self.dirty_tracker
             .record_tx(&self.pending_instructions, &fee_payer_pubkey);
-        let captured = snapshot::capture_tx_meta(&self.pending_instructions, &fee_payer_pubkey);
-        let pre_state = if self.taint_log.collects_diffs() {
-            Some(snapshot::snapshot_writable_accounts(
-                &self.svm,
-                &self.pending_instructions,
-                &fee_payer_pubkey,
-            ))
-        } else {
-            None
-        };
         SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
         // SVM execution: send transaction
@@ -2077,13 +2059,12 @@ impl TestContext {
                 TxOutcome::Success {
                     compute_units,
                     logs,
-                    return_data,
+                    ..
                 } => {
                     eprintln!("[TX] SUCCESS - compute_units={}, logs:", compute_units);
                     for log in logs {
                         eprintln!("[TX]   {}", log);
                     }
-                    eprintln!("[TX] Return data: {:x?}", return_data);
                 }
                 TxOutcome::ProgramError {
                     error,
@@ -2293,7 +2274,10 @@ mod tests {
         let success = TxOutcome::Success {
             compute_units: 100,
             logs: vec!["log1".to_string()],
-            return_data: vec![],
+            signature: Signature::default(),
+            inner_instructions: vec![],
+            return_data: TransactionReturnData::default(),
+            fee: 5000,
         };
 
         assert!(success.is_success());
@@ -2301,19 +2285,24 @@ mod tests {
         assert!(success.error_code().is_none());
         assert_eq!(success.compute_units(), Some(100));
         assert_eq!(success.logs().len(), 1);
+        assert_eq!(success.fee(), 5000);
 
         let error = TxOutcome::ProgramError {
             error: TransactionError::AccountInUse,
             error_code: Some(6051),
             instruction_index: Some(0),
             logs: vec!["error log".to_string()],
-            return_data: vec![],
+            signature: Signature::default(),
+            inner_instructions: vec![],
+            return_data: TransactionReturnData::default(),
+            fee: 0,
         };
 
         assert!(!error.is_success());
         assert!(error.is_error());
         assert_eq!(error.error_code(), Some(6051));
         assert!(error.compute_units().is_none());
+        assert_eq!(error.fee(), 0);
     }
 
     #[test]
@@ -2321,7 +2310,10 @@ mod tests {
         let success = TxOutcome::Success {
             compute_units: 100,
             logs: vec![],
-            return_data: vec![1, 2, 3],
+            signature: Signature::default(),
+            inner_instructions: vec![],
+            return_data: TransactionReturnData::default(),
+            fee: 0,
         };
         assert!(success.into_result().is_ok());
 
@@ -2330,13 +2322,14 @@ mod tests {
             error_code: Some(6051),
             instruction_index: Some(0),
             logs: vec![],
-            return_data: vec![1, 2, 3, 4],
+            signature: Signature::default(),
+            inner_instructions: vec![],
+            return_data: TransactionReturnData::default(),
+            fee: 0,
         };
-        assert!(error.clone().into_result().is_err());
-        assert_eq!(
-            error.into_result().unwrap_err().return_data,
-            vec![1, 2, 3, 4]
-        );
+        let err = error.into_result().unwrap_err();
+        assert_eq!(err.error_code, Some(6051));
+        assert_eq!(err.fee, 0);
     }
 
     // -------------------------------------------------------------------------
@@ -4370,5 +4363,301 @@ mod tests {
             .fee_payer(&fee_payer);
 
         assert_eq!(builder.fee_payer, Some(fee_payer));
+    }
+
+    // =========================================================================
+    // Change 1: TxOutcome new fields — signature, inner_instructions,
+    //           return_data, fee are populated from litesvm metadata
+    // =========================================================================
+
+    #[test]
+    fn tx_result_to_outcome_success_preserves_all_metadata() {
+        use litesvm::types::TransactionMetadata;
+        use solana_message::inner_instruction::InnerInstruction;
+        use solana_message::compiled_instruction::CompiledInstruction;
+
+        let sig = Signature::from([1u8; 64]);
+        let return_program = Pubkey::new_unique();
+        let inner_ix = InnerInstruction {
+            instruction: CompiledInstruction {
+                program_id_index: 2,
+                accounts: vec![0, 1],
+                data: vec![0xAB, 0xCD],
+            },
+            stack_height: 2,
+        };
+
+        let meta = TransactionMetadata {
+            signature: sig,
+            logs: vec!["Program invoked".to_string()],
+            inner_instructions: vec![vec![inner_ix]],
+            compute_units_consumed: 12345,
+            return_data: TransactionReturnData {
+                program_id: return_program,
+                data: vec![1, 2, 3, 4],
+            },
+            fee: 5000,
+        };
+
+        let outcome = tx_result_to_outcome(Ok(meta));
+
+        // Verify all fields are preserved, not just compute_units and logs
+        assert!(outcome.is_success());
+        assert_eq!(outcome.compute_units(), Some(12345));
+        assert_eq!(outcome.logs(), &["Program invoked"]);
+        assert_eq!(*outcome.signature(), sig);
+        assert_eq!(outcome.fee(), 5000);
+        assert_eq!(outcome.return_data().program_id, return_program);
+        assert_eq!(outcome.return_data().data, vec![1, 2, 3, 4]);
+        assert_eq!(outcome.inner_instructions().len(), 1);
+        assert_eq!(outcome.inner_instructions()[0].len(), 1);
+        assert_eq!(outcome.inner_instructions()[0][0].stack_height, 2);
+        assert_eq!(outcome.inner_instructions()[0][0].instruction.data, vec![0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn tx_result_to_outcome_error_preserves_all_metadata() {
+        use solana_instruction::error::InstructionError;
+        use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+
+        let sig = Signature::from([1u8; 64]);
+        let failed = FailedTransactionMetadata {
+            err: TransactionError::InstructionError(2, InstructionError::Custom(9999)),
+            meta: TransactionMetadata {
+                signature: sig,
+                logs: vec!["Program failed".to_string()],
+                inner_instructions: vec![vec![], vec![]],
+                compute_units_consumed: 500,
+                return_data: TransactionReturnData {
+                    program_id: Pubkey::new_unique(),
+                    data: vec![0xFF],
+                },
+                fee: 7500,
+            },
+        };
+
+        let outcome = tx_result_to_outcome(Err(failed));
+
+        assert!(outcome.is_error());
+        assert_eq!(outcome.error_code(), Some(9999));
+        assert_eq!(*outcome.signature(), sig);
+        assert_eq!(outcome.fee(), 7500);
+        assert_eq!(outcome.return_data().data, vec![0xFF]);
+        assert_eq!(outcome.inner_instructions().len(), 2);
+        assert_eq!(outcome.logs(), &["Program failed"]);
+    }
+
+    #[test]
+    fn tx_outcome_into_result_preserves_new_fields_in_tx_error() {
+        let sig = Signature::from([1u8; 64]);
+        let return_program = Pubkey::new_unique();
+
+        let error = TxOutcome::ProgramError {
+            error: TransactionError::AccountInUse,
+            error_code: Some(42),
+            instruction_index: Some(3),
+            logs: vec!["log".to_string()],
+            signature: sig,
+            inner_instructions: vec![vec![]],
+            return_data: TransactionReturnData {
+                program_id: return_program,
+                data: vec![10, 20],
+            },
+            fee: 3000,
+        };
+
+        let err = error.into_result().unwrap_err();
+
+        // All fields must survive the TxOutcome → TxError conversion
+        assert_eq!(err.error_code, Some(42));
+        assert_eq!(err.instruction_index, Some(3));
+        assert_eq!(err.signature, sig);
+        assert_eq!(err.fee, 3000);
+        assert_eq!(err.return_data.program_id, return_program);
+        assert_eq!(err.return_data.data, vec![10, 20]);
+        assert_eq!(err.inner_instructions.len(), 1);
+        assert_eq!(err.logs, vec!["log"]);
+    }
+
+    #[test]
+    fn tx_outcome_accessors_agree_across_variants() {
+        // Both variants should return the same values through accessors
+        let sig = Signature::from([1u8; 64]);
+        let rd = TransactionReturnData {
+            program_id: Pubkey::new_unique(),
+            data: vec![42],
+        };
+
+        let success = TxOutcome::Success {
+            compute_units: 0,
+            logs: vec![],
+            signature: sig,
+            inner_instructions: vec![],
+            return_data: rd.clone(),
+            fee: 100,
+        };
+
+        let error = TxOutcome::ProgramError {
+            error: TransactionError::AccountInUse,
+            error_code: None,
+            instruction_index: None,
+            logs: vec![],
+            signature: sig,
+            inner_instructions: vec![],
+            return_data: rd.clone(),
+            fee: 100,
+        };
+
+        assert_eq!(*success.signature(), *error.signature());
+        assert_eq!(success.fee(), error.fee());
+        assert_eq!(success.return_data().data, error.return_data().data);
+        assert_eq!(success.inner_instructions().len(), error.inner_instructions().len());
+    }
+
+    // =========================================================================
+    // Change 2: Arc-wrapped program_coverage_totals — shared across clones,
+    //           only mutable during setup via Arc::make_mut
+    // =========================================================================
+
+    #[test]
+    fn program_coverage_totals_shared_across_clones() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        let so_path = find_test_so();
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+        ctx.add_program(&program_id, &so_path).unwrap();
+
+        // Verify totals were populated
+        let totals = ctx.get_program_coverage_totals();
+        assert!(totals.contains_key(&program_id), "program should have coverage totals");
+        let (edges, instrs) = totals[&program_id];
+        assert!(edges > 0, "should have edges: {}", edges);
+        assert!(instrs > 0, "should have instructions: {}", instrs);
+
+        // Clone and verify it's the same Arc (cheap pointer clone, not deep copy)
+        let cloned = ctx.clone();
+        let cloned_totals = cloned.get_program_coverage_totals();
+        assert_eq!(cloned_totals[&program_id], (edges, instrs),
+            "clone must have identical coverage totals");
+
+        // Arc::ptr_eq would be ideal but we only have &HashMap. Verify via
+        // the value equality at minimum — the type is Arc<HashMap> so clone
+        // is O(1) pointer bump, not O(n) deep copy.
+    }
+
+    #[test]
+    fn program_coverage_totals_empty_without_program() {
+        let ctx = TestContext::new();
+        assert!(ctx.get_program_coverage_totals().is_empty(),
+            "fresh context should have no coverage totals");
+
+        let cloned = ctx.clone();
+        assert!(cloned.get_program_coverage_totals().is_empty(),
+            "clone of fresh context should also be empty");
+    }
+
+    // =========================================================================
+    // Change 3: Entry-point-aware analyze_program_coverage — BFS from
+    //           entrypoint + function entries, only counting reachable code
+    // =========================================================================
+
+    #[test]
+    fn analyze_program_coverage_returns_nonzero_for_valid_binary() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        let so_path = find_test_so();
+        let program_data = std::fs::read(&so_path).unwrap();
+
+        let result = TestContext::analyze_program_coverage(&program_data);
+        assert!(result.is_some(), "valid SBF binary should produce coverage data");
+
+        let (edges, instructions) = result.unwrap();
+        assert!(edges > 0, "should have conditional edges: {}", edges);
+        assert!(instructions > 0, "should have instructions: {}", instructions);
+
+        // Sanity: edges should be less than instructions (not every instruction
+        // is a conditional branch — conditional branches produce 2 edges each)
+        assert!(edges < instructions * 2,
+            "edges ({}) should be < 2*instructions ({})", edges, instructions);
+    }
+
+    #[test]
+    fn analyze_program_coverage_reachable_subset_of_total() {
+        // The BFS-based analysis should count FEWER instructions than the total
+        // number of instructions in the binary, because it excludes unreachable
+        // code (linker stubs, unused library functions, etc.)
+        use solana_sbpf::elf::Executable;
+        use solana_sbpf::program::BuiltinProgram;
+        use solana_sbpf::static_analysis::Analysis;
+        use solana_sbpf::vm::ContextObject;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        let so_path = find_test_so();
+        let program_data = std::fs::read(&so_path).unwrap();
+
+        // Get our BFS-based count
+        let (bfs_edges, bfs_instructions) =
+            TestContext::analyze_program_coverage(&program_data).unwrap();
+
+        // Get the raw total from the analysis (all nodes, including unreachable)
+        struct DummyContext;
+        impl ContextObject for DummyContext {
+            fn consume(&mut self, _amount: u64) {}
+            fn get_remaining(&self) -> u64 { 0 }
+        }
+        let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
+        let executable = Executable::from_elf(&program_data, loader).unwrap();
+        let analysis = Analysis::from_executable(&executable).unwrap();
+        let total_all_instructions = analysis.instructions.len();
+
+        // BFS count should be <= total (strictly less if any dead code exists)
+        assert!(bfs_instructions <= total_all_instructions,
+            "BFS instructions ({}) should be <= total instructions ({})",
+            bfs_instructions, total_all_instructions);
+
+        // For a real program binary there should be at least some unreachable
+        // code (linker stubs, panic handlers, etc.)
+        // We don't assert strictly less because small programs may have no dead code.
+        eprintln!(
+            "[TEST] BFS reachable: {} instructions, {} edges. Total in binary: {} instructions. \
+             Excluded: {} instructions ({:.1}%)",
+            bfs_instructions, bfs_edges, total_all_instructions,
+            total_all_instructions - bfs_instructions,
+            ((total_all_instructions - bfs_instructions) as f64 / total_all_instructions as f64) * 100.0
+        );
+    }
+
+    #[test]
+    fn analyze_program_coverage_returns_none_for_garbage() {
+        let garbage = vec![0u8; 64];
+        assert!(TestContext::analyze_program_coverage(&garbage).is_none(),
+            "garbage bytes should not parse as valid SBF");
+    }
+
+    #[test]
+    fn analyze_program_coverage_returns_none_for_empty() {
+        assert!(TestContext::analyze_program_coverage(&[]).is_none(),
+            "empty bytes should not parse as valid SBF");
+    }
+
+    #[test]
+    fn analyze_program_coverage_edges_only_from_conditional_jumps() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+
+        let so_path = find_test_so();
+        let program_data = std::fs::read(&so_path).unwrap();
+
+        let (edges, _) = TestContext::analyze_program_coverage(&program_data).unwrap();
+
+        // Edges come from conditional jumps, each producing 2 edges (taken/not-taken).
+        // So edge count should always be even.
+        assert_eq!(edges % 2, 0,
+            "edge count ({}) should be even (each conditional branch = 2 edges)", edges);
     }
 }

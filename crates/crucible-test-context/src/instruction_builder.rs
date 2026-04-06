@@ -43,16 +43,6 @@ impl InstructionBuilder<'_> {
         // Pre-tx: dirty tracking
         let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
-        let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer_pubkey);
-        let pre_state = if self.ctx.taint_log.collects_diffs() {
-            Some(crate::snapshot::snapshot_writable_accounts(
-                &self.ctx.svm,
-                ixs,
-                &fee_payer_pubkey,
-            ))
-        } else {
-            None
-        };
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
         // SVM execution
@@ -73,16 +63,6 @@ impl InstructionBuilder<'_> {
         crate::increment_action_count();
         if outcome.is_success() {
             crate::increment_action_success_count();
-        }
-
-        // Build taint record from captured metadata (only for successful txs)
-        if outcome.is_success() {
-            let taint = crate::snapshot::build_taint_record_from_captured(
-                &self.ctx.svm,
-                captured,
-                pre_state.as_ref(),
-            );
-            self.ctx.taint_log.push(taint);
         }
         crate::SEND_BATCH_POST_NS.with(|c| c.set(c.get() + __t_post.elapsed().as_nanos() as u64));
 

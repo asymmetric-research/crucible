@@ -17,7 +17,7 @@ pub mod state_pool;
 
 pub use dirty_tracker::DirtyTracker;
 pub use account_diff::AccountDiff;
-pub use svm_snapshot::{SvmSnapshot, compute_state_fingerprint_from_snapshot, value_bucket, slot_bucket, slot_diff_bucket, check_account_state_novelty, ACCOUNT_NOVELTY_BITMAP_SIZE, check_field_novelty, FIELD_NOVELTY_BITMAP_SIZE};
+pub use svm_snapshot::{SvmSnapshot, compute_state_fingerprint_from_snapshot, value_bucket, slot_bucket, slot_diff_bucket, check_field_novelty, FIELD_NOVELTY_BITMAP_SIZE};
 pub use state_pool::{
     StateEntry, ActionStats, ActionStatsMap, StatePool,
     FingerprintBitmap, state_class_from_fingerprint, extract_coverage_positions,

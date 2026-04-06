@@ -68,17 +68,17 @@ fn test_state_pool_depth_limit() {
 fn test_state_pool_fingerprint_dedup() {
     let mut pool = StatePool::new(100, 20);
 
-    // Fingerprints are truncated to FINGERPRINT_BITS (17 bits) for dedup.
-    // Two fingerprints with the same bottom 17 bits should collide.
-    let fp1 = 0x0000_0000_0000_1234u64;
-    let fp2 = 0xFFFF_FFFF_FFFE_1234u64; // same bottom 17 bits
+    // Fingerprints are truncated to FINGERPRINT_BITS (18 bits) for dedup.
+    // Two fingerprints with the same bottom 18 bits should collide.
+    let fp1 = 0x0000_0000_0001_1234u64;
+    let fp2 = 0xFFFF_FFFF_FFFD_1234u64; // same bottom 18 bits
 
     assert!(add_test_state(&mut pool, fp1, 0, None, "", None));
     // Same dedup key — rejected
     assert!(!add_test_state(&mut pool, fp2, 1, None, "", None));
     assert_eq!(pool.len(), 1);
 
-    // Different bottom 17 bits — accepted
+    // Different bottom 18 bits — accepted
     let fp3 = 0x0000_0000_0000_5678u64;
     assert!(add_test_state(&mut pool, fp3, 1, None, "", None));
     assert_eq!(pool.len(), 2);
@@ -845,19 +845,19 @@ fn test_pool_max_depth_enforced() {
 
 #[test]
 fn test_pool_fingerprint_dedup_truncation() {
-    // FINGERPRINT_BITS=17, so only bottom 17 bits matter for dedup.
-    // Two fingerprints with same bottom 17 bits should collide.
+    // FINGERPRINT_BITS=18, so only bottom 18 bits matter for dedup.
+    // Two fingerprints with same bottom 18 bits should collide.
     let mut pool = StatePool::new(100, 20);
     let pk = Pubkey::new_unique();
 
-    let fp1 = 0xAAAA_0000_0000_1234u64;
-    let fp2 = 0xBBBB_0000_0000_1234u64; // same bottom 17 bits
+    let fp1 = 0xAAAA_0000_0001_1234u64;
+    let fp2 = 0xBBBB_0000_0005_1234u64; // same bottom 18 bits
 
     assert!(add_pool_entry(&mut pool, fp1, make_pool_snapshot(vec![(pk, 10)]), 0, None));
     assert!(!add_pool_entry(&mut pool, fp2, make_pool_snapshot(vec![(pk, 20)]), 0, None));
     assert_eq!(pool.len(), 1);
 
-    // Different bottom 17 bits → accepted
+    // Different bottom 18 bits → accepted
     let fp3 = 0xAAAA_0000_0000_5678u64;
     assert!(add_pool_entry(&mut pool, fp3, make_pool_snapshot(vec![(pk, 30)]), 0, None));
     assert_eq!(pool.len(), 2);
