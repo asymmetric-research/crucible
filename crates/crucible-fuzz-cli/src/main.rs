@@ -82,6 +82,9 @@ enum Commands {
         /// Maximum state depth (action chain length) in stateful mode (default: 15)
         #[arg(long)]
         max_depth: Option<u32>,
+        /// State pool capacity in stateful mode (default: 256000)
+        #[arg(long)]
+        pool_size: Option<u64>,
         /// Path to alternative program .so binary (for coverage with debug builds)
         #[arg(long)]
         program_so: Option<PathBuf>,
@@ -208,6 +211,7 @@ fn main() -> Result<()> {
             no_tracing,
             stateful,
             max_depth,
+            pool_size,
             program_so,
             symbols,
             mode,
@@ -233,6 +237,7 @@ fn main() -> Result<()> {
             no_tracing,
             stateful,
             max_depth,
+            pool_size,
             program_so,
             symbols,
             mode,
@@ -546,6 +551,7 @@ fn fuzz_run(
     no_tracing: bool,
     stateful: bool,
     max_depth: Option<u32>,
+    pool_size: Option<u64>,
     program_so: Option<PathBuf>,
     symbols: Option<PathBuf>,
     mode: Option<String>,
@@ -748,6 +754,11 @@ fn fuzz_run(
     if let Some(depth) = max_depth {
         cmd.env("FUZZ_MAX_DEPTH", depth.to_string());
         println!("[FUZZ] Max state depth: {}", depth);
+    }
+
+    if let Some(size) = pool_size {
+        cmd.env("FUZZ_STATE_POOL_SIZE", size.to_string());
+        println!("[FUZZ] State pool size: {}", size);
     }
 
     // --program-so: CLI flag takes priority, then fall back to env var (remote --mode)

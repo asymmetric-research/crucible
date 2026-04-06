@@ -84,10 +84,10 @@ fn test_fingerprint_boundary_values() {
     let added_max = add_test_state(&mut pool, u64::MAX, 1, None, "max", None);
     assert!(added_max, "u64::MAX fingerprint should be accepted");
 
-    // Same bottom 17 bits as u64::MAX (0x1FFFF) — should collide
-    let fp_collision = 0x0000_0000_0001_FFFFu64;
+    // Same bottom 18 bits as u64::MAX (0x3FFFF) — should collide
+    let fp_collision = 0x0000_0000_0003_FFFFu64;
     let rejected = add_test_state(&mut pool, fp_collision, 2, None, "collision", None);
-    assert!(!rejected, "same bottom-17-bit fingerprint should be rejected");
+    assert!(!rejected, "same bottom-18-bit fingerprint should be rejected");
 
     assert_eq!(pool.len(), 2);
     assert_eq!(pool.active_count(), 2);
@@ -516,7 +516,7 @@ fn test_try_add_fingerprint_zero_dedup() {
     assert!(first, "fingerprint 0 should be accepted first time");
 
     let second = pool.try_add(
-        0x2_0000u64, // bottom 17 bits = 0, same dedup key as fingerprint 0
+        0x4_0000u64, // bottom 18 bits = 0, same dedup key as fingerprint 0
         SvmSnapshot::empty(make_test_clock(1)),
         1, None,
         make_action_bytes(1, &[0x01]),
