@@ -247,6 +247,14 @@ fn take_last_error_code() -> Option<u32> {
 // Action History Tracking (for .meta.json crash metadata)
 // ============================================================================
 
+/// A single field-level semantic diff (used by schema registry for rich crash output).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FieldDelta {
+    pub field: String,
+    pub old_value: String,
+    pub new_value: String,
+}
+
 /// Record of a single action execution for crash metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionRecord {
@@ -259,58 +267,6 @@ pub struct ActionRecord {
     /// Error code from the last transaction (e.g., Custom(6051) → Some(6051))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<u32>,
-    /// Per-action taint summary (only with FUZZ_TAINT=1 or FUZZ_TAINT_DIFFS=1)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub taint: Option<ActionTaintSummary>,
-}
-
-// ============================================================================
-// Per-Action Taint Types
-// ============================================================================
-
-/// Summary of account reads/writes for a single action dispatch.
-/// One action may produce 0..N transactions via send_batch().
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ActionTaintSummary {
-    /// How many transactions this action produced
-    pub tx_count: usize,
-    /// Accounts written (base58 pubkeys)
-    pub written_accounts: Vec<String>,
-    /// Accounts read (base58 pubkeys)
-    pub read_accounts: Vec<String>,
-    /// Per-account change details (only with FUZZ_TAINT_DIFFS=1)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_changes: Option<Vec<AccountChangeSummary>>,
-}
-
-/// Byte-level and optional semantic diff for a single account.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AccountChangeSummary {
-    pub pubkey: String,
-    pub kind: AccountChangeKind,
-    /// (pre_lamports, post_lamports)
-    pub lamports: (u64, u64),
-    /// Byte ranges that changed: (offset, len)
-    pub changed_ranges: Vec<(usize, usize)>,
-    /// Semantic field diffs (Phase 2 — only when IDL schema registered)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub field_diffs: Option<Vec<FieldDelta>>,
-}
-
-/// Whether an account was created, modified, or deleted.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum AccountChangeKind {
-    Created,
-    Modified,
-    Deleted,
-}
-
-/// A single field-level semantic diff (Phase 2).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FieldDelta {
-    pub field: String,
-    pub old_value: String,
-    pub new_value: String,
 }
 
 /// Complete crash metadata for .meta.json files
@@ -355,26 +311,13 @@ pub fn get_current_iteration() -> u64 {
 
 /// Push an action record to the history and update cumulative stats.
 pub fn push_action_record(name: &str, params: serde_json::Value, success: bool) {
-    push_action_record_with_taint(name, params, success, None);
-}
-
-/// Push an action record with optional taint summary.
-pub fn push_action_record_with_taint(
-    name: &str,
-    params: serde_json::Value,
-    success: bool,
-    taint: Option<ActionTaintSummary>,
-) {
     let error_code = take_last_error_code();
-    // Note: success counting is now done in send_batch() at the transaction level
-    // Record in per-iteration history (for crash metadata)
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
             name: name.to_string(),
             params,
             success,
             error_code,
-            taint,
         });
     });
 }
@@ -385,14 +328,12 @@ pub fn push_action_record_with_taint(
 /// `backfill_action_params` only when needed (crash/violation).
 pub fn push_action_record_lite(name: &str, success: bool) {
     let error_code = take_last_error_code();
-    // Note: success counting is now done in send_batch() at the transaction level
     ACTION_HISTORY.with(|h| {
         h.borrow_mut().push(ActionRecord {
             name: name.to_string(),
             params: serde_json::Value::Null,
             success,
             error_code,
-            taint: None,
         });
     });
 }
@@ -442,9 +383,9 @@ pub fn get_iteration_dispatch_count() -> u64 {
 // ============================================================================
 
 thread_local! {
-    pub(crate) static SEND_BATCH_PRE_NS: Cell<u64> = const { Cell::new(0) };   // dirty_tracker + capture + pre_state
+    pub(crate) static SEND_BATCH_PRE_NS: Cell<u64> = const { Cell::new(0) };   // dirty_tracker
     pub(crate) static SEND_BATCH_SVM_NS: Cell<u64> = const { Cell::new(0) };   // send_transaction (actual SVM)
-    pub(crate) static SEND_BATCH_POST_NS: Cell<u64> = const { Cell::new(0) };  // tx_result_to_outcome + taint record
+    pub(crate) static SEND_BATCH_POST_NS: Cell<u64> = const { Cell::new(0) };  // tx_result_to_outcome
 }
 
 /// Reset send_batch sub-phase accumulators (call before fn_name).
@@ -1228,29 +1169,22 @@ impl TxOutcome {
     }
 }
 
-/// Parse litesvm TransactionError to extract error code
-/// Extracts Custom(N) error codes from InstructionError variants
+/// Parse litesvm TransactionError to extract error code.
+/// Extracts Custom(N) error codes from InstructionError variants.
 pub fn parse_error_code(err: &TransactionError) -> Option<u32> {
-    let debug_str = format!("{:?}", err);
-    if let Some(custom_start) = debug_str.find("Custom(") {
-        let after_custom = &debug_str[custom_start + 7..];
-        if let Some(end) = after_custom.find(')') {
-            return after_custom[..end].parse().ok();
-        }
+    use solana_instruction::error::InstructionError;
+    match err {
+        TransactionError::InstructionError(_, InstructionError::Custom(code)) => Some(*code),
+        _ => None,
     }
-    None
 }
 
-/// Parse litesvm TransactionError to extract instruction index
+/// Parse litesvm TransactionError to extract instruction index.
 pub fn parse_instruction_index(err: &TransactionError) -> Option<u8> {
-    let debug_str = format!("{:?}", err);
-    if let Some(start) = debug_str.find("InstructionError(") {
-        let after_prefix = &debug_str[start + 17..];
-        if let Some(comma) = after_prefix.find(',') {
-            return after_prefix[..comma].trim().parse().ok();
-        }
+    match err {
+        TransactionError::InstructionError(idx, _) => Some(*idx),
+        _ => None,
     }
-    None
 }
 
 /// Convert litesvm transaction result to TxOutcome
@@ -1284,270 +1218,6 @@ pub mod fuzz_types {
     pub use solana_transaction_context::{IndexOfAccount, InstructionContext};
 }
 
-/// Count reachable code from a given entry PC using static CFG analysis.
-/// Returns (instructions, branches, edges) or None if analysis fails.
-/// Used by the fuzzer for per-instruction totals computation.
-pub fn count_reachable_from_pc(
-    program_data: &[u8],
-    entry_pc: usize,
-) -> Option<(usize, usize, usize)> {
-    use solana_sbpf::ebpf;
-    use solana_sbpf::elf::Executable;
-    use solana_sbpf::program::BuiltinProgram;
-    use solana_sbpf::static_analysis::Analysis;
-    use solana_sbpf::vm::ContextObject;
-
-    // Minimal ContextObject for static analysis
-    struct DummyContext;
-    impl ContextObject for DummyContext {
-        fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 {
-            0
-        }
-    }
-
-    let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
-    let executable = Executable::from_elf(program_data, loader).ok()?;
-    let analysis = Analysis::from_executable(&executable).ok()?;
-    let sbpf_version = executable.get_sbpf_version();
-
-    // Build function key → entry PC map from analysis.functions
-    // analysis.functions: BTreeMap<usize, (u32, String)> maps PC → (function_key, name)
-    let mut key_to_pc: HashMap<u32, usize> = HashMap::new();
-    for (pc, (key, _name)) in &analysis.functions {
-        key_to_pc.insert(*key, *pc);
-    }
-
-    // Build a map from PC to node index for quick lookup
-    let mut pc_to_node: HashMap<usize, usize> = HashMap::new();
-    for (node_idx, cfg_node) in analysis.cfg_nodes.iter() {
-        if !cfg_node.instructions.is_empty() {
-            let first_pc = analysis.instructions[cfg_node.instructions.start].ptr;
-            pc_to_node.insert(first_pc, *node_idx);
-        }
-    }
-
-    // Find the CFG node containing entry_pc
-    let mut start_node = None;
-    for (node_idx, cfg_node) in analysis.cfg_nodes.iter() {
-        if !cfg_node.instructions.is_empty() {
-            let first_pc = analysis.instructions[cfg_node.instructions.start].ptr;
-            let last_pc = analysis.instructions[cfg_node.instructions.end - 1].ptr;
-            if entry_pc >= first_pc && entry_pc <= last_pc {
-                start_node = Some(*node_idx);
-                break;
-            }
-        }
-    }
-    let start_node = start_node?;
-
-    // BFS from start_node to count all reachable code, following CALL instructions
-    let mut visited = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(start_node);
-    visited.insert(start_node);
-
-    let mut total_instructions = 0usize;
-    let mut total_branches = 0usize;
-    let mut total_edges = 0usize;
-
-    while let Some(node_idx) = queue.pop_front() {
-        if let Some(cfg_node) = analysis.cfg_nodes.get(&node_idx) {
-            // Count instructions in this node
-            let node_instr_count = cfg_node.instructions.end - cfg_node.instructions.start;
-            total_instructions += node_instr_count;
-
-            // Process each instruction looking for CALLs and conditional branches
-            for insn_idx in cfg_node.instructions.clone() {
-                let insn = &analysis.instructions[insn_idx];
-                let opc = insn.opc;
-
-                // Check for CALL instruction (0x85) - follow the call target
-                // Use function registry to resolve CALL targets correctly
-                if opc == 0x85 {
-                    // Calculate function key using SBPF version-specific logic
-                    let key = sbpf_version.calculate_call_imm_target_pc(insn.ptr, insn.imm);
-                    if let Some(&target_pc) = key_to_pc.get(&key) {
-                        if let Some(&target_node) = pc_to_node.get(&target_pc) {
-                            if visited.insert(target_node) {
-                                queue.push_back(target_node);
-                            }
-                        }
-                    }
-                }
-
-                // Check for conditional branches
-                let is_jmp = opc & 7 == ebpf::BPF_JMP;
-                if is_jmp {
-                    let is_conditional = opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
-                    if is_conditional {
-                        total_branches += 1;
-                        total_edges += 2; // Conditional branches have 2 edges (taken/not-taken)
-                    }
-                }
-            }
-
-            // Enqueue unvisited CFG successors (for jumps within same function)
-            for &dest in &cfg_node.destinations {
-                if visited.insert(dest) {
-                    queue.push_back(dest);
-                }
-            }
-        }
-    }
-
-    eprintln!(
-        "[DEBUG] count_reachable_from_pc(0x{:x}): {} nodes, {} instructions, {} branches, {} edges",
-        entry_pc,
-        visited.len(),
-        total_instructions,
-        total_branches,
-        total_edges
-    );
-
-    Some((total_instructions, total_branches, total_edges))
-}
-
-// LCOV and coverage functions moved to coverage module
-// Re-exported at top of file for backward compatibility
-
-// CFG visualization moved to coverage/html.rs (generate_coverage_html)
-
-// ============================================================================
-// CFG Analysis
-// ============================================================================
-
-// ReachableAnalysis struct moved to coverage/types.rs and re-exported above
-
-/// Extended CFG analysis that returns both counts and sets of reachable code.
-/// Used for filtering visited coverage to only include code within the handler's scope.
-pub fn analyze_reachable_from_pc(
-    program_data: &[u8],
-    entry_pc: usize,
-) -> Option<ReachableAnalysis> {
-    use solana_sbpf::ebpf;
-    use solana_sbpf::elf::Executable;
-    use solana_sbpf::program::BuiltinProgram;
-    use solana_sbpf::static_analysis::Analysis;
-    use solana_sbpf::vm::ContextObject;
-
-    struct DummyContext;
-    impl ContextObject for DummyContext {
-        fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 {
-            0
-        }
-    }
-
-    let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
-    let executable = Executable::from_elf(program_data, loader).ok()?;
-    let analysis = Analysis::from_executable(&executable).ok()?;
-    let sbpf_version = executable.get_sbpf_version();
-
-    // Build function key → entry PC map
-    let mut key_to_pc: HashMap<u32, usize> = HashMap::new();
-    for (pc, (key, _name)) in &analysis.functions {
-        key_to_pc.insert(*key, *pc);
-    }
-
-    // Build PC → node index map
-    let mut pc_to_node: HashMap<usize, usize> = HashMap::new();
-    for (node_idx, cfg_node) in analysis.cfg_nodes.iter() {
-        if !cfg_node.instructions.is_empty() {
-            let first_pc = analysis.instructions[cfg_node.instructions.start].ptr;
-            pc_to_node.insert(first_pc, *node_idx);
-        }
-    }
-
-    // Find starting node
-    let start_node = analysis
-        .cfg_nodes
-        .iter()
-        .find(|(_, cfg_node)| {
-            if cfg_node.instructions.is_empty() {
-                return false;
-            }
-            let first_pc = analysis.instructions[cfg_node.instructions.start].ptr;
-            let last_pc = analysis.instructions[cfg_node.instructions.end - 1].ptr;
-            entry_pc >= first_pc && entry_pc <= last_pc
-        })
-        .map(|(idx, _)| *idx)?;
-
-    // BFS to collect all reachable code
-    let mut visited_nodes = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(start_node);
-    visited_nodes.insert(start_node);
-
-    let mut result = ReachableAnalysis::default();
-
-    while let Some(node_idx) = queue.pop_front() {
-        if let Some(cfg_node) = analysis.cfg_nodes.get(&node_idx) {
-            for insn_idx in cfg_node.instructions.clone() {
-                let insn = &analysis.instructions[insn_idx];
-                let opc = insn.opc;
-                let pc = insn.ptr;
-
-                // Record this PC as reachable
-                result.reachable_pcs.insert(pc);
-                result.total_instructions += 1;
-
-                // Handle CALL instructions
-                if opc == 0x85 {
-                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
-                    if let Some(&target_pc) = key_to_pc.get(&key) {
-                        if let Some(&target_node) = pc_to_node.get(&target_pc) {
-                            if visited_nodes.insert(target_node) {
-                                queue.push_back(target_node);
-                            }
-                        }
-                    }
-                }
-
-                // Handle conditional branches
-                let is_jmp = opc & 7 == ebpf::BPF_JMP;
-                if is_jmp {
-                    let is_conditional = opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
-                    if is_conditional {
-                        result.reachable_branch_pcs.insert(pc);
-                        result.total_branches += 1;
-
-                        // Calculate both edge targets (taken and not-taken)
-                        let offset = insn.off as i64;
-                        let next_pc = pc + 8; // Fall-through (not-taken)
-                        let target_pc = ((pc as i64) + 8 + offset * 8) as usize; // Taken
-
-                        // Record edges as (source_pc << 32) | target_pc
-                        let edge_taken = ((pc as u64) << 32) | (target_pc as u64);
-                        let edge_not_taken = ((pc as u64) << 32) | (next_pc as u64);
-                        result.reachable_edges.insert(edge_taken);
-                        result.reachable_edges.insert(edge_not_taken);
-                        result.total_edges += 2;
-                    }
-                }
-            }
-
-            // Follow CFG successors
-            for &dest in &cfg_node.destinations {
-                if visited_nodes.insert(dest) {
-                    queue.push_back(dest);
-                }
-            }
-        }
-    }
-
-    eprintln!(
-        "[DEBUG] analyze_reachable_from_pc(0x{:x}): {} nodes, {} PCs, {} branches, {} edges",
-        entry_pc,
-        visited_nodes.len(),
-        result.reachable_pcs.len(),
-        result.total_branches,
-        result.total_edges
-    );
-
-    Some(result)
-}
-
 /// Stores program data for reloading into debuggable SVMs
 #[derive(Clone)]
 pub struct ProgramData {
@@ -1571,8 +1241,6 @@ pub struct TestContext {
     pub snapshot: Option<snapshot::SvmSnapshot>,
     /// Tracks dirty accounts across all transactions in an iteration
     pub dirty_tracker: snapshot::DirtyTracker,
-    /// Per-transaction taint records for the current iteration
-    pub taint_log: snapshot::IterationTaintLog,
 }
 
 impl Clone for TestContext {
@@ -1590,9 +1258,8 @@ impl Clone for TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             // Snapshot is not cloned — only the template fixture owns it
             snapshot: None,
-            // Fresh tracker/log for each clone
+            // Fresh tracker for each clone
             dirty_tracker: self.dirty_tracker.clone(),
-            taint_log: self.taint_log.clone(),
         }
     }
 }
@@ -1647,7 +1314,6 @@ impl TestContext {
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1666,7 +1332,6 @@ impl TestContext {
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1789,7 +1454,6 @@ impl TestContext {
             program_coverage_totals: HashMap::new(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1826,7 +1490,6 @@ impl TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            taint_log: snapshot::IterationTaintLog::new(),
         }
     }
 
@@ -1931,11 +1594,10 @@ impl TestContext {
         self.dirty_tracker.clear();
     }
 
-    /// Prepare for a new iteration: clear dirty tracker, taint log, and pending state.
+    /// Prepare for a new iteration: clear dirty tracker and pending state.
     /// Called at the start of each fuzzing iteration.
     pub fn begin_iteration(&mut self) {
         self.dirty_tracker.clear();
-        self.taint_log.clear();
         // Clear pending instructions/signers from previous iteration
         self.pending_instructions.clear();
         self.pending_signers.clear();
@@ -1954,11 +1616,6 @@ impl TestContext {
     /// Whether a snapshot has been taken.
     pub fn has_snapshot(&self) -> bool {
         self.snapshot.is_some()
-    }
-
-    /// Get the taint log for the current iteration.
-    pub fn taint_log(&self) -> &snapshot::IterationTaintLog {
-        &self.taint_log
     }
 
     /// Get the dirty tracker for the current iteration.
@@ -2378,7 +2035,7 @@ impl TestContext {
             }
         }
 
-        // Pre-tx: dirty tracking, metadata capture, optional pre-state snapshot
+        // Pre-tx: dirty tracking
         let __t_pre = std::time::Instant::now();
         self.dirty_tracker
             .record_tx(&self.pending_instructions, &fee_payer_pubkey);
@@ -2405,7 +2062,7 @@ impl TestContext {
         )?;
         SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
-        // Post-tx: outcome parsing, taint record building
+        // Post-tx: outcome parsing
         let __t_post = std::time::Instant::now();
         let outcome = tx_result_to_outcome(result);
 
@@ -2445,18 +2102,6 @@ impl TestContext {
                 }
             }
         }
-
-        // Build taint record from captured metadata.
-        let taint = snapshot::build_taint_record_from_captured(
-            &self.svm,
-            captured,
-            if outcome.is_success() {
-                pre_state.as_ref()
-            } else {
-                None
-            },
-        );
-        self.taint_log.push(taint);
         SEND_BATCH_POST_NS.with(|c| c.set(c.get() + __t_post.elapsed().as_nanos() as u64));
 
         // Clear signers queue (pending_instructions already taken via std::mem::take)
@@ -2551,235 +2196,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Action history with taint tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_action_record_with_taint() {
-        clear_action_history();
-
-        let taint = ActionTaintSummary {
-            tx_count: 2,
-            written_accounts: vec!["Abc123".to_string(), "Def456".to_string()],
-            read_accounts: vec!["Ghi789".to_string()],
-            account_changes: None,
-        };
-
-        push_action_record_with_taint(
-            "action_deposit",
-            serde_json::json!({"amount": 100}),
-            true,
-            Some(taint),
-        );
-
-        let history = get_action_history();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].name, "action_deposit");
-        assert!(history[0].success);
-
-        let taint = history[0].taint.as_ref().expect("taint should be present");
-        assert_eq!(taint.tx_count, 2);
-        assert_eq!(taint.written_accounts.len(), 2);
-        assert_eq!(taint.read_accounts.len(), 1);
-        assert!(taint.account_changes.is_none());
-
-        clear_action_history();
-    }
-
-    #[test]
-    fn test_action_record_without_taint() {
-        clear_action_history();
-
-        push_action_record_with_taint("action_withdraw", serde_json::json!({}), false, None);
-
-        let history = get_action_history();
-        assert_eq!(history.len(), 1);
-        assert!(history[0].taint.is_none());
-
-        clear_action_history();
-    }
-
-    #[test]
-    fn test_action_record_with_detailed_taint() {
-        clear_action_history();
-
-        let changes = vec![
-            AccountChangeSummary {
-                pubkey: "Account111".to_string(),
-                kind: AccountChangeKind::Modified,
-                lamports: (1_000_000, 500_000),
-                changed_ranges: vec![(8, 8), (24, 16)],
-                field_diffs: None,
-            },
-            AccountChangeSummary {
-                pubkey: "Account222".to_string(),
-                kind: AccountChangeKind::Created,
-                lamports: (0, 2_000_000),
-                changed_ranges: vec![(0, 100)],
-                field_diffs: Some(vec![FieldDelta {
-                    field: "balance".to_string(),
-                    old_value: "0".to_string(),
-                    new_value: "2000000".to_string(),
-                }]),
-            },
-        ];
-
-        let taint = ActionTaintSummary {
-            tx_count: 1,
-            written_accounts: vec!["Account111".to_string(), "Account222".to_string()],
-            read_accounts: vec![],
-            account_changes: Some(changes),
-        };
-
-        push_action_record_with_taint(
-            "action_deposit",
-            serde_json::json!({"amount": 2000000}),
-            true,
-            Some(taint),
-        );
-
-        let history = get_action_history();
-        let taint = history[0].taint.as_ref().unwrap();
-        let changes = taint.account_changes.as_ref().unwrap();
-        assert_eq!(changes.len(), 2);
-
-        // First account: Modified
-        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
-        assert_eq!(changes[0].lamports, (1_000_000, 500_000));
-        assert_eq!(changes[0].changed_ranges.len(), 2);
-        assert!(changes[0].field_diffs.is_none());
-
-        // Second account: Created with field diffs
-        assert!(matches!(changes[1].kind, AccountChangeKind::Created));
-        let field_diffs = changes[1].field_diffs.as_ref().unwrap();
-        assert_eq!(field_diffs.len(), 1);
-        assert_eq!(field_diffs[0].field, "balance");
-        assert_eq!(field_diffs[0].old_value, "0");
-        assert_eq!(field_diffs[0].new_value, "2000000");
-
-        clear_action_history();
-    }
-
-    #[test]
-    fn test_crash_metadata_includes_taint() {
-        clear_action_history();
-        set_current_test_name("taint_test");
-        set_current_iteration(42);
-
-        let taint = ActionTaintSummary {
-            tx_count: 1,
-            written_accounts: vec!["Abc".to_string()],
-            read_accounts: vec![],
-            account_changes: None,
-        };
-
-        push_action_record_with_taint("action_a", serde_json::json!({"x": 1}), true, Some(taint));
-
-        push_action_record("action_b", serde_json::json!({}), false);
-
-        let meta = build_crash_metadata(None);
-        assert_eq!(meta.actions.len(), 2);
-        assert!(meta.actions[0].taint.is_some());
-        assert!(meta.actions[1].taint.is_none());
-
-        // Verify serialization round-trip
-        let json_str = serde_json::to_string_pretty(&meta).unwrap();
-        let deserialized: CrashMetadata = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(deserialized.actions.len(), 2);
-        assert!(deserialized.actions[0].taint.is_some());
-        let taint = deserialized.actions[0].taint.as_ref().unwrap();
-        assert_eq!(taint.tx_count, 1);
-        assert_eq!(taint.written_accounts, vec!["Abc"]);
-
-        clear_action_history();
-    }
-
-    #[test]
-    fn test_taint_serde_skip_serializing_if_none() {
-        // Verify that None fields are omitted from JSON output
-        let record = ActionRecord {
-            name: "test".to_string(),
-            params: serde_json::json!({}),
-            success: true,
-            error_code: None,
-            taint: None,
-        };
-        let json = serde_json::to_string(&record).unwrap();
-        assert!(
-            !json.contains("taint"),
-            "taint:null should be omitted from JSON"
-        );
-        assert!(
-            !json.contains("error_code"),
-            "error_code:null should be omitted from JSON"
-        );
-
-        // With taint present
-        let record_with_taint = ActionRecord {
-            name: "test".to_string(),
-            params: serde_json::json!({}),
-            success: true,
-            error_code: None,
-            taint: Some(ActionTaintSummary {
-                tx_count: 1,
-                written_accounts: vec![],
-                read_accounts: vec![],
-                account_changes: None,
-            }),
-        };
-        let json = serde_json::to_string(&record_with_taint).unwrap();
-        assert!(
-            json.contains("taint"),
-            "taint field should be present when Some"
-        );
-        assert!(
-            !json.contains("account_changes"),
-            "None account_changes should be omitted"
-        );
-    }
-
-    #[test]
-    fn test_taint_types_serde_roundtrip() {
-        let summary = ActionTaintSummary {
-            tx_count: 3,
-            written_accounts: vec!["Abc".to_string(), "Def".to_string()],
-            read_accounts: vec!["Ghi".to_string()],
-            account_changes: Some(vec![
-                AccountChangeSummary {
-                    pubkey: "Abc".to_string(),
-                    kind: AccountChangeKind::Modified,
-                    lamports: (100, 200),
-                    changed_ranges: vec![(8, 16)],
-                    field_diffs: Some(vec![FieldDelta {
-                        field: "total".to_string(),
-                        old_value: "100".to_string(),
-                        new_value: "200".to_string(),
-                    }]),
-                },
-                AccountChangeSummary {
-                    pubkey: "Xyz".to_string(),
-                    kind: AccountChangeKind::Deleted,
-                    lamports: (500, 0),
-                    changed_ranges: vec![],
-                    field_diffs: None,
-                },
-            ]),
-        };
-
-        let json = serde_json::to_string_pretty(&summary).unwrap();
-        let deserialized: ActionTaintSummary = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(deserialized.tx_count, 3);
-        assert_eq!(deserialized.written_accounts.len(), 2);
-        assert_eq!(deserialized.read_accounts.len(), 1);
-        let changes = deserialized.account_changes.unwrap();
-        assert_eq!(changes.len(), 2);
-        assert!(matches!(changes[0].kind, AccountChangeKind::Modified));
-        assert!(matches!(changes[1].kind, AccountChangeKind::Deleted));
-        let fd = changes[0].field_diffs.as_ref().unwrap();
-        assert_eq!(fd[0].field, "total");
-    }
-
     // -------------------------------------------------------------------------
     // Violation action index tests
     // -------------------------------------------------------------------------
@@ -3581,7 +2997,6 @@ mod tests {
                 params: serde_json::Value::Null,
                 success: true,
                 error_code: None,
-                taint: None,
             });
         });
 
@@ -3646,7 +3061,6 @@ mod tests {
                 params: serde_json::Value::Null,
                 success: true,
                 error_code: None,
-                taint: None,
             });
         });
 
@@ -4543,32 +3957,28 @@ mod tests {
     }
 
     // =========================================================================
-    // Regression: push_action_record_with_taint preserves params in output
+    // Regression: push_action_record preserves params in output
     // (was broken when push_action_record_lite was used instead, dropping params)
     // =========================================================================
 
     #[test]
-    fn action_record_with_taint_includes_params_in_sequence() {
+    fn action_record_includes_params_in_sequence() {
         clear_format_tls();
         set_total_actions(3);
-        // Simulate what the invariant macro now does: push_action_record_with_taint with params
-        push_action_record_with_taint(
+        push_action_record(
             "delegate_stake",
             serde_json::json!({"authority": null, "stake_account": 1340788527u64, "vote_account": 640494879u64}),
             true,
-            None,
         );
-        push_action_record_with_taint(
+        push_action_record(
             "advance_slots",
             serde_json::json!({"slots": 54177}),
             true,
-            None,
         );
-        push_action_record_with_taint(
+        push_action_record(
             "withdraw",
             serde_json::json!({"stake_account": 3, "lamports": 1000, "leave_reserve": true}),
             false,
-            None,
         );
 
         let out = format_action_sequence();
@@ -4606,13 +4016,12 @@ mod tests {
     }
 
     #[test]
-    fn action_record_with_taint_params_in_oneline() {
+    fn action_record_params_in_oneline() {
         clear_format_tls();
-        push_action_record_with_taint(
+        push_action_record(
             "move_lamports",
             serde_json::json!({"dest_account": 42, "lamports": null, "stake_account": 99}),
             true,
-            None,
         );
 
         let out = format_last_action_oneline();
@@ -4673,6 +4082,77 @@ mod tests {
         assert_eq!(parse_error_code(&err), None);
         // But instruction index should still parse
         assert_eq!(parse_instruction_index(&err), Some(2));
+    }
+
+    // =========================================================================
+    // parse_error_code + parse_instruction_index — structural matching
+    // =========================================================================
+
+    #[test]
+    fn parse_error_code_duplicate_instruction() {
+        // DuplicateInstruction is NOT InstructionError — should return None
+        let err = TransactionError::DuplicateInstruction(2);
+        assert_eq!(parse_error_code(&err), None);
+        assert_eq!(parse_instruction_index(&err), None);
+    }
+
+    #[test]
+    fn parse_instruction_index_with_non_custom_error() {
+        use solana_instruction::error::InstructionError;
+        // InstructionError that's not Custom — index should still be extracted
+        let err = TransactionError::InstructionError(4, InstructionError::ComputationalBudgetExceeded);
+        assert_eq!(parse_error_code(&err), None);
+        assert_eq!(parse_instruction_index(&err), Some(4));
+    }
+
+    #[test]
+    fn parse_error_code_custom_one() {
+        use solana_instruction::error::InstructionError;
+        // Custom(1) — smallest non-zero
+        let err = TransactionError::InstructionError(0, InstructionError::Custom(1));
+        assert_eq!(parse_error_code(&err), Some(1));
+    }
+
+    #[test]
+    fn parse_both_from_same_error() {
+        use solana_instruction::error::InstructionError;
+        // Both error code and instruction index from a single error
+        let err = TransactionError::InstructionError(7, InstructionError::Custom(9999));
+        assert_eq!(parse_error_code(&err), Some(9999));
+        assert_eq!(parse_instruction_index(&err), Some(7));
+    }
+
+    #[test]
+    fn tx_result_to_outcome_success() {
+        use litesvm::types::TransactionMetadata;
+        let meta = TransactionMetadata {
+            compute_units_consumed: 42,
+            logs: vec!["log".to_string()],
+            ..Default::default()
+        };
+        let outcome = tx_result_to_outcome(Ok(meta));
+        assert!(outcome.is_success());
+        assert_eq!(outcome.compute_units(), Some(42));
+        assert_eq!(outcome.error_code(), None);
+    }
+
+    #[test]
+    fn tx_result_to_outcome_error_sets_tls() {
+        use solana_instruction::error::InstructionError;
+        use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+        let failed = FailedTransactionMetadata {
+            err: TransactionError::InstructionError(1, InstructionError::Custom(6051)),
+            meta: TransactionMetadata {
+                logs: vec!["err log".to_string()],
+                ..Default::default()
+            },
+        };
+        let outcome = tx_result_to_outcome(Err(failed));
+        assert!(outcome.is_error());
+        assert_eq!(outcome.error_code(), Some(6051));
+        // TLS should have been set
+        let tls_code = take_last_error_code();
+        assert_eq!(tls_code, Some(6051));
     }
 
     // =========================================================================

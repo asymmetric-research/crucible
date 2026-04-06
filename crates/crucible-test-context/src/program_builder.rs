@@ -71,7 +71,7 @@ impl ProgramBuilder<'_> {
 
         let ixs = std::slice::from_ref(&self.instruction);
 
-        // Pre-tx: dirty tracking + metadata capture
+        // Pre-tx: dirty tracking
         let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
         let captured = crate::snapshot::capture_tx_meta(ixs, &fee_payer_pubkey);
@@ -96,7 +96,7 @@ impl ProgramBuilder<'_> {
         )?;
         crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
-        // Post-tx: outcome parsing + taint record
+        // Post-tx: outcome parsing
         let __t_post = std::time::Instant::now();
         let outcome = tx_result_to_outcome(result);
 

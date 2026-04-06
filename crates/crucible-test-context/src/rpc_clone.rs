@@ -246,7 +246,7 @@ impl<'a> AccountCloner<'a> {
     // ========================================================================
 
     /// Read an account from the disk cache. Returns `None` on cache miss.
-    pub fn read_cache(&self, pubkey: &Pubkey) -> Result<Option<Account>> {
+    fn read_cache(&self, pubkey: &Pubkey) -> Result<Option<Account>> {
         let key_str = pubkey.to_string();
         let meta_path = self.cache_dir.join(format!("{}.json", key_str));
         let data_path = self.cache_dir.join(format!("{}.bin", key_str));
@@ -266,7 +266,7 @@ impl<'a> AccountCloner<'a> {
     }
 
     /// Write an account to the disk cache.
-    pub fn write_cache(&self, pubkey: &Pubkey, account: &Account) -> Result<()> {
+    fn write_cache(&self, pubkey: &Pubkey, account: &Account) -> Result<()> {
         fs::create_dir_all(&self.cache_dir)
             .with_context(|| format!("failed to create cache dir {}", self.cache_dir.display()))?;
 
@@ -318,39 +318,14 @@ impl<'a> AccountCloner<'a> {
 
     /// Handle BPF Upgradeable Loader program: fetch ProgramData, extract ELF.
     fn load_upgradeable_program(&mut self, program_id: &Pubkey, account: &Account) -> Result<()> {
-        // Upgradeable program account data layout:
-        // bytes 0..4  : account type (u32 LE) = 2 for Program
-        // bytes 4..36 : ProgramData address (Pubkey)
-        if account.data.len() < 36 {
-            bail!(
-                "Program account {} data too short ({} bytes) for BPF Upgradeable Loader",
-                program_id,
-                account.data.len(),
-            );
-        }
-
-        let programdata_address = Pubkey::from(<[u8; 32]>::try_from(&account.data[4..36])
-            .expect("slice is 32 bytes"));
+        let programdata_address = parse_programdata_address(&account.data)
+            .with_context(|| format!("Program account {}", program_id))?;
 
         // Fetch the ProgramData account
         let programdata = self.fetch_or_cached(&programdata_address)?;
 
-        // ProgramData layout:
-        // bytes 0..4  : account type (u32 LE) = 3 for ProgramData
-        // bytes 4..5  : Option<Pubkey> tag (1 byte, 0 = None, 1 = Some)
-        // bytes 5..37 : upgrade authority (if tag == 1)
-        // bytes 37..45: slot (u64 LE)
-        // bytes 45..  : ELF binary
-        const PROGRAMDATA_HEADER_SIZE: usize = 45;
-        if programdata.data.len() < PROGRAMDATA_HEADER_SIZE {
-            bail!(
-                "ProgramData {} data too short ({} bytes)",
-                programdata_address,
-                programdata.data.len(),
-            );
-        }
-
-        let elf_bytes = &programdata.data[PROGRAMDATA_HEADER_SIZE..];
+        let elf_bytes = extract_elf_bytes(&programdata.data)
+            .with_context(|| format!("ProgramData {}", programdata_address))?;
         self.ctx.add_program_from_bytes(program_id, elf_bytes)?;
 
         // Also write both accounts to SVM so account queries work
@@ -361,6 +336,35 @@ impl<'a> AccountCloner<'a> {
     }
 }
 
+/// Parse the ProgramData address from a BPF Upgradeable program account's data.
+///
+/// Layout: bytes 0..4 = account type (u32 LE), bytes 4..36 = ProgramData pubkey.
+fn parse_programdata_address(program_account_data: &[u8]) -> Result<Pubkey> {
+    if program_account_data.len() < 36 {
+        bail!(
+            "Program account data too short ({} bytes) for BPF Upgradeable Loader",
+            program_account_data.len(),
+        );
+    }
+    Ok(Pubkey::from(
+        <[u8; 32]>::try_from(&program_account_data[4..36]).expect("slice is 32 bytes"),
+    ))
+}
+
+/// Extract ELF bytes from a ProgramData account's data.
+///
+/// Layout: 45-byte header, then ELF binary.
+fn extract_elf_bytes(programdata_data: &[u8]) -> Result<&[u8]> {
+    const PROGRAMDATA_HEADER_SIZE: usize = 45;
+    if programdata_data.len() < PROGRAMDATA_HEADER_SIZE {
+        bail!(
+            "ProgramData data too short ({} bytes)",
+            programdata_data.len(),
+        );
+    }
+    Ok(&programdata_data[PROGRAMDATA_HEADER_SIZE..])
+}
+
 /// Returns true if the account appears to be a BPF Upgradeable program.
 pub fn is_upgradeable_program(account: &Account) -> bool {
     account.executable && account.owner == BPF_LOADER_UPGRADEABLE
@@ -369,4 +373,306 @@ pub fn is_upgradeable_program(account: &Account) -> bool {
 /// Returns true if the account is executable (any loader).
 pub fn is_program(account: &Account) -> bool {
     account.executable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Helper: create a test account with given data.
+    fn make_account(owner: Pubkey, lamports: u64, data: Vec<u8>, executable: bool) -> Account {
+        Account {
+            lamports,
+            data,
+            owner,
+            executable,
+            rent_epoch: 42,
+        }
+    }
+
+    /// Helper: build an AccountCloner pointing at a temp cache dir.
+    /// RPC URL is bogus — only use for cache/invalidate/clear_cache tests.
+    fn make_cloner<'a>(ctx: &'a mut TestContext, cache_dir: &Path) -> AccountCloner<'a> {
+        AccountCloner::new(ctx, "http://localhost:0")
+            .cache_dir(cache_dir)
+    }
+
+    // ====================================================================
+    // CachedAccountMeta round-trip
+    // ====================================================================
+
+    #[test]
+    fn cached_account_meta_roundtrip() {
+        let owner = Pubkey::new_unique();
+        let pubkey = Pubkey::new_unique();
+        let data = vec![1, 2, 3, 4, 5];
+        let account = make_account(owner, 999, data.clone(), true);
+
+        let meta = CachedAccountMeta::from_account(&pubkey, &account);
+        assert_eq!(meta.pubkey, pubkey.to_string());
+        assert_eq!(meta.owner, owner.to_string());
+        assert_eq!(meta.lamports, 999);
+        assert!(meta.executable);
+        assert_eq!(meta.rent_epoch, 42);
+        assert_eq!(meta.data_len, 5);
+
+        let restored = meta.to_account(data.clone()).unwrap();
+        assert_eq!(restored.lamports, account.lamports);
+        assert_eq!(restored.data, account.data);
+        assert_eq!(restored.owner, account.owner);
+        assert_eq!(restored.executable, account.executable);
+        assert_eq!(restored.rent_epoch, account.rent_epoch);
+    }
+
+    #[test]
+    fn cached_account_meta_invalid_owner() {
+        let meta = CachedAccountMeta {
+            pubkey: Pubkey::new_unique().to_string(),
+            owner: "not-a-pubkey".to_string(),
+            lamports: 0,
+            executable: false,
+            rent_epoch: 0,
+            data_len: 0,
+        };
+        assert!(meta.to_account(vec![]).is_err());
+    }
+
+    // ====================================================================
+    // Cache read/write/invalidate/clear
+    // ====================================================================
+
+    #[test]
+    fn cache_write_then_read() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, tmp.path());
+
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let data = vec![10, 20, 30];
+        let account = make_account(owner, 500, data.clone(), false);
+
+        cloner.write_cache(&pubkey, &account).unwrap();
+        let loaded = cloner.read_cache(&pubkey).unwrap().expect("cache hit");
+
+        assert_eq!(loaded.lamports, 500);
+        assert_eq!(loaded.data, data);
+        assert_eq!(loaded.owner, owner);
+        assert!(!loaded.executable);
+        assert_eq!(loaded.rent_epoch, 42);
+    }
+
+    #[test]
+    fn cache_miss_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, tmp.path());
+
+        let result = cloner.read_cache(&Pubkey::new_unique()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn cache_creates_directory_on_write() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("a").join("b").join("c");
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, &nested);
+
+        let pk = Pubkey::new_unique();
+        let account = make_account(Pubkey::new_unique(), 1, vec![], false);
+        cloner.write_cache(&pk, &account).unwrap();
+
+        assert!(nested.exists());
+        assert!(cloner.read_cache(&pk).unwrap().is_some());
+    }
+
+    #[test]
+    fn invalidate_removes_cached_account() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, tmp.path());
+
+        let pk = Pubkey::new_unique();
+        let account = make_account(Pubkey::new_unique(), 1, vec![0xFF], false);
+        cloner.write_cache(&pk, &account).unwrap();
+        assert!(cloner.read_cache(&pk).unwrap().is_some());
+
+        cloner.invalidate(&pk).unwrap();
+        assert!(cloner.read_cache(&pk).unwrap().is_none());
+
+        // Files should be gone
+        let key_str = pk.to_string();
+        assert!(!tmp.path().join(format!("{}.json", key_str)).exists());
+        assert!(!tmp.path().join(format!("{}.bin", key_str)).exists());
+    }
+
+    #[test]
+    fn invalidate_nonexistent_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, tmp.path());
+
+        // Should not error on missing files
+        cloner.invalidate(&Pubkey::new_unique()).unwrap();
+    }
+
+    #[test]
+    fn clear_cache_removes_everything() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, &cache_dir);
+
+        // Write a few accounts
+        for _ in 0..3 {
+            let pk = Pubkey::new_unique();
+            let account = make_account(Pubkey::new_unique(), 1, vec![1, 2], false);
+            cloner.write_cache(&pk, &account).unwrap();
+        }
+        assert!(cache_dir.exists());
+
+        cloner.clear_cache().unwrap();
+        assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn clear_cache_nonexistent_dir_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does_not_exist");
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, &missing);
+
+        cloner.clear_cache().unwrap();
+    }
+
+    #[test]
+    fn cache_overwrite_updates_data() {
+        let tmp = TempDir::new().unwrap();
+        let mut ctx = TestContext::new();
+        let cloner = make_cloner(&mut ctx, tmp.path());
+
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let v1 = make_account(owner, 100, vec![1], false);
+        let v2 = make_account(owner, 200, vec![2, 3], true);
+
+        cloner.write_cache(&pk, &v1).unwrap();
+        cloner.write_cache(&pk, &v2).unwrap();
+
+        let loaded = cloner.read_cache(&pk).unwrap().unwrap();
+        assert_eq!(loaded.lamports, 200);
+        assert_eq!(loaded.data, vec![2, 3]);
+        assert!(loaded.executable);
+    }
+
+    // ====================================================================
+    // Upgradeable program byte parsing
+    // ====================================================================
+
+    #[test]
+    fn parse_programdata_address_valid() {
+        let expected_pk = Pubkey::new_unique();
+        let mut data = vec![0u8; 36];
+        // bytes 0..4: account type
+        data[0..4].copy_from_slice(&2u32.to_le_bytes());
+        // bytes 4..36: pubkey
+        data[4..36].copy_from_slice(expected_pk.as_ref());
+
+        let result = parse_programdata_address(&data).unwrap();
+        assert_eq!(result, expected_pk);
+    }
+
+    #[test]
+    fn parse_programdata_address_extra_data_is_fine() {
+        let expected_pk = Pubkey::new_unique();
+        let mut data = vec![0u8; 100];
+        data[4..36].copy_from_slice(expected_pk.as_ref());
+
+        let result = parse_programdata_address(&data).unwrap();
+        assert_eq!(result, expected_pk);
+    }
+
+    #[test]
+    fn parse_programdata_address_too_short() {
+        assert!(parse_programdata_address(&[0u8; 35]).is_err());
+        assert!(parse_programdata_address(&[]).is_err());
+    }
+
+    #[test]
+    fn extract_elf_bytes_valid() {
+        let elf = b"ELF_PAYLOAD";
+        let mut data = vec![0u8; 45 + elf.len()];
+        data[45..].copy_from_slice(elf);
+
+        let result = extract_elf_bytes(&data).unwrap();
+        assert_eq!(result, elf);
+    }
+
+    #[test]
+    fn extract_elf_bytes_exact_header_returns_empty() {
+        let data = vec![0u8; 45];
+        let result = extract_elf_bytes(&data).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_elf_bytes_too_short() {
+        assert!(extract_elf_bytes(&[0u8; 44]).is_err());
+        assert!(extract_elf_bytes(&[]).is_err());
+    }
+
+    // ====================================================================
+    // Free functions
+    // ====================================================================
+
+    #[test]
+    fn is_upgradeable_program_checks_owner_and_executable() {
+        let upgradeable = make_account(BPF_LOADER_UPGRADEABLE, 1, vec![], true);
+        assert!(is_upgradeable_program(&upgradeable));
+
+        // Not executable
+        let not_exec = make_account(BPF_LOADER_UPGRADEABLE, 1, vec![], false);
+        assert!(!is_upgradeable_program(&not_exec));
+
+        // Wrong owner
+        let wrong_owner = make_account(Pubkey::new_unique(), 1, vec![], true);
+        assert!(!is_upgradeable_program(&wrong_owner));
+    }
+
+    #[test]
+    fn is_program_checks_executable_flag() {
+        let exec = make_account(Pubkey::new_unique(), 1, vec![], true);
+        assert!(is_program(&exec));
+
+        let not_exec = make_account(Pubkey::new_unique(), 1, vec![], false);
+        assert!(!is_program(&not_exec));
+    }
+
+    // ====================================================================
+    // Builder API
+    // ====================================================================
+
+    #[test]
+    fn builder_defaults() {
+        let mut ctx = TestContext::new();
+        let cloner = AccountCloner::new(&mut ctx, "http://example.com");
+        assert_eq!(cloner.cache_dir, PathBuf::from(DEFAULT_CACHE_DIR));
+        assert!(!cloner.force_refresh);
+        assert_eq!(cloner.max_program_accounts, DEFAULT_MAX_PROGRAM_ACCOUNTS);
+    }
+
+    #[test]
+    fn builder_overrides() {
+        let mut ctx = TestContext::new();
+        let cloner = AccountCloner::new(&mut ctx, "http://example.com")
+            .cache_dir("/tmp/my-cache")
+            .force_refresh()
+            .max_program_accounts(50);
+        assert_eq!(cloner.cache_dir, PathBuf::from("/tmp/my-cache"));
+        assert!(cloner.force_refresh);
+        assert_eq!(cloner.max_program_accounts, 50);
+    }
 }

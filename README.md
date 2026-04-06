@@ -46,7 +46,6 @@ crucible run <program_name> <test_name> --release --timeout 60
 | [Writing Tests](docs/writing-tests.md) | Fixtures, actions, range constraints, simple & invariant fuzzing, assertion macros |
 | [CLI Reference](docs/cli-reference.md) | All `crucible` commands and execution modes |
 | [Crash Analysis](docs/crash-analysis.md) | Listing, viewing, replaying, and minimizing crashes |
-| [Taint Analysis](docs/taint-analysis.md) | Per-action account tracking, byte-level diffs, semantic field diffs |
 | [Coverage Reports](docs/coverage.md) | Bytecode & source-level coverage, LCOV, genhtml |
 | [Harness Guide](docs/harness-guide.md) | In-depth guide to writing effective fuzz harnesses |
 

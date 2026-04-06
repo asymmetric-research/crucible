@@ -107,7 +107,7 @@ Attempts to replay a known crash to verify it still triggers.
 |--------|----------|
 | Input | First file found in `./input/` directory |
 | Non-reproduction signal | `did not reproduce` printed to stdout |
-| Taint diffs | Auto-enabled for rich replay output |
+| Account diffs | Auto-enabled for rich replay output |
 
 ```bash
 crucible run myproject invariant_test --release --mode reproduce
@@ -289,7 +289,6 @@ Any key-value pairs in `extra` are set as environment variables. Useful Crucible
 | Variable | Description |
 |----------|-------------|
 | `FUZZ_VERBOSE=1` | Verbose harness output (action stats, state snapshots) |
-| `FUZZ_TAINT_DIFFS=1` | Enable byte-level account diffs in crash metadata |
 | `FUZZ_STATS_CSV=stats.csv` | Write per-second fuzzing stats to CSV |
 
 ---
@@ -378,6 +377,6 @@ When running under a remote driver (`--mode` set), Crucible behaves slightly dif
 | Crash directory | `fuzz/<prog>/crashes/<test>/` | `./output` |
 | Coverage output | `coverage.lcov` in fuzz target dir | `./output/coverage.lcov` |
 | Stop-on-crash | Off by default | Always on in `explore` |
-| Taint diffs on replay | Auto-enabled | Auto-enabled |
+| Account diffs on replay | Auto-enabled | Auto-enabled |
 
 Explicit flags always override mode defaults (e.g., `--mode explore --crashes-out ./custom` uses `./custom` instead of `./output`).

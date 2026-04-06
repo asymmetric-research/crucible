@@ -78,6 +78,56 @@
         self.do_swap(user_idx, amount, a_to_b, Some(sqrt_price_limit), true, 0)
     }
 
+    /// Round-trip swap: A→B then B→A (or vice versa). User must not profit.
+    /// Catches AMM composability exploits and rounding direction errors.
+    pub fn action_swap_roundtrip(
+        &mut self,
+        #[range(0..3)] user_idx: usize,
+        amount: u64,
+        a_to_b_first: bool,
+    ) -> bool {
+        let amount = (amount % 500_000) + 100; // Moderate size, min 100
+        let user = &self.users[user_idx];
+
+        // Snapshot user balances before round-trip
+        let pre_a = self.ctx.token_balance(&user.token_account_a);
+        let pre_b = self.ctx.token_balance(&user.token_account_b);
+
+        // Leg 1: swap in one direction
+        let leg1 = self.do_swap(user_idx, amount, a_to_b_first, None, true, 0);
+        if !leg1 { return false; }
+
+        // Compute how much we received on leg 1
+        let mid_a = self.ctx.token_balance(&self.users[user_idx].token_account_a);
+        let mid_b = self.ctx.token_balance(&self.users[user_idx].token_account_b);
+        let received = if a_to_b_first {
+            mid_b.saturating_sub(pre_b) // received token B
+        } else {
+            mid_a.saturating_sub(pre_a) // received token A
+        };
+        if received == 0 { return true; } // Nothing to swap back
+
+        // Leg 2: swap all received tokens back
+        let leg2 = self.do_swap(user_idx, received, !a_to_b_first, None, true, 0);
+        if !leg2 { return true; } // Leg 2 failed — no invariant violation
+
+        // Postcondition: user must NOT profit on the round-trip
+        let post_a = self.ctx.token_balance(&self.users[user_idx].token_account_a);
+        let post_b = self.ctx.token_balance(&self.users[user_idx].token_account_b);
+
+        if a_to_b_first {
+            fuzz_assert!(post_a <= pre_a,
+                "Swap roundtrip A→B→A profit: user gained {} token A (pre={} post={})",
+                post_a.saturating_sub(pre_a), pre_a, post_a);
+        } else {
+            fuzz_assert!(post_b <= pre_b,
+                "Swap roundtrip B→A→B profit: user gained {} token B (pre={} post={})",
+                post_b.saturating_sub(pre_b), pre_b, post_b);
+        }
+
+        true
+    }
+
     /// Exact-output swap (amount specifies desired output, accepts any input)
     pub fn action_exact_out_swap(
         &mut self,
@@ -201,9 +251,26 @@
                     fuzz_assert!(consumed <= amount,
                         "Swap consumed {} > specified amount {}", consumed, amount);
 
-                    // Note: We intentionally do NOT check for non-zero output on exact-input swaps.
-                    // With tiny amounts, fees or rounding can legitimately consume the entire input.
-                    // The exact-out check below already covers the more interesting case.
+                    // Non-zero output for non-dust exact-input swaps:
+                    // If consumed > fee_amount (i.e., there's residual after fees), output must be >0.
+                    // fee_amount ~ consumed * fee_rate / 1_000_000
+                    let received = if a_to_b {
+                        user_b_post.saturating_sub(user_b_pre)
+                    } else {
+                        user_a_post.saturating_sub(user_a_pre)
+                    };
+                    if consumed > 0 && pre_liquidity > 0 {
+                        let fee_estimate = (consumed as u128).saturating_mul(pre_fee_rate as u128) / 1_000_000;
+                        let after_fee = (consumed as u128).saturating_sub(fee_estimate);
+                        // If at least 10000 tokens remain after fees AND pool has liquidity,
+                        // user should get something. Lower thresholds trigger FPs at extreme
+                        // price ranges where CLMM math legitimately rounds output to 0.
+                        if after_fee >= 10_000 {
+                            fuzz_assert!(received > 0,
+                                "Non-dust swap produced zero output: consumed={} fee~={} after_fee={} received=0 liq={}",
+                                consumed, fee_estimate, after_fee, pre_liquidity);
+                        }
+                    }
                 }
 
                 // Exact-out swap output verification: user must receive tokens
@@ -279,6 +346,36 @@
                             fuzz_assert!((proto_b_delta as u128) <= max_total_fee,
                                 "b_to_a swap: proto_fee {} > max_total_fee {} (input={} fee_rate={})",
                                 proto_b_delta, max_total_fee, vault_b_input, fee_rate);
+                        }
+                    }
+                }
+
+                // Non-zero fee for non-dust swaps (catches rounding-to-zero exploit)
+                // If input * fee_rate >= 1_000_000 (at least 1 unit of fee), protocol+LP fee must be > 0
+                if amount_specified_is_input && pre_fee_rate > 0 && pre_liquidity > 0 {
+                    let vault_input = if a_to_b {
+                        vault_a_post.saturating_sub(vault_a_pre)
+                    } else {
+                        vault_b_post.saturating_sub(vault_b_pre)
+                    };
+                    let min_fee_owed = (vault_input as u128).saturating_mul(pre_fee_rate as u128) / 1_000_000;
+                    if min_fee_owed >= 2 {
+                        // At least 2 units of fee expected — protocol fee should be non-zero
+                        if let Ok(pp) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
+                            let proto_delta = if a_to_b {
+                                pp.protocol_fee_owed_a.saturating_sub(pre_proto_fee_a)
+                            } else {
+                                pp.protocol_fee_owed_b.saturating_sub(pre_proto_fee_b)
+                            };
+                            let fee_growth_delta = if a_to_b {
+                                pp.fee_growth_global_a.wrapping_sub(pre_fee_growth_a)
+                            } else {
+                                pp.fee_growth_global_b.wrapping_sub(pre_fee_growth_b)
+                            };
+                            let total_fee_evidence = proto_delta as u128 + fee_growth_delta;
+                            fuzz_assert!(total_fee_evidence > 0,
+                                "Non-dust swap charged zero fees: input={} fee_rate={} min_fee={} proto_delta={} fg_delta={}",
+                                vault_input, pre_fee_rate, min_fee_owed, proto_delta, fee_growth_delta);
                         }
                     }
                 }

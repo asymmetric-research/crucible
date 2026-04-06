@@ -339,7 +339,7 @@ mod tests {
         assert!(output.contains("register_schemas"), "should generate register_schemas function");
         assert!(output.contains("\"Bank\""), "should have type name");
         assert!(output.contains("register_account_schemas"), "should call register_account_schemas");
-        assert!(output.contains("bytemuck :: from_bytes"), "should use bytemuck for zero-copy");
+        assert!(output.contains("bytemuck :: try_from_bytes"), "should use bytemuck for zero-copy");
         assert!(output.contains("total_deposits"), "should compare total_deposits field");
         assert!(output.contains("mint"), "should compare mint field");
         // Discriminator bytes should be present
