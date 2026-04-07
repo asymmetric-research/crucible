@@ -1356,6 +1356,7 @@ dependencies = [
  "solana-bpf-loader-program",
  "solana-compute-budget",
  "solana-hash 3.1.0",
+ "solana-instruction 3.1.0",
  "solana-keypair",
  "solana-message 3.0.1",
  "solana-program-runtime",

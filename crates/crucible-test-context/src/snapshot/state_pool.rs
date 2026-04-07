@@ -130,6 +130,16 @@ pub struct StateEntry {
     /// Coverage map positions (non-zero entries) this state hit.
     /// Used to decrement edge_freq on eviction/crash. None for non-coverage states.
     pub edge_positions: Option<Arc<Vec<u16>>>,
+    /// Precomputed n-gram rarity score for action-path scheduling.
+    /// max(rarity_2, rarity_3, rarity_4) computed at add-time. Higher = rarer path.
+    pub ngram_rarity: f64,
+    /// N-gram keys for 2/3/4-gram frequency tracking.
+    /// [0]=2-gram, [1]=3-gram, [2]=4-gram. 0 means N/A (state too shallow).
+    pub ngram_keys: [u64; 3],
+    /// Consecutive picks without producing a novel child. Resets to 0 when
+    /// novel_children is incremented. Used for exponential weight decay:
+    /// states that keep failing to produce novelty get deprioritized.
+    pub barren_picks: u32,
 }
 
 // ============================================================================
@@ -463,12 +473,18 @@ pub struct StatePool {
     /// AFLFast-style edge frequency table: how many active states hit each coverage map position.
     /// 65536 entries (128KB). Incremented on add, decremented on eviction/crash.
     pub(crate) edge_freq: Vec<u16>,
+    /// N-gram frequency tables: [0]=2-gram, [1]=3-gram, [2]=4-gram.
+    /// Key: FxHash of variant sequence. Value: count of active states with this n-gram.
+    /// Used to compute action-path rarity at add-time.
+    ngram_freq: [FastHashMap<u64, u32>; 3],
     /// Per-state-class statistics for SCFuzz-inspired scheduling.
     pub(crate) registry: StateRegistry,
     /// Current fuzz phase (Coverage bootstrap vs Blended with SCFuzz formula).
     pub(crate) phase: FuzzPhase,
     /// Current iteration counter (set by the fuzzing loop).
     pub(crate) current_iteration: u64,
+    /// Counter for periodic n-gram rarity refresh.
+    ngram_refresh_counter: u32,
 }
 
 impl StatePool {
@@ -487,10 +503,103 @@ impl StatePool {
             max_depth,
             total_picks: AtomicU64::new(0),
             edge_freq: vec![0u16; 65536],
+            ngram_freq: [
+                FastHashMap::default(),
+                FastHashMap::default(),
+                FastHashMap::default(),
+            ],
             registry: StateRegistry::new(),
             phase: FuzzPhase::Coverage,
             current_iteration: 0,
+            ngram_refresh_counter: 0,
         }
+    }
+
+    /// Compute n-gram keys for a new state being added.
+    /// Walks parent chain up to 3 levels back (for 4-gram).
+    /// Returns [2-gram_key, 3-gram_key, 4-gram_key] where 0 means N/A.
+    fn compute_ngram_keys(&self, action_variant: Option<u16>, parent_idx: Option<usize>) -> [u64; 3] {
+        let self_variant = match action_variant {
+            Some(v) => v,
+            None => return [0; 3],
+        };
+
+        // Collect up to 3 ancestor variants
+        let mut ancestors: [u16; 3] = [0; 3];
+        let mut ancestor_count = 0usize;
+        let mut cur_idx = parent_idx;
+        while ancestor_count < 3 {
+            let idx = match cur_idx {
+                Some(i) if i < self.states.len() => i,
+                _ => break,
+            };
+            match self.states[idx].action_variant {
+                Some(v) => {
+                    ancestors[ancestor_count] = v;
+                    ancestor_count += 1;
+                    cur_idx = self.states[idx].parent_idx;
+                }
+                None => break,
+            }
+        }
+
+        let mut keys = [0u64; 3];
+
+        if ancestor_count >= 1 {
+            let mut h = FxHasher::default();
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[0] = h.finish();
+        }
+        if ancestor_count >= 2 {
+            let mut h = FxHasher::default();
+            ancestors[1].hash(&mut h);
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[1] = h.finish();
+        }
+        if ancestor_count >= 3 {
+            let mut h = FxHasher::default();
+            ancestors[2].hash(&mut h);
+            ancestors[1].hash(&mut h);
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[2] = h.finish();
+        }
+
+        keys
+    }
+
+    /// Compute n-gram rarity score from frequency tables.
+    /// Returns max(rarity_2, rarity_3, rarity_4), clamped to [0.1, 50.0].
+    /// Uses max_freq/count ratio for strong differentiation: a unique 4-gram
+    /// vs the most common one can get up to 36x boost.
+    fn compute_ngram_rarity(&self, keys: &[u64; 3]) -> f64 {
+        let mut max_rarity = 1.0_f64;
+
+        for (level, &key) in keys.iter().enumerate() {
+            if key == 0 { continue; }
+
+            let freq_map = &self.ngram_freq[level];
+            let count = freq_map.get(&key).copied().unwrap_or(1) as f64;
+
+            // Use max frequency as reference (not mean) for stronger differentiation.
+            // mean_freq/count collapses when the freq table is dense (many entries near mean).
+            // max_freq/count creates a much wider spread: unique sequences vs the most
+            // common one get massive boosts, and common sequences get demoted below 1.0.
+            let max_freq = freq_map.values().copied().max().unwrap_or(1) as f64;
+
+            let ratio = max_freq / count;
+            let rarity = match level {
+                0 => ratio.powf(0.4),    // 2-gram: dampened
+                1 => ratio.powf(0.5),    // 3-gram: moderate
+                _ => ratio.powf(0.6),    // 4-gram: strongest signal
+            };
+
+            max_rarity = max_rarity.max(rarity);
+        }
+
+        max_rarity.clamp(0.1, 50.0)
     }
 
     /// Try to add a new state. Returns true if the state was novel and added.
@@ -524,6 +633,14 @@ impl StatePool {
                 if let Some(ref positions) = self.states[evict_idx].edge_positions {
                     for &pos in positions.iter() {
                         self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
+                    }
+                }
+                // Decrement n-gram frequencies
+                for (level, &key) in self.states[evict_idx].ngram_keys.iter().enumerate() {
+                    if key != 0 {
+                        if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                            *count = count.saturating_sub(1);
+                        }
                     }
                 }
             } else {
@@ -561,6 +678,15 @@ impl StatePool {
             (0.0, None)
         };
 
+        // Compute n-gram keys and rarity score.
+        let ngram_keys = self.compute_ngram_keys(action_variant, parent_idx);
+        for (level, &key) in ngram_keys.iter().enumerate() {
+            if key != 0 {
+                *self.ngram_freq[level].entry(key).or_insert(0) += 1;
+            }
+        }
+        let ngram_rarity = self.compute_ngram_rarity(&ngram_keys);
+
         self.states.push(StateEntry {
             fingerprint,
             delta: Arc::new(delta),
@@ -580,6 +706,9 @@ impl StatePool {
             pool_size_at_add,
             rarity_score,
             edge_positions,
+            ngram_rarity,
+            ngram_keys,
+            barren_picks: 0,
         });
         // Only add to active set if depth < max_depth.
         // States at max_depth can't extend further — keep them in `states` + `seen`
@@ -587,10 +716,11 @@ impl StatePool {
         if depth < self.max_depth {
             self.active_indices.push(idx);
         }
-        // Credit parent for producing a novel child
+        // Credit parent for producing a novel child and reset barren counter
         if let Some(pidx) = parent_idx {
             if let Some(parent) = self.states.get_mut(pidx) {
                 parent.novel_children += 1;
+                parent.barren_picks = 0;
             }
         }
 
@@ -625,6 +755,35 @@ impl StatePool {
 
     /// Pick a random active state index using the given random value (uniform).
     /// Returns None if no active (non-crashed) states remain.
+    /// Build cumulative weight array for all active states. Returns (cumulative, total).
+    /// Reuse this for multiple picks within the same batch to avoid O(n) recomputation.
+    pub fn build_weight_distribution(&self) -> (Vec<f64>, f64) {
+        let n = self.active_indices.len();
+        let tp = self.total_picks.load(Ordering::Relaxed) as f64;
+        let mut cumulative = Vec::with_capacity(n);
+        let mut total: f64 = 0.0;
+        for &idx in &self.active_indices {
+            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            total += w;
+            cumulative.push(total);
+        }
+        (cumulative, total)
+    }
+
+    /// Sample one state from a pre-built weight distribution. O(log n).
+    /// Does NOT increment pick_count or total_picks.
+    pub fn sample_from_distribution(&self, cumulative: &[f64], total: f64, rand_val: u64) -> Option<usize> {
+        if cumulative.is_empty() || total <= 0.0 {
+            return self.pick_random(rand_val);
+        }
+        let target = (rand_val as f64 / u64::MAX as f64) * total;
+        let pos = match cumulative.binary_search_by(|w| w.partial_cmp(&target).unwrap()) {
+            Ok(i) => i,
+            Err(i) => i.min(cumulative.len() - 1),
+        };
+        Some(self.active_indices[pos])
+    }
+
     pub fn pick_random(&self, rand_val: u64) -> Option<usize> {
         if self.active_indices.is_empty() {
             None
@@ -713,6 +872,17 @@ impl StatePool {
         let success_boost = if s.action_succeeded { 2.0 } else { 1.0 };
         let depth_factor = 1.0 / (1.0 + 0.025 * s.depth as f64);
 
+        // Barren decay: exponential weight reduction for states that keep failing
+        // to produce novel children. Halves every 50 barren picks.
+        // A state with 200 consecutive barren picks gets 0.0625x weight (1/16).
+        let barren_decay = 1.0 / (1.0 + s.barren_picks as f64 / 50.0);
+
+        // N-gram action-path rarity: precomputed at add-time from 2/3/4-gram frequency tables.
+        // States reached via rare action sequences get higher weight. The longest matching
+        // rare n-gram dominates (e.g., a rare 4-gram like advance→deactivate→withdraw→delegate
+        // gives up to 25x boost vs max 4x from a 2-gram).
+        let ngram_rarity = s.ngram_rarity;
+
         // Gate coverage power schedule on EDGE coverage, not combined novelty.
         // Field-novel states use SCFuzz formula with a modest bonus.
         if s.edge_novelty == 0 {
@@ -722,19 +892,26 @@ impl StatePool {
                 // The floor ensures every field-novel state gets enough picks to
                 // potentially discover edge coverage in its children.
                 let depth_bonus = 2.0 + 0.5 * s.depth as f64;  // depth 0 → 2x, depth 7 → 5.5x
-                let child_bonus = (1.0 + s.novel_children as f64).sqrt();  // productive parents
+                // Productive parents get a strong boost: if children found novel coverage,
+                // this state is a valuable stepping stone (e.g., advance_slots intermediates
+                // whose children discover new deactivation/withdrawal code paths).
+                let child_bonus = if s.novel_children > 0 {
+                    (2.0 + s.novel_children as f64 * 5.0).sqrt()
+                } else {
+                    1.0
+                };
                 let explore_decay = 1.0 / (1.0 + picks / 200.0);  // slower decay: halves at 200
 
                 match self.phase {
                     FuzzPhase::Coverage => {
-                        return depth_bonus * child_bonus * explore_decay * success_boost * depth_factor;
+                        return depth_bonus * child_bonus * explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                     }
                     FuzzPhase::Blended => {
                         let sc = state_class_from_fingerprint(s.fingerprint);
                         let scfuzz = self.registry.state_seed_weight(sc, picks, s.action_succeeded);
                         // Take max of SCFuzz and exploration floor — don't let SCFuzz zero out exploration
                         let base = scfuzz.max(depth_bonus * explore_decay);
-                        return base * child_bonus * depth_factor;
+                        return base * child_bonus * ngram_rarity * barren_decay * depth_factor;
                     }
                 }
             }
@@ -742,11 +919,11 @@ impl StatePool {
             match self.phase {
                 FuzzPhase::Coverage => {
                     let explore_decay = 1.0 / (1.0 + picks / 50.0);
-                    return explore_decay * success_boost * depth_factor;
+                    return explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                 }
                 FuzzPhase::Blended => {
                     let sc = state_class_from_fingerprint(s.fingerprint);
-                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * depth_factor;
+                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * ngram_rarity * barren_decay * depth_factor;
                 }
             }
         }
@@ -783,7 +960,7 @@ impl StatePool {
         let productivity_decay = 1.0 / (1.0 + picks / 500.0);
         let productivity = 1.0 + (productivity_raw - 1.0) * productivity_decay;
 
-        coverage_floor * novelty_power * rarity * productivity * success_boost * depth_factor
+        coverage_floor * novelty_power * rarity * productivity * ngram_rarity * barren_decay * success_boost * depth_factor
     }
 
     /// Fill a batch of picks using weighted selection. Returns the number of picks made.
@@ -898,6 +1075,14 @@ impl StatePool {
                     self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
                 }
             }
+            // Decrement n-gram frequencies for crashed state
+            for (level, &key) in self.states[state_idx].ngram_keys.iter().enumerate() {
+                if key != 0 {
+                    if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
         }
     }
 
@@ -920,6 +1105,30 @@ impl StatePool {
         {
             self.phase = FuzzPhase::Blended;
         }
+        // Periodically refresh n-gram rarity scores from current frequency tables.
+        // Every 200 batch boundaries (~12800 iterations). O(active_states) pass.
+        self.ngram_refresh_counter += 1;
+        if self.ngram_refresh_counter >= 200 {
+            self.ngram_refresh_counter = 0;
+            self.refresh_ngram_rarity();
+        }
+    }
+
+    /// Recompute ngram_rarity for all active states from current frequency tables.
+    fn refresh_ngram_rarity(&mut self) {
+        for &idx in &self.active_indices {
+            let keys = self.states[idx].ngram_keys;
+            let rarity = self.compute_ngram_rarity(&keys);
+            self.states[idx].ngram_rarity = rarity;
+        }
+    }
+
+    /// Record a barren pick (no novel child produced). Increments the state's
+    /// consecutive barren counter, which causes exponential weight decay.
+    pub fn record_barren_pick(&mut self, state_idx: usize) {
+        if let Some(entry) = self.states.get_mut(state_idx) {
+            entry.barren_picks = entry.barren_picks.saturating_add(1);
+        }
     }
 
     /// Mutable access to the state registry (for flushing pending selects from macro codegen).
@@ -939,16 +1148,33 @@ impl StatePool {
             return None;
         }
         let tp = self.total_picks.load(Ordering::Relaxed) as f64;
+
+        // First pass: find weakest among states with NO novel children.
+        // States whose children found new coverage are valuable stepping stones
+        // (e.g., advance_slots intermediates) and should be protected from eviction.
         let mut min_weight = f64::MAX;
-        let mut min_pos = 0;
+        let mut min_pos: Option<usize> = None;
         for (pos, &idx) in self.active_indices.iter().enumerate() {
+            if self.states[idx].novel_children > 0 { continue; }
             let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
             if w < min_weight {
                 min_weight = w;
-                min_pos = pos;
+                min_pos = Some(pos);
             }
         }
-        Some(min_pos)
+
+        // Fallback: if all active states have novel children, evict the weakest overall.
+        if min_pos.is_none() {
+            for (pos, &idx) in self.active_indices.iter().enumerate() {
+                let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+                if w < min_weight {
+                    min_weight = w;
+                    min_pos = Some(pos);
+                }
+            }
+        }
+
+        min_pos
     }
 
     /// Check if a crash is novel by its action sequence hash.
@@ -1028,8 +1254,8 @@ impl StatePool {
         // ================================================================
         let _ = writeln!(out, "STATE INDEX");
         let _ = writeln!(out, "-----------");
-        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10} {:<7} {:<18} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7} {}",
-            "idx", "dep", "actv", "picks", "weight", "prob%", "fingerprint", "novl", "ecov", "type", "chld", "viol", "ok", "psz", "rarity", "action");
+        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10} {:<7} {:<18} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7} {:<6} {}",
+            "idx", "dep", "actv", "picks", "weight", "prob%", "fingerprint", "novl", "ecov", "type", "chld", "viol", "ok", "psz", "rarity", "ngram", "action");
 
         for (idx, entry) in self.states.iter().enumerate() {
             let active = if active_set.contains(&idx) { "yes" } else { "-" };
@@ -1037,12 +1263,13 @@ impl StatePool {
             let w = weights.get(&idx).copied().unwrap_or(0.0);
             let prob = if total_weight > 0.0 { w / total_weight * 100.0 } else { 0.0 };
             let wtype = if entry.edge_novelty > 0 { "edge" } else if entry.novelty_bits > 0 { "fld" } else { "none" };
-            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10.2} {:<7.3} {:018x} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7.4} {}",
+            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10.2} {:<7.3} {:018x} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7.4} {:<6.1} {}",
                 idx, entry.depth, active, picks, w, prob, entry.fingerprint,
                 entry.novelty_bits, entry.edge_novelty, wtype, entry.novel_children, entry.violation_count,
                 if entry.action_succeeded { "ok" } else { "fail" },
                 entry.pool_size_at_add,
                 entry.rarity_score,
+                entry.ngram_rarity,
                 if entry.action_desc.is_empty() { "(initial)".to_string() } else {
                     entry.action_desc.lines().collect::<Vec<_>>().join(" | ")
                 });

@@ -322,13 +322,13 @@ impl SvmSnapshot {
         [
             Clock::id(),
             EpochRewards::id(),
-            EpochSchedule::id(),
+            // EpochSchedule::id(),  // Static after genesis — no need to snapshot
             Fees::id(),
             LastRestartSlot::id(),
             RecentBlockhashes::id(),
             Rent::id(),
-            SlotHashes::id(),
-            SlotHistory::id(),
+            // SlotHashes::id(),    // 20 KB — consensus/vote verification, not used by programs
+            // SlotHistory::id(),   // 131 KB — slot occupancy bitvector, irrelevant for fuzzing
             StakeHistory::id(),
         ]
         .iter()
@@ -410,16 +410,19 @@ pub fn slot_bucket(val: u64) -> u8 {
     }
 }
 
-/// Differential bucketing for slot changes from initial (~31 buckets).
-/// Buckets: 0-9 individual, 10-90 per-10, 100-900 per-100, 1000-2000 per-1000, >2000 overflow.
+/// Differential bucketing for slot changes from initial (~49 buckets).
+/// Buckets: 0-9 individual, 10-99 per-10, 100-999 per-100, 1K-9K per-1K,
+///          10K-99K per-10K, 100K-999K per-100K, ≥1M overflow.
 #[inline]
 pub fn slot_diff_bucket(diff: u64) -> u8 {
     match diff {
-        0..=9 => diff as u8,                          // buckets 0-9
-        10..=99 => 9 + (diff / 10) as u8,             // buckets 10-18
-        100..=999 => 18 + (diff / 100) as u8,         // buckets 19-27
-        1000..=2000 => 27 + (diff / 1000) as u8,      // buckets 28-29
-        _ => 30,                                       // overflow
+        0..=9 => diff as u8,                                // buckets 0-9
+        10..=99 => 9 + (diff / 10) as u8,                   // buckets 10-18
+        100..=999 => 18 + (diff / 100) as u8,               // buckets 19-27
+        1_000..=9_999 => 27 + (diff / 1_000) as u8,         // buckets 28-36
+        10_000..=99_999 => 36 + (diff / 10_000) as u8,      // buckets 37-45
+        100_000..=999_999 => 45 + (diff / 100_000) as u8,   // buckets 46-54
+        _ => 55,                                             // overflow (≥1M)
     }
 }
 
@@ -447,6 +450,15 @@ pub fn compute_state_fingerprint_from_snapshot(
     let slot_diff = clock.slot.saturating_sub(initial_clock.slot);
     slot_diff_bucket(slot_diff).hash(&mut hasher);
     clock.epoch.hash(&mut hasher);
+
+    // If the harness explicitly advanced the clock (warp_to_slot/advance_slots),
+    // include the exact target slot in the fingerprint. This ensures each distinct
+    // clock advance produces a unique state, even when slot_diff_bucket collapses
+    // multiple values into the same bucket. Without this, advance_slots(3000) and
+    // advance_slots(5000) could produce identical fingerprints.
+    if let Some(target) = dirty.clock_target_slot {
+        target.hash(&mut hasher);
+    }
 
     if dirty.dirty_accounts().is_empty() {
         return hasher.finish();
@@ -631,6 +643,18 @@ pub unsafe fn check_field_novelty(
             bitmap_ptr, total_bits,
             field_hash(CLOCK_TYPE_KEY, 1, value_bucket(clock.epoch)),
         );
+
+        // If the harness explicitly called warp_to_slot/advance_slots, use the exact
+        // target slot for novelty. Each distinct clock advance is a unique state —
+        // "advance to slot 3000" and "advance to slot 50000" produce different program
+        // behavior (e.g., epoch-dependent stake activation) even if their slot_diff_bucket
+        // is the same. Use slot_bucket (not slot_diff_bucket) for finer discrimination.
+        if let Some(target) = dirty.clock_target_slot {
+            novel_count += check_and_set_bit_atomic(
+                bitmap_ptr, total_bits,
+                field_hash(CLOCK_TYPE_KEY, 2, slot_bucket(target)),
+            );
+        }
     }
 
     // Collect pubkeys for combined set novelty (computed after per-account loop).

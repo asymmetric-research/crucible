@@ -363,7 +363,7 @@ fn test_svm_snapshot_restore_clock() {
 
     // Restore with clock_dirty flag
     let mut dirty = DirtyTracker::new();
-    dirty.mark_clock_dirty();
+    dirty.mark_clock_dirty(100);
     snap.restore(&mut svm, &dirty);
 
     let restored_clock = svm.get_sysvar::<Clock>();
@@ -813,12 +813,21 @@ fn test_slot_diff_bucket() {
     // Per-100: 100-999
     assert_eq!(slot_diff_bucket(100), 19);
     assert_eq!(slot_diff_bucket(999), 27);
-    // Per-1000: 1000-2000
+    // Per-1K: 1000-9999
     assert_eq!(slot_diff_bucket(1000), 28);
     assert_eq!(slot_diff_bucket(2000), 29);
-    // Overflow
     assert_eq!(slot_diff_bucket(3000), 30);
-    assert_eq!(slot_diff_bucket(u64::MAX), 30);
+    assert_eq!(slot_diff_bucket(9999), 36);
+    // Per-10K: 10000-99999
+    assert_eq!(slot_diff_bucket(10000), 37);
+    assert_eq!(slot_diff_bucket(54520), 41);
+    assert_eq!(slot_diff_bucket(99999), 45);
+    // Per-100K: 100000-999999
+    assert_eq!(slot_diff_bucket(100000), 46);
+    assert_eq!(slot_diff_bucket(999999), 54);
+    // Overflow (≥1M)
+    assert_eq!(slot_diff_bucket(1_000_000), 55);
+    assert_eq!(slot_diff_bucket(u64::MAX), 55);
 }
 
 // =========================================================================

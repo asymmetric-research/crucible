@@ -2387,7 +2387,7 @@ fn test_stateless_restore_resets_clock() {
 
     // Restore with clock_dirty
     let mut dirty = DirtyTracker::new();
-    dirty.mark_clock_dirty();
+    dirty.mark_clock_dirty(100);
     snap.restore(&mut svm, &dirty);
 
     assert_eq!(

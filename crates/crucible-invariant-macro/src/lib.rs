@@ -1242,10 +1242,18 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
             // Cap actions to prevent unbounded input growth causing performance degradation
             // Each action = one SVM transaction, more actions = exponentially more work
-            let max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
+            let max_actions: usize = if std::env::var("FUZZ_INPUT_FILE").is_ok()
+                || std::env::var("FUZZ_TMIN_FILE").is_ok()
+                || std::env::var("FUZZ_TMIN_ALL_DIR").is_ok()
+            {
+                // Replay/tmin mode: don't cap — crash files may have more actions than the default
+                usize::MAX
+            } else {
+                std::env::var("FUZZ_MAX_ACTIONS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(10)
+            };
 
             let debug = std::env::var("FUZZ_DEBUG").is_ok();
             let capped_len = actions.len().min(max_actions);

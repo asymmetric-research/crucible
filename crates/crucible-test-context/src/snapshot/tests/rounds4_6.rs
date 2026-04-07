@@ -2147,7 +2147,7 @@ fn test_dirty_tracker_clock_flag_drives_clock_restore() {
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut dirty = DirtyTracker::new();
-    dirty.mark_clock_dirty();
+    dirty.mark_clock_dirty(100);
     assert!(dirty.is_clock_dirty());
 
     initial.restore_selective(&mut svm, &divergent, &delta);

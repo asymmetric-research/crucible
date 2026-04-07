@@ -789,6 +789,8 @@ fn fuzz_run(
         }
     }
 
+    // Default max_actions to 100 in stateful mode (deeper exploration needed)
+    let max_actions = if stateful && max_actions == 10 { 100 } else { max_actions };
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());
     println!("[FUZZ] Max actions per iteration: {}", max_actions);
 

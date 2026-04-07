@@ -86,11 +86,17 @@ pub fn stateful_mode(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(256_000); // 256k
 
-            // Parse max depth from env or default to 15
+            // Parse max depth from env. Falls back to FUZZ_MAX_ACTIONS, then 10.
             let max_depth: u32 = std::env::var("FUZZ_MAX_DEPTH")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
+                .unwrap_or_else(|| {
+                    std::env::var("FUZZ_MAX_ACTIONS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(10)
+                });
+
 
             // Use seed from env var if provided, otherwise use current time
             let seed = std::env::var("FUZZ_SEED")
@@ -157,9 +163,13 @@ pub fn stateful_mode(
                 .clone();
 
             // SVM swap trick (same as singlecore): move real SVM out of template
+            // Use LiteSVM::default() as placeholder — bare minimum struct with no builtins
+            // or program cache. LiteSVM::new() would load all built-in programs (~hundreds of MB)
+            // which is wasted since the placeholder is never executed (always replaced via swap).
+            // With 33k pool entries each cloning the fixture, this saves GBs of memory.
             let mut __real_svm = std::mem::replace(
                 &mut template_fixture.ctx.svm,
-                crucible_test_context::litesvm::LiteSVM::new(),
+                crucible_test_context::litesvm::LiteSVM::default(),
             );
             // Swap out additional context SVMs
             #extra_swap_out
@@ -327,6 +337,9 @@ fn stateful_singlecore_body(
             }
             __seed_files.sort();
 
+            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
+
             let mut __seeded = 0u64;
             for __seed_path in &__seed_files {
                 let __seed_bytes = match std::fs::read(__seed_path) {
@@ -350,7 +363,7 @@ fn stateful_singlecore_body(
                 );
 
                 for __seed_action in &__fuzz_input.actions {
-                    if __current_depth >= max_depth { break; }
+                    if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
                     if state_pool.is_full() { break; }
 
                     // Swap SVMs into fixture (primary + additional contexts)
@@ -418,10 +431,13 @@ fn stateful_singlecore_body(
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                     #extra_swap_in_seed
 
+                    // Seeded states get minimum novelty so they're competitive in the
+                    // power schedule. edge_novelty=1 puts them in the coverage weight
+                    // tier; without this they get 0 novelty → almost never picked.
                     if __fp != 0 && state_pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, 0, 0, true, None,
+                        __fs, 8, 1, true, None,
                     ) {
                         __parent_idx = Some(state_pool.len() - 1);
                         __seeded += 1;
@@ -444,6 +460,10 @@ fn stateful_singlecore_body(
         eprintln!("[STATEFUL] Starting stateful fuzzing loop...\n");
 
         let mut __phase_pick_ns: u64 = 0;
+        let mut __phase_pick_flush_ns: u64 = 0;
+        let mut __phase_pick_batch_ns: u64 = 0;
+        let mut __phase_pick_crossover_ns: u64 = 0;
+        let mut __phase_pick_splice_ns: u64 = 0;
         let mut __phase_restore_ns: u64 = 0;
         let mut __phase_action_gen_ns: u64 = 0;
         let mut __phase_clone_ns: u64 = 0;
@@ -451,6 +471,9 @@ fn stateful_singlecore_body(
         let mut __phase_tx_pre_ns: u64 = 0;
         let mut __phase_tx_svm_ns: u64 = 0;
         let mut __phase_tx_post_ns: u64 = 0;
+        let mut __phase_tx_blockhash_ns: u64 = 0;
+        let mut __phase_tx_sign_ns: u64 = 0;
+        let mut __phase_tx_exec_ns: u64 = 0;
         let mut __phase_coverage_ns: u64 = 0;
         let mut __phase_field_novelty_ns: u64 = 0;
         let mut __phase_fingerprint_ns: u64 = 0;
@@ -469,6 +492,10 @@ fn stateful_singlecore_body(
         let mut __rng_vals: Vec<u64> = Vec::with_capacity(__BATCH_SIZE);
         let mut __crossover_buf: Vec<(usize, std::sync::Arc<Vec<u8>>)> = Vec::with_capacity(16);
         let mut __pending_selects: Vec<u16> = Vec::with_capacity(__BATCH_SIZE);
+
+        // Cached weight distribution — rebuilt at batch boundaries, reused for crossover + splice
+        let mut __weight_cumulative: Vec<f64> = Vec::new();
+        let mut __weight_total: f64 = 0.0;
 
         loop {
             if SIGNAL_STOP.load(std::sync::atomic::Ordering::Relaxed) { break; }
@@ -510,22 +537,33 @@ fn stateful_singlecore_body(
             // 1. Refill batch when empty (amortizes O(n) weight computation over BATCH_SIZE iterations)
             let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
             if __pick_batch.is_empty() {
+                let __t_flush = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 // Flush pending selects into registry
                 for __sc in __pending_selects.drain(..) {
                     state_pool.registry_mut().record_select(__sc);
                 }
                 state_pool.set_current_iteration(iteration);
                 state_pool.maybe_advance_phase();
+                if let Some(__t) = __t_flush { __phase_pick_flush_ns += __t.elapsed().as_nanos() as u64; }
 
+                let __t_batch = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 __rng_vals.clear();
                 for _ in 0..__BATCH_SIZE {
                     __rng_vals.push(rng.next());
                 }
+                // Build weight distribution once, reuse for batch + crossover + splice
+                let (__wc, __wt) = state_pool.build_weight_distribution();
+                __weight_cumulative = __wc;
+                __weight_total = __wt;
                 state_pool.pick_weighted_batch(&__rng_vals, &mut __pick_batch);
-                // Refresh crossover candidates (weighted: prefer high-power states)
+                if let Some(__t) = __t_batch { __phase_pick_batch_ns += __t.elapsed().as_nanos() as u64; }
+
+                let __t_cross = if __do_profile { Some(std::time::Instant::now()) } else { None };
+                // Refresh crossover candidates using pre-built distribution (O(log n) per pick)
                 __crossover_buf.clear();
                 for _ in 0..16usize {
-                    if let Some(idx) = state_pool.pick_weighted(rng.next()) {
+                    if let Some(idx) = state_pool.sample_from_distribution(&__weight_cumulative, __weight_total, rng.next()) {
+
                         if let Some(entry) = state_pool.get(idx) {
                             if let Some(vi) = entry.action_variant {
                                 __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
@@ -533,6 +571,7 @@ fn stateful_singlecore_body(
                         }
                     }
                 }
+                if let Some(__t) = __t_cross { __phase_pick_crossover_ns += __t.elapsed().as_nanos() as u64; }
                 if __pick_batch.is_empty() {
                     eprintln!("[STATEFUL] All active states exhausted (all led to crashes). Stopping.");
                     break;
@@ -544,12 +583,13 @@ fn stateful_singlecore_body(
             // Subsequence splice (5%): pick a random contiguous subsequence (len 2-5) from
             // a donor pool state's action chain and execute it from the initial state.
             // Tests whether mid-chain subsequences trigger bugs from clean state.
+            let __t_splice = if __do_profile { Some(std::time::Instant::now()) } else { None };
             let __splice_roll = rng.next() % 100;
             let mut __splice_chain: Option<Vec<#action_ty>> = None;
             let mut __burst_mode = false;
             if __splice_roll < 5 && state_pool.len() > 10 {
                 // 5%: Donor splice — extract subsequence from an existing chain
-                let __donor_idx = state_pool.pick_weighted(rng.next()).unwrap_or(0);
+                let __donor_idx = state_pool.sample_from_distribution(&__weight_cumulative, __weight_total, rng.next()).unwrap_or(0);
                 let __donor_seq = state_pool.reconstruct_variant_field_sequence(__donor_idx);
                 if __donor_seq.len() >= 2 {
                     let __splice_len = (2 + rng.next() as usize % 4).min(__donor_seq.len());
@@ -584,8 +624,9 @@ fn stateful_singlecore_body(
                 // 15%: Burst mode — generate 2-5 random actions from the picked parent state.
                 // Each action is executed sequentially; novel intermediates are saved to pool.
                 // This enables multi-step bug chains (e.g., delegate→advance→deactivate→withdraw→delegate).
-                __burst_mode = true;
+                // __burst_mode = true;  // temporarily disabled
             }
+            if let Some(__t) = __t_splice { __phase_pick_splice_ns += __t.elapsed().as_nanos() as u64; }
             if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
 
             // 2. Selective restore with dual-SVM support.
@@ -719,6 +760,25 @@ fn stateful_singlecore_body(
             let __chain_len = __action_chain.len();
             // Use last action's variant for stats recording
             let __action_variant_idx = __action_chain.last().unwrap().variant_index();
+
+            // Pre-compute action descriptions with params BEFORE the chain is consumed
+            // by the test function. Without this, pool entries only get action names
+            // (no params) because push_action_record_lite defers param serialization.
+            let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
+                let __params = __a.to_json_params();
+                let __ps = if let serde_json::Value::Object(ref __map) = __params {
+                    __map.iter()
+                        .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else { String::new() };
+                if __ps.is_empty() {
+                    __a.action_name().to_string()
+                } else {
+                    format!("{}({})", __a.action_name(), __ps)
+                }
+            }).collect();
+
             if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
 
             // 5. Execute the action chain using the existing invariant test function.
@@ -767,6 +827,10 @@ fn stateful_singlecore_body(
                 __phase_tx_pre_ns += __pre;
                 __phase_tx_svm_ns += __svm;
                 __phase_tx_post_ns += __post;
+                let (__bh, __sg, __ex) = crucible_test_context::get_send_tx_breakdown();
+                __phase_tx_blockhash_ns += __bh;
+                __phase_tx_sign_ns += __sg;
+                __phase_tx_exec_ns += __ex;
             }
 
             // Check if this action produced new coverage:
@@ -848,13 +912,19 @@ fn stateful_singlecore_body(
             if let Some(ref msg) = violation {
                 // Reconstruct full action sequence for crash file
                 let mut crash_bytes = state_pool.reconstruct_action_sequence(state_idx);
+                let __parent_count = if crash_bytes.len() >= 4 {
+                    u32::from_le_bytes(crash_bytes[0..4].try_into().unwrap())
+                } else { 0 };
                 if crash_bytes.len() >= 4 {
-                    let old_count = u32::from_le_bytes(
-                        crash_bytes[0..4].try_into().unwrap()
-                    );
+                    let old_count = __parent_count;
                     crash_bytes[0..4].copy_from_slice(&(old_count + __chain_len as u32).to_le_bytes());
                     crash_bytes.extend_from_slice(&__single_action_buf);
                 }
+                // Debug: verify binary matches description chain
+                let __desc_chain = state_pool.reconstruct_action_descriptions(state_idx);
+                eprintln!("[CRASH_DEBUG] parent state_idx={}, parent depth={}, parent action_bytes count={}, desc chain len={}, chain_len={}, total binary count={}",
+                    state_idx, parent_depth, __parent_count, __desc_chain.len(), __chain_len,
+                    __parent_count + __chain_len as u32);
 
                 // Dedup by action variant sequence (coarse: same action types = same crash class)
                 let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
@@ -866,19 +936,35 @@ fn stateful_singlecore_body(
                     crashes_found += 1;
                     println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                     eprintln!("\n[FUZZ_FINDING] at iteration {}: {}", iteration, msg);
-                    // Print full action chain from root to violation
+                    // Print full action chain from root to violation.
+                    // Include ALL actions from the current chain (chain_len may be >1 in burst mode).
                     let parent_descs = state_pool.reconstruct_action_descriptions(state_idx);
-                    let current_desc = crucible_test_context::format_last_action_oneline();
-                    let total = parent_descs.len() + 1;
+                    let history = crucible_test_context::get_action_history();
+                    let current_descs: Vec<String> = __chain_descs.iter().enumerate().map(|(i, desc)| {
+                        let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                        format!("{} -> {}", desc, status)
+                    }).collect();
+                    let total = parent_descs.len() + current_descs.len();
                     eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                     for (i, desc) in parent_descs.iter().enumerate() {
                         eprintln!("  {}. {}", i + 1, desc);
                     }
-                    eprintln!("  {}. {} [VIOLATION]", total, current_desc);
+                    for (i, desc) in current_descs.iter().enumerate() {
+                        let tag = if i == current_descs.len() - 1 { " [VIOLATION]" } else { "" };
+                        eprintln!("  {}. {}{}", parent_descs.len() + i + 1, desc, tag);
+                    }
                     eprintln!("===================================");
 
-                    crucible_test_context::write_crash_metadata(
-                        &crash_dir, input_hash, Some(seed), &crash_bytes,
+                    // Build full action records for metadata (parent chain + ALL current actions)
+                    let mut __full_actions: Vec<crucible_test_context::ActionRecord> = parent_descs
+                        .iter()
+                        .map(|d| crucible_test_context::parse_action_desc(d))
+                        .collect();
+                    for desc in &current_descs {
+                        __full_actions.push(crucible_test_context::parse_action_desc(desc));
+                    }
+                    crucible_test_context::write_crash_metadata_with_actions(
+                        &crash_dir, input_hash, Some(seed), &crash_bytes, Some(__full_actions),
                     );
 
                     if stop_on_crash {
@@ -954,7 +1040,15 @@ fn stateful_singlecore_body(
                             Vec::new()
                         };
 
-                        let action_desc = crucible_test_context::format_all_actions_oneline();
+                        // Use pre-computed descriptions (with params) instead of TLS history
+                        // (which only has action names from push_action_record_lite).
+                        let action_desc = {
+                            let history = crucible_test_context::get_action_history();
+                            __chain_descs.iter().enumerate().map(|(i, desc)| {
+                                let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                                format!("{} -> {}", desc, status)
+                            }).collect::<Vec<_>>().join("\n")
+                        };
 
                         // Swap SVMs out before storing fixture (makes clone cheap)
                         #extra_restore_swap_back_fixture
@@ -994,6 +1088,11 @@ fn stateful_singlecore_body(
                 action_stats.record(__state_class, __action_variant_idx, false);
                 false
             };
+
+            // Record barren pick for exponential weight decay.
+            if !(__is_novel || __new_coverage) && violation.is_none() && __panic_result.is_ok() {
+                state_pool.record_barren_pick(state_idx);
+            }
 
             // 7. Update divergent_keys, prev_delta_arc, and prev_exec_dirty for next iteration
             // IMPORTANT: Always track dirty accounts regardless of action success/failure.
@@ -1126,14 +1225,32 @@ fn stateful_singlecore_body(
                         pct(other_ns), avg(other_ns),
                         avg_us,
                     );
+                    // pick breakdown: flush (registry+phase), batch (weight computation), crossover (16x pick_weighted)
+                    if __phase_pick_ns > 0 {
+                        let ppct = |ns: u64| -> f64 { (ns as f64 / __phase_pick_ns as f64) * 100.0 };
+                        let pick_other = __phase_pick_ns.saturating_sub(__phase_pick_flush_ns + __phase_pick_batch_ns + __phase_pick_crossover_ns + __phase_pick_splice_ns);
+                        eprintln!(
+                            "[PICK]    flush: {:.1}% ({}µs) | batch: {:.1}% ({}µs) | crossover: {:.1}% ({}µs) | splice: {:.1}% ({}µs) | other: {:.1}% ({}µs)",
+                            ppct(__phase_pick_flush_ns), avg(__phase_pick_flush_ns),
+                            ppct(__phase_pick_batch_ns), avg(__phase_pick_batch_ns),
+                            ppct(__phase_pick_crossover_ns), avg(__phase_pick_crossover_ns),
+                            ppct(__phase_pick_splice_ns), avg(__phase_pick_splice_ns),
+                            ppct(pick_other), avg(pick_other),
+                        );
+                    }
+                    __phase_pick_flush_ns = 0;
+                    __phase_pick_batch_ns = 0;
+                    __phase_pick_crossover_ns = 0;
+                    __phase_pick_splice_ns = 0;
                     // exec breakdown: tx_pre (dirty), tx_svm (litesvm), tx_post (outcome), dispatch overhead
                     let tx_total = __phase_tx_pre_ns + __phase_tx_svm_ns + __phase_tx_post_ns;
                     let dispatch_ns = __phase_svm_exec_ns.saturating_sub(tx_total);
                     let epct = |ns: u64| -> f64 { if __phase_svm_exec_ns > 0 { (ns as f64 / __phase_svm_exec_ns as f64) * 100.0 } else { 0.0 } };
                     eprintln!(
-                        "[EXEC]    tx_pre: {:.1}% ({}µs) | tx_svm: {:.1}% ({}µs) | tx_post: {:.1}% ({}µs) | dispatch: {:.1}% ({}µs)",
+                        "[EXEC]    tx_pre: {:.1}% ({}µs) | tx_svm: {:.1}% ({}µs) [blockhash: {}µs, sign: {}µs, exec: {}µs] | tx_post: {:.1}% ({}µs) | dispatch: {:.1}% ({}µs)",
                         epct(__phase_tx_pre_ns), avg(__phase_tx_pre_ns),
                         epct(__phase_tx_svm_ns), avg(__phase_tx_svm_ns),
+                        avg(__phase_tx_blockhash_ns), avg(__phase_tx_sign_ns), avg(__phase_tx_exec_ns),
                         epct(__phase_tx_post_ns), avg(__phase_tx_post_ns),
                         epct(dispatch_ns), avg(dispatch_ns),
                     );
@@ -1145,6 +1262,9 @@ fn stateful_singlecore_body(
                     __phase_tx_pre_ns = 0;
                     __phase_tx_svm_ns = 0;
                     __phase_tx_post_ns = 0;
+                    __phase_tx_blockhash_ns = 0;
+                    __phase_tx_sign_ns = 0;
+                    __phase_tx_exec_ns = 0;
                     __phase_coverage_ns = 0;
                     __phase_field_novelty_ns = 0;
                     __phase_fingerprint_ns = 0;
@@ -1301,6 +1421,9 @@ fn stateful_multicore_body(
             }
             __seed_files.sort();
 
+            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
+
             let mut __seeded = 0u64;
             let mut pool = state_pool.write().unwrap();
             for __seed_path in &__seed_files {
@@ -1325,7 +1448,7 @@ fn stateful_multicore_body(
                 );
 
                 for __seed_action in &__fuzz_input.actions {
-                    if __current_depth >= max_depth { break; }
+                    if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
                     if pool.is_full() { break; }
 
                     // Swap SVMs into fixture (primary + additional contexts)
@@ -1395,7 +1518,7 @@ fn stateful_multicore_body(
                     if __fp != 0 && pool.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, 0, 0, true, None,
+                        __fs, 8, 1, true, None,
                     ) {
                         __parent_idx = Some(pool.len() - 1);
                         __seeded += 1;
@@ -1515,9 +1638,10 @@ fn stateful_multicore_body(
                     // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, novelty_bits, edge_novelty, succeeded, coverage_positions)
                     let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
                     // Crash info: (action_variant, msg, current_action_desc, parent_state_idx, crash_bytes)
-                    let mut pending_crashes: Vec<(u16, String, String, usize, Vec<u8>)> = Vec::new();
+                    let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>)> = Vec::new();
                     // Track pending violations: state indices that need record_violation() in the flush
                     let mut pending_violations: Vec<usize> = Vec::new();
+                    let mut pending_barren: Vec<usize> = Vec::new();
                     // Pending state_class selects to flush into registry
                     let mut pending_selects: Vec<u16> = Vec::with_capacity(BATCH_SIZE);
                     // Thread-local seen variant hashes to skip duplicate crash accumulation
@@ -1531,8 +1655,8 @@ fn stateful_multicore_body(
                         if local_batch.is_empty() {
                             // Flush pending writes from the previous batch (one write lock)
                             // Fix 3: Collect crash outputs inside lock, write to disk outside
-                            let mut __crash_outputs: Vec<(String, Vec<String>, String, u64, Vec<u8>)> = Vec::new();
-                            if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() {
+                            let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>)> = Vec::new();
+                            if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() || !pending_barren.is_empty() {
                                 if let Ok(mut pool) = pool.try_write() {
                                     for sc in pending_selects.drain(..) {
                                         pool.registry_mut().record_select(sc);
@@ -1549,7 +1673,10 @@ fn stateful_multicore_body(
                                     for vi_idx in pending_violations.drain(..) {
                                         pool.record_violation(vi_idx);
                                     }
-                                    for (cur_variant, msg, current_desc, parent_idx, crash_bytes) in pending_crashes.drain(..) {
+                                    for bi_idx in pending_barren.drain(..) {
+                                        pool.record_barren_pick(bi_idx);
+                                    }
+                                    for (cur_variant, msg, current_descs, parent_idx, crash_bytes) in pending_crashes.drain(..) {
                                         // Compute variant-only hash inside the lock
                                         let mut __variant_seq = pool.reconstruct_variant_sequence(parent_idx);
                                         __variant_seq.push(cur_variant);
@@ -1559,7 +1686,7 @@ fn stateful_multicore_body(
                                         if pool.is_novel_crash(vh) {
                                             crashes.fetch_add(1, Ordering::Relaxed);
                                             let parent_descs = pool.reconstruct_action_descriptions(parent_idx);
-                                            __crash_outputs.push((msg, parent_descs, current_desc, vh, crash_bytes));
+                                            __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
                                             if stop_on_crash {
                                                 eprintln!("[STATEFUL W{}] First crash found, signaling stop (--stop-on-crash).", worker_id);
                                                 stop.store(true, Ordering::SeqCst);
@@ -1575,18 +1702,28 @@ fn stateful_multicore_body(
                                 }
                             }
                             // Crash disk I/O outside write lock (Fix 3)
-                            for (msg, parent_descs, current_desc, vh, crash_bytes) in __crash_outputs {
-                                let total = parent_descs.len() + 1;
+                            for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
+                                let total = parent_descs.len() + current_descs.len();
                                 println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                                 eprintln!("\n[FUZZ_FINDING] {}", msg);
                                 eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                                 for (i, desc) in parent_descs.iter().enumerate() {
                                     eprintln!("  {}. {}", i + 1, desc);
                                 }
-                                eprintln!("  {}. {} [VIOLATION]", total, current_desc);
+                                for (i, desc) in current_descs.iter().enumerate() {
+                                    let tag = if i == current_descs.len() - 1 { " [VIOLATION]" } else { "" };
+                                    eprintln!("  {}. {}{}", parent_descs.len() + i + 1, desc, tag);
+                                }
                                 eprintln!("===================================");
-                                crucible_test_context::write_crash_metadata(
-                                    &crash_dir, vh, Some(worker_seed), &crash_bytes,
+                                let mut __full_actions: Vec<crucible_test_context::ActionRecord> = parent_descs
+                                    .iter()
+                                    .map(|d| crucible_test_context::parse_action_desc(d))
+                                    .collect();
+                                for desc in &current_descs {
+                                    __full_actions.push(crucible_test_context::parse_action_desc(desc));
+                                }
+                                crucible_test_context::write_crash_metadata_with_actions(
+                                    &crash_dir, vh, Some(worker_seed), &crash_bytes, Some(__full_actions),
                                 );
                             }
 
@@ -1609,11 +1746,12 @@ fn stateful_multicore_body(
                                 for _ in 0..BATCH_SIZE {
                                     rng_vals.push(rng.next());
                                 }
+                                let (__wc, __wt) = p.build_weight_distribution();
                                 p.pick_weighted_batch(&rng_vals, &mut local_batch);
-                                // Pick crossover candidates (weighted: prefer high-power states)
+                                // Pick crossover candidates using pre-built distribution (O(log n))
                                 __crossover_buf.clear();
                                 for _ in 0..16usize {
-                                    if let Some(idx) = p.pick_weighted(rng.next()) {
+                                    if let Some(idx) = p.sample_from_distribution(&__wc, __wt, rng.next()) {
                                         if let Some(entry) = p.get(idx) {
                                             if let Some(vi) = entry.action_variant {
                                                 __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
@@ -1663,7 +1801,7 @@ fn stateful_multicore_body(
                         if __splice_roll < 5 && __cached_pool_len > 10 {
                             // 5%: Donor splice — extract subsequence from an existing chain
                             if let Ok(p) = pool.try_read() {
-                                let __donor_idx = p.pick_weighted(rng.next()).unwrap_or(0);
+                                let __donor_idx = p.pick_random(rng.next()).unwrap_or(0);
                                 let __donor_seq = p.reconstruct_variant_field_sequence(__donor_idx);
                                 if __donor_seq.len() >= 2 {
                                     let __splice_len = (2 + rng.next() as usize % 4).min(__donor_seq.len());
@@ -1706,7 +1844,7 @@ fn stateful_multicore_body(
                             }
                         } else if __splice_roll < 20 && __cached_pool_len > 10 {
                             // 15%: Burst mode — forced 2-5 action chain from picked parent state
-                            __burst_mode = true;
+                            // __burst_mode = true;  // temporarily disabled
                         }
 
                         // 2. Selective restore with dual-SVM support
@@ -1826,6 +1964,21 @@ fn stateful_multicore_body(
                         let __chain_len = __action_chain.len();
                         let __action_variant_idx = __action_chain.last().unwrap().variant_index();
 
+                        let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
+                            let __params = __a.to_json_params();
+                            let __ps = if let serde_json::Value::Object(ref __map) = __params {
+                                __map.iter()
+                                    .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            } else { String::new() };
+                            if __ps.is_empty() {
+                                __a.action_name().to_string()
+                            } else {
+                                format!("{}({})", __a.action_name(), __ps)
+                            }
+                        }).collect();
+
                         // 4. Execute chain — use per-iteration fixture clone (correct mutable state).
                         //    Swap SVMs into fixture, run test, swap back.
                         std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
@@ -1894,16 +2047,23 @@ fn stateful_multicore_body(
                             if seen_variant_hashes.insert(__local_key) {
                                 // Build crash bytes locally (deep clone from Arc)
                                 let mut crash_bytes = (*parent_action_bytes).clone();
+                                let __parent_count = if crash_bytes.len() >= 4 {
+                                    u32::from_le_bytes(crash_bytes[0..4].try_into().unwrap())
+                                } else { 0 };
+                                eprintln!("[CRASH_DEBUG] W{}: state_idx={}, parent_depth={}, parent_bytes_count={}, chain_len={}, total={}",
+                                    worker_id, state_idx, parent_depth, __parent_count, __chain_len, __parent_count + __chain_len as u32);
                                 if crash_bytes.len() >= 4 {
-                                    let old_count = u32::from_le_bytes(
-                                        crash_bytes[0..4].try_into().unwrap()
-                                    );
+                                    let old_count = __parent_count;
                                     crash_bytes[0..4].copy_from_slice(&(old_count + __chain_len as u32).to_le_bytes());
                                     crash_bytes.extend_from_slice(&__single_action_buf);
                                 }
-                                // Store action variant for coarse dedup (computed inside lock later)
-                                let current_desc = crucible_test_context::format_last_action_oneline();
-                                pending_crashes.push((__cur_variant, msg.clone(), current_desc, state_idx, crash_bytes));
+                                // Store ALL chain action descs for crash output
+                                let history = crucible_test_context::get_action_history();
+                                let current_descs: Vec<String> = __chain_descs.iter().enumerate().map(|(i, desc)| {
+                                    let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                                    format!("{} -> {}", desc, status)
+                                }).collect();
+                                pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes));
                             }
                         }
 
@@ -1973,7 +2133,13 @@ fn stateful_multicore_body(
                                     std::mem::swap(&mut __iter_fixture.ctx.svm, &mut *worker_svm);
                                     #extra_swap_in_iter
 
-                                    let action_desc = crucible_test_context::format_all_actions_oneline();
+                                    let action_desc = {
+                                        let history = crucible_test_context::get_action_history();
+                                        __chain_descs.iter().enumerate().map(|(i, desc)| {
+                                            let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                                            format!("{} -> {}", desc, status)
+                                        }).collect::<Vec<_>>().join("\n")
+                                    };
                                     let __coverage_positions: Option<Vec<u16>> = if __novel_bits > 0 && has_tracing {
                                         Some(crucible_test_context::snapshot::extract_coverage_positions(&worker_cov_map))
                                     } else { None };
@@ -1990,6 +2156,11 @@ fn stateful_multicore_body(
                             action_stats.record(__state_class, __action_variant_idx, false);
                             false
                         };
+
+                        // Record barren pick for exponential weight decay.
+                        if !(__is_novel || __new_coverage) && violation.is_none() && __panic_result.is_ok() {
+                            pending_barren.push(state_idx);
+                        }
 
                         // 6. Update divergent_keys, prev_delta_arc, and prev_exec_dirty
                         // IMPORTANT: Always track dirty accounts regardless of success/failure.
@@ -2091,6 +2262,10 @@ fn stateful_multicore_body(
                 crucible_test_context::FastHashSet::default();
 
             let mut __phase_pick_ns: u64 = 0;
+            let mut __phase_pick_flush_ns: u64 = 0;
+            let mut __phase_pick_batch_ns: u64 = 0;
+            let mut __phase_pick_crossover_ns: u64 = 0;
+            let mut __phase_pick_splice_ns: u64 = 0;
             let mut __phase_restore_ns: u64 = 0;
             let mut __phase_action_gen_ns: u64 = 0;
             let mut __phase_clone_ns: u64 = 0;
@@ -2098,6 +2273,9 @@ fn stateful_multicore_body(
             let mut __phase_tx_pre_ns: u64 = 0;
             let mut __phase_tx_svm_ns: u64 = 0;
             let mut __phase_tx_post_ns: u64 = 0;
+            let mut __phase_tx_blockhash_ns: u64 = 0;
+            let mut __phase_tx_sign_ns: u64 = 0;
+            let mut __phase_tx_exec_ns: u64 = 0;
             let mut __phase_coverage_ns: u64 = 0;
             let mut __phase_field_novelty_ns: u64 = 0;
             let mut __phase_fingerprint_ns: u64 = 0;
@@ -2131,9 +2309,10 @@ fn stateful_multicore_body(
             let mut w0_pending_drops: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE + 1);
             // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, coverage_novel, edge_novelty, succeeded, coverage_positions)
             let mut pending_novel: Vec<(u64, SvmSnapshot, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
-            let mut pending_crashes: Vec<(u16, String, String, usize, Vec<u8>)> = Vec::new();
+            let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>)> = Vec::new();
             // Track pending violations: state indices that need record_violation() in the flush
             let mut pending_violations: Vec<usize> = Vec::new();
+            let mut pending_barren: Vec<usize> = Vec::new();
             // Pending state_class selects to flush into registry
             let mut pending_selects: Vec<u16> = Vec::with_capacity(BATCH_SIZE);
             // Thread-local seen variant hashes to skip duplicate crash accumulation
@@ -2168,10 +2347,11 @@ fn stateful_multicore_body(
                 // 1. Refill batch when empty
                 let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 if local_batch.is_empty() {
+                    let __t_flush = if __do_profile { Some(std::time::Instant::now()) } else { None };
                     // Flush pending writes from previous batch
                     // Fix 3: Collect crash outputs inside lock, write to disk outside
-                    let mut __crash_outputs: Vec<(String, Vec<String>, String, u64, Vec<u8>)> = Vec::new();
-                    if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() {
+                    let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>)> = Vec::new();
+                    if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() || !pending_barren.is_empty() {
                         if let Ok(mut p) = pool.try_write() {
                             for sc in pending_selects.drain(..) {
                                 p.registry_mut().record_select(sc);
@@ -2188,7 +2368,10 @@ fn stateful_multicore_body(
                             for vi_idx in pending_violations.drain(..) {
                                 p.record_violation(vi_idx);
                             }
-                            for (cur_variant, msg, current_desc, parent_idx, crash_bytes) in pending_crashes.drain(..) {
+                            for bi_idx in pending_barren.drain(..) {
+                                p.record_barren_pick(bi_idx);
+                            }
+                            for (cur_variant, msg, current_descs, parent_idx, crash_bytes) in pending_crashes.drain(..) {
                                 // Compute variant-only hash inside the lock
                                 let mut __variant_seq = p.reconstruct_variant_sequence(parent_idx);
                                 __variant_seq.push(cur_variant);
@@ -2198,7 +2381,7 @@ fn stateful_multicore_body(
                                 if p.is_novel_crash(vh) {
                                     crashes.fetch_add(1, Ordering::Relaxed);
                                     let parent_descs = p.reconstruct_action_descriptions(parent_idx);
-                                    __crash_outputs.push((msg, parent_descs, current_desc, vh, crash_bytes));
+                                    __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
                                     if stop_on_crash {
                                         eprintln!("[STATEFUL W0] First crash found, signaling stop (--stop-on-crash).");
                                         stop.store(true, Ordering::SeqCst);
@@ -2216,18 +2399,28 @@ fn stateful_multicore_body(
                         }
                     }
                     // Crash disk I/O outside write lock (Fix 3)
-                    for (msg, parent_descs, current_desc, vh, crash_bytes) in __crash_outputs {
-                        let total = parent_descs.len() + 1;
+                    for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
+                        let total = parent_descs.len() + current_descs.len();
                         println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                         eprintln!("\n[FUZZ_FINDING] {}", msg);
                         eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                         for (i, desc) in parent_descs.iter().enumerate() {
                             eprintln!("  {}. {}", i + 1, desc);
                         }
-                        eprintln!("  {}. {} [VIOLATION]", total, current_desc);
+                        for (i, desc) in current_descs.iter().enumerate() {
+                            let tag = if i == current_descs.len() - 1 { " [VIOLATION]" } else { "" };
+                            eprintln!("  {}. {}{}", parent_descs.len() + i + 1, desc, tag);
+                        }
                         eprintln!("===================================");
-                        crucible_test_context::write_crash_metadata(
-                            &crash_dir, vh, Some(seed), &crash_bytes,
+                        let mut __full_actions: Vec<crucible_test_context::ActionRecord> = parent_descs
+                            .iter()
+                            .map(|d| crucible_test_context::parse_action_desc(d))
+                            .collect();
+                        for desc in &current_descs {
+                            __full_actions.push(crucible_test_context::parse_action_desc(desc));
+                        }
+                        crucible_test_context::write_crash_metadata_with_actions(
+                            &crash_dir, vh, Some(seed), &crash_bytes, Some(__full_actions),
                         );
                     }
 
@@ -2242,8 +2435,11 @@ fn stateful_multicore_body(
                         }
                     }
 
+                    if let Some(__t) = __t_flush { __phase_pick_flush_ns += __t.elapsed().as_nanos() as u64; }
+
                     // Pick weighted batch (read lock — pick_count is atomic)
                     {
+                        let __t_batch = if __do_profile { Some(std::time::Instant::now()) } else { None };
                         let p = pool.read().unwrap();
                         cached_pool_len = p.len();
                         cached_pool_active = p.active_count();
@@ -2251,11 +2447,14 @@ fn stateful_multicore_body(
                         for _ in 0..BATCH_SIZE {
                             rng_vals.push(rng.next());
                         }
+                        let (__wc, __wt) = p.build_weight_distribution();
                         p.pick_weighted_batch(&rng_vals, &mut local_batch);
-                        // Pick crossover candidates (weighted: prefer high-power states)
+                        if let Some(__t) = __t_batch { __phase_pick_batch_ns += __t.elapsed().as_nanos() as u64; }
+                        // Pick crossover candidates using pre-built distribution (O(log n))
+                        let __t_cross = if __do_profile { Some(std::time::Instant::now()) } else { None };
                         __crossover_buf.clear();
                         for _ in 0..16usize {
-                            if let Some(idx) = p.pick_weighted(rng.next()) {
+                            if let Some(idx) = p.sample_from_distribution(&__wc, __wt, rng.next()) {
                                 if let Some(entry) = p.get(idx) {
                                     if let Some(vi) = entry.action_variant {
                                         __crossover_buf.push((vi as usize, entry.action_field_bytes.clone()));
@@ -2263,6 +2462,7 @@ fn stateful_multicore_body(
                                 }
                             }
                         }
+                        if let Some(__t) = __t_cross { __phase_pick_crossover_ns += __t.elapsed().as_nanos() as u64; }
                         // Read lock released here — pool is free for other workers
                     }
 
@@ -2297,13 +2497,14 @@ fn stateful_multicore_body(
                 let mut __iter_fixture = w0_fixture_batch.pop().unwrap();
 
                 // Subsequence splice (5%) or burst mode (15%):
+                let __t_splice = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 let __splice_roll = rng.next() % 100;
                 let mut __splice_chain: Option<Vec<#action_ty>> = None;
                 let mut __burst_mode = false;
                 if __splice_roll < 5 && cached_pool_len > 10 {
                     // 5%: Donor splice — extract subsequence from an existing chain
                     if let Ok(p) = pool.try_read() {
-                        let __donor_idx = p.pick_weighted(rng.next()).unwrap_or(0);
+                        let __donor_idx = p.pick_random(rng.next()).unwrap_or(0);
                         let __donor_seq = p.reconstruct_variant_field_sequence(__donor_idx);
                         if __donor_seq.len() >= 2 {
                             let __splice_len = (2 + rng.next() as usize % 4).min(__donor_seq.len());
@@ -2346,8 +2547,9 @@ fn stateful_multicore_body(
                     }
                 } else if __splice_roll < 20 && cached_pool_len > 10 {
                     // 15%: Burst mode — forced 2-5 action chain from picked parent state
-                    __burst_mode = true;
+                    // __burst_mode = true;  // temporarily disabled
                 }
+                if let Some(__t) = __t_splice { __phase_pick_splice_ns += __t.elapsed().as_nanos() as u64; }
                 if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 2. Selective restore with dual-SVM support
@@ -2469,8 +2671,23 @@ fn stateful_multicore_body(
                     }
                 }
                 let __chain_len = __action_chain.len();
-                // Use last action's variant for stats recording
                 let __action_variant_idx = __action_chain.last().unwrap().variant_index();
+
+                let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
+                    let __params = __a.to_json_params();
+                    let __ps = if let serde_json::Value::Object(ref __map) = __params {
+                        __map.iter()
+                            .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    } else { String::new() };
+                    if __ps.is_empty() {
+                        __a.action_name().to_string()
+                    } else {
+                        format!("{}({})", __a.action_name(), __ps)
+                    }
+                }).collect();
+
                 if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 4. Execute — use per-iteration fixture clone (correct mutable state).
@@ -2509,6 +2726,10 @@ fn stateful_multicore_body(
                     __phase_tx_pre_ns += __pre;
                     __phase_tx_svm_ns += __svm;
                     __phase_tx_post_ns += __post;
+                    let (__bh, __sg, __ex) = crucible_test_context::get_send_tx_breakdown();
+                    __phase_tx_blockhash_ns += __bh;
+                    __phase_tx_sign_ns += __sg;
+                    __phase_tx_exec_ns += __ex;
                 }
 
                 // Flush thread-local bitmap buffers and check for new coverage.
@@ -2568,9 +2789,13 @@ fn stateful_multicore_body(
                             crash_bytes[0..4].copy_from_slice(&(old_count + __chain_len as u32).to_le_bytes());
                             crash_bytes.extend_from_slice(&__single_action_buf);
                         }
-                        // Store action variant for coarse dedup (computed inside lock later)
-                        let current_desc = crucible_test_context::format_last_action_oneline();
-                        pending_crashes.push((__cur_variant, msg.clone(), current_desc, state_idx, crash_bytes));
+                        // Store ALL chain action descs for crash output
+                        let history = crucible_test_context::get_action_history();
+                        let current_descs: Vec<String> = __chain_descs.iter().enumerate().map(|(i, desc)| {
+                            let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                            format!("{} -> {}", desc, status)
+                        }).collect();
+                        pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes));
                     }
                 }
                 if let Some(__t) = __t { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
@@ -2643,7 +2868,13 @@ fn stateful_multicore_body(
                             std::mem::swap(&mut __iter_fixture.ctx.svm, &mut w0_svm);
                             #extra_swap_in_iter
 
-                            let action_desc = crucible_test_context::format_all_actions_oneline();
+                            let action_desc = {
+                                let history = crucible_test_context::get_action_history();
+                                __chain_descs.iter().enumerate().map(|(i, desc)| {
+                                    let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
+                                    format!("{} -> {}", desc, status)
+                                }).collect::<Vec<_>>().join("\n")
+                            };
                             let __coverage_positions: Option<Vec<u16>> = if __novel_bits > 0 && has_tracing {
                                 Some(crucible_test_context::snapshot::extract_coverage_positions(&worker_cov_map))
                             } else { None };
@@ -2661,6 +2892,11 @@ fn stateful_multicore_body(
                     action_stats.record(__state_class, __action_variant_idx, false);
                     false
                 };
+
+                // Record barren pick for exponential weight decay.
+                if !(__is_novel || __new_coverage) && violation.is_none() && __panic_result.is_ok() {
+                    pending_barren.push(state_idx);
+                }
 
                 // 6. Update divergent_keys, prev_delta_arc, and prev_exec_dirty
                 // IMPORTANT: Always track dirty accounts regardless of success/failure.
@@ -2803,14 +3039,32 @@ fn stateful_multicore_body(
                             pct(other_ns), avg(other_ns),
                             avg_us,
                         );
+                        // pick breakdown
+                        if __phase_pick_ns > 0 {
+                            let ppct = |ns: u64| -> f64 { (ns as f64 / __phase_pick_ns as f64) * 100.0 };
+                            let pick_other = __phase_pick_ns.saturating_sub(__phase_pick_flush_ns + __phase_pick_batch_ns + __phase_pick_crossover_ns + __phase_pick_splice_ns);
+                            eprintln!(
+                                "[PICK]    flush: {:.1}% ({}µs) | batch: {:.1}% ({}µs) | crossover: {:.1}% ({}µs) | splice: {:.1}% ({}µs) | other: {:.1}% ({}µs)",
+                                ppct(__phase_pick_flush_ns), avg(__phase_pick_flush_ns),
+                                ppct(__phase_pick_batch_ns), avg(__phase_pick_batch_ns),
+                                ppct(__phase_pick_crossover_ns), avg(__phase_pick_crossover_ns),
+                                ppct(__phase_pick_splice_ns), avg(__phase_pick_splice_ns),
+                                ppct(pick_other), avg(pick_other),
+                            );
+                        }
+                        __phase_pick_flush_ns = 0;
+                        __phase_pick_batch_ns = 0;
+                        __phase_pick_crossover_ns = 0;
+                        __phase_pick_splice_ns = 0;
                         // exec breakdown: tx_pre (dirty), tx_svm (litesvm), tx_post (outcome), dispatch overhead
                         let tx_total = __phase_tx_pre_ns + __phase_tx_svm_ns + __phase_tx_post_ns;
                         let dispatch_ns = __phase_svm_exec_ns.saturating_sub(tx_total);
                         let epct = |ns: u64| -> f64 { if __phase_svm_exec_ns > 0 { (ns as f64 / __phase_svm_exec_ns as f64) * 100.0 } else { 0.0 } };
                         eprintln!(
-                            "[EXEC]    tx_pre: {:.1}% ({}µs) | tx_svm: {:.1}% ({}µs) | tx_post: {:.1}% ({}µs) | dispatch: {:.1}% ({}µs)",
+                            "[EXEC]    tx_pre: {:.1}% ({}µs) | tx_svm: {:.1}% ({}µs) [blockhash: {}µs, sign: {}µs, exec: {}µs] | tx_post: {:.1}% ({}µs) | dispatch: {:.1}% ({}µs)",
                             epct(__phase_tx_pre_ns), avg(__phase_tx_pre_ns),
                             epct(__phase_tx_svm_ns), avg(__phase_tx_svm_ns),
+                            avg(__phase_tx_blockhash_ns), avg(__phase_tx_sign_ns), avg(__phase_tx_exec_ns),
                             epct(__phase_tx_post_ns), avg(__phase_tx_post_ns),
                             epct(dispatch_ns), avg(dispatch_ns),
                         );
@@ -2822,6 +3076,9 @@ fn stateful_multicore_body(
                         __phase_tx_pre_ns = 0;
                         __phase_tx_svm_ns = 0;
                         __phase_tx_post_ns = 0;
+                        __phase_tx_blockhash_ns = 0;
+                        __phase_tx_sign_ns = 0;
+                        __phase_tx_exec_ns = 0;
                         __phase_coverage_ns = 0;
                         __phase_field_novelty_ns = 0;
                         __phase_fingerprint_ns = 0;

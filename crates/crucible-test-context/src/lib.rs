@@ -340,8 +340,12 @@ pub fn get_iteration_dispatch_count() -> u64 {
 
 thread_local! {
     pub(crate) static SEND_BATCH_PRE_NS: Cell<u64> = const { Cell::new(0) };   // dirty_tracker
-    pub(crate) static SEND_BATCH_SVM_NS: Cell<u64> = const { Cell::new(0) };   // send_transaction (actual SVM)
+    pub(crate) static SEND_BATCH_SVM_NS: Cell<u64> = const { Cell::new(0) };   // send_transaction (total)
     pub(crate) static SEND_BATCH_POST_NS: Cell<u64> = const { Cell::new(0) };  // tx_result_to_outcome
+    // Sub-breakdown of send_transaction:
+    pub(crate) static SEND_TX_BLOCKHASH_NS: Cell<u64> = const { Cell::new(0) }; // expire_blockhash + latest_blockhash
+    pub(crate) static SEND_TX_SIGN_NS: Cell<u64> = const { Cell::new(0) };      // message + signing
+    pub(crate) static SEND_TX_EXEC_NS: Cell<u64> = const { Cell::new(0) };      // svm.send_transaction
 }
 
 /// Reset send_batch sub-phase accumulators (call before fn_name).
@@ -350,6 +354,9 @@ pub fn reset_send_batch_timers() {
     SEND_BATCH_PRE_NS.with(|c| c.set(0));
     SEND_BATCH_SVM_NS.with(|c| c.set(0));
     SEND_BATCH_POST_NS.with(|c| c.set(0));
+    SEND_TX_BLOCKHASH_NS.with(|c| c.set(0));
+    SEND_TX_SIGN_NS.with(|c| c.set(0));
+    SEND_TX_EXEC_NS.with(|c| c.set(0));
 }
 
 /// Get send_batch sub-phase timers: (pre_ns, svm_ns, post_ns).
@@ -359,6 +366,16 @@ pub fn get_send_batch_timers() -> (u64, u64, u64) {
         SEND_BATCH_PRE_NS.with(|c| c.get()),
         SEND_BATCH_SVM_NS.with(|c| c.get()),
         SEND_BATCH_POST_NS.with(|c| c.get()),
+    )
+}
+
+/// Get send_transaction sub-breakdown: (blockhash_ns, sign_ns, exec_ns).
+#[inline]
+pub fn get_send_tx_breakdown() -> (u64, u64, u64) {
+    (
+        SEND_TX_BLOCKHASH_NS.with(|c| c.get()),
+        SEND_TX_SIGN_NS.with(|c| c.get()),
+        SEND_TX_EXEC_NS.with(|c| c.get()),
     )
 }
 
@@ -407,6 +424,48 @@ pub fn mark_variant_succeeded(variant_idx: usize) {
 /// Get the number of action variants that have ever succeeded.
 pub fn succeeded_variant_count() -> usize {
     SUCCEEDED_VARIANTS.with(|s| s.borrow().len())
+}
+
+/// Parse an action description string like "withdraw(authority=null, lamports=5) -> OK"
+/// back into an ActionRecord. Used by stateful mode to reconstruct full crash metadata
+/// from pool descriptions.
+pub fn parse_action_desc(desc: &str) -> ActionRecord {
+    let (body, success) = if let Some(body) = desc.strip_suffix(" -> OK") {
+        (body, true)
+    } else if let Some(body) = desc.strip_suffix(" -> FAIL") {
+        (body, false)
+    } else {
+        (desc, true)
+    };
+    let (name, params) = if let Some(paren) = body.find('(') {
+        let name = &body[..paren];
+        let params_str = body[paren + 1..].trim_end_matches(')');
+        let mut map = serde_json::Map::new();
+        for part in params_str.split(", ") {
+            if let Some(eq) = part.find('=') {
+                let key = &part[..eq];
+                let val_str = &part[eq + 1..];
+                let val = if val_str == "null" {
+                    serde_json::Value::Null
+                } else if val_str == "true" {
+                    serde_json::Value::Bool(true)
+                } else if val_str == "false" {
+                    serde_json::Value::Bool(false)
+                } else if let Ok(n) = val_str.parse::<u64>() {
+                    serde_json::Value::Number(n.into())
+                } else if let Ok(n) = val_str.parse::<i64>() {
+                    serde_json::Value::Number(n.into())
+                } else {
+                    serde_json::Value::String(val_str.to_string())
+                };
+                map.insert(key.to_string(), val);
+            }
+        }
+        (name.to_string(), serde_json::Value::Object(map))
+    } else {
+        (body.to_string(), serde_json::Value::Object(serde_json::Map::new()))
+    };
+    ActionRecord { name, params, success, error_code: None }
 }
 
 /// Build crash metadata from current state
@@ -504,7 +563,7 @@ pub fn print_action_sequence() {
 }
 
 /// Format a JSON value for display (compact format)
-fn format_json_value(v: &serde_json::Value) -> String {
+pub fn format_json_value(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
@@ -581,8 +640,23 @@ pub fn write_crash_metadata(
     seed: Option<u64>,
     input_bytes: &[u8],
 ) {
+    write_crash_metadata_with_actions(crash_dir, input_hash, seed, input_bytes, None)
+}
+
+/// Write crash metadata with an explicit full action chain (for stateful mode).
+/// If `full_actions` is Some, it overrides the TLS action history.
+pub fn write_crash_metadata_with_actions(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+    full_actions: Option<Vec<ActionRecord>>,
+) {
     let crash_id = format!("crash_{:016x}", input_hash);
-    let metadata = build_crash_metadata(seed);
+    let mut metadata = build_crash_metadata(seed);
+    if let Some(actions) = full_actions {
+        metadata.actions = actions;
+    }
     let meta_filename = format!("{}/{}.meta.json", crash_dir, crash_id);
     let input_filename = format!("{}/{}", crash_dir, crash_id);
 
@@ -1194,6 +1268,10 @@ pub struct TestContext {
     pub snapshot: Option<snapshot::SvmSnapshot>,
     /// Tracks dirty accounts across all transactions in an iteration
     pub dirty_tracker: snapshot::DirtyTracker,
+    /// Whether signature verification is enabled on the SVM.
+    /// When false (default for fuzzing), transactions use dummy signatures
+    /// to skip ed25519 computation (~77µs per tx).
+    pub sigverify: bool,
 }
 
 impl Clone for TestContext {
@@ -1213,6 +1291,7 @@ impl Clone for TestContext {
             snapshot: None,
             // Fresh tracker for each clone
             dirty_tracker: self.dirty_tracker.clone(),
+            sigverify: self.sigverify,
         }
     }
 }
@@ -1267,7 +1346,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-        }
+            sigverify: false,        }
     }
 
     pub fn with_invocation_callback<C: InvocationInspectCallback + 'static>(callback: C) -> Self {
@@ -1285,7 +1364,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-        }
+            sigverify: false,        }
     }
 
     /// Analyze a program binary and return (total_edges, total_instructions).
@@ -1430,7 +1509,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-        }
+            sigverify: false,        }
     }
 
     pub fn into_svm(self) -> LiteSVM {
@@ -1466,7 +1545,7 @@ impl TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-        }
+            sigverify: false,        }
     }
 
     /// Set an invocation callback for coverage tracking on this context.
@@ -1697,14 +1776,14 @@ impl TestContext {
     }
 
     pub fn warp_to_slot(&mut self, slot: u64) {
-        self.dirty_tracker.mark_clock_dirty();
+        self.dirty_tracker.mark_clock_dirty(slot);
         self.svm.warp_to_slot(slot);
     }
 
     pub fn advance_slots(&mut self, slots: u64) {
-        self.dirty_tracker.mark_clock_dirty();
         let current_slot = self.slot();
         let target_slot = current_slot + slots;
+        self.dirty_tracker.mark_clock_dirty(target_slot);
         self.svm.warp_to_slot(target_slot);
     }
 
@@ -2041,6 +2120,7 @@ impl TestContext {
             instructions,
             &unique_signers,
             fee_payer,
+            self.sigverify,
         )?;
         SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
@@ -4659,5 +4739,232 @@ mod tests {
         // So edge count should always be even.
         assert_eq!(edges % 2, 0,
             "edge count ({}) should be even (each conditional branch = 2 edges)", edges);
+    }
+
+    // =========================================================================
+    // Fee payer / signer resolution regression tests
+    // =========================================================================
+
+    /// Helper: create a funded keypair in the test context
+    fn fund_keypair(ctx: &mut TestContext) -> Keypair {
+        let kp = Keypair::new();
+        ctx.svm.airdrop(&kp.pubkey(), 10_000_000_000).unwrap();
+        kp
+    }
+
+    #[test]
+    fn raw_call_with_signers_no_fee_payer() {
+        // Regression: raw_call().signers(&[payer]).send() should use first signer as fee payer
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix).signers(&[&payer]).send();
+        assert!(result.is_ok(), "raw_call with signers should succeed: {:?}", result.err());
+        assert!(result.unwrap().is_success());
+    }
+
+    #[test]
+    fn raw_call_with_explicit_fee_payer() {
+        // fee_payer() should be used even if it's not in signers list
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix).fee_payer(&payer).send();
+        assert!(result.is_ok(), "raw_call with fee_payer should succeed: {:?}", result.err());
+        assert!(result.unwrap().is_success());
+    }
+
+    #[test]
+    fn raw_call_fee_payer_prepended_to_signers() {
+        // When fee_payer is set AND signers are set, fee_payer should be prepended
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let other_signer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix)
+            .fee_payer(&payer)
+            .signers(&[&other_signer])
+            .send();
+        assert!(result.is_ok(), "fee_payer + signers should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn raw_call_no_signers_no_fee_payer_errors() {
+        // No signers and no fee payer should error
+        let mut ctx = TestContext::new();
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &Pubkey::new_unique(), &Pubkey::new_unique(), 1000,
+        );
+        let result = ctx.raw_call(ix).send();
+        assert!(result.is_err(), "should error with no signers");
+    }
+
+    #[test]
+    fn raw_call_duplicate_fee_payer_signer_no_double_sign() {
+        // fee_payer same as first signer — should not duplicate
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix)
+            .fee_payer(&payer)
+            .signers(&[&payer])
+            .send();
+        assert!(result.is_ok(), "duplicate fee_payer/signer should not cause double-sign error: {:?}", result.err());
+        assert!(result.unwrap().is_success());
+    }
+
+    #[test]
+    fn send_batch_with_signers() {
+        // send_batch uses pending_signers[0] as fee payer
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 2000,
+        );
+        ctx.pending_instructions.push(ix);
+        ctx.pending_signers.push(payer.insecure_clone());
+        let result = ctx.send_batch();
+        assert!(result.is_ok(), "send_batch should succeed: {:?}", result.err());
+        let outcome = result.unwrap();
+        assert!(outcome.is_some());
+        assert!(outcome.unwrap().is_success());
+        assert_eq!(ctx.svm.get_balance(&recipient).unwrap_or(0), 2000);
+    }
+
+    // =========================================================================
+    // Dummy signing regression tests
+    // =========================================================================
+
+    #[test]
+    fn sigverify_false_uses_dummy_signatures() {
+        // Default sigverify=false should still execute transactions successfully
+        let mut ctx = TestContext::new();
+        assert!(!ctx.sigverify, "default sigverify should be false");
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix).signers(&[&payer]).send();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_success());
+    }
+
+    #[test]
+    fn sigverify_true_uses_real_signatures() {
+        let mut ctx = TestContext::new();
+        ctx.sigverify = true;
+        // Re-enable sigverify on the SVM too
+        ctx.svm = ctx.svm.with_sigverify(true);
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(), &recipient, 1000,
+        );
+        let result = ctx.raw_call(ix).signers(&[&payer]).send();
+        assert!(result.is_ok(), "real signing should work: {:?}", result.err());
+        assert!(result.unwrap().is_success());
+    }
+
+    #[test]
+    fn multiple_transactions_with_dummy_signing() {
+        // Verify dummy signing works across multiple sequential transactions
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Pubkey::new_unique();
+
+        for i in 0..5 {
+            let ix = anchor_lang::solana_program::system_instruction::transfer(
+                &payer.pubkey(), &recipient, 1000,
+            );
+            let result = ctx.raw_call(ix).signers(&[&payer]).send();
+            assert!(result.is_ok(), "tx {} should succeed: {:?}", i, result.err());
+            assert!(result.unwrap().is_success(), "tx {} should be successful", i);
+        }
+
+        // Verify lamports moved
+        let balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
+        assert_eq!(balance, 5000, "recipient should have 5000 lamports after 5 transfers");
+    }
+
+    // =========================================================================
+    // Sysvar snapshot regression tests
+    // =========================================================================
+
+    #[test]
+    fn sysvar_snapshot_excludes_large_sysvars() {
+        // SlotHistory (131KB) and SlotHashes (20KB) should NOT be in snapshots
+        use anchor_lang::prelude::sysvar::SysvarId;
+        use anchor_lang::prelude::Clock;
+
+        let ctx = TestContext::new();
+        let snapshot = snapshot::SvmSnapshot::take_all(&ctx.svm);
+
+        let sysvar_pubkeys: Vec<_> = snapshot.sysvars.iter().map(|(pk, _)| *pk).collect();
+
+        // Clock should be present
+        assert!(sysvar_pubkeys.contains(&Clock::id()), "Clock should be in snapshot");
+
+        // SlotHistory and SlotHashes should NOT be present
+        let slot_history_id = solana_pubkey::Pubkey::from_str_const(
+            "SysvarS1otHistory11111111111111111111111111"
+        );
+        let slot_hashes_id = solana_pubkey::Pubkey::from_str_const(
+            "SysvarS1otHashes111111111111111111111111111"
+        );
+        assert!(!sysvar_pubkeys.contains(&slot_history_id),
+            "SlotHistory (131KB) should be excluded from snapshots");
+        assert!(!sysvar_pubkeys.contains(&slot_hashes_id),
+            "SlotHashes (20KB) should be excluded from snapshots");
+    }
+
+    // =========================================================================
+    // Clock target slot tracking regression tests
+    // =========================================================================
+
+    #[test]
+    fn advance_slots_records_target_slot() {
+        let mut ctx = TestContext::new();
+        ctx.advance_slots(500);
+        assert_eq!(ctx.dirty_tracker.clock_target_slot, Some(500 + ctx.slot() - 500));
+        assert!(ctx.dirty_tracker.is_clock_dirty());
+    }
+
+    #[test]
+    fn warp_to_slot_records_target_slot() {
+        let mut ctx = TestContext::new();
+        ctx.warp_to_slot(12345);
+        assert_eq!(ctx.dirty_tracker.clock_target_slot, Some(12345));
+        assert!(ctx.dirty_tracker.is_clock_dirty());
+    }
+
+    #[test]
+    fn dirty_tracker_clear_resets_clock_target() {
+        let mut ctx = TestContext::new();
+        ctx.advance_slots(100);
+        assert!(ctx.dirty_tracker.clock_target_slot.is_some());
+        ctx.dirty_tracker.clear();
+        assert!(ctx.dirty_tracker.clock_target_slot.is_none());
+        assert!(!ctx.dirty_tracker.is_clock_dirty());
     }
 }
