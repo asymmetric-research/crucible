@@ -37,82 +37,18 @@ pub fn multicore_mode(
         quote! { let mut u = Unstructured::new(slice); }
     };
 
-    // Max input size: 1024 for both modes (structured max valid ~336 bytes, 1024 is 3x headroom)
-    // Max input size: scan --corpus-in files to avoid truncating stateful entries.
-    let max_size_setup = quote! {
-        let __max_input_size: usize = {
-            let mut max = 1024usize;
-            if let Some(ref dir) = corpus_in_dir {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(meta) = entry.metadata() {
-                            max = max.max(meta.len() as usize);
-                        }
-                    }
-                }
-            }
-            max
-        };
-        state.set_max_size(__max_input_size);
-    };
+    let max_size_setup = codegen::max_size_setup();
 
     let default_seed_code = if structured {
-        let at = action_type.unwrap();
-        quote! {
-            {
-                use libafl::generators::Generator;
-                let __seed_max: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10)
-                    .min(4);
-                let mut gen = crucible_fuzzer::ActionGenerator::<#at>::new(1, __seed_max);
-                for _ in 0..4 {
-                    if let Ok(input) = gen.generate(&mut state) {
-                        let _ = fuzzer.add_input(&mut state, &mut executor, &mut mgr, input);
-                    }
-                }
-                if state.corpus().count() == 0 {
-                    let input = BytesInput::new(vec![0u8; 256]);
-                    fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                        .expect("failed to add fallback seed");
-                }
-            }
-        }
+        codegen::structured_add_default_seed(action_type.unwrap())
     } else {
-        quote! {
-            let input = BytesInput::new(vec![0u8; 256]);
-            fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                .expect("failed to add default seed");
-        }
+        codegen::add_default_seed()
     };
 
     let mutator_setup = if structured {
-        let at = action_type.unwrap();
-        quote! {
-            let __fuzz_max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
-            let trim_stage = crucible_fuzzer::SuccessTrimStage::<#at>::new();
-            let seq_mutator = crucible_fuzzer::SequenceMutator::<#at>::new(__fuzz_max_actions);
-            let param_mutator = crucible_fuzzer::ParamMutator::<#at>::new();
-            let cross_mutator = crucible_fuzzer::CrossoverMutator::<#at>::new(__fuzz_max_actions);
-            let mutator = StdMOptMutator::new(
-                &mut state,
-                tuple_list!(seq_mutator, param_mutator, cross_mutator),
-                7, 5
-            ).expect("failed to create structured mutator");
-            let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(trim_stage, power_stage);
-        }
+        codegen::structured_mutator_stages_setup(action_type.unwrap())
     } else {
-        quote! {
-            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
-                .expect("failed to create mutator");
-            let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(power_stage);
-        }
+        codegen::mutator_stages_setup()
     };
 
     // Generate per-context code blocks
@@ -240,6 +176,15 @@ pub fn multicore_mode(
                 .expect("failed to allocate shared execution counter");
             shared_execs_shmem.fill(0);
             let shared_execs_ptr = shared_execs_shmem.as_slice().as_ptr() as *mut u8;
+
+            // Guard: discovered variant bitmap supports max 256 variants
+            {
+                let __variant_count = crucible_test_context::TOTAL_ACTION_VARIANTS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                assert!(__variant_count <= 256,
+                    "Action enum has {} variants but discovered bitmap supports max 256. \
+                     File a bug if you need >256 action variants.", __variant_count);
+            }
 
             // Allocate shared memory for discovered variant bitmap (success-seeking)
             // Each byte represents whether a variant has ever succeeded (0 or 1)

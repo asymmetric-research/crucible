@@ -180,25 +180,7 @@ pub fn singlecore_mode(
         };
     };
 
-    // Max input size: cap to prevent unbounded growth from havoc mutations.
-    // When --corpus-in is provided, scan files to find the actual max size so that
-    // stateful corpus entries (which can be larger than 1024) are not truncated.
-    let max_size_setup = quote! {
-        let __max_input_size: usize = {
-            let mut max = 1024usize;
-            if let Some(ref dir) = corpus_in_dir {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(meta) = entry.metadata() {
-                            max = max.max(meta.len() as usize);
-                        }
-                    }
-                }
-            }
-            max
-        };
-        state.set_max_size(__max_input_size);
-    };
+    let max_size_setup = codegen::max_size_setup();
 
     quote! {
         // === SINGLE-THREADED MODE (default) ===

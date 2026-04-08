@@ -255,6 +255,334 @@ pub fn stateful_mode(
     }
 }
 
+// =============================================================================
+// Shared helpers — extracted to avoid duplication between singlecore/multicore
+// =============================================================================
+
+/// Post-execution truncation: if the chain broke early (stateful_chain_mode
+/// break on failure), strip unexecuted actions from `__single_action_buf` so
+/// crash files and pool entries don't contain bytes for actions that never ran.
+fn gen_post_exec_truncation() -> proc_macro2::TokenStream {
+    quote! {
+        {
+            let __actually_executed = crucible_test_context::get_action_history().len();
+            if __actually_executed < __chain_len {
+                let __truncate_at = __action_byte_offsets[__actually_executed];
+                __single_action_buf.truncate(__truncate_at);
+                __chain_len = __actually_executed;
+            }
+        }
+    }
+}
+
+/// Generate the action chain: adaptive chain length, crossover/splice/parent
+/// mutation, guided variant selection, action serialization, byte offset
+/// tracking, and chain description pre-computation.
+///
+/// Parameters:
+/// - `pool_fill_expr`: expression for pool fill ratio (e.g. `state_pool.len()` or `__cached_pool_len`)
+/// - `pending_selects_var`: variable to push state_class into (e.g. `__pending_selects` or `pending_selects`)
+fn gen_action_chain(
+    action_ty: &proc_macro2::TokenStream,
+    pool_fill_expr: &proc_macro2::TokenStream,
+    pending_selects_var: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
+        #pending_selects_var.push(__state_class);
+
+        let mut __action_chain: Vec<#action_ty>;
+        __single_action_buf.clear();
+
+        if let Some(__spliced) = __splice_chain {
+            // Subsequence splice: use pre-built chain from donor state
+            __action_chain = __spliced;
+            for __a in &__action_chain {
+                __single_action_buf.extend_from_slice(&(__a.variant_index() as u16).to_le_bytes());
+                __a.serialize_fields(&mut __single_action_buf);
+            }
+        } else {
+            // Adaptive chain length: longer chains early (depth exploration),
+            // shorter chains as pool fills (exploit discovered states).
+            let __pool_fill = #pool_fill_expr as f64 / pool_capacity as f64;
+            let __chain_roll = rng.next() % 100;
+            let __chain_len: usize = if __pool_fill < 0.05 {
+                // Bootstrap (<5%): very aggressive depth — mean ~2.8
+                if __chain_roll < 20 { 1 } else if __chain_roll < 45 { 2 } else if __chain_roll < 70 { 3 } else if __chain_roll < 85 { 4 } else { 5 }
+            } else if __pool_fill < 0.25 {
+                // Early (<25%): depth-heavy — mean ~2.15
+                if __chain_roll < 35 { 1 } else if __chain_roll < 65 { 2 } else if __chain_roll < 85 { 3 } else if __chain_roll < 95 { 4 } else { 5 }
+            } else if __pool_fill < 0.6 {
+                // Mid (<60%): balanced — mean ~1.76
+                if __chain_roll < 55 { 1 } else if __chain_roll < 80 { 2 } else if __chain_roll < 92 { 3 } else if __chain_roll < 97 { 4 } else { 5 }
+            } else {
+                // Mature (≥60%): exploit — mean ~1.22
+                if __chain_roll < 85 { 1 } else if __chain_roll < 95 { 2 } else if __chain_roll < 98 { 3 } else if __chain_roll < 99 { 4 } else { 5 }
+            };
+
+            __action_chain = Vec::with_capacity(__chain_len);
+
+            for __ci in 0..__chain_len {
+                let __replay_roll = rng.next() % 100;
+                let __one_action = if __replay_roll < 35 && !__crossover_buf.is_empty() {
+                    // 35%: Crossover EXACT replay (exploit known-good params)
+                    let __ci = rng.next() as usize % __crossover_buf.len();
+                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                    if !cross_fields.is_empty() {
+                        let mut cursor = 0usize;
+                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
+                            Some(a) => a,
+                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                        }
+                    } else {
+                        <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
+                    }
+                } else if __replay_roll < 45 && !__crossover_buf.is_empty() {
+                    // 10%: Crossover + mutate (secondary exploration)
+                    let __ci = rng.next() as usize % __crossover_buf.len();
+                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                    if !cross_fields.is_empty() {
+                        let mut cursor = 0usize;
+                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
+                            Some(mut a) => {
+                                <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
+                                a
+                            }
+                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                        }
+                    } else {
+                        <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
+                    }
+                } else if __replay_roll < 55 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
+                    // 10%: Mutate parent's actual action
+                    let pv = parent_variant.unwrap() as usize;
+                    let mut cursor = 0usize;
+                    match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(pv, &*parent_field_bytes, &mut cursor) {
+                        Some(mut a) => {
+                            <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
+                            a
+                        }
+                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(pv, &mut rng),
+                    }
+                } else {
+                    // 45%: Guided variant selection (epsilon-greedy from ActionStatsMap)
+                    match action_stats.pick_variant(__state_class, rng.next(), rng.next()) {
+                        Some(vi) => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(vi, &mut rng),
+                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
+                    }
+                };
+                // Serialize this action's bytes
+                __single_action_buf.extend_from_slice(&(__one_action.variant_index() as u16).to_le_bytes());
+                __one_action.serialize_fields(&mut __single_action_buf);
+                __action_chain.push(__one_action);
+            }
+        }
+        let mut __chain_len = __action_chain.len();
+        // Track byte offset of each action in __single_action_buf for post-execution truncation
+        let __action_byte_offsets: Vec<usize> = {
+            let mut offsets = Vec::with_capacity(__chain_len + 1);
+            let mut pos = 0usize;
+            for __a in &__action_chain {
+                offsets.push(pos);
+                pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
+            }
+            offsets.push(pos); // sentinel: end of last action
+            offsets
+        };
+        // Use last action's variant for stats recording
+        let __action_variant_idx = __action_chain.last().unwrap().variant_index();
+
+        // Pre-compute action descriptions with params BEFORE the chain is consumed
+        // by the test function. Without this, pool entries only get action names
+        // (no params) because push_action_record_lite defers param serialization.
+        let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
+            let __params = __a.to_json_params();
+            let __ps = if let serde_json::Value::Object(ref __map) = __params {
+                __map.iter()
+                    .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else { String::new() };
+            if __ps.is_empty() {
+                __a.action_name().to_string()
+            } else {
+                format!("{}({})", __a.action_name(), __ps)
+            }
+        }).collect();
+    }
+}
+
+/// Generate the corpus seeding loop (CORPUS-IN: seed pool from disk).
+///
+/// This is the shared implementation used by both singlecore and multicore
+/// stateful modes. Parameters capture the differences:
+///
+/// - `pool_var`: token for pool access (e.g. `state_pool` or `pool`)
+/// - `swap_in_seed` / `swap_back_seed`: extra context swap tokens for seed fixture
+/// - `callback_expr`: FuzzCallback constructor (from_raw vs with_shared_memory)
+/// - `pre_loop`: code before the file iteration (e.g. acquiring a write lock)
+/// - `post_exec_flush`: optional bitmap flush after each seed action (multicore only)
+/// - `debug_diag`: optional debug replay diagnostic block (singlecore only)
+/// - `edge_count_expr`: how to count edges after seeding
+/// - `post_seeding`: code after seeding completes (drop lock, mark boundary)
+fn gen_corpus_seeding(
+    _mod_name: &syn::Ident,
+    fn_name: &syn::Ident,
+    action_ty: &proc_macro2::TokenStream,
+    pool_var: &proc_macro2::TokenStream,
+    swap_in_seed: &proc_macro2::TokenStream,
+    swap_back_seed: &proc_macro2::TokenStream,
+    callback_expr: &proc_macro2::TokenStream,
+    pre_loop: &proc_macro2::TokenStream,
+    post_exec_flush: &proc_macro2::TokenStream,
+    debug_diag: &proc_macro2::TokenStream,
+    edge_count_expr: &proc_macro2::TokenStream,
+    post_seeding: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        if let Some(ref __corpus_in_path) = corpus_in_dir {
+            let mut __seed_files: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(__corpus_in_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && is_corpus_input(&path) {
+                        __seed_files.push(path);
+                    }
+                }
+            }
+            __seed_files.sort();
+
+            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
+
+            let mut __seeded = 0u64;
+            #pre_loop
+            for __seed_path in &__seed_files {
+                let __seed_bytes = match std::fs::read(__seed_path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&__seed_bytes);
+                if __fuzz_input.actions.is_empty() { continue; }
+
+                // Reset SVM to initial state for this sequence
+                initial_snapshot.restore_full(&mut __real_svm);
+
+                // One fixture per sequence — accumulates mutable state across actions
+                let mut __seed_fixture = template_fixture.clone();
+
+                let mut __parent_idx: Option<usize> = Some(0); // initial state
+                let mut __current_depth: u32 = 0;
+                let mut __current_action_bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
+                let mut __current_delta = std::sync::Arc::new(
+                    SvmSnapshot::empty(initial_snapshot.clock().clone())
+                );
+
+                for __seed_action in &__fuzz_input.actions {
+                    if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
+                    if #pool_var.is_full() { break; }
+
+                    // Swap SVMs into fixture (primary + additional contexts)
+                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #swap_in_seed
+
+                    let callback = #callback_expr;
+                    __seed_fixture.ctx.set_invocation_callback(callback);
+                    crucible_test_context::clear_action_history();
+                    crucible_test_context::clear_violation_tracking();
+                    crucible_test_context::reset_iteration_dispatch_count();
+
+                    let __seed_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #fn_name(&mut __seed_fixture, vec![__seed_action.clone()]);
+                    }));
+                    #post_exec_flush
+
+                    // Check success
+                    let __seed_ok = __seed_panic.is_ok() && {
+                        crucible_test_context::get_first_action_success().unwrap_or(false)
+                    };
+
+                    #debug_diag
+
+                    if !__seed_ok {
+                        // Swap SVMs back and stop this sequence
+                        #swap_back_seed
+                        std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                        break;
+                    }
+
+                    // Serialize the single action
+                    let __single_bytes = {
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&(__seed_action.variant_index() as u16).to_le_bytes());
+                        __seed_action.serialize_fields(&mut buf);
+                        buf
+                    };
+
+                    // Build accumulated action bytes
+                    let mut __accum = __current_action_bytes.clone();
+                    let __count = u32::from_le_bytes(__accum[0..4].try_into().unwrap());
+                    __accum[0..4].copy_from_slice(&(__count + 1).to_le_bytes());
+                    __accum.extend_from_slice(&__single_bytes);
+
+                    // Take delta from current SVM state
+                    let __new_delta = SvmSnapshot::take_delta(
+                        &__seed_fixture.ctx.svm, &__current_delta, &__seed_fixture.ctx.dirty_tracker,
+                    );
+
+                    // Fingerprint
+                    let __fp = compute_state_fingerprint_from_snapshot(
+                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
+                    );
+
+                    __current_depth += 1;
+                    // Backfill params so the stored action_desc includes them in crash output
+                    crucible_test_context::backfill_action_params(0, __seed_action.to_json_params());
+                    let __action_desc = crucible_test_context::format_last_action_oneline();
+                    let __variant = __seed_action.variant_index() as u16;
+                    let __field_bytes = if __single_bytes.len() > 2 {
+                        __single_bytes[2..].to_vec()
+                    } else { Vec::new() };
+
+                    // Store fixture state (swap SVMs out for cheap clone)
+                    #swap_back_seed
+                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    let __fs: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
+                        Some(std::sync::Arc::new(__FixtureWrapper(__seed_fixture.clone())));
+                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                    #swap_in_seed
+
+                    // Seeded states get minimum novelty so they're competitive in the
+                    // power schedule. edge_novelty=1 puts them in the coverage weight
+                    // tier; without this they get 0 novelty → almost never picked.
+                    if __fp != 0 && #pool_var.try_add(
+                        __fp, __new_delta.clone(), __current_depth, __parent_idx,
+                        __accum.clone(), __action_desc, Some(__variant), __field_bytes,
+                        __fs, 8, 1, true, None,
+                    ) {
+                        __parent_idx = Some(#pool_var.len() - 1);
+                        __seeded += 1;
+                    }
+
+                    __current_delta = std::sync::Arc::new(__new_delta);
+                    __current_action_bytes = __accum;
+
+                    // Swap SVMs back for next action (SVM stays modified = correct sequential state)
+                    #swap_back_seed
+                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
+                }
+            }
+
+            // Reset SVM to initial for the main loop
+            initial_snapshot.restore_full(&mut __real_svm);
+            let __seed_edges = #edge_count_expr;
+            eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
+                __seeded, __seed_files.len(), __seed_edges);
+        }
+        #post_seeding
+    }
+}
+
 /// Generate the single-threaded stateful fuzzing loop body.
 fn stateful_singlecore_body(
     mod_name: &syn::Ident,
@@ -272,6 +600,38 @@ fn stateful_singlecore_body(
     let seed_ident = quote::format_ident!("__seed_fixture");
     let extra_swap_in_seed = codegen::stateful_extra_swap_in(&seed_ident, contexts);
     let extra_swap_back_seed = codegen::stateful_extra_swap_back(&seed_ident, contexts);
+
+    let seed_code = gen_corpus_seeding(
+        mod_name, fn_name, action_ty,
+        &quote! { state_pool },
+        &extra_swap_in_seed,
+        &extra_swap_back_seed,
+        &quote! { #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE) },
+        &quote! {}, // no pre-loop setup in singlecore (pool is local)
+        &quote! {}, // no post-exec flush in singlecore
+        &quote! {   // debug diagnostics (singlecore only)
+            if crucible_test_context::is_debug_replay() {
+                let __dirty_keys: Vec<_> = __seed_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied().collect();
+                let (__sh, __sl) = crucible_test_context::compute_svm_debug_hash(
+                    &__seed_fixture.ctx.svm, &__dirty_keys,
+                );
+                let __dbg_file = __seed_path.file_name().unwrap_or_default().to_string_lossy();
+                eprintln!("[SEED_DIAG] file={} action={}/{} variant={} success={} slot={} hash={:016x}",
+                    __dbg_file, __current_depth + 1, __fuzz_input.actions.len(),
+                    __seed_action.action_name(), __seed_ok, __sl, __sh);
+            }
+        },
+        &quote! { #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed) },
+        &quote! { state_pool.mark_seed_boundary(); },
+    );
+
+    let action_chain_code = gen_action_chain(
+        action_ty,
+        &quote! { state_pool.len() },
+        &quote! { __pending_selects },
+    );
+    let truncation_code = gen_post_exec_truncation();
+
     quote! {
         // === SINGLE-THREADED STATEFUL ===
         let mut state_pool = StatePool::new(pool_capacity, max_depth);
@@ -324,155 +684,7 @@ fn stateful_singlecore_body(
 
         eprintln!("[STATEFUL] Pool capacity: {}k, max depth: {}, seed: {}", pool_capacity / 1024, max_depth, seed);
 
-        // === CORPUS-IN: Seed pool from disk ===
-        if let Some(ref __corpus_in_path) = corpus_in_dir {
-            let mut __seed_files: Vec<std::path::PathBuf> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(__corpus_in_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && is_corpus_input(&path) {
-                        __seed_files.push(path);
-                    }
-                }
-            }
-            __seed_files.sort();
-
-            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
-
-            let mut __seeded = 0u64;
-            for __seed_path in &__seed_files {
-                let __seed_bytes = match std::fs::read(__seed_path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&__seed_bytes);
-                if __fuzz_input.actions.is_empty() { continue; }
-
-                // Reset SVM to initial state for this sequence
-                initial_snapshot.restore_full(&mut __real_svm);
-
-                // One fixture per sequence — accumulates mutable state across actions
-                let mut __seed_fixture = template_fixture.clone();
-
-                let mut __parent_idx: Option<usize> = Some(0); // initial state
-                let mut __current_depth: u32 = 0;
-                let mut __current_action_bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
-                let mut __current_delta = std::sync::Arc::new(
-                    SvmSnapshot::empty(initial_snapshot.clock().clone())
-                );
-
-                for __seed_action in &__fuzz_input.actions {
-                    if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
-                    if state_pool.is_full() { break; }
-
-                    // Swap SVMs into fixture (primary + additional contexts)
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    #extra_swap_in_seed
-
-                    let callback = #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE);
-                    __seed_fixture.ctx.set_invocation_callback(callback);
-                    crucible_test_context::clear_action_history();
-                    crucible_test_context::clear_violation_tracking();
-                    crucible_test_context::reset_iteration_dispatch_count();
-
-                    let __seed_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        #fn_name(&mut __seed_fixture, vec![__seed_action.clone()]);
-                    }));
-
-                    // Check success
-                    let __seed_ok = __seed_panic.is_ok() && {
-                        crucible_test_context::get_first_action_success().unwrap_or(false)
-                    };
-
-                    // Seed loading diagnostic: per-action state hash
-                    if crucible_test_context::is_debug_replay() {
-                        let __dirty_keys: Vec<_> = __seed_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied().collect();
-                        let (__sh, __sl) = crucible_test_context::compute_svm_debug_hash(
-                            &__seed_fixture.ctx.svm, &__dirty_keys,
-                        );
-                        let __dbg_file = __seed_path.file_name().unwrap_or_default().to_string_lossy();
-                        eprintln!("[SEED_DIAG] file={} action={}/{} variant={} success={} slot={} hash={:016x}",
-                            __dbg_file, __current_depth + 1, __fuzz_input.actions.len(),
-                            __seed_action.action_name(), __seed_ok, __sl, __sh);
-                    }
-
-                    if !__seed_ok {
-                        // Swap SVMs back and stop this sequence
-                        #extra_swap_back_seed
-                        std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                        break;
-                    }
-
-                    // Serialize the single action
-                    let __single_bytes = {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(__seed_action.variant_index() as u16).to_le_bytes());
-                        __seed_action.serialize_fields(&mut buf);
-                        buf
-                    };
-
-                    // Build accumulated action bytes
-                    let mut __accum = __current_action_bytes.clone();
-                    let __count = u32::from_le_bytes(__accum[0..4].try_into().unwrap());
-                    __accum[0..4].copy_from_slice(&(__count + 1).to_le_bytes());
-                    __accum.extend_from_slice(&__single_bytes);
-
-                    // Take delta from current SVM state
-                    let __new_delta = SvmSnapshot::take_delta(
-                        &__seed_fixture.ctx.svm, &__current_delta, &__seed_fixture.ctx.dirty_tracker,
-                    );
-
-                    // Fingerprint
-                    let __fp = compute_state_fingerprint_from_snapshot(
-                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
-                    );
-
-                    __current_depth += 1;
-                    // Backfill params so the stored action_desc includes them in crash output
-                    crucible_test_context::backfill_action_params(0, __seed_action.to_json_params());
-                    let __action_desc = crucible_test_context::format_last_action_oneline();
-                    let __variant = __seed_action.variant_index() as u16;
-                    let __field_bytes = if __single_bytes.len() > 2 {
-                        __single_bytes[2..].to_vec()
-                    } else { Vec::new() };
-
-                    // Store fixture state (swap SVMs out for cheap clone)
-                    #extra_swap_back_seed
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    let __fs: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                        Some(std::sync::Arc::new(__FixtureWrapper(__seed_fixture.clone())));
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    #extra_swap_in_seed
-
-                    // Seeded states get minimum novelty so they're competitive in the
-                    // power schedule. edge_novelty=1 puts them in the coverage weight
-                    // tier; without this they get 0 novelty → almost never picked.
-                    if __fp != 0 && state_pool.try_add(
-                        __fp, __new_delta.clone(), __current_depth, __parent_idx,
-                        __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, 8, 1, true, None,
-                    ) {
-                        __parent_idx = Some(state_pool.len() - 1);
-                        __seeded += 1;
-                    }
-
-                    __current_delta = std::sync::Arc::new(__new_delta);
-                    __current_action_bytes = __accum;
-
-                    // Swap SVMs back for next action (SVM stays modified = correct sequential state)
-                    #extra_swap_back_seed
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                }
-            }
-
-            // Reset SVM to initial for the main loop
-            initial_snapshot.restore_full(&mut __real_svm);
-            let __seed_edges = #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed);
-            eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
-                __seeded, __seed_files.len(), __seed_edges);
-        }
-        state_pool.mark_seed_boundary();
+        #seed_code
 
         eprintln!("[STATEFUL] Starting stateful fuzzing loop...\n");
 
@@ -603,7 +815,6 @@ fn stateful_singlecore_body(
             let __t_splice = if __do_profile { Some(std::time::Instant::now()) } else { None };
             let __splice_roll = rng.next() % 100;
             let mut __splice_chain: Option<Vec<#action_ty>> = None;
-            let mut __burst_mode = false;
             if __splice_roll < 5 && state_pool.len() > 10 {
                 // 5%: Donor splice — extract subsequence from an existing chain
                 let __donor_idx = state_pool.sample_from_distribution(&__weight_cumulative, __weight_total, rng.next()).unwrap_or(0);
@@ -637,11 +848,6 @@ fn stateful_singlecore_body(
                         __splice_chain = Some(__spliced_actions);
                     }
                 }
-            } else if __splice_roll < 20 && state_pool.len() > 10 {
-                // 15%: Burst mode — generate 2-5 random actions from the picked parent state.
-                // Each action is executed sequentially; novel intermediates are saved to pool.
-                // This enables multi-step bug chains (e.g., delegate→advance→deactivate→withdraw→delegate).
-                // __burst_mode = true;  // temporarily disabled
             }
             if let Some(__t) = __t_splice { __phase_pick_splice_ns += __t.elapsed().as_nanos() as u64; }
             if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
@@ -690,136 +896,10 @@ fn stateful_singlecore_body(
             }
 
             // 3. Generate action chain using adaptive scheduling.
-            //    If splice was triggered above, use the spliced chain instead.
             let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
-            let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
-            __pending_selects.push(__state_class);
-
-            let mut __action_chain: Vec<#action_ty>;
-            __single_action_buf.clear();
-
-            if let Some(__spliced) = __splice_chain {
-                // Subsequence splice: use pre-built chain from donor state
-                __action_chain = __spliced;
-                for __a in &__action_chain {
-                    __single_action_buf.extend_from_slice(&(__a.variant_index() as u16).to_le_bytes());
-                    __a.serialize_fields(&mut __single_action_buf);
-                }
-            } else {
-                // Adaptive chain length: longer chains early (depth exploration),
-                // shorter chains as pool fills (exploit discovered states).
-                // Burst mode (15%): forces 2-5 actions from picked parent state,
-                // enabling multi-step bug chains (e.g., delegate→advance→deactivate→withdraw→delegate).
-                let __pool_fill = state_pool.len() as f64 / pool_capacity as f64;
-                let __chain_roll = rng.next() % 100;
-                let __chain_len: usize = if __burst_mode {
-                    // Burst: forced 2-5 actions from current parent state
-                    2 + rng.next() as usize % 4
-                } else if __pool_fill < 0.05 {
-                    // Bootstrap (<5%): very aggressive depth — mean ~2.8
-                    if __chain_roll < 20 { 1 } else if __chain_roll < 45 { 2 } else if __chain_roll < 70 { 3 } else if __chain_roll < 85 { 4 } else { 5 }
-                } else if __pool_fill < 0.25 {
-                    // Early (<25%): depth-heavy — mean ~2.15
-                    if __chain_roll < 35 { 1 } else if __chain_roll < 65 { 2 } else if __chain_roll < 85 { 3 } else if __chain_roll < 95 { 4 } else { 5 }
-                } else if __pool_fill < 0.6 {
-                    // Mid (<60%): balanced — mean ~1.76
-                    if __chain_roll < 55 { 1 } else if __chain_roll < 80 { 2 } else if __chain_roll < 92 { 3 } else if __chain_roll < 97 { 4 } else { 5 }
-                } else {
-                    // Mature (≥60%): exploit — mean ~1.22
-                    if __chain_roll < 85 { 1 } else if __chain_roll < 95 { 2 } else if __chain_roll < 98 { 3 } else if __chain_roll < 99 { 4 } else { 5 }
-                };
-
-                __action_chain = Vec::with_capacity(__chain_len);
-
-                for __ci in 0..__chain_len {
-                    let __replay_roll = rng.next() % 100;
-                    let __one_action = if __replay_roll < 35 && !__crossover_buf.is_empty() {
-                        // 35%: Crossover EXACT replay (exploit known-good params)
-                        let __ci = rng.next() as usize % __crossover_buf.len();
-                        let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                        if !cross_fields.is_empty() {
-                            let mut cursor = 0usize;
-                            match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                Some(a) => a,
-                                None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                            }
-                        } else {
-                            <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                        }
-                    } else if __replay_roll < 45 && !__crossover_buf.is_empty() {
-                        // 10%: Crossover + mutate (secondary exploration)
-                        let __ci = rng.next() as usize % __crossover_buf.len();
-                        let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                        if !cross_fields.is_empty() {
-                            let mut cursor = 0usize;
-                            match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                Some(mut a) => {
-                                    <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                    a
-                                }
-                                None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                            }
-                        } else {
-                            <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                        }
-                    } else if __replay_roll < 55 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                        // 10%: Mutate parent's actual action
-                        let pv = parent_variant.unwrap() as usize;
-                        let mut cursor = 0usize;
-                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(pv, &*parent_field_bytes, &mut cursor) {
-                            Some(mut a) => {
-                                <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                a
-                            }
-                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(pv, &mut rng),
-                        }
-                    } else {
-                        // 45%: Guided variant selection (epsilon-greedy from ActionStatsMap)
-                        match action_stats.pick_variant(__state_class, rng.next(), rng.next()) {
-                            Some(vi) => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(vi, &mut rng),
-                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                        }
-                    };
-                    // Serialize this action's bytes
-                    __single_action_buf.extend_from_slice(&(__one_action.variant_index() as u16).to_le_bytes());
-                    __one_action.serialize_fields(&mut __single_action_buf);
-                    __action_chain.push(__one_action);
-                }
-            }
-            let mut __chain_len = __action_chain.len();
-            // Track byte offset of each action in __single_action_buf for post-execution truncation
-            let __action_byte_offsets: Vec<usize> = {
-                let mut offsets = Vec::with_capacity(__chain_len + 1);
-                let mut pos = 0usize;
-                for __a in &__action_chain {
-                    offsets.push(pos);
-                    pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
-                }
-                offsets.push(pos); // sentinel: end of last action
-                offsets
-            };
-            // Use last action's variant for stats recording
-            let __action_variant_idx = __action_chain.last().unwrap().variant_index();
-
-            // Pre-compute action descriptions with params BEFORE the chain is consumed
-            // by the test function. Without this, pool entries only get action names
-            // (no params) because push_action_record_lite defers param serialization.
-            let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
-                let __params = __a.to_json_params();
-                let __ps = if let serde_json::Value::Object(ref __map) = __params {
-                    __map.iter()
-                        .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                } else { String::new() };
-                if __ps.is_empty() {
-                    __a.action_name().to_string()
-                } else {
-                    format!("{}({})", __a.action_name(), __ps)
-                }
-            }).collect();
-
+            #action_chain_code
             if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
+
 
             // 5. Execute the action chain using the existing invariant test function.
             //    Restore fixture from pool state (correct mutable fields for this state),
@@ -873,17 +953,8 @@ fn stateful_singlecore_body(
                 __phase_tx_exec_ns += __ex;
             }
 
-            // Truncate chain to actually-executed actions. If the chain broke early
-            // (is_stateful_chain_mode break on failure), __single_action_buf contains
-            // bytes for unexecuted actions that would cause replay divergence.
-            {
-                let __actually_executed = crucible_test_context::get_action_history().len();
-                if __actually_executed < __chain_len {
-                    let __truncate_at = __action_byte_offsets[__actually_executed];
-                    __single_action_buf.truncate(__truncate_at);
-                    __chain_len = __actually_executed;
-                }
-            }
+            // Truncate chain to actually-executed actions (strip unexecuted bytes)
+            #truncation_code
 
             // Check if this action produced new coverage:
             // 1. New unique edge (TOTAL_EDGES_ATOMIC increased)
@@ -998,7 +1069,7 @@ fn stateful_singlecore_body(
                     println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                     eprintln!("\n[FUZZ_FINDING] at iteration {}: {}", iteration, msg);
                     // Print full action chain from root to violation.
-                    // Include ALL actions from the current chain (chain_len may be >1 in burst mode).
+                    // Include ALL actions from the current chain (chain_len may be >1 with splice).
                     let parent_descs = state_pool.reconstruct_action_descriptions(state_idx);
                     let history = crucible_test_context::get_action_history();
                     let current_descs: Vec<String> = __chain_descs.iter().enumerate().map(|(i, desc)| {
@@ -1409,6 +1480,52 @@ fn stateful_multicore_body(
     let seed_ident_mc = quote::format_ident!("__seed_fixture");
     let extra_swap_in_seed_mc = codegen::stateful_extra_swap_in(&seed_ident_mc, contexts);
     let extra_swap_back_seed_mc = codegen::stateful_extra_swap_back(&seed_ident_mc, contexts);
+
+    let mc_seed_code = gen_corpus_seeding(
+        mod_name, fn_name, action_ty,
+        &quote! { pool },
+        &extra_swap_in_seed_mc,
+        &extra_swap_back_seed_mc,
+        &quote! {
+            #mod_name::FuzzCallback::with_shared_memory(
+                __stateful_cov_ptr, #mod_name::MAP_SIZE,
+                shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
+            )
+        },
+        &quote! { let mut pool = state_pool.write().unwrap(); }, // pre-loop: acquire write lock
+        &quote! { // post-exec: flush to shared bitmap
+            #mod_name::flush_local_bitmap_buffers(
+                shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
+            );
+        },
+        &quote! {}, // no debug diagnostics in multicore (yet)
+        &quote! {
+            #mod_name::FuzzCallback::count_shared_bits(
+                shared_edge_addr as *const u8,
+                #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
+            )
+        },
+        &quote! { // post-seeding: drop lock, mark boundary
+            {
+                let mut pool = state_pool.write().unwrap();
+                pool.mark_seed_boundary();
+            }
+        },
+    );
+
+    // Worker threads use __cached_pool_len (read-lock-free snapshot), W0 uses cached_pool_len
+    let mc_worker_action_chain = gen_action_chain(
+        action_ty,
+        &quote! { __cached_pool_len },
+        &quote! { pending_selects },
+    );
+    let mc_w0_action_chain = gen_action_chain(
+        action_ty,
+        &quote! { cached_pool_len },
+        &quote! { pending_selects },
+    );
+    let mc_truncation_code = gen_post_exec_truncation();
+
     quote! {
         // === MULTI-THREADED STATEFUL ===
         use std::sync::{Arc, RwLock, atomic::{AtomicU64, AtomicBool, Ordering}};
@@ -1451,6 +1568,14 @@ fn stateful_multicore_body(
         let shared_crashes = Arc::new(AtomicU64::new(0));
         let shared_novel = Arc::new(AtomicU64::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
+        // Guard: discovered variant bitmap supports max 256 variants
+        {
+            let __variant_count = crucible_test_context::TOTAL_ACTION_VARIANTS
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert!(__variant_count <= 256,
+                "Action enum has {} variants but discovered bitmap supports max 256. \
+                 File a bug if you need >256 action variants.", __variant_count);
+        }
         // Shared discovered-variants bitmap: each byte is 0/1 for up to 256 variants.
         // Workers atomically set bytes to 1 when they discover a new variant;
         // monitor counts non-zero bytes to display "discovered: X/Y actions".
@@ -1485,154 +1610,7 @@ fn stateful_multicore_body(
 
         eprintln!("[STATEFUL] Pool capacity: {}k, max depth: {}, seed: {}", pool_capacity / 1024, max_depth, seed);
 
-        // === CORPUS-IN: Seed pool from disk (main thread, before workers) ===
-        if let Some(ref __corpus_in_path) = corpus_in_dir {
-            let mut __seed_files: Vec<std::path::PathBuf> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(__corpus_in_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && is_corpus_input(&path) {
-                        __seed_files.push(path);
-                    }
-                }
-            }
-            __seed_files.sort();
-
-            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
-
-            let mut __seeded = 0u64;
-            let mut pool = state_pool.write().unwrap();
-            for __seed_path in &__seed_files {
-                let __seed_bytes = match std::fs::read(__seed_path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&__seed_bytes);
-                if __fuzz_input.actions.is_empty() { continue; }
-
-                // Reset SVM to initial state for this sequence
-                initial_snapshot.restore_full(&mut __real_svm);
-
-                // One fixture per sequence — accumulates mutable state across actions
-                let mut __seed_fixture = template_fixture.clone();
-
-                let mut __parent_idx: Option<usize> = Some(0); // initial state
-                let mut __current_depth: u32 = 0;
-                let mut __current_action_bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
-                let mut __current_delta = std::sync::Arc::new(
-                    SvmSnapshot::empty(initial_snapshot.clock().clone())
-                );
-
-                for __seed_action in &__fuzz_input.actions {
-                    if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
-                    if pool.is_full() { break; }
-
-                    // Swap SVMs into fixture (primary + additional contexts)
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    #extra_swap_in_seed_mc
-
-                    let callback = #mod_name::FuzzCallback::with_shared_memory(
-                        __stateful_cov_ptr, #mod_name::MAP_SIZE,
-                        shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
-                    );
-                    __seed_fixture.ctx.set_invocation_callback(callback);
-                    crucible_test_context::clear_action_history();
-                    crucible_test_context::clear_violation_tracking();
-                    crucible_test_context::reset_iteration_dispatch_count();
-
-                    let __seed_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        #fn_name(&mut __seed_fixture, vec![__seed_action.clone()]);
-                    }));
-                    // Flush coverage to shared bitmap so monitor reflects seed coverage
-                    #mod_name::flush_local_bitmap_buffers(
-                        shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
-                    );
-
-                    // Check success
-                    let __seed_ok = __seed_panic.is_ok() && {
-                        crucible_test_context::get_first_action_success().unwrap_or(false)
-                    };
-
-                    if !__seed_ok {
-                        #extra_swap_back_seed_mc
-                        std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                        break;
-                    }
-
-                    // Serialize the single action
-                    let __single_bytes = {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(__seed_action.variant_index() as u16).to_le_bytes());
-                        __seed_action.serialize_fields(&mut buf);
-                        buf
-                    };
-
-                    // Build accumulated action bytes
-                    let mut __accum = __current_action_bytes.clone();
-                    let __count = u32::from_le_bytes(__accum[0..4].try_into().unwrap());
-                    __accum[0..4].copy_from_slice(&(__count + 1).to_le_bytes());
-                    __accum.extend_from_slice(&__single_bytes);
-
-                    // Take delta from current SVM state
-                    let __new_delta = SvmSnapshot::take_delta(
-                        &__seed_fixture.ctx.svm, &__current_delta, &__seed_fixture.ctx.dirty_tracker,
-                    );
-
-                    // Fingerprint
-                    let __fp = compute_state_fingerprint_from_snapshot(
-                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
-                    );
-
-                    __current_depth += 1;
-                    // Backfill params so the stored action_desc includes them in crash output
-                    crucible_test_context::backfill_action_params(0, __seed_action.to_json_params());
-                    let __action_desc = crucible_test_context::format_last_action_oneline();
-                    let __variant = __seed_action.variant_index() as u16;
-                    let __field_bytes = if __single_bytes.len() > 2 {
-                        __single_bytes[2..].to_vec()
-                    } else { Vec::new() };
-
-                    // Store fixture state (swap SVMs out for cheap clone)
-                    #extra_swap_back_seed_mc
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    let __fs: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
-                        Some(std::sync::Arc::new(__FixtureWrapper(__seed_fixture.clone())));
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                    #extra_swap_in_seed_mc
-
-                    if __fp != 0 && pool.try_add(
-                        __fp, __new_delta.clone(), __current_depth, __parent_idx,
-                        __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, 8, 1, true, None,
-                    ) {
-                        __parent_idx = Some(pool.len() - 1);
-                        __seeded += 1;
-                    }
-
-                    __current_delta = std::sync::Arc::new(__new_delta);
-                    __current_action_bytes = __accum;
-
-                    // Swap SVMs back for next action
-                    #extra_swap_back_seed_mc
-                    std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
-                }
-            }
-            drop(pool);
-
-            // Reset SVM to initial for workers
-            initial_snapshot.restore_full(&mut __real_svm);
-            let __seed_edges = #mod_name::FuzzCallback::count_shared_bits(
-                shared_edge_addr as *const u8,
-                #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
-            );
-            eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
-                __seeded, __seed_files.len(), __seed_edges);
-        }
-        {
-            let mut pool = state_pool.write().unwrap();
-            pool.mark_seed_boundary();
-        }
+        #mc_seed_code
 
         eprintln!("[STATEFUL] Starting multi-threaded stateful fuzzing...\n");
 
@@ -1893,10 +1871,9 @@ fn stateful_multicore_body(
                             local_batch.pop().unwrap();
                         let mut __iter_fixture = fixture_batch.pop().unwrap();
 
-                        // Subsequence splice (5%) or burst mode (15%):
+                        // Subsequence splice (5%):
                         let __splice_roll = rng.next() % 100;
                         let mut __splice_chain: Option<Vec<#action_ty>> = None;
-                        let mut __burst_mode = false;
                         if __splice_roll < 5 && __cached_pool_len > 10 {
                             // 5%: Donor splice — extract subsequence from an existing chain
                             if let Ok(p) = pool.try_read() {
@@ -1941,9 +1918,6 @@ fn stateful_multicore_body(
                                     }
                                 }
                             }
-                        } else if __splice_roll < 20 && __cached_pool_len > 10 {
-                            // 15%: Burst mode — forced 2-5 action chain from picked parent state
-                            // __burst_mode = true;  // temporarily disabled
                         }
 
                         // 2. Selective restore with dual-SVM support
@@ -1970,123 +1944,8 @@ fn stateful_multicore_body(
                             divergent_keys.extend(delta_arc.accounts().keys().copied());
                         }
 
-                        // 3. Generate action chain using adaptive scheduling
-                        let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
-                        pending_selects.push(__state_class);
-
-                        let mut __action_chain: Vec<#action_ty>;
-                        __single_action_buf.clear();
-
-                        if let Some(__spliced) = __splice_chain {
-                            // Subsequence splice: use pre-built chain from donor state
-                            __action_chain = __spliced;
-                            for __a in &__action_chain {
-                                __single_action_buf.extend_from_slice(&(__a.variant_index() as u16).to_le_bytes());
-                                __a.serialize_fields(&mut __single_action_buf);
-                            }
-                        } else {
-                            let __pool_fill = __cached_pool_len as f64 / pool_capacity as f64;
-                            let __chain_roll = rng.next() % 100;
-                            let __chain_len: usize = if __burst_mode {
-                                // Burst: forced 2-5 actions from current parent state
-                                2 + rng.next() as usize % 4
-                            } else if __pool_fill < 0.05 {
-                                // Bootstrap (<5%): very aggressive depth — mean ~2.8
-                                if __chain_roll < 20 { 1 } else if __chain_roll < 45 { 2 } else if __chain_roll < 70 { 3 } else if __chain_roll < 85 { 4 } else { 5 }
-                            } else if __pool_fill < 0.25 {
-                                // Early (<25%): depth-heavy — mean ~2.15
-                                if __chain_roll < 35 { 1 } else if __chain_roll < 65 { 2 } else if __chain_roll < 85 { 3 } else if __chain_roll < 95 { 4 } else { 5 }
-                            } else if __pool_fill < 0.6 {
-                                // Mid (<60%): balanced — mean ~1.76
-                                if __chain_roll < 55 { 1 } else if __chain_roll < 80 { 2 } else if __chain_roll < 92 { 3 } else if __chain_roll < 97 { 4 } else { 5 }
-                            } else {
-                                // Mature (≥60%): exploit — mean ~1.22
-                                if __chain_roll < 85 { 1 } else if __chain_roll < 95 { 2 } else if __chain_roll < 98 { 3 } else if __chain_roll < 99 { 4 } else { 5 }
-                            };
-
-                            __action_chain = Vec::with_capacity(__chain_len);
-
-                            for __ai in 0..__chain_len {
-                                let __replay_roll = rng.next() % 100;
-                                let __one_action = if __replay_roll < 35 && !__crossover_buf.is_empty() {
-                                    // 35%: Crossover EXACT replay (exploit known-good params)
-                                    let __ci = rng.next() as usize % __crossover_buf.len();
-                                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                                    if !cross_fields.is_empty() {
-                                        let mut cursor = 0usize;
-                                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                            Some(a) => a,
-                                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                                        }
-                                    } else {
-                                        <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                                    }
-                                } else if __replay_roll < 45 && !__crossover_buf.is_empty() {
-                                    // 10%: Crossover + mutate (secondary exploration)
-                                    let __ci = rng.next() as usize % __crossover_buf.len();
-                                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                                    if !cross_fields.is_empty() {
-                                        let mut cursor = 0usize;
-                                        match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                            Some(mut a) => {
-                                                <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                                a
-                                            }
-                                            None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                                        }
-                                    } else {
-                                        <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                                    }
-                                } else if __replay_roll < 55 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                                    // 10%: Mutate parent's actual action
-                                    let pv = parent_variant.unwrap() as usize;
-                                    let mut cursor = 0usize;
-                                    match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(pv, &*parent_field_bytes, &mut cursor) {
-                                        Some(mut a) => {
-                                            <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                            a
-                                        }
-                                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(pv, &mut rng),
-                                    }
-                                } else {
-                                    // 45%: Guided variant selection (epsilon-greedy)
-                                    match action_stats.pick_variant(__state_class, rng.next(), rng.next()) {
-                                        Some(vi) => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(vi, &mut rng),
-                                        None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                                    }
-                                };
-                                __single_action_buf.extend_from_slice(&(__one_action.variant_index() as u16).to_le_bytes());
-                                __one_action.serialize_fields(&mut __single_action_buf);
-                                __action_chain.push(__one_action);
-                            }
-                        }
-                        let mut __chain_len = __action_chain.len();
-                        let __action_byte_offsets: Vec<usize> = {
-                            let mut offsets = Vec::with_capacity(__chain_len + 1);
-                            let mut pos = 0usize;
-                            for __a in &__action_chain {
-                                offsets.push(pos);
-                                pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
-                            }
-                            offsets.push(pos);
-                            offsets
-                        };
-                        let __action_variant_idx = __action_chain.last().unwrap().variant_index();
-
-                        let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
-                            let __params = __a.to_json_params();
-                            let __ps = if let serde_json::Value::Object(ref __map) = __params {
-                                __map.iter()
-                                    .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            } else { String::new() };
-                            if __ps.is_empty() {
-                                __a.action_name().to_string()
-                            } else {
-                                format!("{}({})", __a.action_name(), __ps)
-                            }
-                        }).collect();
+                        // 3. Generate action chain using adaptive scheduling.
+                        #mc_worker_action_chain
 
                         // 4. Execute chain — use per-iteration fixture clone (correct mutable state).
                         //    Swap SVMs into fixture, run test, swap back.
@@ -2115,15 +1974,8 @@ fn stateful_multicore_body(
                         }));
                         let __actions_this_iter = crucible_test_context::get_iteration_dispatch_count();
 
-                        // Truncate chain to actually-executed actions (see singlecore comment)
-                        {
-                            let __actually_executed = crucible_test_context::get_action_history().len();
-                            if __actually_executed < __chain_len {
-                                let __truncate_at = __action_byte_offsets[__actually_executed];
-                                __single_action_buf.truncate(__truncate_at);
-                                __chain_len = __actually_executed;
-                            }
-                        }
+                        // Truncate chain to actually-executed actions (strip unexecuted bytes)
+                        #mc_truncation_code
 
                         // Flush thread-local bitmap buffers and check for new coverage.
                         // Uses shared bitmaps (atomic fetch_or) as single source of truth
@@ -2632,11 +2484,10 @@ fn stateful_multicore_body(
                     local_batch.pop().unwrap();
                 let mut __iter_fixture = w0_fixture_batch.pop().unwrap();
 
-                // Subsequence splice (5%) or burst mode (15%):
+                // Subsequence splice (5%):
                 let __t_splice = if __do_profile { Some(std::time::Instant::now()) } else { None };
                 let __splice_roll = rng.next() % 100;
                 let mut __splice_chain: Option<Vec<#action_ty>> = None;
-                let mut __burst_mode = false;
                 if __splice_roll < 5 && cached_pool_len > 10 {
                     // 5%: Donor splice — extract subsequence from an existing chain
                     if let Ok(p) = pool.try_read() {
@@ -2681,9 +2532,6 @@ fn stateful_multicore_body(
                             }
                         }
                     }
-                } else if __splice_roll < 20 && cached_pool_len > 10 {
-                    // 15%: Burst mode — forced 2-5 action chain from picked parent state
-                    // __burst_mode = true;  // temporarily disabled
                 }
                 if let Some(__t) = __t_splice { __phase_pick_splice_ns += __t.elapsed().as_nanos() as u64; }
                 if let Some(__t) = __t { __phase_pick_ns += __t.elapsed().as_nanos() as u64; }
@@ -2715,126 +2563,7 @@ fn stateful_multicore_body(
                 if let Some(__t) = __t { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
 
                 // 3. Generate action chain using adaptive scheduling.
-                let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
-                let __state_class = crucible_test_context::snapshot::state_class_from_fingerprint(parent_fingerprint);
-                pending_selects.push(__state_class);
-
-                let mut __action_chain: Vec<#action_ty>;
-                __single_action_buf.clear();
-
-                if let Some(__spliced) = __splice_chain {
-                    // Subsequence splice: use pre-built chain from donor state
-                    __action_chain = __spliced;
-                    for __a in &__action_chain {
-                        __single_action_buf.extend_from_slice(&(__a.variant_index() as u16).to_le_bytes());
-                        __a.serialize_fields(&mut __single_action_buf);
-                    }
-                } else {
-                    let __pool_fill = cached_pool_len as f64 / pool_capacity as f64;
-                    let __chain_roll = rng.next() % 100;
-                    let __chain_len: usize = if __burst_mode {
-                        // Burst: forced 2-5 actions from current parent state
-                        2 + rng.next() as usize % 4
-                    } else if __pool_fill < 0.05 {
-                        // Bootstrap (<5%): very aggressive depth — mean ~2.8
-                        if __chain_roll < 20 { 1 } else if __chain_roll < 45 { 2 } else if __chain_roll < 70 { 3 } else if __chain_roll < 85 { 4 } else { 5 }
-                    } else if __pool_fill < 0.25 {
-                        // Early (<25%): depth-heavy — mean ~2.15
-                        if __chain_roll < 35 { 1 } else if __chain_roll < 65 { 2 } else if __chain_roll < 85 { 3 } else if __chain_roll < 95 { 4 } else { 5 }
-                    } else if __pool_fill < 0.6 {
-                        // Mid (<60%): balanced — mean ~1.76
-                        if __chain_roll < 55 { 1 } else if __chain_roll < 80 { 2 } else if __chain_roll < 92 { 3 } else if __chain_roll < 97 { 4 } else { 5 }
-                    } else {
-                        // Mature (≥60%): exploit — mean ~1.22
-                        if __chain_roll < 85 { 1 } else if __chain_roll < 95 { 2 } else if __chain_roll < 98 { 3 } else if __chain_roll < 99 { 4 } else { 5 }
-                    };
-
-                    __action_chain = Vec::with_capacity(__chain_len);
-
-                    for __ci in 0..__chain_len {
-                        let __replay_roll = rng.next() % 100;
-                        let __one_action = if __replay_roll < 35 && !__crossover_buf.is_empty() {
-                            // 35%: Crossover EXACT replay (exploit known-good params)
-                            let __ci = rng.next() as usize % __crossover_buf.len();
-                            let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                            if !cross_fields.is_empty() {
-                                let mut cursor = 0usize;
-                                match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                    Some(a) => a,
-                                    None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                                }
-                            } else {
-                                <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                            }
-                        } else if __replay_roll < 45 && !__crossover_buf.is_empty() {
-                            // 10%: Crossover + mutate (secondary exploration)
-                            let __ci = rng.next() as usize % __crossover_buf.len();
-                            let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
-                            if !cross_fields.is_empty() {
-                                let mut cursor = 0usize;
-                                match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
-                                    Some(mut a) => {
-                                        <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                        a
-                                    }
-                                    None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                                }
-                            } else {
-                                <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(cross_vi, &mut rng)
-                            }
-                        } else if __replay_roll < 55 && parent_variant.is_some() && !parent_field_bytes.is_empty() {
-                            // 10%: Mutate parent's actual action
-                            let pv = parent_variant.unwrap() as usize;
-                            let mut cursor = 0usize;
-                            match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(pv, &*parent_field_bytes, &mut cursor) {
-                                Some(mut a) => {
-                                    <#action_ty as crucible_fuzzer::FuzzAction>::mutate(&mut a, &mut rng);
-                                    a
-                                }
-                                None => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(pv, &mut rng),
-                            }
-                        } else {
-                            // 45%: Guided variant selection (epsilon-greedy)
-                            match action_stats.pick_variant(__state_class, rng.next(), rng.next()) {
-                                Some(vi) => <#action_ty as crucible_fuzzer::FuzzAction>::random_variant(vi, &mut rng),
-                                None => <#action_ty as crucible_fuzzer::FuzzAction>::random(&mut rng),
-                            }
-                        };
-                        // Serialize this action's bytes
-                        __single_action_buf.extend_from_slice(&(__one_action.variant_index() as u16).to_le_bytes());
-                        __one_action.serialize_fields(&mut __single_action_buf);
-                        __action_chain.push(__one_action);
-                    }
-                }
-                let mut __chain_len = __action_chain.len();
-                let __action_byte_offsets: Vec<usize> = {
-                    let mut offsets = Vec::with_capacity(__chain_len + 1);
-                    let mut pos = 0usize;
-                    for __a in &__action_chain {
-                        offsets.push(pos);
-                        pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
-                    }
-                    offsets.push(pos);
-                    offsets
-                };
-                let __action_variant_idx = __action_chain.last().unwrap().variant_index();
-
-                let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
-                    let __params = __a.to_json_params();
-                    let __ps = if let serde_json::Value::Object(ref __map) = __params {
-                        __map.iter()
-                            .map(|(k, v)| format!("{}={}", k, crucible_test_context::format_json_value(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    } else { String::new() };
-                    if __ps.is_empty() {
-                        __a.action_name().to_string()
-                    } else {
-                        format!("{}({})", __a.action_name(), __ps)
-                    }
-                }).collect();
-
-                if let Some(__t) = __t { __phase_action_gen_ns += __t.elapsed().as_nanos() as u64; }
+                #mc_w0_action_chain
 
                 // 4. Execute — use per-iteration fixture clone (correct mutable state).
                 //    Swap SVMs into fixture, run test, swap back.
@@ -2878,15 +2607,8 @@ fn stateful_multicore_body(
                     __phase_tx_exec_ns += __ex;
                 }
 
-                // Truncate chain to actually-executed actions (see singlecore comment)
-                {
-                    let __actually_executed = crucible_test_context::get_action_history().len();
-                    if __actually_executed < __chain_len {
-                        let __truncate_at = __action_byte_offsets[__actually_executed];
-                        __single_action_buf.truncate(__truncate_at);
-                        __chain_len = __actually_executed;
-                    }
-                }
+                // Truncate chain to actually-executed actions (strip unexecuted bytes)
+                #mc_truncation_code
 
                 // Flush thread-local bitmap buffers and check for new coverage.
                 // Uses shared bitmaps (atomic fetch_or) as single source of truth.
@@ -3299,5 +3021,383 @@ fn stateful_multicore_body(
         eprintln!("\n[STATEFUL] Final stats: {} iterations, {} novel states, {} crashes, pool: {}",
             total_iters, total_novel, total_crashes, pool_len);
         std::process::exit(0);
+    }
+}
+
+// =============================================================================
+// Tests — Verify structural properties of generated code.
+//
+// These tests call the stateful codegen functions with dummy inputs and verify
+// that the generated TokenStream contains the expected patterns. They serve as
+// regression guards: if the P1 refactoring accidentally changes or drops a
+// code pattern, these tests will catch it.
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::format_ident;
+
+    /// Helper: convert TokenStream to string for pattern matching.
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    /// Helper: generate singlecore body with default params.
+    fn gen_singlecore() -> String {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture_name = format_ident!("TestFixture");
+        let fn_name = format_ident!("invariant_check");
+        let fixture_param = format_ident!("fixture");
+        let action_ty = quote::quote! { Actions };
+        let contexts = vec![format_ident!("ctx")];
+        ts(stateful_singlecore_body(
+            &mod_name, &fixture_name, &fn_name, &fixture_param,
+            "test_feature", &action_ty, &contexts,
+        ))
+    }
+
+    /// Helper: generate multicore body with default params.
+    fn gen_multicore() -> String {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture_name = format_ident!("TestFixture");
+        let fn_name = format_ident!("invariant_check");
+        let fixture_param = format_ident!("fixture");
+        let action_ty = quote::quote! { Actions };
+        let contexts = vec![format_ident!("ctx")];
+        ts(stateful_multicore_body(
+            &mod_name, &fixture_name, &fn_name, &fixture_param,
+            "test_feature", &action_ty, &contexts,
+        ))
+    }
+
+    // ── Action generation (must be identical across all 3 bodies) ───────
+
+    #[test]
+    fn singlecore_has_adaptive_chain_length() {
+        let output = gen_singlecore();
+        // Adaptive chain length based on pool fill ratio
+        assert!(output.contains("pool_fill"), "should compute pool fill ratio");
+        assert!(output.contains("0.05"), "should have bootstrap threshold (<5%)");
+        assert!(output.contains("0.25"), "should have early threshold (<25%)");
+        assert!(output.contains("0.6"), "should have mid threshold (<60%)");
+    }
+
+    #[test]
+    fn multicore_has_adaptive_chain_length() {
+        let output = gen_multicore();
+        assert!(output.contains("pool_fill"), "should compute pool fill ratio");
+        assert!(output.contains("0.05"), "should have bootstrap threshold (<5%)");
+        assert!(output.contains("0.25"), "should have early threshold (<25%)");
+        assert!(output.contains("0.6"), "should have mid threshold (<60%)");
+    }
+
+    #[test]
+    fn singlecore_has_crossover_replay() {
+        let output = gen_singlecore();
+        // 35% crossover exact replay
+        assert!(output.contains("crossover_buf"), "should use crossover buffer");
+        assert!(output.contains("deserialize_fields"), "should deserialize crossover fields");
+        assert!(output.contains("random_variant"), "should have random variant fallback");
+    }
+
+    #[test]
+    fn multicore_has_crossover_replay() {
+        let output = gen_multicore();
+        assert!(output.contains("crossover_buf"), "should use crossover buffer");
+        assert!(output.contains("deserialize_fields"), "should deserialize crossover fields");
+    }
+
+    #[test]
+    fn singlecore_has_guided_variant_selection() {
+        let output = gen_singlecore();
+        assert!(output.contains("action_stats . pick_variant"), "should use epsilon-greedy action stats");
+    }
+
+    #[test]
+    fn multicore_has_guided_variant_selection() {
+        let output = gen_multicore();
+        assert!(output.contains("action_stats . pick_variant"), "should use epsilon-greedy action stats");
+    }
+
+    // ── Post-execution truncation ───────────────────────────────────────
+
+    #[test]
+    fn singlecore_truncates_unexecuted_actions() {
+        let output = gen_singlecore();
+        assert!(output.contains("__actually_executed"), "should track actually executed count");
+        assert!(output.contains("__action_byte_offsets"), "should track byte offsets per action");
+        assert!(output.contains("truncate"), "should truncate __single_action_buf");
+    }
+
+    #[test]
+    fn multicore_truncates_unexecuted_actions() {
+        let output = gen_multicore();
+        assert!(output.contains("__actually_executed"), "should track actually executed count");
+        assert!(output.contains("__action_byte_offsets"), "should track byte offsets per action");
+        assert!(output.contains("truncate"), "should truncate __single_action_buf");
+    }
+
+    // ── Coverage check (virgin map scan + field novelty) ────────────────
+
+    #[test]
+    fn singlecore_has_virgin_map_scan() {
+        let output = gen_singlecore();
+        assert!(output.contains("__virgin_map"), "should maintain virgin map");
+        assert!(output.contains("to_bucket"), "should use hitcount bucketing");
+        assert!(output.contains("__edge_novel_bits"), "should track edge novelty bits");
+    }
+
+    #[test]
+    fn multicore_has_coverage_tracking() {
+        let output = gen_multicore();
+        // Multicore uses shared bitmap flush instead of virgin map
+        assert!(output.contains("flush_local_bitmap_buffers"), "should flush to shared bitmaps");
+        assert!(output.contains("new_coverage_count"), "should check new coverage count");
+    }
+
+    #[test]
+    fn singlecore_has_field_novelty() {
+        let output = gen_singlecore();
+        assert!(output.contains("check_field_novelty"), "should check per-field state novelty");
+        assert!(output.contains("__field_novel_bits"), "should track field novelty bits");
+    }
+
+    #[test]
+    fn multicore_has_field_novelty() {
+        let output = gen_multicore();
+        assert!(output.contains("check_field_novelty"), "should check per-field state novelty");
+    }
+
+    // ── Fingerprint + dedup ─────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_fingerprint_computation() {
+        let output = gen_singlecore();
+        assert!(output.contains("compute_state_fingerprint_from_snapshot"),
+            "should compute fingerprint from SVM state");
+        assert!(output.contains("dirty_tracker . dirty_accounts () . is_empty"),
+            "should detect clock-only changes");
+        assert!(output.contains("0x517cc1b727220a95"),
+            "should XOR with parent fingerprint for clock-only");
+    }
+
+    #[test]
+    fn multicore_has_fingerprint_computation() {
+        let output = gen_multicore();
+        assert!(output.contains("compute_state_fingerprint_from_snapshot"),
+            "should compute fingerprint from SVM state");
+        assert!(output.contains("0x517cc1b727220a95"),
+            "should XOR with parent fingerprint for clock-only");
+    }
+
+    #[test]
+    fn singlecore_has_edge_novel_dedup_bypass() {
+        let output = gen_singlecore();
+        // When edge_novel_bits > 0, fingerprint is made unique to bypass dedup
+        assert!(output.contains("0x9e3779b97f4a7c15"),
+            "should use golden ratio constant for dedup bypass");
+    }
+
+    #[test]
+    fn multicore_has_edge_novel_dedup_bypass() {
+        let output = gen_multicore();
+        assert!(output.contains("0x9e3779b97f4a7c15"),
+            "should use golden ratio constant for dedup bypass");
+    }
+
+    // ── Delta + pool save ───────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_saves_to_pool() {
+        let output = gen_singlecore();
+        assert!(output.contains("take_delta"), "should take delta snapshot");
+        assert!(output.contains("try_add"), "should call pool.try_add()");
+        assert!(output.contains("accumulated_bytes"), "should build accumulated action bytes");
+        assert!(output.contains("write_corpus_entry"), "should write corpus incrementally");
+    }
+
+    #[test]
+    fn multicore_saves_to_pool() {
+        let output = gen_multicore();
+        assert!(output.contains("take_delta"), "should take delta snapshot");
+        // Multicore uses pending_novel vector, flushed via try_add in batch
+        assert!(output.contains("pending_novel"), "should defer saves to batch");
+        assert!(output.contains("try_add"), "should flush via try_add");
+        assert!(output.contains("write_corpus_entry"), "should write corpus incrementally");
+    }
+
+    #[test]
+    fn singlecore_validates_ghost_actions() {
+        let output = gen_singlecore();
+        assert!(output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions from inherited parent bytes");
+    }
+
+    #[test]
+    fn multicore_validates_ghost_actions() {
+        let output = gen_multicore();
+        assert!(output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions from inherited parent bytes");
+    }
+
+    // ── Crash handling ──────────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_writes_crash_metadata() {
+        let output = gen_singlecore();
+        assert!(output.contains("take_violation"), "should check for violations");
+        assert!(output.contains("FUZZ_FINDING"), "should print finding marker");
+        assert!(output.contains("write_crash_metadata_with_actions"), "should write crash metadata");
+        assert!(output.contains("record_violation"), "should record violation against state");
+    }
+
+    #[test]
+    fn multicore_writes_crash_metadata() {
+        let output = gen_multicore();
+        assert!(output.contains("take_violation"), "should check for violations");
+        assert!(output.contains("FUZZ_FINDING"), "should print finding marker");
+        assert!(output.contains("write_crash_metadata_with_actions"), "should write crash metadata");
+        // Multicore uses pending_violations + pending_crashes
+        assert!(output.contains("pending_violations"), "should defer violations to batch");
+        assert!(output.contains("pending_crashes"), "should defer crashes to batch");
+    }
+
+    // ── Divergent tracking ──────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_tracks_divergent_keys() {
+        let output = gen_singlecore();
+        assert!(output.contains("divergent_keys"), "should track divergent accounts");
+        assert!(output.contains("prev_delta_arc"), "should track previous delta for optimization");
+        assert!(output.contains("prev_exec_dirty"), "should track previous execution's dirty accounts");
+    }
+
+    #[test]
+    fn multicore_tracks_divergent_keys() {
+        let output = gen_multicore();
+        assert!(output.contains("divergent_keys"), "should track divergent accounts");
+        assert!(output.contains("prev_delta_arc"), "should track previous delta");
+        assert!(output.contains("prev_exec_dirty"), "should track previous execution's dirty accounts");
+    }
+
+    // ── Selective restore (dual-SVM) ────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_dual_svm_restore() {
+        let output = gen_singlecore();
+        assert!(output.contains("is_traced_iter"), "should detect traced iterations");
+        assert!(output.contains("restore_selective"), "should use selective restore");
+        assert!(output.contains("restore_selective_from"), "should use delta-to-delta restore");
+        assert!(output.contains("traced_divergent"), "should track traced SVM divergent keys");
+    }
+
+    #[test]
+    fn multicore_has_dual_svm_restore() {
+        let output = gen_multicore();
+        assert!(output.contains("is_traced_iter"), "should detect traced iterations");
+        assert!(output.contains("restore_selective"), "should use selective restore");
+        assert!(output.contains("restore_selective_from"), "should use delta-to-delta restore");
+    }
+
+    // ── Splice ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_subsequence_splice() {
+        let output = gen_singlecore();
+        assert!(output.contains("splice_chain"), "should support splice chains");
+        assert!(output.contains("splice_roll"), "should roll for splice probability");
+        assert!(output.contains("reconstruct_variant_field_sequence"),
+            "should reconstruct donor sequence for splice");
+    }
+
+    #[test]
+    fn multicore_has_subsequence_splice() {
+        let output = gen_multicore();
+        assert!(output.contains("splice_chain"), "should support splice chains");
+        assert!(output.contains("splice_roll"), "should roll for splice probability");
+    }
+
+    // ── Corpus seeding ──────────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_corpus_seeding() {
+        let output = gen_singlecore();
+        assert!(output.contains("corpus_in_dir"), "should check for corpus-in");
+        assert!(output.contains("seed_files"), "should collect seed files");
+        assert!(output.contains("FuzzInput"), "should parse seed inputs");
+        assert!(output.contains("mark_seed_boundary"), "should mark seed boundary");
+    }
+
+    #[test]
+    fn multicore_has_corpus_seeding() {
+        let output = gen_multicore();
+        assert!(output.contains("corpus_in_dir"), "should check for corpus-in");
+        assert!(output.contains("seed_files"), "should collect seed files");
+        assert!(output.contains("FuzzInput"), "should parse seed inputs");
+        assert!(output.contains("mark_seed_boundary"), "should mark seed boundary");
+    }
+
+    // ── Batch picking ───────────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_batched_picks() {
+        let output = gen_singlecore();
+        assert!(output.contains("pick_batch"), "should use batched picking");
+        assert!(output.contains("build_weight_distribution"), "should build weight distribution");
+        assert!(output.contains("pick_weighted_batch"), "should use weighted batch picking");
+    }
+
+    #[test]
+    fn multicore_has_batched_picks() {
+        let output = gen_multicore();
+        assert!(output.contains("local_batch"), "should use local batch for workers");
+        assert!(output.contains("build_weight_distribution"), "should build weight distribution");
+        assert!(output.contains("pick_weighted_batch"), "should use weighted batch picking");
+    }
+
+    // ── No burst mode (removed in cleanup) ──────────────────────────────
+
+    #[test]
+    fn singlecore_no_burst_mode() {
+        let output = gen_singlecore();
+        assert!(!output.contains("burst_mode"), "burst mode should be removed");
+    }
+
+    #[test]
+    fn multicore_no_burst_mode() {
+        let output = gen_multicore();
+        assert!(!output.contains("burst_mode"), "burst mode should be removed");
+    }
+
+    // ── Barren pick tracking ────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_records_barren_picks() {
+        let output = gen_singlecore();
+        assert!(output.contains("record_barren_pick"), "should record barren picks for weight decay");
+    }
+
+    #[test]
+    fn multicore_records_barren_picks() {
+        let output = gen_multicore();
+        assert!(output.contains("pending_barren") || output.contains("record_barren_pick"),
+            "should track barren picks");
+    }
+
+    // ── Action stats ────────────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_has_action_stats() {
+        let output = gen_singlecore();
+        assert!(output.contains("ActionStatsMap"), "should create action stats tracker");
+        assert!(output.contains("action_stats . record"), "should record action outcomes");
+    }
+
+    #[test]
+    fn multicore_has_action_stats() {
+        let output = gen_multicore();
+        assert!(output.contains("ActionStatsMap"), "should create per-worker action stats");
+        assert!(output.contains("action_stats . record"), "should record action outcomes");
     }
 }
