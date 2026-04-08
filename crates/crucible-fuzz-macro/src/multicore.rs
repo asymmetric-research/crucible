@@ -38,7 +38,23 @@ pub fn multicore_mode(
     };
 
     // Max input size: 1024 for both modes (structured max valid ~336 bytes, 1024 is 3x headroom)
-    let max_size_setup = quote! { state.set_max_size(1024); };
+    // Max input size: scan --corpus-in files to avoid truncating stateful entries.
+    let max_size_setup = quote! {
+        let __max_input_size: usize = {
+            let mut max = 1024usize;
+            if let Some(ref dir) = corpus_in_dir {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            max = max.max(meta.len() as usize);
+                        }
+                    }
+                }
+            }
+            max
+        };
+        state.set_max_size(__max_input_size);
+    };
 
     let default_seed_code = if structured {
         let at = action_type.unwrap();
@@ -317,6 +333,7 @@ pub fn multicore_mode(
             // Monitor for aggregated stats across all workers
             // Uses rate-limited caching to avoid expensive operations on every callback
             let monitor = MultiMonitor::new(move |s| {
+                if crucible_test_context::is_corpus_loading() { return; }
                 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
                 // Cached monitor values with rate-limiting (avoid expensive ops on every callback)
@@ -803,6 +820,7 @@ pub fn multicore_mode(
 
                 if !corpus_dirs_to_load.is_empty() {
                     // Full loading: all workers load all inputs for complete seed access
+                    crucible_test_context::set_corpus_loading(true);
                     state.load_initial_inputs_forced(
                         &mut fuzzer,
                         &mut executor,
@@ -811,6 +829,7 @@ pub fn multicore_mode(
                     ).unwrap_or_else(|e| {
                         eprintln!("[Worker {}] Failed to load corpus: {:?}", worker_id, e);
                     });
+                    crucible_test_context::set_corpus_loading(false);
                 }
 
                 // Ensure at least one input - ALL workers need a seed to fuzz
@@ -819,7 +838,11 @@ pub fn multicore_mode(
                 }
 
                 let loaded = state.corpus().count();
-                eprintln!("[Worker {}] Loaded {} corpus entries (ready to fuzz)", worker_id, loaded);
+                let __load_edges = #mod_name::FuzzCallback::count_shared_bits(
+                    shared_edge_ptr as *const u8,
+                    #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
+                );
+                eprintln!("[Worker {}] Loaded {} corpus entries, edges after loading: {} (ready to fuzz)", worker_id, loaded, __load_edges);
 
                 // After corpus loading, switch to non-tracing SVM for max throughput.
                 // The corpus was loaded with tracing enabled so the coverage baseline

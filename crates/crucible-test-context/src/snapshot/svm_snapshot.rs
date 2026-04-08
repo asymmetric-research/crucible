@@ -259,6 +259,29 @@ impl SvmSnapshot {
         &self.accounts
     }
 
+    /// Hash the SVM state for the accounts tracked by this snapshot.
+    /// Used for save/restore verification: hash at save time, hash again after restore,
+    /// if they differ the snapshot is lossy.
+    pub fn hash_tracked_state(&self, svm: &LiteSVM) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use rustc_hash::FxHasher;
+        let mut hasher = FxHasher::default();
+        // Sort keys for deterministic order
+        let mut keys: Vec<_> = self.accounts.keys().copied().collect();
+        keys.sort();
+        for pk in &keys {
+            pk.hash(&mut hasher);
+            if let Some(acct) = svm.get_account(pk) {
+                acct.lamports.hash(&mut hasher);
+                acct.data.hash(&mut hasher);
+                acct.owner.hash(&mut hasher);
+            } else {
+                0u8.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     /// Get the stored Clock sysvar by deserializing from sysvars.
     pub fn clock(&self) -> Clock {
         let clock_id = Clock::id();

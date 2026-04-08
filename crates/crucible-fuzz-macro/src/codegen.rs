@@ -114,6 +114,8 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
         let __csv_ref = __stats_csv.clone();
 
         let monitor = SimpleMonitor::new(move |s| {
+            // Suppress monitor output during corpus loading (too noisy)
+            if crucible_test_context::is_corpus_loading() { return; }
             // Helper to parse numeric values from LibAFL's monitor string
             // Handles SI suffixes: k (1000), M (1000000)
             fn __parse_monitor_val(s: &str, key: &str) -> f64 {

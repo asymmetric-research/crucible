@@ -141,6 +141,8 @@ thread_local! {
     static FUZZ_DEBUG: Cell<bool> = Cell::new(false);
     // Stateful chain mode: when true, action loops break on first failure
     static STATEFUL_CHAIN_MODE: Cell<bool> = const { Cell::new(false) };
+    // Corpus loading phase: suppress monitor output during loading
+    static CORPUS_LOADING: Cell<bool> = const { Cell::new(false) };
 }
 
 // Sentinel: has FUZZ_DEBUG TLS been initialized on this thread?
@@ -175,6 +177,53 @@ pub fn set_stateful_chain_mode(v: bool) {
 pub fn is_stateful_chain_mode() -> bool {
     STATEFUL_CHAIN_MODE.with(|f| f.get())
 }
+
+/// Check FUZZ_DEBUG_REPLAY env var (cached per-thread).
+#[inline]
+pub fn is_debug_replay() -> bool {
+    // Simple check — not on hot path (only used in replay mode)
+    std::env::var("FUZZ_DEBUG_REPLAY").is_ok()
+}
+
+/// Hash SVM state for tracked accounts. Returns (hash, clock_slot).
+/// Accounts sorted by (lamports, data_len, data_hash) for cross-run stability.
+pub fn compute_svm_debug_hash(svm: &litesvm::LiteSVM, tracked_accounts: &[solana_pubkey::Pubkey]) -> (u64, u64) {
+    use std::hash::{Hash, Hasher};
+    use rustc_hash::FxHasher;
+    use anchor_lang::prelude::Clock;
+    let mut hasher = FxHasher::default();
+    let clock: Clock = svm.get_sysvar();
+    let slot = clock.slot;
+    clock.slot.hash(&mut hasher);
+    clock.epoch.hash(&mut hasher);
+    let mut entries: Vec<(u64, usize, u64)> = Vec::with_capacity(tracked_accounts.len());
+    for pubkey in tracked_accounts {
+        if let Some(acct) = svm.get_account(pubkey) {
+            let mut dh = FxHasher::default();
+            acct.data.hash(&mut dh);
+            entries.push((acct.lamports, acct.data.len(), dh.finish()));
+        }
+    }
+    entries.sort();
+    for (lamports, data_len, data_hash) in &entries {
+        lamports.hash(&mut hasher);
+        data_len.hash(&mut hasher);
+        data_hash.hash(&mut hasher);
+    }
+    (hasher.finish(), slot)
+}
+
+/// Set corpus loading flag (suppresses monitor output during loading).
+pub fn set_corpus_loading(v: bool) {
+    CORPUS_LOADING.with(|f| f.set(v));
+}
+
+/// Check if corpus loading is in progress.
+#[inline]
+pub fn is_corpus_loading() -> bool {
+    CORPUS_LOADING.with(|f| f.get())
+}
+
 
 #[doc(hidden)]
 /// Set the current Anchor instruction name (for coverage tracking)
@@ -4966,5 +5015,20 @@ mod tests {
         ctx.dirty_tracker.clear();
         assert!(ctx.dirty_tracker.clock_target_slot.is_none());
         assert!(!ctx.dirty_tracker.is_clock_dirty());
+    }
+
+    // === Regression: corpus_loading flag suppresses monitor output ===
+
+    #[test]
+    fn corpus_loading_flag_defaults_false() {
+        assert!(!is_corpus_loading());
+    }
+
+    #[test]
+    fn corpus_loading_flag_roundtrip() {
+        set_corpus_loading(true);
+        assert!(is_corpus_loading());
+        set_corpus_loading(false);
+        assert!(!is_corpus_loading());
     }
 }

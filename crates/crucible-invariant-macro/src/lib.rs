@@ -1242,18 +1242,10 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
             // Cap actions to prevent unbounded input growth causing performance degradation
             // Each action = one SVM transaction, more actions = exponentially more work
-            let max_actions: usize = if std::env::var("FUZZ_INPUT_FILE").is_ok()
-                || std::env::var("FUZZ_TMIN_FILE").is_ok()
-                || std::env::var("FUZZ_TMIN_ALL_DIR").is_ok()
-            {
-                // Replay/tmin mode: don't cap — crash files may have more actions than the default
-                usize::MAX
-            } else {
-                std::env::var("FUZZ_MAX_ACTIONS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10)
-            };
+            // Never cap actions during replay — corpus entries from stateful mode
+            // can have more actions than the default mutation cap (10).
+            // The cap only matters for the mutator (SequenceMutator), not here.
+            let max_actions: usize = usize::MAX;
 
             let debug = std::env::var("FUZZ_DEBUG").is_ok();
             let capped_len = actions.len().min(max_actions);
@@ -1304,6 +1296,19 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 __executed_actions.push(action);
 
                 #fn_body
+
+                // Per-action replay diagnostic: log success + violation + state hash
+                if crucible_test_context::is_debug_replay() {
+                    let __has_viol = crucible_test_context::has_violation();
+                    let __dirty_keys: Vec<_> = fixture.ctx.dirty_tracker.dirty_accounts().iter().copied().collect();
+                    let (__state_hash, __slot) = crucible_test_context::compute_svm_debug_hash(
+                        &fixture.ctx.svm, &__dirty_keys,
+                    );
+                    eprintln!("[REPLAY_DIAG] action={}/{} variant={} success={} violation={} slot={} hash={:016x}",
+                        i + 1, capped_len,
+                        __executed_actions.last().unwrap().action_name(),
+                        success, __has_viol, __slot, __state_hash);
+                }
 
                 // === EARLY EXIT: Stop immediately if invariant was violated ===
                 if crucible_test_context::has_violation() {

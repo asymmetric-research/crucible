@@ -385,6 +385,18 @@ fn stateful_singlecore_body(
                         crucible_test_context::get_first_action_success().unwrap_or(false)
                     };
 
+                    // Seed loading diagnostic: per-action state hash
+                    if crucible_test_context::is_debug_replay() {
+                        let __dirty_keys: Vec<_> = __seed_fixture.ctx.dirty_tracker.dirty_accounts().iter().copied().collect();
+                        let (__sh, __sl) = crucible_test_context::compute_svm_debug_hash(
+                            &__seed_fixture.ctx.svm, &__dirty_keys,
+                        );
+                        let __dbg_file = __seed_path.file_name().unwrap_or_default().to_string_lossy();
+                        eprintln!("[SEED_DIAG] file={} action={}/{} variant={} success={} slot={} hash={:016x}",
+                            __dbg_file, __current_depth + 1, __fuzz_input.actions.len(),
+                            __seed_action.action_name(), __seed_ok, __sl, __sh);
+                    }
+
                     if !__seed_ok {
                         // Swap SVMs back and stop this sequence
                         #extra_swap_back_seed
@@ -417,6 +429,8 @@ fn stateful_singlecore_body(
                     );
 
                     __current_depth += 1;
+                    // Backfill params so the stored action_desc includes them in crash output
+                    crucible_test_context::backfill_action_params(0, __seed_action.to_json_params());
                     let __action_desc = crucible_test_context::format_last_action_oneline();
                     let __variant = __seed_action.variant_index() as u16;
                     let __field_bytes = if __single_bytes.len() > 2 {
@@ -454,8 +468,11 @@ fn stateful_singlecore_body(
 
             // Reset SVM to initial for the main loop
             initial_snapshot.restore_full(&mut __real_svm);
-            eprintln!("[STATEFUL] Seeded {} states from {} corpus files", __seeded, __seed_files.len());
+            let __seed_edges = #mod_name::TOTAL_EDGES_ATOMIC.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
+                __seeded, __seed_files.len(), __seed_edges);
         }
+        state_pool.mark_seed_boundary();
 
         eprintln!("[STATEFUL] Starting stateful fuzzing loop...\n");
 
@@ -514,7 +531,7 @@ fn stateful_singlecore_body(
                             #mod_name::write_lcov_coverage("coverage.lcov");
                         }
                         if let Some(ref __corpus_out_path) = corpus_out_dir {
-                            match state_pool.export_corpus(__corpus_out_path) {
+                            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
                             }
@@ -660,6 +677,18 @@ fn stateful_singlecore_body(
             }
             if let Some(__t) = __t { __phase_restore_ns += __t.elapsed().as_nanos() as u64; }
 
+            // Debug: verify restore fidelity by comparing state hash
+            if crucible_test_context::is_debug_replay() {
+                let __saved_hash = state_pool.get_debug_hash(state_idx);
+                if __saved_hash != 0 {
+                    let __restored_hash = initial_snapshot.hash_tracked_state(&__real_svm);
+                    if __saved_hash != __restored_hash {
+                        eprintln!("[RESTORE_MISMATCH] state_idx={} depth={} save_hash={:016x} restore_hash={:016x}",
+                            state_idx, parent_depth, __saved_hash, __restored_hash);
+                    }
+                }
+            }
+
             // 3. Generate action chain using adaptive scheduling.
             //    If splice was triggered above, use the spliced chain instead.
             let __t = if __do_profile { Some(std::time::Instant::now()) } else { None };
@@ -757,7 +786,18 @@ fn stateful_singlecore_body(
                     __action_chain.push(__one_action);
                 }
             }
-            let __chain_len = __action_chain.len();
+            let mut __chain_len = __action_chain.len();
+            // Track byte offset of each action in __single_action_buf for post-execution truncation
+            let __action_byte_offsets: Vec<usize> = {
+                let mut offsets = Vec::with_capacity(__chain_len + 1);
+                let mut pos = 0usize;
+                for __a in &__action_chain {
+                    offsets.push(pos);
+                    pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
+                }
+                offsets.push(pos); // sentinel: end of last action
+                offsets
+            };
             // Use last action's variant for stats recording
             let __action_variant_idx = __action_chain.last().unwrap().variant_index();
 
@@ -831,6 +871,18 @@ fn stateful_singlecore_body(
                 __phase_tx_blockhash_ns += __bh;
                 __phase_tx_sign_ns += __sg;
                 __phase_tx_exec_ns += __ex;
+            }
+
+            // Truncate chain to actually-executed actions. If the chain broke early
+            // (is_stateful_chain_mode break on failure), __single_action_buf contains
+            // bytes for unexecuted actions that would cause replay divergence.
+            {
+                let __actually_executed = crucible_test_context::get_action_history().len();
+                if __actually_executed < __chain_len {
+                    let __truncate_at = __action_byte_offsets[__actually_executed];
+                    __single_action_buf.truncate(__truncate_at);
+                    __chain_len = __actually_executed;
+                }
             }
 
             // Check if this action produced new coverage:
@@ -910,8 +962,17 @@ fn stateful_singlecore_body(
             let violation = crucible_test_context::take_violation();
 
             if let Some(ref msg) = violation {
-                // Reconstruct full action sequence for crash file
-                let mut crash_bytes = state_pool.reconstruct_action_sequence(state_idx);
+                let __violation_action_idx = crucible_test_context::get_violation_action_index();
+                let __history_len = crucible_test_context::get_action_history().len();
+                eprintln!("[CRASH_DIAG] violation at chain action {}/{} (parent depth={}, total={}), history_len={}",
+                    __violation_action_idx.map(|i| i + 1).unwrap_or(0), __chain_len,
+                    parent_depth, parent_depth + __chain_len as u32, __history_len);
+                // Reconstruct full action sequence for crash file (strip inherited ghosts)
+                let mut crash_bytes = {
+                    let raw = state_pool.reconstruct_action_sequence(state_idx);
+                    let stored = if raw.len() >= 4 { u32::from_le_bytes(raw[0..4].try_into().unwrap()) } else { 0 };
+                    if stored != parent_depth { state_pool.rebuild_action_bytes_clean(state_idx) } else { raw }
+                };
                 let __parent_count = if crash_bytes.len() >= 4 {
                     u32::from_le_bytes(crash_bytes[0..4].try_into().unwrap())
                 } else { 0 };
@@ -1023,6 +1084,13 @@ fn stateful_singlecore_body(
                         // Deep-clone parent action bytes to build accumulated sequence
                         let mut accumulated_bytes = (*parent_action_bytes).clone();
                         if accumulated_bytes.len() >= 4 {
+                            // Validate parent count matches depth to strip inherited ghosts
+                            let stored_count = u32::from_le_bytes(
+                                accumulated_bytes[0..4].try_into().unwrap()
+                            );
+                            if stored_count != parent_depth {
+                                accumulated_bytes = state_pool.rebuild_action_bytes_clean(state_idx);
+                            }
                             let count = u32::from_le_bytes(
                                 accumulated_bytes[0..4].try_into().unwrap()
                             );
@@ -1078,6 +1146,15 @@ fn stateful_singlecore_body(
                             __coverage_positions,
                         ) {
                             novel_states += 1;
+                            // Debug: store state hash at save time for restore verification
+                            if crucible_test_context::is_debug_replay() {
+                                let __save_hash = initial_snapshot.hash_tracked_state(&#fixture_param_name.ctx.svm);
+                                state_pool.set_last_debug_hash(__save_hash);
+                            }
+                            // Write to corpus incrementally if --corpus-out is set
+                            if let Some(ref __cop) = corpus_out_dir {
+                                state_pool.write_corpus_entry(state_pool.len() - 1, __cop);
+                            }
                         }
                         if let Some(__t) = __t_save { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
                     }
@@ -1282,7 +1359,7 @@ fn stateful_singlecore_body(
 
         // Loop exited (all active states exhausted or signal)
         if let Some(ref __corpus_out_path) = corpus_out_dir {
-            match state_pool.export_corpus(__corpus_out_path) {
+            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
             }
@@ -1455,7 +1532,10 @@ fn stateful_multicore_body(
                     std::mem::swap(&mut __seed_fixture.ctx.svm, &mut __real_svm);
                     #extra_swap_in_seed_mc
 
-                    let callback = #mod_name::FuzzCallback::from_raw(__stateful_cov_ptr, #mod_name::MAP_SIZE);
+                    let callback = #mod_name::FuzzCallback::with_shared_memory(
+                        __stateful_cov_ptr, #mod_name::MAP_SIZE,
+                        shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
+                    );
                     __seed_fixture.ctx.set_invocation_callback(callback);
                     crucible_test_context::clear_action_history();
                     crucible_test_context::clear_violation_tracking();
@@ -1464,6 +1544,10 @@ fn stateful_multicore_body(
                     let __seed_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         #fn_name(&mut __seed_fixture, vec![__seed_action.clone()]);
                     }));
+                    // Flush coverage to shared bitmap so monitor reflects seed coverage
+                    #mod_name::flush_local_bitmap_buffers(
+                        shared_edge_addr as *mut u8, shared_branch_addr as *mut u8,
+                    );
 
                     // Check success
                     let __seed_ok = __seed_panic.is_ok() && {
@@ -1501,6 +1585,8 @@ fn stateful_multicore_body(
                     );
 
                     __current_depth += 1;
+                    // Backfill params so the stored action_desc includes them in crash output
+                    crucible_test_context::backfill_action_params(0, __seed_action.to_json_params());
                     let __action_desc = crucible_test_context::format_last_action_oneline();
                     let __variant = __seed_action.variant_index() as u16;
                     let __field_bytes = if __single_bytes.len() > 2 {
@@ -1536,7 +1622,16 @@ fn stateful_multicore_body(
 
             // Reset SVM to initial for workers
             initial_snapshot.restore_full(&mut __real_svm);
-            eprintln!("[STATEFUL] Seeded {} states from {} corpus files", __seeded, __seed_files.len());
+            let __seed_edges = #mod_name::FuzzCallback::count_shared_bits(
+                shared_edge_addr as *const u8,
+                #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
+            );
+            eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
+                __seeded, __seed_files.len(), __seed_edges);
+        }
+        {
+            let mut pool = state_pool.write().unwrap();
+            pool.mark_seed_boundary();
         }
 
         eprintln!("[STATEFUL] Starting multi-threaded stateful fuzzing...\n");
@@ -1567,6 +1662,7 @@ fn stateful_multicore_body(
             let novel = shared_novel.clone();
             let stop = stop_flag.clone();
             let crash_dir = crash_dir.clone();
+            let corpus_out_for_worker = corpus_out_dir.clone();
             let fixture_clone_lock = fixture_clone_mutex.clone();
             let fp_bitmap = fingerprint_bitmap.clone();
             let discovered_bitmap = shared_discovered.clone();
@@ -1667,6 +1763,9 @@ fn stateful_multicore_body(
                                         if pool.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) {
                                             novel.fetch_add(1, Ordering::Relaxed);
                                             fp_bitmap.mark(fp);
+                                            if let Some(ref __cop) = corpus_out_for_worker {
+                                                pool.write_corpus_entry(pool.len() - 1, __cop);
+                                            }
                                         }
                                     }
                                     // Record violations against parent states
@@ -1961,7 +2060,17 @@ fn stateful_multicore_body(
                                 __action_chain.push(__one_action);
                             }
                         }
-                        let __chain_len = __action_chain.len();
+                        let mut __chain_len = __action_chain.len();
+                        let __action_byte_offsets: Vec<usize> = {
+                            let mut offsets = Vec::with_capacity(__chain_len + 1);
+                            let mut pos = 0usize;
+                            for __a in &__action_chain {
+                                offsets.push(pos);
+                                pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
+                            }
+                            offsets.push(pos);
+                            offsets
+                        };
                         let __action_variant_idx = __action_chain.last().unwrap().variant_index();
 
                         let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
@@ -2006,6 +2115,16 @@ fn stateful_multicore_body(
                         }));
                         let __actions_this_iter = crucible_test_context::get_iteration_dispatch_count();
 
+                        // Truncate chain to actually-executed actions (see singlecore comment)
+                        {
+                            let __actually_executed = crucible_test_context::get_action_history().len();
+                            if __actually_executed < __chain_len {
+                                let __truncate_at = __action_byte_offsets[__actually_executed];
+                                __single_action_buf.truncate(__truncate_at);
+                                __chain_len = __actually_executed;
+                            }
+                        }
+
                         // Flush thread-local bitmap buffers and check for new coverage.
                         // Uses shared bitmaps (atomic fetch_or) as single source of truth
                         // for coverage novelty — same as stateless multicore (SharedBitmapFeedback).
@@ -2045,13 +2164,17 @@ fn stateful_multicore_body(
                                 &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
                             );
                             if seen_variant_hashes.insert(__local_key) {
-                                // Build crash bytes locally (deep clone from Arc)
-                                let mut crash_bytes = (*parent_action_bytes).clone();
+                                // Build crash bytes (strip inherited ghosts from parent)
+                                let mut crash_bytes = {
+                                    let raw = (*parent_action_bytes).clone();
+                                    let stored = if raw.len() >= 4 { u32::from_le_bytes(raw[0..4].try_into().unwrap()) } else { 0 };
+                                    if stored != parent_depth {
+                                        if let Ok(__pg) = pool.read() { __pg.rebuild_action_bytes_clean(state_idx) } else { raw }
+                                    } else { raw }
+                                };
                                 let __parent_count = if crash_bytes.len() >= 4 {
                                     u32::from_le_bytes(crash_bytes[0..4].try_into().unwrap())
                                 } else { 0 };
-                                eprintln!("[CRASH_DEBUG] W{}: state_idx={}, parent_depth={}, parent_bytes_count={}, chain_len={}, total={}",
-                                    worker_id, state_idx, parent_depth, __parent_count, __chain_len, __parent_count + __chain_len as u32);
                                 if crash_bytes.len() >= 4 {
                                     let old_count = __parent_count;
                                     crash_bytes[0..4].copy_from_slice(&(old_count + __chain_len as u32).to_le_bytes());
@@ -2105,6 +2228,16 @@ fn stateful_multicore_body(
 
                                     let mut accumulated_bytes = (*parent_action_bytes).clone();
                                     if accumulated_bytes.len() >= 4 {
+                                        // Validate parent action count matches depth to strip inherited ghosts
+                                        let stored_count = u32::from_le_bytes(
+                                            accumulated_bytes[0..4].try_into().unwrap()
+                                        );
+                                        if stored_count as u32 != parent_depth {
+                                            // Parent has ghost actions — rebuild from scratch
+                                            if let Ok(__pg) = pool.read() {
+                                                accumulated_bytes = __pg.rebuild_action_bytes_clean(state_idx);
+                                            }
+                                        }
                                         let count = u32::from_le_bytes(
                                             accumulated_bytes[0..4].try_into().unwrap()
                                         );
@@ -2362,6 +2495,9 @@ fn stateful_multicore_body(
                                 if p.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) {
                                     novel.fetch_add(1, Ordering::Relaxed);
                                     fingerprint_bitmap.mark(fp);
+                                    if let Some(ref __cop) = corpus_out_dir {
+                                        p.write_corpus_entry(p.len() - 1, __cop);
+                                    }
                                 }
                             }
                             // Record violations against parent states
@@ -2670,7 +2806,17 @@ fn stateful_multicore_body(
                         __action_chain.push(__one_action);
                     }
                 }
-                let __chain_len = __action_chain.len();
+                let mut __chain_len = __action_chain.len();
+                let __action_byte_offsets: Vec<usize> = {
+                    let mut offsets = Vec::with_capacity(__chain_len + 1);
+                    let mut pos = 0usize;
+                    for __a in &__action_chain {
+                        offsets.push(pos);
+                        pos += 2 + <#action_ty as crucible_fuzzer::FuzzAction>::field_byte_count(__a.variant_index());
+                    }
+                    offsets.push(pos);
+                    offsets
+                };
                 let __action_variant_idx = __action_chain.last().unwrap().variant_index();
 
                 let __chain_descs: Vec<String> = __action_chain.iter().map(|__a| {
@@ -2732,6 +2878,16 @@ fn stateful_multicore_body(
                     __phase_tx_exec_ns += __ex;
                 }
 
+                // Truncate chain to actually-executed actions (see singlecore comment)
+                {
+                    let __actually_executed = crucible_test_context::get_action_history().len();
+                    if __actually_executed < __chain_len {
+                        let __truncate_at = __action_byte_offsets[__actually_executed];
+                        __single_action_buf.truncate(__truncate_at);
+                        __chain_len = __actually_executed;
+                    }
+                }
+
                 // Flush thread-local bitmap buffers and check for new coverage.
                 // Uses shared bitmaps (atomic fetch_or) as single source of truth.
                 // Edge coverage (drives dedup bypass — real code coverage)
@@ -2781,7 +2937,11 @@ fn stateful_multicore_body(
                         &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
                     );
                     if seen_variant_hashes.insert(__local_key) {
-                        let mut crash_bytes = (*parent_action_bytes).clone();
+                        let mut crash_bytes = {
+                            let raw = (*parent_action_bytes).clone();
+                            let stored = if raw.len() >= 4 { u32::from_le_bytes(raw[0..4].try_into().unwrap()) } else { 0 };
+                            if stored != parent_depth { state_pool.read().unwrap().rebuild_action_bytes_clean(state_idx) } else { raw }
+                        };
                         if crash_bytes.len() >= 4 {
                             let old_count = u32::from_le_bytes(
                                 crash_bytes[0..4].try_into().unwrap()
@@ -3118,7 +3278,7 @@ fn stateful_multicore_body(
 
         if let Some(ref __corpus_out_path) = corpus_out_dir {
             let pool = state_pool.read().unwrap();
-            match pool.export_corpus(__corpus_out_path) {
+            match pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
             }

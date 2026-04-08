@@ -140,6 +140,9 @@ pub struct StateEntry {
     /// novel_children is incremented. Used for exponential weight decay:
     /// states that keep failing to produce novelty get deprioritized.
     pub barren_picks: u32,
+    /// Debug: hash of tracked account state at save time (for restore verification).
+    /// Set when FUZZ_DEBUG_REPLAY=1, otherwise 0.
+    pub debug_state_hash: u64,
 }
 
 // ============================================================================
@@ -485,6 +488,9 @@ pub struct StatePool {
     pub(crate) current_iteration: u64,
     /// Counter for periodic n-gram rarity refresh.
     ngram_refresh_counter: u32,
+    /// Number of states loaded from seed corpus (indices 0..seed_count are seeds).
+    /// Used by export_corpus to skip seed intermediates.
+    seed_count: usize,
 }
 
 impl StatePool {
@@ -512,6 +518,7 @@ impl StatePool {
             phase: FuzzPhase::Coverage,
             current_iteration: 0,
             ngram_refresh_counter: 0,
+            seed_count: 0,
         }
     }
 
@@ -709,6 +716,7 @@ impl StatePool {
             ngram_rarity,
             ngram_keys,
             barren_picks: 0,
+            debug_state_hash: 0,
         });
         // Only add to active set if depth < max_depth.
         // States at max_depth can't extend further — keep them in `states` + `seen`
@@ -1049,6 +1057,24 @@ impl StatePool {
         self.states.len()
     }
 
+    /// Set debug state hash for the most recently added entry.
+    pub fn set_last_debug_hash(&mut self, hash: u64) {
+        if let Some(entry) = self.states.last_mut() {
+            entry.debug_state_hash = hash;
+        }
+    }
+
+    /// Get debug state hash for a given entry.
+    pub fn get_debug_hash(&self, idx: usize) -> u64 {
+        self.states[idx].debug_state_hash
+    }
+
+    /// Mark current pool size as the seed boundary.
+    /// Entries at indices 0..seed_count are seed-loaded intermediates.
+    pub fn mark_seed_boundary(&mut self) {
+        self.seed_count = self.states.len();
+    }
+
     /// Number of active (non-crashed) states eligible for picking.
     pub fn active_count(&self) -> usize {
         self.active_indices.len()
@@ -1194,21 +1220,96 @@ impl StatePool {
         self.states.len() - self.active_indices.len()
     }
 
+    /// Convenience wrapper: export without seed passthrough.
+    #[cfg(test)]
+    pub fn export_corpus_no_seeds(&self, dir: &str) -> std::io::Result<usize> {
+        self.export_corpus(dir, None)
+    }
+
+    /// Write a single entry to the corpus directory (called incrementally when new coverage is found).
+    /// Only writes if the entry has edge_novelty > 0. Returns true if written.
+    pub fn write_corpus_entry(&self, idx: usize, dir: &str) -> bool {
+        let entry = &self.states[idx];
+        if entry.action_bytes.len() <= 4 || entry.edge_novelty == 0 {
+            return false;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let mut hasher = FxHasher::default();
+        entry.action_bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        let path = format!("{}/corpus_{:016x}", dir, hash);
+        std::fs::write(&path, &*entry.action_bytes).is_ok()
+    }
+
     /// Write all pool entries' action sequences to disk as FuzzInput binary files.
     /// Returns the number of files written. Skips the initial state (depth 0, empty actions).
-    pub fn export_corpus(&self, dir: &str) -> std::io::Result<usize> {
+    pub fn export_corpus(&self, dir: &str, seed_dir: Option<&str>) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut count = 0;
-        for entry in &self.states {
+
+        // Step 1: Copy seed files (full chains from --corpus-in) directly.
+        // These are proven-replayable chains that provide base coverage.
+        if let Some(src) = seed_dir {
+            if let Ok(entries) = std::fs::read_dir(src) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name() {
+                            let name_str = name.to_string_lossy();
+                            if name_str.starts_with('.') || name_str.ends_with(".metadata") {
+                                continue;
+                            }
+                            let dest = format!("{}/{}", dir, name_str);
+                            std::fs::copy(&path, &dest)?;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Export only non-seed entries that discovered new code-edge coverage.
+        // Seed intermediates are skipped — the full seed chains (step 1) already cover them.
+        let mut new_coverage = 0usize;
+        let mut skipped_state_only = 0usize;
+        for (idx, entry) in self.states.iter().enumerate() {
             // Skip initial empty state (just a 4-byte header with count=0)
             if entry.action_bytes.len() <= 4 { continue; }
+            // Skip seed-loaded intermediates — the original files are already copied.
+            if idx < self.seed_count { continue; }
+            // Only export states that discovered new code-edge coverage.
+            if entry.edge_novelty == 0 {
+                skipped_state_only += 1;
+                continue;
+            }
             let mut hasher = FxHasher::default();
             entry.action_bytes.hash(&mut hasher);
             let hash = hasher.finish();
             let path = format!("{}/corpus_{:016x}", dir, hash);
             std::fs::write(&path, &*entry.action_bytes)?;
+            new_coverage += 1;
             count += 1;
         }
+        // Diagnostic: count unique edge positions across all exported entries.
+        // This shows whether the exported set captures all known coverage.
+        let mut all_positions: FastHashSet<u16> = FastHashSet::default();
+        let mut entries_with_positions = 0usize;
+        let mut entries_without_positions = 0usize;
+        for (idx, entry) in self.states.iter().enumerate() {
+            if entry.action_bytes.len() <= 4 { continue; }
+            if idx < self.seed_count { continue; }
+            if entry.edge_novelty == 0 { continue; }
+            if let Some(ref positions) = entry.edge_positions {
+                all_positions.extend(positions.iter());
+                entries_with_positions += 1;
+            } else {
+                entries_without_positions += 1;
+            }
+        }
+        eprintln!("[STATEFUL] Corpus: {} seed files + {} new coverage entries ({} state-only skipped)",
+            count - new_coverage, new_coverage, skipped_state_only);
+        eprintln!("[STATEFUL] Coverage diagnostic: {} unique edge positions across {} entries ({} without positions)",
+            all_positions.len(), entries_with_positions, entries_without_positions);
         Ok(count)
     }
 
@@ -1562,6 +1663,48 @@ impl StatePool {
         (*self.states[state_idx].action_bytes).clone()
     }
 
+    /// Rebuild action bytes by walking the parent chain and extracting each entry's
+    /// individual contribution. This strips ghost actions that may have been inherited
+    /// from ancestor entries created before the chain truncation fix.
+    pub fn rebuild_action_bytes_clean(&self, state_idx: usize) -> Vec<u8> {
+        // Walk parent chain to collect (entry_idx, parent_idx) pairs
+        let mut chain: Vec<usize> = Vec::new();
+        let mut idx = state_idx;
+        loop {
+            chain.push(idx);
+            match self.states[idx].parent_idx {
+                Some(parent) => idx = parent,
+                None => break,
+            }
+        }
+        chain.reverse(); // root → ... → state_idx
+
+        // Rebuild: for each entry, extract its individual bytes by subtracting parent's bytes
+        let mut result: Vec<u8> = 0u32.to_le_bytes().to_vec(); // count header
+        let mut count: u32 = 0;
+        for &entry_idx in &chain {
+            let entry = &self.states[entry_idx];
+            let entry_bytes = &*entry.action_bytes;
+            if entry_bytes.len() <= 4 { continue; } // skip initial empty state
+
+            let parent_byte_len = match entry.parent_idx {
+                Some(pidx) => self.states[pidx].action_bytes.len(),
+                None => 4, // root: just 4-byte header
+            };
+
+            // Entry's individual contribution = entry_bytes[parent_byte_len..]
+            if entry_bytes.len() > parent_byte_len {
+                let individual = &entry_bytes[parent_byte_len..];
+                // Count individual actions by parsing 2-byte variant headers
+                // We trust depth: each entry adds exactly 1 action (or chain_len actions)
+                result.extend_from_slice(individual);
+            }
+            count = entry.depth;
+        }
+        result[0..4].copy_from_slice(&count.to_le_bytes());
+        result
+    }
+
     /// Walk the parent chain and return the sequence of action variant indices (oldest first).
     /// Used for coarse crash deduplication — same action types = same crash class.
     pub fn reconstruct_variant_sequence(&self, state_idx: usize) -> Vec<u16> {
@@ -1626,5 +1769,119 @@ impl StatePool {
         }
         chain.reverse();
         chain
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_empty_delta() -> SvmSnapshot {
+        SvmSnapshot {
+            accounts: FastHashMap::default(),
+            sysvars: Vec::new(),
+        }
+    }
+
+    fn make_pool_with_entries() -> StatePool {
+        let mut pool = StatePool::new(100, 10);
+        // Add initial state
+        let delta = make_empty_delta();
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
+
+        // Add a field-only entry (edge_novelty=0)
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x01, 0x00, 0xAA]; // 1 action
+        pool.try_add(1, delta, 1, Some(0), action_bytes, "field_action -> OK".into(),
+            Some(0), vec![0xAA], None, 5, 0, true, None);
+
+        // Add a coverage entry (edge_novelty=3)
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x02, 0x00, 0xBB]; // 1 action
+        pool.try_add(2, delta, 1, Some(0), action_bytes, "cov_action -> OK".into(),
+            Some(1), vec![0xBB], None, 3, 3, true, Some(vec![10, 20, 30]));
+
+        pool
+    }
+
+    #[test]
+    fn export_corpus_skips_field_only_entries() {
+        let pool = make_pool_with_entries();
+        let dir = std::env::temp_dir().join("crucible_test_export_field_only");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+
+        // Only the coverage entry should be exported (not the initial or field-only)
+        assert_eq!(count, 1, "should export only coverage entries");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_corpus_skips_seed_entries() {
+        let mut pool = make_pool_with_entries();
+        // Mark current entries as seeds
+        pool.mark_seed_boundary();
+
+        // Add another coverage entry after seed boundary
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x03, 0x00, 0xCC];
+        pool.try_add(3, delta, 1, Some(0), action_bytes, "new_cov -> OK".into(),
+            Some(2), vec![0xCC], None, 2, 2, true, Some(vec![40, 50]));
+
+        let dir = std::env::temp_dir().join("crucible_test_export_seed_skip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+
+        // Only the post-seed coverage entry should be exported
+        assert_eq!(count, 1, "should skip seed entries and only export new coverage");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_corpus_copies_seed_files() {
+        let pool = make_pool_with_entries();
+        let seed_dir = std::env::temp_dir().join("crucible_test_seed_src");
+        let out_dir = std::env::temp_dir().join("crucible_test_seed_dst");
+        let _ = std::fs::remove_dir_all(&seed_dir);
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&seed_dir).unwrap();
+
+        // Create seed files
+        std::fs::write(seed_dir.join("corpus_aaa"), b"seed1").unwrap();
+        std::fs::write(seed_dir.join("corpus_bbb"), b"seed2").unwrap();
+        std::fs::write(seed_dir.join(".hidden"), b"skip").unwrap();
+        std::fs::write(seed_dir.join("x.metadata"), b"skip").unwrap();
+
+        let count = pool.export_corpus(
+            out_dir.to_str().unwrap(),
+            Some(seed_dir.to_str().unwrap()),
+        ).unwrap();
+
+        // 2 seed files + 1 coverage entry = 3
+        assert_eq!(count, 3);
+        assert!(out_dir.join("corpus_aaa").exists());
+        assert!(out_dir.join("corpus_bbb").exists());
+        assert!(!out_dir.join(".hidden").exists());
+        assert!(!out_dir.join("x.metadata").exists());
+
+        let _ = std::fs::remove_dir_all(&seed_dir);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn mark_seed_boundary_sets_count() {
+        let mut pool = StatePool::new(100, 10);
+        let delta = make_empty_delta();
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
+        let delta = make_empty_delta();
+        pool.try_add(1, delta, 1, Some(0), vec![1, 0, 0, 0, 0, 0],
+            "a -> OK".into(), Some(0), vec![], None, 1, 1, true, None);
+
+        pool.mark_seed_boundary();
+        assert_eq!(pool.seed_count, 2);
     }
 }

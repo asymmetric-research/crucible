@@ -180,10 +180,25 @@ pub fn singlecore_mode(
         };
     };
 
-    // Max input size: cap to prevent unbounded growth from havoc mutations
-    // Structured: 8 actions * (2 bytes variant + ~5 fields * 8 bytes) = ~336 bytes typical max, 1024 is 3x headroom
-    // Arbitrary: 1024 matches existing cap
-    let max_size_setup = quote! { state.set_max_size(1024); };
+    // Max input size: cap to prevent unbounded growth from havoc mutations.
+    // When --corpus-in is provided, scan files to find the actual max size so that
+    // stateful corpus entries (which can be larger than 1024) are not truncated.
+    let max_size_setup = quote! {
+        let __max_input_size: usize = {
+            let mut max = 1024usize;
+            if let Some(ref dir) = corpus_in_dir {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            max = max.max(meta.len() as usize);
+                        }
+                    }
+                }
+            }
+            max
+        };
+        state.set_max_size(__max_input_size);
+    };
 
     quote! {
         // === SINGLE-THREADED MODE (default) ===
@@ -235,18 +250,20 @@ pub fn singlecore_mode(
                     eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
                     let corpus_dirs = vec![std::path::PathBuf::from(corpus_dir)];
 
-                    if $use_forced_loading {
-                        // Same-dir case: use load_initial_inputs_forced to avoid re-adding existing entries
-                        state.load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
-                            .expect("failed to load initial corpus");
-                    } else {
-                        // Different directories or in-memory: use regular loading
-                        state.load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
-                            .expect("failed to load initial corpus");
-                    }
+                    // Always use forced loading so ALL seed inputs are kept.
+                    // Non-forced loading rejects entries that don't pass MaxMapFeedback
+                    // (e.g. entries that only discovered hitcount bucket novelty).
+                    crucible_test_context::set_corpus_loading(true);
+                    state.load_initial_inputs_forced(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
+                        .expect("failed to load initial corpus");
+                    crucible_test_context::set_corpus_loading(false);
 
                     let corpus_count = state.corpus().count();
-                    eprintln!("[FUZZ] Loaded {} seed inputs (corpus loading complete)", corpus_count);
+                    let __load_edges = {
+                        let s = #mod_name::COVERAGE_STATE.lock().unwrap();
+                        s.total_edges
+                    };
+                    eprintln!("[FUZZ] Loaded {} seed inputs, edges after loading: {} (corpus loading complete)", corpus_count, __load_edges);
                     if corpus_count == 0 {
                         if verbose { eprintln!("[FUZZ] No valid inputs in corpus, using default seed"); }
                         #add_default_seed

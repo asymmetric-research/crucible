@@ -351,7 +351,7 @@ fn test_state_pool_export_corpus_basic() {
         0, 0, true, None,
     );
 
-    // State with real action bytes — should be written
+    // State with real action bytes — should be written (edge_novelty=1)
     pool.try_add(
         2,
         SvmSnapshot::empty(make_test_clock(1)),
@@ -362,10 +362,10 @@ fn test_state_pool_export_corpus_basic() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
-    // Another state with different action bytes
+    // Another state with different action bytes (edge_novelty=1)
     pool.try_add(
         3,
         SvmSnapshot::empty(make_test_clock(2)),
@@ -376,12 +376,12 @@ fn test_state_pool_export_corpus_basic() {
         Some(1),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
-    let count = pool.export_corpus(dir_path).unwrap();
+    let count = pool.export_corpus_no_seeds(dir_path).unwrap();
 
     assert_eq!(count, 2); // skipped the initial <=4-byte entry
 
@@ -411,7 +411,7 @@ fn test_state_pool_export_corpus_empty() {
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus(dir.path().to_str().unwrap()).unwrap();
+    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
     assert_eq!(count, 0);
 }
 
@@ -430,12 +430,12 @@ fn test_state_pool_export_corpus_content() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
-    pool.export_corpus(dir_path).unwrap();
+    pool.export_corpus_no_seeds(dir_path).unwrap();
 
     let files: Vec<_> = std::fs::read_dir(dir_path)
         .unwrap()
@@ -468,7 +468,7 @@ fn test_state_pool_export_corpus_creates_dir() {
     let nested_str = nested.to_str().unwrap();
 
     assert!(!nested.exists());
-    pool.export_corpus(nested_str).unwrap();
+    pool.export_corpus_no_seeds(nested_str).unwrap();
     assert!(nested.exists());
 }
 
@@ -492,8 +492,8 @@ fn test_state_pool_export_corpus_deterministic() {
     let dir1 = tempfile::tempdir().unwrap();
     let dir2 = tempfile::tempdir().unwrap();
 
-    pool.export_corpus(dir1.path().to_str().unwrap()).unwrap();
-    pool.export_corpus(dir2.path().to_str().unwrap()).unwrap();
+    pool.export_corpus_no_seeds(dir1.path().to_str().unwrap()).unwrap();
+    pool.export_corpus_no_seeds(dir2.path().to_str().unwrap()).unwrap();
 
     let files1: Vec<String> = std::fs::read_dir(dir1.path())
         .unwrap()
@@ -787,15 +787,15 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
 
     pool.try_add(
         1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
-        bytes.clone(), "a".to_string(), Some(0), vec![], None, 0, 0, true, None,
+        bytes.clone(), "a".to_string(), Some(0), vec![], None, 1, 1, true, None,
     );
     pool.try_add(
         2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
-        bytes.clone(), "b".to_string(), Some(1), vec![], None, 0, 0, true, None,
+        bytes.clone(), "b".to_string(), Some(1), vec![], None, 1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus(dir.path().to_str().unwrap()).unwrap();
+    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
     // export_corpus returns 2 (it writes twice), but the file is overwritten
     assert_eq!(count, 2);
     let files: Vec<_> = std::fs::read_dir(dir.path())
@@ -1266,16 +1266,16 @@ fn test_pool_export_corpus_skips_shallow() {
         vec![0, 0, 0, 0], // 4-byte header with count=0
         "".into(), None, vec![], None, 0, 0, true, None,
     );
-    // State with real action bytes
+    // State with real action bytes (edge_novelty=1 so it's exported)
     pool.try_add(
         2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
         vec![1, 0, 0, 0, 0xAA, 0xBB],
-        "action".into(), Some(0), vec![], None, 0, 0, true, None,
+        "action".into(), Some(0), vec![], None, 1, 1, true, None,
     );
 
     let dir = "/tmp/test_pool_export_corpus";
     let _ = std::fs::remove_dir_all(dir);
-    let count = pool.export_corpus(dir).unwrap();
+    let count = pool.export_corpus_no_seeds(dir).unwrap();
     assert_eq!(count, 1, "should skip initial state with ≤4 byte action_bytes");
 
     // Cleanup

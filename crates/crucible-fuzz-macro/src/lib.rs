@@ -536,9 +536,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             let cmin_mode = std::env::var("FUZZ_CMIN").is_ok();
             let corpus_in_dir = std::env::var("FUZZ_CORPUS_IN").ok();
             let corpus_out_dir = std::env::var("FUZZ_CORPUS_OUT").ok();
-            let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok().or_else(|| {
-                if std::path::Path::new("./output").is_dir() { Some("./output".to_string()) } else { None }
-            });
+            let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok();
             let verbose = std::env::var("FUZZ_VERBOSE").is_ok();
 
             // Coverage map - just a simple vec, no shared memory needed for InProcessExecutor
