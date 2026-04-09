@@ -454,6 +454,14 @@ pub fn clear_violation_tracking() {
     VIOLATION_ACTION_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
+/// Clear all per-iteration state: action history + violation tracking.
+/// Convenience wrapper — call at the start of each fuzzing iteration.
+#[inline]
+pub fn clear_iteration_state() {
+    clear_action_history();
+    clear_violation_tracking();
+}
+
 // ============================================================================
 // Success-Seeking Mutation State
 // ============================================================================

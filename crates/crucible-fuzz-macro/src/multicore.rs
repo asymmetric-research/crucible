@@ -609,8 +609,7 @@ pub fn multicore_mode(
                         }
                     }
                     crucible_test_context::set_current_iteration(current_iteration);
-                    crucible_test_context::clear_action_history();
-                    crucible_test_context::clear_violation_tracking();
+                    crucible_test_context::clear_iteration_state();
                     // Reset the "new coverage" flag for SharedBitmapFeedback
                     #mod_name::reset_new_coverage_flag();
 

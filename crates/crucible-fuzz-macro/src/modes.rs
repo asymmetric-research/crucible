@@ -501,8 +501,7 @@ pub fn tmin_mode(
             // Helper: execute an action sequence on a fresh clone, return whether it crashes
             let crashes = |actions: &[#action_ty], template: &#fixture_name| -> bool {
                 let mut fixture = template.clone();
-                crucible_test_context::clear_action_history();
-                crucible_test_context::clear_violation_tracking();
+                crucible_test_context::clear_iteration_state();
                 let _ = crucible_test_context::take_violation();
                 with_stderr_suppressed(|| #fn_name(&mut fixture, actions.to_vec()));
                 crucible_test_context::has_violation()
@@ -579,8 +578,7 @@ pub fn tmin_mode(
                         .expect("failed to write minimized crash");
 
                     // Update .meta.json — re-execute to capture clean action history
-                    crucible_test_context::clear_action_history();
-                    crucible_test_context::clear_violation_tracking();
+                    crucible_test_context::clear_iteration_state();
                     {
                         let mut fixture = template_fixture.clone();
                         with_stderr_suppressed(|| #fn_name(&mut fixture, actions));

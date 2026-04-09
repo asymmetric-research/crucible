@@ -4,7 +4,84 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use rustc_hash::FxHasher;
 
-use super::svm_snapshot::{SvmSnapshot, FINGERPRINT_BITS};
+use super::svm_snapshot::{SvmSnapshot, CompactDelta, FINGERPRINT_BITS};
+
+// ============================================================================
+// Memory profiling
+// ============================================================================
+
+/// Detailed memory breakdown of a StatePool, returned by `StatePool::memory_stats()`.
+#[derive(Default)]
+pub struct PoolMemoryStats {
+    pub total_states: usize,
+    pub active_states: usize,
+    pub capacity: usize,
+    /// Sum of delta.accounts.len() across all states.
+    pub total_delta_accounts: usize,
+    /// Sum of estimated heap bytes across all delta snapshots.
+    /// May overcount shared Arc<Account> data between parent/child deltas.
+    pub total_delta_heap_bytes: usize,
+    /// Number of states with Some(fixture_state).
+    pub fixture_state_count: usize,
+    /// Sum of action_bytes.len() across all states.
+    pub total_action_bytes: usize,
+    /// Sum of action_field_bytes.len() across all states.
+    pub total_field_bytes: usize,
+    /// Sum of action_desc.len() across all states.
+    pub total_desc_bytes: usize,
+    /// Sum of edge_positions bytes across all states.
+    pub total_edge_position_bytes: usize,
+    /// Fixed overhead per StateEntry struct (fixed-size fields).
+    pub entry_overhead_bytes: usize,
+    /// edge_freq Vec allocation.
+    pub edge_freq_bytes: usize,
+    /// Number of entries in the seen set.
+    pub seen_entries: usize,
+    /// active_indices Vec backing allocation.
+    pub active_indices_bytes: usize,
+}
+
+impl PoolMemoryStats {
+    /// Total estimated pool memory in bytes.
+    pub fn total_bytes(&self) -> usize {
+        self.total_delta_heap_bytes
+            + self.entry_overhead_bytes
+            + self.total_action_bytes
+            + self.total_field_bytes
+            + self.total_desc_bytes
+            + self.total_edge_position_bytes
+            + self.edge_freq_bytes
+            + self.active_indices_bytes
+            + self.seen_entries * 16 // FastHashSet<u64> ≈ 16 bytes/entry
+    }
+
+    /// Format as a human-readable multi-line breakdown.
+    pub fn format_breakdown(&self) -> String {
+        let total = self.total_bytes();
+        format!(
+            "pool_states: {}/{} (active: {}, cap: {}), \
+             delta_heap: {:.1}MB ({} accts), \
+             fixtures: {}, \
+             action_bytes: {:.1}MB, \
+             desc: {:.1}MB, \
+             entry_overhead: {:.1}MB, \
+             edge_pos: {:.1}MB, \
+             pool_total: {:.1}MB",
+            self.total_states,
+            self.capacity,
+            self.active_states,
+            self.capacity,
+            self.total_delta_heap_bytes as f64 / 1_048_576.0,
+            self.total_delta_accounts,
+            self.fixture_state_count,
+            self.total_action_bytes as f64 / 1_048_576.0,
+            self.total_desc_bytes as f64 / 1_048_576.0,
+            self.entry_overhead_bytes as f64 / 1_048_576.0,
+            self.total_edge_position_bytes as f64 / 1_048_576.0,
+            total as f64 / 1_048_576.0,
+        )
+    }
+}
 
 // ============================================================================
 // FingerprintBitmap — lock-free pre-check for fingerprint novelty
@@ -70,10 +147,10 @@ impl FingerprintBitmap {
 pub struct StateEntry {
     /// Fingerprint of the state (used for dedup).
     pub fingerprint: u64,
-    /// Delta snapshot: only accounts differing from the initial state.
+    /// Compact delta: u64-word diffs for accounts differing from the initial state.
     /// Wrapped in Arc so that cloning under RwLock read lock is just an
-    /// atomic refcount bump (~1ns) instead of a deep HashMap copy (~500μs).
-    pub delta: Arc<SvmSnapshot>,
+    /// atomic refcount bump (~1ns) instead of a deep copy.
+    pub delta: Arc<CompactDelta>,
     /// Depth: number of actions from initial state.
     pub depth: u32,
     /// Index of the parent state in the pool (None for initial state).
@@ -616,7 +693,7 @@ impl StatePool {
     pub fn try_add(
         &mut self,
         fingerprint: u64,
-        delta: SvmSnapshot,
+        delta: CompactDelta,
         depth: u32,
         parent_idx: Option<usize>,
         action_bytes: Vec<u8>,
@@ -650,6 +727,13 @@ impl StatePool {
                         }
                     }
                 }
+                // Free expensive data from evicted entry. Only chain metadata
+                // (parent_idx, action_bytes, action_desc, depth) is kept for
+                // crash reconstruction. Delta, fixture, and edge positions are
+                // only needed for active states (picking + child creation).
+                self.states[evict_idx].delta = Arc::new(CompactDelta::tombstone());
+                self.states[evict_idx].fixture_state = None;
+                self.states[evict_idx].edge_positions = None;
             } else {
                 return false;
             }
@@ -723,6 +807,24 @@ impl StatePool {
         // for dedup and parent chain reconstruction, but don't waste picks on them.
         if depth < self.max_depth {
             self.active_indices.push(idx);
+        } else {
+            // Max-depth: will never be picked. Decrement frequency tables
+            // (edge_freq was incremented above at add time) and free expensive data.
+            if let Some(ref positions) = self.states[idx].edge_positions {
+                for &pos in positions.iter() {
+                    self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
+                }
+            }
+            for (level, &key) in self.states[idx].ngram_keys.iter().enumerate() {
+                if key != 0 {
+                    if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
+            self.states[idx].delta = Arc::new(CompactDelta::tombstone());
+            self.states[idx].fixture_state = None;
+            self.states[idx].edge_positions = None;
         }
         // Credit parent for producing a novel child and reset barren counter
         if let Some(pidx) = parent_idx {
@@ -771,7 +873,7 @@ impl StatePool {
         let mut cumulative = Vec::with_capacity(n);
         let mut total: f64 = 0.0;
         for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             total += w;
             cumulative.push(total);
         }
@@ -824,7 +926,7 @@ impl StatePool {
         let mut cumulative = Vec::with_capacity(n);
         let mut total: f64 = 0.0;
         for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             total += w;
             cumulative.push(total);
         }
@@ -864,7 +966,7 @@ impl StatePool {
     /// Common factors: success boost (2x) and depth preference (shallow bias).
     /// Never-picked states get maximum priority. Max-depth states get zero weight.
     #[inline]
-    pub(crate) fn compute_weight(&self, s: &StateEntry, _total_picks: f64, max_depth: u32) -> f64 {
+    pub(crate) fn compute_weight(&self, s: &StateEntry, max_depth: u32) -> f64 {
         // Max-depth states can't extend — don't pick them as parents
         if s.depth >= max_depth {
             return 0.0;
@@ -979,26 +1081,33 @@ impl StatePool {
     /// weights once and samples multiple times.
     ///
     /// Output tuple: (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
+    /// Pick a batch of states using a pre-built weight distribution.
+    /// Use `build_weight_distribution()` to compute `(cumulative, total)` once,
+    /// then pass them here to avoid redundant O(n) recomputation.
     pub fn pick_weighted_batch(
         &self,
         rng_vals: &[u64],
-        out: &mut Vec<(Arc<SvmSnapshot>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
+    ) -> usize {
+        let (cumulative, total) = self.build_weight_distribution();
+        self.pick_weighted_batch_from(&cumulative, total, rng_vals, out)
+    }
+
+    /// Pick a batch of states using a caller-provided weight distribution.
+    /// Avoids redundant O(n) weight recomputation when the distribution is
+    /// already available from a prior `build_weight_distribution()` call.
+    pub fn pick_weighted_batch_from(
+        &self,
+        cumulative: &[f64],
+        total: f64,
+        rng_vals: &[u64],
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
     ) -> usize {
         if self.active_indices.is_empty() {
             return 0;
         }
 
         let n = self.active_indices.len();
-
-        // Build cumulative weight array once
-        let tp = self.total_picks.load(Ordering::Relaxed) as f64;
-        let mut cumulative = Vec::with_capacity(n);
-        let mut total: f64 = 0.0;
-        for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
-            total += w;
-            cumulative.push(total);
-        }
 
         // If all weights are zero, fall back to uniform random
         if total <= 0.0 {
@@ -1090,6 +1199,53 @@ impl StatePool {
         self.states.len() >= self.capacity
     }
 
+    /// Compute detailed memory breakdown for profiling.
+    pub fn memory_stats(&self) -> PoolMemoryStats {
+        let mut stats = PoolMemoryStats::default();
+        stats.total_states = self.states.len();
+        stats.active_states = self.active_indices.len();
+        stats.capacity = self.capacity;
+
+        // Fixed allocations
+        stats.edge_freq_bytes = self.edge_freq.len() * 2; // Vec<u16>
+        stats.seen_entries = self.seen.len();
+
+        for entry in &self.states {
+            // Delta snapshot memory
+            let delta_accounts = entry.delta.account_count();
+            stats.total_delta_accounts += delta_accounts;
+            stats.total_delta_heap_bytes += entry.delta.estimated_heap_bytes();
+
+            // Fixture state (we can only tell if it's Some, not its size)
+            if entry.fixture_state.is_some() {
+                stats.fixture_state_count += 1;
+            }
+
+            // Action bytes (Arc<Vec<u8>>)
+            stats.total_action_bytes += entry.action_bytes.len();
+            stats.total_field_bytes += entry.action_field_bytes.len();
+            stats.total_desc_bytes += entry.action_desc.len();
+
+            // Edge positions (Option<Arc<Vec<u16>>>)
+            if let Some(ref positions) = entry.edge_positions {
+                stats.total_edge_position_bytes += positions.len() * 2;
+            }
+        }
+
+        // StateEntry struct overhead (fixed fields per entry)
+        // fingerprint(8) + depth(4) + parent_idx(8+4) + pick_count(4) + novel_children(4)
+        // + violation_count(4) + novelty_bits(4) + edge_novelty(4) + action_succeeded(1)
+        // + pool_size_at_add(4) + rarity_score(8) + ngram_rarity(8) + ngram_keys(24)
+        // + barren_picks(4) + debug_state_hash(8) + Arc ptrs(8*4=32) + Option overhead
+        // ≈ 160 bytes per entry
+        stats.entry_overhead_bytes = self.states.len() * 160;
+
+        // Vec + HashSet backing storage
+        stats.active_indices_bytes = self.active_indices.capacity() * 8;
+
+        stats
+    }
+
     /// Remove a state from the pickable set (after a crash).
     /// The state remains in `states` for parent chain reconstruction.
     pub fn mark_crashed(&mut self, state_idx: usize) {
@@ -1109,6 +1265,10 @@ impl StatePool {
                     }
                 }
             }
+            // Free expensive data — crashed states are never picked again
+            self.states[state_idx].delta = Arc::new(CompactDelta::tombstone());
+            self.states[state_idx].fixture_state = None;
+            self.states[state_idx].edge_positions = None;
         }
     }
 
@@ -1182,7 +1342,7 @@ impl StatePool {
         let mut min_pos: Option<usize> = None;
         for (pos, &idx) in self.active_indices.iter().enumerate() {
             if self.states[idx].novel_children > 0 { continue; }
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             if w < min_weight {
                 min_weight = w;
                 min_pos = Some(pos);
@@ -1192,7 +1352,7 @@ impl StatePool {
         // Fallback: if all active states have novel children, evict the weakest overall.
         if min_pos.is_none() {
             for (pos, &idx) in self.active_indices.iter().enumerate() {
-                let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+                let w = self.compute_weight(&self.states[idx], self.max_depth);
                 if w < min_weight {
                     min_weight = w;
                     min_pos = Some(pos);
@@ -1335,7 +1495,7 @@ impl StatePool {
         let mut weights: FastHashMap<usize, f64> = FastHashMap::default();
         let mut total_weight: f64 = 0.0;
         for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp_f, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             weights.insert(idx, w);
             total_weight += w;
         }
@@ -1526,6 +1686,94 @@ impl StatePool {
             if entries.len() > 30 {
                 let _ = writeln!(out, "  ... {} more classes", entries.len() - 30);
             }
+        }
+        let _ = writeln!(out, "");
+
+        // ================================================================
+        // Section 7: Memory breakdown
+        // ================================================================
+        let mem = self.memory_stats();
+        let _ = writeln!(out, "MEMORY BREAKDOWN");
+        let _ = writeln!(out, "----------------");
+        let _ = writeln!(out, "  Pool: {} states ({} active, {} evicted), capacity: {}",
+            mem.total_states, mem.active_states, mem.total_states - mem.active_states, mem.capacity);
+        let _ = writeln!(out, "  Delta heap (accounts):  {:.1} MB  ({} total account entries across all deltas)",
+            mem.total_delta_heap_bytes as f64 / 1_048_576.0, mem.total_delta_accounts);
+        let _ = writeln!(out, "  Fixtures stored:        {}  (of {} states have Some(fixture_state))",
+            mem.fixture_state_count, mem.total_states);
+        let _ = writeln!(out, "  Action bytes:           {:.1} MB", mem.total_action_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Action descs:           {:.1} MB", mem.total_desc_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Field bytes:            {:.1} MB", mem.total_field_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge positions:         {:.1} MB", mem.total_edge_position_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Entry struct overhead:  {:.1} MB", mem.entry_overhead_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge freq table:        {:.1} MB", mem.edge_freq_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Seen set:               {} entries", mem.seen_entries);
+        let _ = writeln!(out, "  Active indices:         {:.1} KB", mem.active_indices_bytes as f64 / 1024.0);
+        let _ = writeln!(out, "  ─────────────────────────────────");
+        let _ = writeln!(out, "  POOL TOTAL:             {:.1} MB", mem.total_bytes() as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  (Note: delta heap may overcount shared Arc<Account> data between parent/child)");
+        let _ = writeln!(out, "");
+
+        // Per-entry memory detail (sorted by delta heap size descending, top 50 + bottom 10)
+        let _ = writeln!(out, "PER-ENTRY MEMORY (top 50 by delta heap, then bottom 10)");
+        let _ = writeln!(out, "-------------------------------------------------------");
+        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10} {:<8} {:<8} {}",
+            "idx", "dep", "actv", "accts", "heap_KB", "sysv_KB", "abytes", "top patches by size");
+
+        // Collect per-entry memory info
+        let mut entry_mem: Vec<(usize, usize, usize, Vec<(String, usize)>)> = Vec::with_capacity(self.states.len());
+        for (idx, entry) in self.states.iter().enumerate() {
+            let delta = &*entry.delta;
+            let heap = delta.estimated_heap_bytes();
+            let sysvar_data = delta.sysvar_data_bytes();
+            let mut account_sizes = delta.accounts_report_info();
+            account_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+            entry_mem.push((idx, heap, sysvar_data, account_sizes));
+        }
+        entry_mem.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let write_entry = |out: &mut String, (idx, heap_bytes, sysvar_bytes, ref acct_sizes): &(usize, usize, usize, Vec<(String, usize)>)| {
+            let entry = &self.states[*idx];
+            let active = if active_set.contains(idx) { "yes" } else { "-" };
+            let top_accts: String = acct_sizes.iter().take(5)
+                .map(|(pk, sz)| format!("{}:{:.1}K", pk, *sz as f64 / 1024.0))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10.1} {:<8.1} {:<8} {}",
+                idx, entry.depth, active,
+                entry.delta.account_count(),
+                *heap_bytes as f64 / 1024.0,
+                *sysvar_bytes as f64 / 1024.0,
+                entry.action_bytes.len(),
+                top_accts);
+        };
+
+        // Top 50
+        for item in entry_mem.iter().take(50) {
+            write_entry(&mut out, item);
+        }
+        if entry_mem.len() > 60 {
+            let _ = writeln!(out, "  ... {} entries omitted ...", entry_mem.len() - 60);
+            let _ = writeln!(out, "");
+            let _ = writeln!(out, "  Bottom 10:");
+            let start = entry_mem.len().saturating_sub(10);
+            for item in entry_mem[start..].iter() {
+                write_entry(&mut out, item);
+            }
+        }
+        let _ = writeln!(out, "");
+
+        // Histogram of delta account counts
+        let _ = writeln!(out, "DELTA ACCOUNT COUNT HISTOGRAM");
+        let _ = writeln!(out, "-----------------------------");
+        let mut acct_count_hist: FastHashMap<usize, usize> = FastHashMap::default();
+        for entry in &self.states {
+            *acct_count_hist.entry(entry.delta.account_count()).or_insert(0) += 1;
+        }
+        let mut hist_sorted: Vec<(usize, usize)> = acct_count_hist.into_iter().collect();
+        hist_sorted.sort_by_key(|&(count, _)| count);
+        for (acct_count, num_entries) in &hist_sorted {
+            let _ = writeln!(out, "  {:>4} accounts: {:>5} entries", acct_count, num_entries);
         }
         let _ = writeln!(out, "");
 
@@ -1776,11 +2024,8 @@ impl StatePool {
 mod tests {
     use super::*;
 
-    fn make_empty_delta() -> SvmSnapshot {
-        SvmSnapshot {
-            accounts: FastHashMap::default(),
-            sysvars: Vec::new(),
-        }
+    fn make_empty_delta() -> CompactDelta {
+        CompactDelta::tombstone()
     }
 
     fn make_pool_with_entries() -> StatePool {

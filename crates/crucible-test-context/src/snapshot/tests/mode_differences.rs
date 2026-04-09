@@ -1965,7 +1965,7 @@ fn test_pool_coverage_novel_3x_boost() {
     // State 1: has novelty_bits (use try_add directly to set value)
     pool.try_add(
         2,
-        make_pool_snapshot(vec![(pk2, 2000)]),
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk2, 2000)])),
         1,
         None,
         vec![0u8; 8],

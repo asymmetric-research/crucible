@@ -31,7 +31,7 @@ pub fn init_program_binaries(mod_name: &syn::Ident) -> proc_macro2::TokenStream 
             );
             program_binaries.insert(program_hash, binary);
         }
-        #mod_name::init_program_binaries(program_binaries.clone());
+        #mod_name::init_program_binaries(program_binaries);
     }
 }
 
@@ -899,5 +899,126 @@ mod tests {
         assert!(output.contains(".metadata"), "should skip .metadata files");
         assert!(output.contains(".meta.json"), "should skip .meta.json files");
         assert!(output.contains(".state"), "should skip .state file");
+    }
+
+    // ── D7: Corpus dir cleanup (pre-extraction regression test) ────────
+
+    #[test]
+    fn singlecore_mode_cleans_stale_metadata() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Singlecore removes only hidden files (metadata)
+        assert!(output.contains("starts_with ('.')"), "should filter hidden files");
+        assert!(output.contains("remove_file"), "should remove stale metadata files");
+        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+    }
+
+    #[test]
+    fn multicore_mode_cleans_corpus_dir() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Multicore removes all files (not just hidden)
+        assert!(output.contains("remove_file"), "should remove stale files");
+        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+    }
+
+    // ── C1: Multicore % 64 batch flush ─────────────────────────────────
+
+    #[test]
+    fn multicore_batches_counter_flush_every_64() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Should batch flush shared counters every 64 iterations
+        assert!(output.contains("% 64"), "should flush counters every 64 iterations");
+        assert!(output.contains("__local_actions_pending"), "should accumulate actions locally");
+        assert!(output.contains("__local_ok_pending"), "should accumulate ok count locally");
+        assert!(output.contains("__local_execs_pending"), "should accumulate exec count locally");
+    }
+
+    // ── D10: Deser block pattern (pre-extraction regression for modes.rs) ──
+
+    #[test]
+    fn dry_run_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::dry_run_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true,
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn dry_run_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::dry_run_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+    }
+
+    #[test]
+    fn replay_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote! { TestAction };
+        let output = ts(crate::modes::replay_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true, Some(&action_ty),
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn replay_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::replay_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false, None,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+    }
+
+    #[test]
+    fn coverage_only_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::coverage_only_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true,
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn coverage_only_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::coverage_only_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
     }
 }

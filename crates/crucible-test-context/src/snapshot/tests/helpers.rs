@@ -53,7 +53,7 @@ pub fn add_test_state(
     let action_bytes = make_action_bytes(1, &[0xAA, 0xBB]);
     pool.try_add(
         fingerprint,
-        SvmSnapshot::empty(make_test_clock(depth as u64)),
+        CompactDelta::empty(make_test_clock(depth as u64)),
         depth,
         parent_idx,
         action_bytes,
@@ -203,6 +203,8 @@ pub fn make_pool_snapshot(accounts: Vec<(Pubkey, u64)>) -> SvmSnapshot {
 }
 
 /// Helper to create a pool entry with minimal boilerplate.
+/// Accepts an SvmSnapshot for convenience but converts to CompactDelta
+/// (wrapping accounts as AccountPatch::Full) before passing to try_add.
 pub fn add_pool_entry(
     pool: &mut StatePool,
     fingerprint: u64,
@@ -210,8 +212,9 @@ pub fn add_pool_entry(
     depth: u32,
     parent_idx: Option<usize>,
 ) -> bool {
+    let compact = snapshot_to_compact_delta(delta);
     pool.try_add(
-        fingerprint, delta, depth, parent_idx,
+        fingerprint, compact, depth, parent_idx,
         vec![0u8; 8], // action_bytes (dummy 4-byte header + 4-byte action)
         format!("action_fp_{:x}", fingerprint),
         Some((fingerprint & 0xF) as u16),
@@ -222,4 +225,14 @@ pub fn add_pool_entry(
         true,
         None,
     )
+}
+
+/// Convert an SvmSnapshot to CompactDelta for pool tests.
+/// Wraps each Arc<Account> as AccountPatch::Full.
+pub fn snapshot_to_compact_delta(snap: SvmSnapshot) -> CompactDelta {
+    let mut accounts = FastHashMap::default();
+    for (pk, arc_acct) in snap.accounts {
+        accounts.insert(pk, AccountPatch::Full(arc_acct));
+    }
+    CompactDelta { accounts, sysvars: snap.sysvars }
 }

@@ -96,9 +96,9 @@ pub fn singlecore_mode(
             // unbounded growth in LiteSVM internals (accounts HashMap, program cache, etc.)
             #ctx_reset
 
-            // Rate-limit timeout check to every 300 iterations to avoid syscall overhead
+            // Rate-limit timeout check to every 1000 iterations to avoid syscall overhead
             if let Some(timeout) = timeout_secs {
-                if current_iteration % 300 == 0 {
+                if current_iteration % 1000 == 0 {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -114,8 +114,7 @@ pub fn singlecore_mode(
             }
 
             crucible_test_context::set_current_iteration(current_iteration);
-            crucible_test_context::clear_action_history();
-            crucible_test_context::clear_violation_tracking();
+            crucible_test_context::clear_iteration_state();
 
             #(#deser_stmts)*
 

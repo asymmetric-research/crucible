@@ -9,3 +9,4 @@ mod adversarial;
 mod rounds4_6;
 mod mode_differences;
 mod novelty_diagnostic;
+mod compact_delta;
