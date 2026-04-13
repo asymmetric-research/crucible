@@ -576,6 +576,8 @@ fn gen_corpus_seeding(
                     // Seeded states get minimum novelty so they're competitive in the
                     // power schedule. edge_novelty=1 puts them in the coverage weight
                     // tier; without this they get 0 novelty → almost never picked.
+                    // Seeds use fallback rarity (no coverage_positions) because the
+                    // cumulative coverage map doesn't represent per-seed coverage.
                     if __fp != 0 && #pool_var.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,

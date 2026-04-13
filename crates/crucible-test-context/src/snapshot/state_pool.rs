@@ -213,6 +213,9 @@ pub struct StateEntry {
     /// N-gram keys for 2/3/4-gram frequency tracking.
     /// [0]=2-gram, [1]=3-gram, [2]=4-gram. 0 means N/A (state too shallow).
     pub ngram_keys: [u64; 3],
+    /// Hash of the full variant sequence from root to this state (path identity).
+    /// Used for AFLFast-style path frequency rarity.
+    pub path_hash: u64,
     /// Consecutive picks without producing a novel child. Resets to 0 when
     /// novel_children is incremented. Used for exponential weight decay:
     /// states that keep failing to produce novelty get deprioritized.
@@ -557,6 +560,10 @@ pub struct StatePool {
     /// Key: FxHash of variant sequence. Value: count of active states with this n-gram.
     /// Used to compute action-path rarity at add-time.
     ngram_freq: [FastHashMap<u64, u32>; 3],
+    /// AFLFast-style path frequency table: how many states share the same full
+    /// variant sequence (path identity). Used for path rarity in compute_weight.
+    /// Key: hash of variant sequence from root. Value: count of states with this path.
+    pub(crate) path_freq: FastHashMap<u64, u32>,
     /// Per-state-class statistics for SCFuzz-inspired scheduling.
     pub(crate) registry: StateRegistry,
     /// Current fuzz phase (Coverage bootstrap vs Blended with SCFuzz formula).
@@ -591,6 +598,7 @@ impl StatePool {
                 FastHashMap::default(),
                 FastHashMap::default(),
             ],
+            path_freq: FastHashMap::default(),
             registry: StateRegistry::new(),
             phase: FuzzPhase::Coverage,
             current_iteration: 0,
@@ -602,6 +610,36 @@ impl StatePool {
     /// Compute n-gram keys for a new state being added.
     /// Walks parent chain up to 3 levels back (for 4-gram).
     /// Returns [2-gram_key, 3-gram_key, 4-gram_key] where 0 means N/A.
+    /// Compute a hash of the full variant sequence from root to this state.
+    /// Two states with the same path hash share identical action sequences.
+    /// O(depth) — typically <100 hops.
+    fn compute_path_hash(&self, action_variant: Option<u16>, parent_idx: Option<usize>) -> u64 {
+        let self_variant = match action_variant {
+            Some(v) => v,
+            None => return 0,
+        };
+        // Walk parent chain, collecting variants
+        let mut variants: Vec<u16> = Vec::with_capacity(16);
+        variants.push(self_variant);
+        let mut cur_idx = parent_idx;
+        while let Some(idx) = cur_idx {
+            if idx >= self.states.len() { break; }
+            match self.states[idx].action_variant {
+                Some(v) => {
+                    variants.push(v);
+                    cur_idx = self.states[idx].parent_idx;
+                }
+                None => break,
+            }
+        }
+        // Hash root-to-leaf order
+        let mut h = FxHasher::default();
+        for v in variants.iter().rev() {
+            v.hash(&mut h);
+        }
+        h.finish()
+    }
+
     fn compute_ngram_keys(&self, action_variant: Option<u16>, parent_idx: Option<usize>) -> [u64; 3] {
         let self_variant = match action_variant {
             Some(v) => v,
@@ -727,6 +765,13 @@ impl StatePool {
                         }
                     }
                 }
+                // Decrement path frequency
+                let evict_path = self.states[evict_idx].path_hash;
+                if evict_path != 0 {
+                    if let Some(count) = self.path_freq.get_mut(&evict_path) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
                 // Free expensive data from evicted entry. Only chain metadata
                 // (parent_idx, action_bytes, action_desc, depth) is kept for
                 // crash reconstruction. Delta, fixture, and edge positions are
@@ -778,6 +823,12 @@ impl StatePool {
         }
         let ngram_rarity = self.compute_ngram_rarity(&ngram_keys);
 
+        // Compute full path hash and update path frequency table.
+        let path_hash = self.compute_path_hash(action_variant, parent_idx);
+        if path_hash != 0 {
+            *self.path_freq.entry(path_hash).or_insert(0) += 1;
+        }
+
         self.states.push(StateEntry {
             fingerprint,
             delta: Arc::new(delta),
@@ -799,6 +850,7 @@ impl StatePool {
             edge_positions,
             ngram_rarity,
             ngram_keys,
+            path_hash,
             barren_picks: 0,
             debug_state_hash: 0,
         });
@@ -822,15 +874,30 @@ impl StatePool {
                     }
                 }
             }
+            // Decrement path frequency
+            let mp_path = self.states[idx].path_hash;
+            if mp_path != 0 {
+                if let Some(count) = self.path_freq.get_mut(&mp_path) {
+                    *count = count.saturating_sub(1);
+                }
+            }
             self.states[idx].delta = Arc::new(CompactDelta::tombstone());
             self.states[idx].fixture_state = None;
             self.states[idx].edge_positions = None;
         }
-        // Credit parent for producing a novel child and reset barren counter
+        // Credit parent for producing a novel child and reset barren counter.
+        // Also propagate credit up to grandparent — prevents productive lineages
+        // from being abandoned by barren_decay when the parent is a stepping stone.
         if let Some(pidx) = parent_idx {
+            let grandparent_idx = self.states.get(pidx).and_then(|p| p.parent_idx);
             if let Some(parent) = self.states.get_mut(pidx) {
                 parent.novel_children += 1;
                 parent.barren_picks = 0;
+            }
+            if let Some(gpidx) = grandparent_idx {
+                if let Some(gp) = self.states.get_mut(gpidx) {
+                    gp.barren_picks = gp.barren_picks.saturating_sub(25);
+                }
             }
         }
 
@@ -993,25 +1060,16 @@ impl StatePool {
         // gives up to 25x boost vs max 4x from a 2-gram).
         let ngram_rarity = s.ngram_rarity;
 
-        // Gate coverage power schedule on EDGE coverage, not combined novelty.
-        // Field-novel states use SCFuzz formula with a modest bonus.
+        // Non-edge states: fast explore-and-decay.
         if s.edge_novelty == 0 {
             if s.novelty_bits > 0 {
-                // Field-novel only: minimum exploration floor + depth bonus.
-                // Deeper states explored rarer territory and deserve more picks.
-                // The floor ensures every field-novel state gets enough picks to
-                // potentially discover edge coverage in its children.
-                let depth_bonus = 2.0 + 0.5 * s.depth as f64;  // depth 0 → 2x, depth 7 → 5.5x
-                // Productive parents get a strong boost: if children found novel coverage,
-                // this state is a valuable stepping stone (e.g., advance_slots intermediates
-                // whose children discover new deactivation/withdrawal code paths).
+                let depth_bonus = 2.0 + 0.5 * s.depth as f64;
                 let child_bonus = if s.novel_children > 0 {
                     (2.0 + s.novel_children as f64 * 5.0).sqrt()
                 } else {
                     1.0
                 };
-                let explore_decay = 1.0 / (1.0 + picks / 200.0);  // slower decay: halves at 200
-
+                let explore_decay = 1.0 / (1.0 + picks / 200.0);
                 match self.phase {
                     FuzzPhase::Coverage => {
                         return depth_bonus * child_bonus * explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
@@ -1019,13 +1077,11 @@ impl StatePool {
                     FuzzPhase::Blended => {
                         let sc = state_class_from_fingerprint(s.fingerprint);
                         let scfuzz = self.registry.state_seed_weight(sc, picks, s.action_succeeded);
-                        // Take max of SCFuzz and exploration floor — don't let SCFuzz zero out exploration
                         let base = scfuzz.max(depth_bonus * explore_decay);
                         return base * child_bonus * ngram_rarity * barren_decay * depth_factor;
                     }
                 }
             }
-            // novelty_bits == 0: no novelty at all — unchanged
             match self.phase {
                 FuzzPhase::Coverage => {
                     let explore_decay = 1.0 / (1.0 + picks / 50.0);
@@ -1038,39 +1094,69 @@ impl StatePool {
             }
         }
 
-        // --- Edge coverage states: power schedule ---
+        // --- Edge coverage states: rarity + path frequency + productivity ---
+        //
+        //   weight = coverage_floor * rarity * (1/path_freq) * productivity * common_factors
+        //
+        // - coverage_floor: decays with picks (under-explored states get more)
+        // - rarity: exponential boost for rare edges (10x-10000x)
+        // - 1/path_freq: AFLFast path rarity — diverse action sequences get more energy
+        // - productivity: kills states producing 0 children after 100+ picks (hard decay)
 
-        // 1. Coverage floor: exponential decay from 1000x → 2x based on pool fill fraction.
-        //    Early: coverage states massively dominate scheduling for fast discovery.
-        //    Late: decays so stateful signals (SCFuzz) take over for deeper exploration.
-        //    Self-calibrating: tied to fill fraction (pool_size/capacity), not absolute count.
-        let fill_frac = self.states.len() as f64 / self.capacity.max(1) as f64;
-        let coverage_floor = 2.0 + 998.0 * (-fill_frac * 6.0).exp();
+        // Pick-decay base: halves at 200 picks
+        let coverage_floor = 1000.0 / (1.0 + picks / 200.0);
 
-        // 2. Novelty power: 2^(effective_bits/2) — steeper than old /4.
-        //    novel=1→1.41, novel=10→32, novel=50→capped at 2^40.
-        //    At picks=500 with budget=300: novel=50 effective=12.5→2^6.25≈76x.
-        let novelty_budget = 300.0;
-        let effective_bits = s.edge_novelty as f64 / (1.0 + picks / novelty_budget);
-        let novelty_power = 2.0_f64.powf((effective_bits / 2.0).min(40.0));
+        // Path frequency penalty: states sharing the same root-to-leaf variant
+        // sequence get progressively less energy. Core AFLFast insight.
+        let path_freq = if s.path_hash != 0 {
+            *self.path_freq.get(&s.path_hash).unwrap_or(&1) as f64
+        } else { 1.0 };
+        let path_penalty = 1.0 / path_freq;
 
-        // 3. Rarity bonus: AFLFast-style edge rarity score.
-        //    Uses precomputed mean inverse frequency of this state's coverage positions.
-        //    Falls back to pool_size_at_add proxy when no positions were provided.
+        // Exponential rarity: states covering rare edges get exponential boost.
+        // Capped at 10^3 (1000x) to prevent rarity outliers from monopolizing picks
+        // when they have low productivity. Productivity multiplier compounds on top.
         let rarity = if s.rarity_score > 0.0 {
-            // Scale: score=1.0 (all unique edges) → ~3.0, score=0.01 (all common) → ~1.2
-            (1.0 + s.rarity_score * 20.0).ln().max(1.0)
+            10.0_f64.powf((s.rarity_score * 75.0).min(3.0))
         } else {
-            // Fallback for states without edge positions (seeds, no-tracing mode)
             (1.0 + s.pool_size_at_add as f64 / 100.0).log2().clamp(1.0, 3.0)
         };
 
-        // 4. Productivity with moderate decay (halves at 500 picks).
-        let productivity_raw = (1.0 + s.novel_children as f64).sqrt();
-        let productivity_decay = 1.0 / (1.0 + picks / 500.0);
-        let productivity = 1.0 + (productivity_raw - 1.0) * productivity_decay;
+        // Productivity: proven producers dominate, barren states decay hard.
+        //
+        // Combines hit_rate (efficiency) AND absolute children count (track record).
+        // A state with 100 children @ 1% rate beats a state with 1 child @ 5% rate
+        // because 100 children is concrete evidence of productivity.
+        //
+        // Grace period scales with edge_novelty (more novel = more patience).
+        let grace_period = (100.0 + s.edge_novelty as f64 * 10.0).min(2000.0);
+        let productivity = if s.novel_children == 0 && picks >= grace_period {
+            // Barren past grace period — exponential decay
+            (grace_period / picks).powi(2).max(0.001)
+        } else if s.novel_children > 0 {
+            // Has children — combine hit_rate with absolute children count
+            //   children=1, rate=1%   → (1+10) * sqrt(1)  = 11
+            //   children=10, rate=1%  → (1+10) * sqrt(10) = 35
+            //   children=100, rate=1% → (1+10) * sqrt(100) = 110
+            //   children=553, rate=1% → (1+10) * sqrt(553) = 259
+            let hit_rate = s.novel_children as f64 / picks;
+            let rate_factor = 1.0 + hit_rate * 1000.0;
+            let track_record = (s.novel_children as f64).sqrt();
+            rate_factor * track_record
+        } else {
+            // 0 children, still in grace period
+            1.0
+        };
 
-        coverage_floor * novelty_power * rarity * productivity * ngram_rarity * barren_decay * success_boost * depth_factor
+        // Depth bonus: mild reward for cumulative coverage from longer chains.
+        // sqrt scaling so deep states get a boost but don't dominate over productivity.
+        //   depth 5  → 1.45x
+        //   depth 10 → 1.63x
+        //   depth 30 → 2.10x
+        //   depth 100 → 3.00x
+        let edge_depth_bonus = 1.0 + (s.depth as f64).sqrt() * 0.2;
+
+        coverage_floor * rarity * path_penalty * productivity * success_boost * edge_depth_bonus
     }
 
     /// Fill a batch of picks using weighted selection. Returns the number of picks made.
@@ -1265,6 +1351,13 @@ impl StatePool {
                     }
                 }
             }
+            // Decrement path frequency for crashed state
+            let crash_path = self.states[state_idx].path_hash;
+            if crash_path != 0 {
+                if let Some(count) = self.path_freq.get_mut(&crash_path) {
+                    *count = count.saturating_sub(1);
+                }
+            }
             // Free expensive data — crashed states are never picked again
             self.states[state_idx].delta = Arc::new(CompactDelta::tombstone());
             self.states[state_idx].fixture_state = None;
@@ -1291,21 +1384,34 @@ impl StatePool {
         {
             self.phase = FuzzPhase::Blended;
         }
-        // Periodically refresh n-gram rarity scores from current frequency tables.
-        // Every 200 batch boundaries (~12800 iterations). O(active_states) pass.
+        // Periodically refresh rarity scores from current frequency tables.
+        // Every 2000 batch boundaries (~128000 iterations). O(active_states) pass.
+        // Both n-gram and edge rarity are refreshed in the same pass for efficiency.
         self.ngram_refresh_counter += 1;
-        if self.ngram_refresh_counter >= 200 {
+        if self.ngram_refresh_counter >= 2000 {
             self.ngram_refresh_counter = 0;
-            self.refresh_ngram_rarity();
+            self.refresh_rarity_scores();
         }
     }
 
-    /// Recompute ngram_rarity for all active states from current frequency tables.
-    fn refresh_ngram_rarity(&mut self) {
+    /// Recompute ngram_rarity and edge rarity_score for all active states
+    /// from current frequency tables. Batched into a single O(active) pass.
+    fn refresh_rarity_scores(&mut self) {
         for &idx in &self.active_indices {
+            // N-gram rarity
             let keys = self.states[idx].ngram_keys;
             let rarity = self.compute_ngram_rarity(&keys);
             self.states[idx].ngram_rarity = rarity;
+
+            // Edge rarity: recompute mean inverse frequency from current edge_freq
+            if let Some(ref positions) = self.states[idx].edge_positions {
+                if !positions.is_empty() {
+                    let score: f64 = positions.iter()
+                        .map(|&pos| 1.0 / (self.edge_freq[pos as usize] as f64 + 1.0))
+                        .sum::<f64>() / positions.len() as f64;
+                    self.states[idx].rarity_score = score;
+                }
+            }
         }
     }
 

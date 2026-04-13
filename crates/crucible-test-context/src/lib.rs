@@ -1424,6 +1424,14 @@ impl TestContext {
             sigverify: false,        }
     }
 
+    pub fn with_compute_budget(mut self, compute_unit_limit: u64) -> Self {
+        use solana_compute_budget::compute_budget::ComputeBudget;
+        let mut budget = ComputeBudget::new_with_defaults(true, true);
+        budget.compute_unit_limit = compute_unit_limit;
+        self.svm = self.svm.with_compute_budget(budget);
+        self
+    }
+
     /// Analyze a program binary and return (total_edges, total_instructions).
     /// Only counts reachable code from the program entrypoint via BFS.
     /// Only counts edges from conditional jump instructions (matching runtime tracking).
