@@ -59,7 +59,7 @@ impl PoolMemoryStats {
     pub fn format_breakdown(&self) -> String {
         let total = self.total_bytes();
         format!(
-            "pool_states: {}/{} (active: {}, cap: {}), \
+            "pool_states: {}/{} (active: {}, crashed: {}), \
              delta_heap: {:.1}MB ({} accts), \
              fixtures: {}, \
              action_bytes: {:.1}MB, \
@@ -70,7 +70,7 @@ impl PoolMemoryStats {
             self.total_states,
             self.capacity,
             self.active_states,
-            self.capacity,
+            self.total_states.saturating_sub(self.active_states),
             self.total_delta_heap_bytes as f64 / 1_048_576.0,
             self.total_delta_accounts,
             self.fixture_state_count,
@@ -135,12 +135,6 @@ impl FingerprintBitmap {
         self.bits[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
     }
 
-    /// Number of bits set (for diagnostics).
-    pub fn count_set(&self) -> usize {
-        self.bits.iter()
-            .map(|b| b.load(Ordering::Relaxed).count_ones() as usize)
-            .sum()
-    }
 }
 
 /// A single saved state in the state pool.
@@ -180,8 +174,8 @@ pub struct StateEntry {
     pub pick_count: AtomicU32,
     /// Number of novel child states produced from this state.
     pub novel_children: u32,
-    /// Number of times an action from this state produced an invariant violation.
-    /// States exceeding the threshold are removed from the active pool.
+    /// Diagnostic only: counts violations for debug output. Not used in scheduling/eviction
+    /// (violations are too rare to matter; states are removed via mark_crashed() instead).
     pub violation_count: u32,
     /// Number of novel coverage bits this state discovered (edges + state buckets).
     /// Higher = rarer seed. Used in power scheduling to favor seeds that
@@ -780,7 +774,33 @@ impl StatePool {
                 self.states[evict_idx].fixture_state = None;
                 self.states[evict_idx].edge_positions = None;
             } else {
-                return false;
+                // No active states to evict — try to reclaim a tombstoned entry
+                // (max-depth or crashed states that will never be picked again).
+                let mut reclaimed = false;
+                for i in (0..self.states.len()).rev() {
+                    let is_active = self.active_indices.contains(&i);
+                    if !is_active {
+                        let dedup = self.states[i].fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+                        self.seen.remove(&dedup);
+                        self.states.swap_remove(i);
+                        // Fix up active_indices: swap_remove moves the last element to position i
+                        if i < self.states.len() {
+                            // The element that was at the end is now at position i
+                            let moved_from = self.states.len(); // old index of moved element
+                            for ai in self.active_indices.iter_mut() {
+                                if *ai == moved_from {
+                                    *ai = i;
+                                    break;
+                                }
+                            }
+                        }
+                        reclaimed = true;
+                        break;
+                    }
+                }
+                if !reclaimed {
+                    return false;
+                }
             }
         }
         if depth > self.max_depth {
@@ -795,17 +815,14 @@ impl StatePool {
         let idx = self.states.len();
         let pool_size_at_add = idx as u32;
 
-        // Compute edge rarity score and update frequency table
+        // Compute edge rarity score (read-only) and wrap positions.
+        // Frequency tables are only updated for states that enter the active set (depth < max_depth).
         let (rarity_score, edge_positions) = if let Some(positions) = coverage_positions {
             if !positions.is_empty() && novelty_bits > 0 {
                 // Mean inverse frequency: rare edges → higher score
                 let score: f64 = positions.iter()
                     .map(|&pos| 1.0 / (self.edge_freq[pos as usize] as f64 + 1.0))
                     .sum::<f64>() / positions.len() as f64;
-                // Increment frequency table for this state's positions
-                for &pos in &positions {
-                    self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_add(1);
-                }
                 (score, Some(Arc::new(positions)))
             } else {
                 (0.0, None)
@@ -814,20 +831,12 @@ impl StatePool {
             (0.0, None)
         };
 
-        // Compute n-gram keys and rarity score.
+        // Compute n-gram keys and rarity score (read-only — freq tables updated below).
         let ngram_keys = self.compute_ngram_keys(action_variant, parent_idx);
-        for (level, &key) in ngram_keys.iter().enumerate() {
-            if key != 0 {
-                *self.ngram_freq[level].entry(key).or_insert(0) += 1;
-            }
-        }
         let ngram_rarity = self.compute_ngram_rarity(&ngram_keys);
 
-        // Compute full path hash and update path frequency table.
+        // Compute full path hash (freq table updated below).
         let path_hash = self.compute_path_hash(action_variant, parent_idx);
-        if path_hash != 0 {
-            *self.path_freq.entry(path_hash).or_insert(0) += 1;
-        }
 
         self.states.push(StateEntry {
             fingerprint,
@@ -859,28 +868,22 @@ impl StatePool {
         // for dedup and parent chain reconstruction, but don't waste picks on them.
         if depth < self.max_depth {
             self.active_indices.push(idx);
-        } else {
-            // Max-depth: will never be picked. Decrement frequency tables
-            // (edge_freq was incremented above at add time) and free expensive data.
+            // Increment frequency tables only for active states (used in rarity scoring).
             if let Some(ref positions) = self.states[idx].edge_positions {
                 for &pos in positions.iter() {
-                    self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
+                    self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_add(1);
                 }
             }
-            for (level, &key) in self.states[idx].ngram_keys.iter().enumerate() {
+            for (level, &key) in ngram_keys.iter().enumerate() {
                 if key != 0 {
-                    if let Some(count) = self.ngram_freq[level].get_mut(&key) {
-                        *count = count.saturating_sub(1);
-                    }
+                    *self.ngram_freq[level].entry(key).or_insert(0) += 1;
                 }
             }
-            // Decrement path frequency
-            let mp_path = self.states[idx].path_hash;
-            if mp_path != 0 {
-                if let Some(count) = self.path_freq.get_mut(&mp_path) {
-                    *count = count.saturating_sub(1);
-                }
+            if path_hash != 0 {
+                *self.path_freq.entry(path_hash).or_insert(0) += 1;
             }
+        } else {
+            // Max-depth: will never be picked. Free expensive data.
             self.states[idx].delta = Arc::new(CompactDelta::tombstone());
             self.states[idx].fixture_state = None;
             self.states[idx].edge_positions = None;
@@ -958,6 +961,12 @@ impl StatePool {
             Ok(i) => i,
             Err(i) => i.min(cumulative.len() - 1),
         };
+        // active_indices may have shrunk since cumulative was built (e.g. mark_crashed
+        // during a previous iteration in the same batch). Fall back to uniform random
+        // rather than panicking with an OOB index.
+        if pos >= self.active_indices.len() {
+            return self.pick_random(rand_val);
+        }
         Some(self.active_indices[pos])
     }
 
@@ -980,12 +989,12 @@ impl StatePool {
         if self.active_indices.is_empty() {
             return None;
         }
-        self.total_picks.fetch_add(1, Ordering::Relaxed);
 
         let n = self.active_indices.len();
         if n == 1 {
             let idx = self.active_indices[0];
             self.states[idx].pick_count.fetch_add(1, Ordering::Relaxed);
+            self.total_picks.fetch_add(1, Ordering::Relaxed);
             return Some(idx);
         }
 
@@ -1003,6 +1012,7 @@ impl StatePool {
             let pos = rand_val as usize % n;
             let idx = self.active_indices[pos];
             self.states[idx].pick_count.fetch_add(1, Ordering::Relaxed);
+            self.total_picks.fetch_add(1, Ordering::Relaxed);
             return Some(idx);
         }
 
@@ -1013,6 +1023,7 @@ impl StatePool {
         };
         let idx = self.active_indices[pos];
         self.states[idx].pick_count.fetch_add(1, Ordering::Relaxed);
+        self.total_picks.fetch_add(1, Ordering::Relaxed);
         Some(idx)
     }
 
@@ -1078,7 +1089,7 @@ impl StatePool {
                         let sc = state_class_from_fingerprint(s.fingerprint);
                         let scfuzz = self.registry.state_seed_weight(sc, picks, s.action_succeeded);
                         let base = scfuzz.max(depth_bonus * explore_decay);
-                        return base * child_bonus * ngram_rarity * barren_decay * depth_factor;
+                        return base * child_bonus * ngram_rarity * barren_decay * success_boost * depth_factor;
                     }
                 }
             }
@@ -1089,7 +1100,7 @@ impl StatePool {
                 }
                 FuzzPhase::Blended => {
                     let sc = state_class_from_fingerprint(s.fingerprint);
-                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * ngram_rarity * barren_decay * depth_factor;
+                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * ngram_rarity * barren_decay * success_boost * depth_factor;
                 }
             }
         }
@@ -1162,11 +1173,9 @@ impl StatePool {
     /// Fill a batch of picks using weighted selection. Returns the number of picks made.
     /// More efficient than calling pick_weighted() in a loop because it computes
     /// weights once and samples multiple times.
-    /// Fill a batch of picks using weighted selection. Returns the number of picks made.
-    /// More efficient than calling pick_weighted() in a loop because it computes
-    /// weights once and samples multiple times.
     ///
     /// Output tuple: (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
+    ///
     /// Pick a batch of states using a pre-built weight distribution.
     /// Use `build_weight_distribution()` to compute `(cumulative, total)` once,
     /// then pass them here to avoid redundant O(n) recomputation.
@@ -1261,6 +1270,7 @@ impl StatePool {
 
     /// Get debug state hash for a given entry.
     pub fn get_debug_hash(&self, idx: usize) -> u64 {
+        debug_assert!(idx < self.states.len(), "get_debug_hash: idx {} out of bounds (len {})", idx, self.states.len());
         self.states[idx].debug_state_hash
     }
 

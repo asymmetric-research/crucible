@@ -3508,6 +3508,21 @@ fn invariant_test(fixture: &mut KlendFixture) {
     obligation_pledged_ctokens_bounded(fixture);
     // fees_within_available — disabled: FP because protocol fees accrue on borrowed-out
     // liquidity and naturally exceed available_amount under high utilization
+    // Phase D round 16: new invariants from ideation
+    zero_supply_implies_zero_available(fixture);
+    ctoken_positive_backing(fixture);
+    deposit_limit_enforcement(fixture);
+    // Phase D round 16b: elevation group debt tracking (0 prior coverage)
+    eg_routing_exclusivity(fixture);
+    eg_zeroed_borrow_clears_trackers(fixture);
+    // Phase D round 17: LTV/borrow factor arithmetic
+    // borrow_factor_adjusted_equals_slot_sum — disabled: FP because our setup
+    // patches obligation aggregate fields directly without populating per-slot values.
+    allowed_borrow_le_deposited_value(fixture);
+    // eg_bucket_sum_consistency — disabled: FP from mainnet-cloned state.
+    // EG tracking was added to existing reserves with legacy borrows, so the
+    // disaggregated EG buckets don't match the interest-accrued aggregate.
+    // Would be valid for a from-scratch setup.
 }
 
 fn solvency_check(fixture: &mut KlendFixture) {
@@ -4357,6 +4372,279 @@ fn reserve_available_lte_vault(fixture: &mut KlendFixture) {
             "AVAILABLE > VAULT: reserve {} available_amount={} > vault_balance={} (phantom liquidity={})",
             reserve_data.reserve, available, vault_balance,
             available.saturating_sub(vault_balance)
+        );
+    }
+}
+
+/// Invariant: If cToken mint_total_supply == 0, then available_amount must also be 0.
+/// A state where supply is zero but available_amount > 0 creates orphaned liquidity:
+/// the next depositor triggers the 1:1 bootstrap branch and acquires the stranded
+/// funds for free. This catches the "last redeemer gets extra lamport" rounding bug.
+fn zero_supply_implies_zero_available(fixture: &mut KlendFixture) {
+    use spl_token::state::Mint;
+    use solana_program::program_pack::Pack;
+
+    for reserve_data in &fixture.reserves {
+        let Ok(mint_account) = fixture.ctx.get_account(&reserve_data.collateral_mint) else { continue };
+        let Ok(mint) = Mint::unpack(&mint_account.data) else { continue };
+
+        if mint.supply == 0 {
+            let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+            if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+            let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+            crucible_test_context::fuzz_assert!(
+                reserve.liquidity.available_amount == 0,
+                "ORPHANED LIQUIDITY: reserve {} has 0 cToken supply but {} available lamports (free for next depositor)",
+                reserve_data.reserve, reserve.liquidity.available_amount
+            );
+        }
+    }
+}
+
+/// Invariant: If cToken mint_total_supply > 0, total liquidity backing must be > 0.
+/// total_liquidity = available_amount * SF + borrowed_amount_sf.
+/// A positive supply with zero backing means all cTokens are unredeemable — protocol insolvency.
+fn ctoken_positive_backing(fixture: &mut KlendFixture) {
+    use types::u64_pair_to_u128;
+    use spl_token::state::Mint;
+    use solana_program::program_pack::Pack;
+
+    for reserve_data in &fixture.reserves {
+        let Ok(mint_account) = fixture.ctx.get_account(&reserve_data.collateral_mint) else { continue };
+        let Ok(mint) = Mint::unpack(&mint_account.data) else { continue };
+
+        if mint.supply > 0 {
+            let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+            if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+            let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+            let available = reserve.liquidity.available_amount as u128;
+            let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+            // total_liq in SF units: available * (1 << 60) + borrowed_sf
+            let total_liq_sf = available.wrapping_mul(1u128 << 60).saturating_add(borrowed_sf);
+
+            crucible_test_context::fuzz_assert!(
+                total_liq_sf > 0,
+                "INSOLVENCY: reserve {} has {} cToken supply but zero liquidity backing (available={}, borrowed_sf={})",
+                reserve_data.reserve, mint.supply, available, borrowed_sf
+            );
+        }
+    }
+}
+
+/// Invariant: Total reserve liquidity (available + borrowed) should not exceed deposit_limit.
+/// If it does, a deposit_limit bypass bug exists allowing more deposits than configured.
+/// deposit_limit of 0 or u64::MAX means unlimited — skip check.
+fn deposit_limit_enforcement(fixture: &mut KlendFixture) {
+    use types::u64_pair_to_u128;
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let deposit_limit = reserve.config.deposit_limit;
+        // Skip unlimited/disabled limits
+        if deposit_limit == 0 || deposit_limit == u64::MAX { continue; }
+
+        let available = reserve.liquidity.available_amount as u128;
+        let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+        let borrowed = borrowed_sf >> 60;
+        let total_deposited = available.saturating_add(borrowed);
+
+        // Allow 1% tolerance for rounding in interest accrual
+        let limit_with_tolerance = (deposit_limit as u128).saturating_add(deposit_limit as u128 / 100);
+
+        crucible_test_context::fuzz_assert!(
+            total_deposited <= limit_with_tolerance,
+            "DEPOSIT LIMIT EXCEEDED: reserve {} total_deposited={} > deposit_limit={} (available={} borrowed={})",
+            reserve_data.reserve, total_deposited, deposit_limit, available, borrowed
+        );
+    }
+}
+
+/// Invariant: Elevation group routing must be mutually exclusive.
+/// When obligation.elevation_group != 0 (in an EG), borrow slots must have
+/// borrowed_amount_outside_elevation_groups == 0.
+/// When obligation.elevation_group == 0 (no EG), deposit slots must have
+/// borrowed_amount_against_this_collateral_in_elevation_group == 0.
+/// A borrow routed to the wrong bucket is accounted with the wrong borrow factor,
+/// enabling undercollateralized debt that passes health checks.
+fn eg_routing_exclusivity(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        if obligation.elevation_group != 0 {
+            // In an EG: all borrow slots should have outside_eg == 0
+            for (i, borrow) in obligation.borrows.iter().enumerate() {
+                if borrow.borrow_reserve == [0u8; 32] { continue; }
+                crucible_test_context::fuzz_assert!(
+                    borrow.borrowed_amount_outside_elevation_groups == 0,
+                    "EG ROUTING: user {} in EG={} but borrow slot {} has outside_eg={}",
+                    user.keypair.pubkey(), obligation.elevation_group,
+                    i, borrow.borrowed_amount_outside_elevation_groups
+                );
+            }
+        } else {
+            // Not in EG: all deposit slots should have eg_collateral_borrow == 0
+            for (i, deposit) in obligation.deposits.iter().enumerate() {
+                if deposit.deposit_reserve == [0u8; 32] { continue; }
+                crucible_test_context::fuzz_assert!(
+                    deposit.borrowed_amount_against_this_collateral_in_elevation_group == 0,
+                    "EG ROUTING: user {} not in EG but deposit slot {} has eg_borrow={}",
+                    user.keypair.pubkey(),
+                    i, deposit.borrowed_amount_against_this_collateral_in_elevation_group
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: Fully repaid borrow slots (borrowed_amount_sf == 0) must have
+/// zeroed EG tracker fields. A ghost value in borrowed_amount_outside_elevation_groups
+/// on a zeroed slot propagates phantom capacity to the reserve-level EG buckets,
+/// permanently blocking new EG borrows at that reserve.
+fn eg_zeroed_borrow_clears_trackers(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        for (i, borrow) in obligation.borrows.iter().enumerate() {
+            if borrow.borrow_reserve == [0u8; 32] { continue; }
+            let amount = u64_pair_to_u128(borrow.borrowed_amount_sf);
+            if amount == 0 {
+                crucible_test_context::fuzz_assert!(
+                    borrow.borrowed_amount_outside_elevation_groups == 0,
+                    "EG GHOST: user {} borrow slot {} has borrowed_sf=0 but outside_eg={}",
+                    user.keypair.pubkey(), i,
+                    borrow.borrowed_amount_outside_elevation_groups
+                );
+            }
+        }
+
+        // If ALL borrows are zeroed, all deposit EG trackers must be zero too
+        let all_borrows_zero = obligation.borrows.iter().all(|b| {
+            b.borrow_reserve == [0u8; 32] || u64_pair_to_u128(b.borrowed_amount_sf) == 0
+        });
+        if all_borrows_zero {
+            for (i, deposit) in obligation.deposits.iter().enumerate() {
+                if deposit.deposit_reserve == [0u8; 32] { continue; }
+                crucible_test_context::fuzz_assert!(
+                    deposit.borrowed_amount_against_this_collateral_in_elevation_group == 0,
+                    "EG GHOST: user {} all borrows zero but deposit slot {} has eg_borrow={}",
+                    user.keypair.pubkey(), i,
+                    deposit.borrowed_amount_against_this_collateral_in_elevation_group
+                );
+            }
+        }
+    }
+}
+
+/// Invariant: Reserve-level EG bucket sum must not exceed total borrowed.
+/// Sum of borrowed_amount_outside_elevation_group +
+/// borrowed_amounts_against_this_reserve_in_elevation_groups[0..32]
+/// should be <= reserve.liquidity.borrowed_amount_sf >> 60.
+/// The EG tracking is a disaggregation of total borrowed — it CAN be less
+/// (legacy borrows from before EG tracking was added are not tracked in buckets),
+/// but it should NEVER exceed the total (that would mean phantom EG debt was created,
+/// enabling overborrowing beyond configured group caps).
+fn eg_bucket_sum_consistency(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let borrowed_sf = u64_pair_to_u128(reserve.liquidity.borrowed_amount_sf);
+        // Skip if no borrows
+        if borrowed_sf == 0 { continue; }
+
+        let total_tokens = borrowed_sf >> 60;
+
+        let mut eg_sum: u128 = reserve.borrowed_amount_outside_elevation_group as u128;
+        for &bucket in &reserve.borrowed_amounts_against_this_reserve_in_elevation_groups {
+            eg_sum = eg_sum.saturating_add(bucket as u128);
+        }
+
+        // EG bucket sum should not exceed total borrowed (one-directional)
+        // Allow small tolerance for rounding across accrual cycles
+        let tolerance: u128 = 64;
+        crucible_test_context::fuzz_assert!(
+            eg_sum <= total_tokens.saturating_add(tolerance),
+            "EG BUCKET OVERFLOW: reserve {} eg_sum={} > total_borrowed_tokens={} (excess={})",
+            reserve_data.reserve, eg_sum, total_tokens,
+            eg_sum.saturating_sub(total_tokens)
+        );
+    }
+}
+
+/// Invariant: obligation.borrow_factor_adjusted_debt_value_sf must equal
+/// the sum of per-slot borrow_factor_adjusted_market_value_sf across all active borrow slots.
+/// The aggregate is written by a separate accumulation loop from the per-slot fields;
+/// any divergence exposes a skipped slot, double-counted slot, or stale residue.
+/// Catches elevation group migration bugs that leave inconsistent per-slot values.
+fn borrow_factor_adjusted_equals_slot_sum(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        let aggregate = u64_pair_to_u128(obligation.borrow_factor_adjusted_debt_value_sf);
+        // Skip if no debt — refresh hasn't run or no borrows
+        if aggregate == 0 { continue; }
+
+        let mut slot_sum: u128 = 0;
+        for borrow in &obligation.borrows {
+            if borrow.borrow_reserve == [0u8; 32] { continue; }
+            let slot_val = u64_pair_to_u128(borrow.borrow_factor_adjusted_market_value_sf);
+            slot_sum = slot_sum.saturating_add(slot_val);
+        }
+
+        // Allow small tolerance for u128 rounding in accumulation
+        let diff = if aggregate > slot_sum { aggregate - slot_sum } else { slot_sum - aggregate };
+        let tolerance: u128 = 1u128 << 30;  // ~1 sf-unit at the bit level
+
+        crucible_test_context::fuzz_assert!(
+            diff <= tolerance,
+            "BFA DEBT MISMATCH: user {} aggregate={} != slot_sum={} (diff={})",
+            user.keypair.pubkey(), aggregate, slot_sum, diff
+        );
+    }
+}
+
+/// Invariant: obligation.allowed_borrow_value_sf must not exceed deposited_value_sf.
+/// LTV-weighted collateral cannot exceed unweighted collateral (LTV is in [0, 100]).
+/// A violation means an LTV > 100 was applied (u8 overflow, EG misconfig, or wrong elevation
+/// group table entry) — enabling collateral-free borrowing that drains the reserve.
+fn allowed_borrow_le_deposited_value(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE, u64_pair_to_u128};
+
+    for user in &fixture.users {
+        let Ok(account) = fixture.ctx.get_account(&user.obligation) else { continue };
+        if account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+        let obligation: &Obligation = bytemuck::from_bytes(&account.data[8..8 + OBLIGATION_SIZE]);
+
+        let allowed = u64_pair_to_u128(obligation.allowed_borrow_value_sf);
+        let deposited = u64_pair_to_u128(obligation.deposited_value_sf);
+
+        // Skip if no deposits — no allowed_borrow can be computed yet
+        if deposited == 0 { continue; }
+
+        crucible_test_context::fuzz_assert!(
+            allowed <= deposited,
+            "EFFECTIVE LTV > 100%: user {} allowed_borrow_value_sf={} > deposited_value_sf={} (excess={})",
+            user.keypair.pubkey(), allowed, deposited, allowed.saturating_sub(deposited)
         );
     }
 }

@@ -3358,7 +3358,48 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
                 fuzz_assert!(pos_state.tick_upper_index % (TICK_SPACING as i32) == 0,
                     "Position[{}] tick_upper {} not aligned to tick_spacing {}",
                     idx, pos_state.tick_upper_index, TICK_SPACING);
+                // NEW: Tick range immutability check vs fixture-tracked values.
+                // Catches Anchor zero-copy layout bugs (v1 vs v2 struct mismatch)
+                // or silent writes from liquidity ops that should not touch bounds.
+                // The fixture tracker is updated only at open/reset; any deviation
+                // from on-chain values means an unauthorized tick mutation.
+                fuzz_assert_eq!(pos_state.tick_lower_index, pos.tick_lower_index,
+                    "Position[{}] tick_lower mutated: on-chain={} tracker={}",
+                    idx, pos_state.tick_lower_index, pos.tick_lower_index);
+                fuzz_assert_eq!(pos_state.tick_upper_index, pos.tick_upper_index,
+                    "Position[{}] tick_upper mutated: on-chain={} tracker={}",
+                    idx, pos_state.tick_upper_index, pos.tick_upper_index);
             }
+        }
+    }
+
+    // ---- Total Vault Solvency: vault >= protocol_fee_owed + sum(position.fee_owed) ----
+    // Stronger than the existing vault >= protocol_fee_owed check. The vault must hold
+    // enough tokens to pay out BOTH the protocol fees AND all LP fee_owed. If total
+    // liabilities exceed vault holdings, we have double-booking insolvency — either
+    // a position's fee_owed was inflated or the same swap fee was credited twice.
+    {
+        if let Ok(pool_state) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+            let vault_a = fixture.ctx.token_balance(&fixture.pool.token_vault_a) as u128;
+            let vault_b = fixture.ctx.token_balance(&fixture.pool.token_vault_b) as u128;
+            let mut total_lp_owed_a: u128 = 0;
+            let mut total_lp_owed_b: u128 = 0;
+            for pos in fixture.positions.iter() {
+                if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Position>(&pos.position) {
+                    if ps.whirlpool == fixture.pool.whirlpool {
+                        total_lp_owed_a = total_lp_owed_a.saturating_add(ps.fee_owed_a as u128);
+                        total_lp_owed_b = total_lp_owed_b.saturating_add(ps.fee_owed_b as u128);
+                    }
+                }
+            }
+            let total_owed_a = (pool_state.protocol_fee_owed_a as u128).saturating_add(total_lp_owed_a);
+            let total_owed_b = (pool_state.protocol_fee_owed_b as u128).saturating_add(total_lp_owed_b);
+            fuzz_assert!(vault_a >= total_owed_a,
+                "Pool1 vault_a ({}) < total_owed = protocol({}) + sum_lp_fee_owed({}) = {}",
+                vault_a, pool_state.protocol_fee_owed_a, total_lp_owed_a, total_owed_a);
+            fuzz_assert!(vault_b >= total_owed_b,
+                "Pool1 vault_b ({}) < total_owed = protocol({}) + sum_lp_fee_owed({}) = {}",
+                vault_b, pool_state.protocol_fee_owed_b, total_lp_owed_b, total_owed_b);
         }
     }
 
@@ -3377,6 +3418,41 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
                 || fixture.prev_p1_zero_liquidity,
                 "Pool1 fee_growth_global_b increased ({} -> {}) while liquidity was zero",
                 fixture.prev_fee_growth_global_b, pool_state.fee_growth_global_b);
+        }
+    }
+
+    // ---- Reward Growth Zero-Liquidity Freeze (all pools) ----
+    // Analogous to fee_growth freeze: when pool.liquidity == 0, reward_growth_global
+    // should NOT increase because there are no in-range LPs to receive rewards.
+    // Rewards accumulating with zero liquidity are destroyed (no owner). Unlike
+    // fee_growth which is fee-funded, reward_growth drains a finite reward vault,
+    // so zero-liquidity accumulation is both wasteful AND creates vault insolvency.
+    {
+        let check_reward_zero_liq = |pool_pk: &Pubkey, pool_data: &PoolData,
+            prev_growths: &[u128; 3], prev_zero_liq: bool, pool_name: &str|
+        {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(pool_pk) {
+                if ps.liquidity == 0 {
+                    for i in 0..3 {
+                        if pool_data.reward_initialized[i] {
+                            let cur = ps.reward_infos[i].growth_global_x64;
+                            fuzz_assert!(cur == prev_growths[i] || prev_zero_liq,
+                                "{} reward[{}] growth_global increased ({} -> {}) while liquidity was zero",
+                                pool_name, i, prev_growths[i], cur);
+                        }
+                    }
+                }
+            }
+        };
+        check_reward_zero_liq(&fixture.pool.whirlpool, &fixture.pool,
+            &snap_p1_reward_growths, fixture.prev_p1_zero_liquidity, "Pool1");
+        if let Some(ref p2) = fixture.pool_two {
+            check_reward_zero_liq(&p2.whirlpool, p2,
+                &snap_p2_reward_growths, fixture.prev_p2_zero_liquidity, "Pool2");
+        }
+        if let Some(ref p3) = fixture.pool_three {
+            check_reward_zero_liq(&p3.whirlpool, p3,
+                &snap_p3_reward_growths, fixture.prev_p3_zero_liquidity, "Pool3");
         }
     }
 
@@ -3826,5 +3902,44 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
                 pool_state.liquidity, total_all);
         }
     }
+
+    // ========================================================================
+    // NEW: Differential sqrt_price/tick Oracle (f64 log — independent code path)
+    // ========================================================================
+    // Recompute implied tick from sqrt_price using floating-point logarithm,
+    // which is a COMPLETELY independent code path from the program's Q64.64
+    // integer tick-crossing logic. Catches off-by-one in tick-step loop exit,
+    // direction flag inversion, or sqrt_price advancing without tick update.
+    // Tolerance of 1 accommodates floor/ceil boundary at exact tick prices.
+    {
+        let check_tick_oracle = |pool_pk: &Pubkey, pool_name: &str| {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(pool_pk) {
+                let q64: f64 = (1u128 << 64) as f64;
+                let sqrt_price_f64 = ps.sqrt_price as f64 / q64;
+                let price_f64 = sqrt_price_f64 * sqrt_price_f64;
+                if price_f64 > 0.0 && price_f64.is_finite() && price_f64 > 1e-38 {
+                    let implied_tick = (price_f64.ln() / 1.0001_f64.ln()).floor() as i32;
+                    fuzz_assert!(
+                        (implied_tick - ps.tick_current_index).abs() <= 1,
+                        "{}: f64 tick oracle desync: implied={} actual={} sqrt_price={} price_f64={}",
+                        pool_name, implied_tick, ps.tick_current_index, ps.sqrt_price, price_f64
+                    );
+                }
+            }
+        };
+        check_tick_oracle(&fixture.pool.whirlpool, "Pool1");
+        if let Some(ref p2) = fixture.pool_two {
+            check_tick_oracle(&p2.whirlpool, "Pool2");
+        }
+        if let Some(ref p3) = fixture.pool_three {
+            check_tick_oracle(&p3.whirlpool, "Pool3");
+        }
+    }
+
+    // NOTE: LP fee upper bound via fee_growth × liquidity was REMOVED (false positive).
+    // The global invariant can't bound fee_growth delta against vault balance because
+    // fee_growth spans multiple swaps while vault changes from deposits/withdrawals.
+    // The per-swap fee checks in do_swap (protocol fee bounded by input, fee_growth
+    // direction, non-zero fee for non-dust swaps) already provide this coverage correctly.
 
 }

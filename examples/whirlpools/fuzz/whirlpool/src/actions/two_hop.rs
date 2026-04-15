@@ -196,6 +196,26 @@ pub fn action_two_hop_swap_v2(
                     }
                 }
 
+                // Zero intermediate → pool_two noop: if pool_one emitted zero
+                // intermediate tokens, pool_two must be completely unchanged.
+                // Catches phantom fee accrual on zero-amount swap legs.
+                if v1_b_out == 0 {
+                    if let Ok(p2_post) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&pool_two.whirlpool) {
+                        fuzz_assert_eq!(p2_post.protocol_fee_owed_a, th_p2_pre_proto_a,
+                            "two_hop A→B→C: zero intermediate but pool2 protocol_fee_a changed {} -> {}",
+                            th_p2_pre_proto_a, p2_post.protocol_fee_owed_a);
+                        fuzz_assert_eq!(p2_post.protocol_fee_owed_b, th_p2_pre_proto_b,
+                            "two_hop A→B→C: zero intermediate but pool2 protocol_fee_b changed {} -> {}",
+                            th_p2_pre_proto_b, p2_post.protocol_fee_owed_b);
+                        fuzz_assert_eq!(p2_post.fee_growth_global_a, th_p2_fg_a,
+                            "two_hop A→B→C: zero intermediate but pool2 fee_growth_a changed {} -> {}",
+                            th_p2_fg_a, p2_post.fee_growth_global_a);
+                        fuzz_assert_eq!(p2_post.fee_growth_global_b, th_p2_fg_b,
+                            "two_hop A→B→C: zero intermediate but pool2 fee_growth_b changed {} -> {}",
+                            th_p2_fg_b, p2_post.fee_growth_global_b);
+                    }
+                }
+
                 debug_print!("[TWO_HOP_SWAP_V2] SUCCESS: A→B→C amount={} user={}", amount, user_idx);
                 true
             }
@@ -386,6 +406,25 @@ pub fn action_two_hop_swap_v2(
                 fuzz_assert_eq!(p1_post.fee_growth_global_a, th2_p1_fg_a,
                     "two_hop_v2 C→B→A pool1: fee_growth_a changed {} -> {} (B→A, should be frozen)",
                     th2_p1_fg_a, p1_post.fee_growth_global_a);
+            }
+
+            // Zero intermediate → pool_one noop: if pool_two (whirlpool_one in CBA) emitted
+            // zero intermediate tokens, pool_one (whirlpool_two) must be completely unchanged.
+            if v1_inter_out == 0 {
+                if let Ok(p1_post) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
+                    fuzz_assert_eq!(p1_post.protocol_fee_owed_a, th2_p1_pre_proto_a,
+                        "two_hop C→B→A: zero intermediate but pool1 protocol_fee_a changed {} -> {}",
+                        th2_p1_pre_proto_a, p1_post.protocol_fee_owed_a);
+                    fuzz_assert_eq!(p1_post.protocol_fee_owed_b, th2_p1_pre_proto_b,
+                        "two_hop C→B→A: zero intermediate but pool1 protocol_fee_b changed {} -> {}",
+                        th2_p1_pre_proto_b, p1_post.protocol_fee_owed_b);
+                    fuzz_assert_eq!(p1_post.fee_growth_global_a, th2_p1_fg_a,
+                        "two_hop C→B→A: zero intermediate but pool1 fee_growth_a changed {} -> {}",
+                        th2_p1_fg_a, p1_post.fee_growth_global_a);
+                    fuzz_assert_eq!(p1_post.fee_growth_global_b, th2_p1_fg_b,
+                        "two_hop C→B→A: zero intermediate but pool1 fee_growth_b changed {} -> {}",
+                        th2_p1_fg_b, p1_post.fee_growth_global_b);
+                }
             }
 
             debug_print!("[TWO_HOP_SWAP_V2] SUCCESS: C→B→A amount={} user={}", amount, user_idx);

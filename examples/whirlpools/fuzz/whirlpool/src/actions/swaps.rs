@@ -311,6 +311,55 @@
                         vault_b_delta, -user_b_delta);
                 }
 
+                // ----------------------------------------------------------------
+                // NEODYME FINDING 2: SPOT-PRICE BOUNDED SWAP OUTPUT
+                // ----------------------------------------------------------------
+                // From Orca Neodyme audit (May 2022), Medium finding "Integer
+                // Overflow when swapping" — `amount_in + fee_amount` could overflow
+                // u64 at very high/low prices, causing "assets to be sold for
+                // a fraction of their real worth". The fix was checked math, but
+                // we add a fuzz-side detection: the output amount must be bounded
+                // by a generous multiple of input × spot-price. A swap where the
+                // user receives 10x+ the spot-price output signals an overflow bug.
+                //
+                // Uses f64 arithmetic (independent code path) to avoid re-implementing
+                // the u128 pricing logic. 10x tolerance allows legitimate
+                // multi-tick price impact while catching the class of bugs that
+                // delivers e.g. 1000x (overflow) or a fraction of expected output.
+                {
+                    let user_a_post_chk = self.ctx.token_balance(&self.users[user_idx].token_account_a);
+                    let user_b_post_chk = self.ctx.token_balance(&self.users[user_idx].token_account_b);
+                    let sqrt_price_f64 = price_pre as f64 / (1u128 << 64) as f64;
+                    let spot_price = sqrt_price_f64 * sqrt_price_f64; // price of A in terms of B
+                    if spot_price > 0.0 && spot_price.is_finite() {
+                        if a_to_b {
+                            // Sold A, received B. Expected: received_b ≈ consumed_a × spot_price
+                            let consumed_a = user_a_pre.saturating_sub(user_a_post_chk);
+                            let received_b = user_b_post_chk.saturating_sub(user_b_pre);
+                            if consumed_a > 0 {
+                                let expected_b_f64 = (consumed_a as f64) * spot_price;
+                                // 10x upper bound catches extreme overflow/underflow bugs
+                                // Floor at 1000 for small-swap tolerance
+                                let max_b_f64 = (expected_b_f64 * 10.0).max(1000.0);
+                                fuzz_assert!((received_b as f64) <= max_b_f64,
+                                    "NEODYME-CLASS OVERFLOW: a_to_b swap consumed {} A, received {} B, but spot price says max={} (sqrt_price={}, spot={:.6})",
+                                    consumed_a, received_b, max_b_f64 as u64, price_pre, spot_price);
+                            }
+                        } else {
+                            // Sold B, received A. Expected: received_a ≈ consumed_b / spot_price
+                            let consumed_b = user_b_pre.saturating_sub(user_b_post_chk);
+                            let received_a = user_a_post_chk.saturating_sub(user_a_pre);
+                            if consumed_b > 0 && spot_price > 1e-300 {
+                                let expected_a_f64 = (consumed_b as f64) / spot_price;
+                                let max_a_f64 = (expected_a_f64 * 10.0).max(1000.0);
+                                fuzz_assert!((received_a as f64) <= max_a_f64,
+                                    "NEODYME-CLASS OVERFLOW: b_to_a swap consumed {} B, received {} A, but spot price says max={} (sqrt_price={}, spot={:.6})",
+                                    consumed_b, received_a, max_a_f64 as u64, price_pre, spot_price);
+                            }
+                        }
+                    }
+                }
+
                 // Per-swap protocol fee side isolation + bounded by input + rate ratio
                 if let Ok(post_pool) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
                     let proto_a_delta = post_pool.protocol_fee_owed_a.saturating_sub(pre_proto_fee_a);

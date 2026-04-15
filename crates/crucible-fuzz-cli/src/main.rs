@@ -2174,7 +2174,7 @@ fn resolve_binary_from_metadata(
                 None
             };
 
-            // First pass: match by name
+            // First pass: match by package name
             for package in packages {
                 let pkg_name = package["name"].as_str().unwrap_or("");
                 if pkg_name.contains(program_name)
@@ -2186,7 +2186,31 @@ fn resolve_binary_from_metadata(
                 }
             }
 
-            // Second pass: if there's exactly one package (standalone workspace),
+            // Second pass: match by exact bin target name (e.g. slippage_bug → target/release/slippage_bug)
+            for package in packages {
+                if let Some(targets) = package["targets"].as_array() {
+                    for target in targets {
+                        let is_bin = target["kind"].as_array().map_or(false, |k| {
+                            k.iter().any(|v| v.as_str() == Some("bin"))
+                        });
+                        if is_bin {
+                            if let Some(bin_name) = target["name"].as_str() {
+                                if bin_name == program_name
+                                    || bin_name == program_name.replace('-', "_")
+                                {
+                                    let binary =
+                                        PathBuf::from(target_dir).join(profile).join(bin_name);
+                                    if exists_fn(&binary) {
+                                        return Ok(binary);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Third pass: if there's exactly one package (standalone workspace),
             // use it regardless of name — the fuzz_dir already scoped us correctly
             if packages.len() == 1 {
                 if let Some(path) = try_package(&packages[0]) {

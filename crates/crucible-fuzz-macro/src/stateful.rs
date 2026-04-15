@@ -339,8 +339,8 @@ fn gen_action_chain(
                 let __replay_roll = rng.next() % 100;
                 let __one_action = if __replay_roll < 35 && !__crossover_buf.is_empty() {
                     // 35%: Crossover EXACT replay (exploit known-good params)
-                    let __ci = rng.next() as usize % __crossover_buf.len();
-                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                    let __cross_idx = rng.next() as usize % __crossover_buf.len();
+                    let (cross_vi, ref cross_fields) = __crossover_buf[__cross_idx];
                     if !cross_fields.is_empty() {
                         let mut cursor = 0usize;
                         match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
@@ -352,8 +352,8 @@ fn gen_action_chain(
                     }
                 } else if __replay_roll < 45 && !__crossover_buf.is_empty() {
                     // 10%: Crossover + mutate (secondary exploration)
-                    let __ci = rng.next() as usize % __crossover_buf.len();
-                    let (cross_vi, ref cross_fields) = __crossover_buf[__ci];
+                    let __cross_idx = rng.next() as usize % __crossover_buf.len();
+                    let (cross_vi, ref cross_fields) = __crossover_buf[__cross_idx];
                     if !cross_fields.is_empty() {
                         let mut cursor = 0usize;
                         match <#action_ty as crucible_fuzzer::FuzzAction>::deserialize_fields(cross_vi, &*cross_fields, &mut cursor) {
@@ -1789,9 +1789,12 @@ fn stateful_multicore_body(
                     // Thread-local seen variant hashes to skip duplicate crash accumulation
                     let mut seen_variant_hashes: crucible_test_context::FastHashSet<u64> = crucible_test_context::FastHashSet::default();
                     let mut __single_action_buf: Vec<u8> = Vec::with_capacity(64);
+                    // Cached weight distribution — rebuilt at batch boundaries, reused for splice
+                    let mut __weight_cumulative: Vec<f64> = Vec::new();
+                    let mut __weight_total: f64 = 0.0;
 
                     loop {
-                        if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
+                        if stop.load(Ordering::Relaxed) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
 
                         // Refill batch when empty
                         if local_batch.is_empty() {
@@ -1834,7 +1837,7 @@ fn stateful_multicore_body(
                                             __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
                                             if stop_on_crash {
                                                 eprintln!("[STATEFUL W{}] First crash found, signaling stop (--stop-on-crash).", worker_id);
-                                                stop.store(true, Ordering::SeqCst);
+                                                stop.store(true, Ordering::Relaxed);
                                             }
                                         }
                                     }
@@ -1842,7 +1845,9 @@ fn stateful_multicore_body(
                                     // Couldn't get write lock — keep pending_novel for retry next batch.
                                     // Cap to prevent unbounded growth if write lock is always contended.
                                     if pending_novel.len() > 2048 {
-                                        pending_novel.drain(..pending_novel.len() - 1024);
+                                        let dropped = pending_novel.len() - 1024;
+                                        pending_novel.drain(..dropped);
+                                        eprintln!("[WORKER W{}] Warning: dropped {} pending novel states (write lock contention)", worker_id, dropped);
                                     }
                                 }
                             }
@@ -1904,6 +1909,9 @@ fn stateful_multicore_body(
                                         }
                                     }
                                 }
+                                // Cache weight distribution for splice donor selection
+                                __weight_cumulative = __wc;
+                                __weight_total = __wt;
                                 // Read lock released here — pool is free for other workers
                             }
 
@@ -1935,7 +1943,7 @@ fn stateful_multicore_body(
                         local_iter += 1;
 
                         // Pop one state + pre-cloned fixture from local batch (no lock needed)
-                        let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut _fixture_arc) =
+                        let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc) =
                             local_batch.pop().unwrap();
                         let mut __iter_fixture = fixture_batch.pop().unwrap();
 
@@ -1945,7 +1953,9 @@ fn stateful_multicore_body(
                         if __splice_roll < 5 && __cached_pool_len > 10 {
                             // 5%: Donor splice — extract subsequence from an existing chain
                             if let Ok(p) = pool.try_read() {
-                                let __donor_idx = p.pick_random(rng.next()).unwrap_or(0);
+                                // Use cached weight distribution for weighted donor selection
+                                // (consistent with singlecore which uses sample_from_distribution)
+                                let __donor_idx = p.sample_from_distribution(&__weight_cumulative, __weight_total, rng.next()).unwrap_or(0);
                                 let __donor_seq = p.reconstruct_variant_field_sequence(__donor_idx);
                                 if __donor_seq.len() >= 2 {
                                     let __splice_len = (2 + rng.next() as usize % 4).min(__donor_seq.len());
@@ -1970,11 +1980,11 @@ fn stateful_multicore_body(
                                             state_idx = 0;
                                             parent_action_bytes = entry.action_bytes.clone();
                                             parent_fingerprint = entry.fingerprint;
-                                            _fixture_arc = entry.fixture_state.clone();
+                                            fixture_arc = entry.fixture_state.clone();
                                             // Re-clone fixture from initial state under mutex
                                             {
                                                 let _guard = fixture_clone_lock.lock().unwrap();
-                                                if let Some(ref arc) = _fixture_arc {
+                                                if let Some(ref arc) = fixture_arc {
                                                     let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
                                                     __iter_fixture = wrapper.0.clone();
                                                 } else {
@@ -2145,10 +2155,16 @@ fn stateful_multicore_body(
                                         let stored_count = u32::from_le_bytes(
                                             accumulated_bytes[0..4].try_into().unwrap()
                                         );
-                                        if stored_count as u32 != parent_depth {
+                                        if stored_count != parent_depth {
                                             // Parent has ghost actions — rebuild from scratch
-                                            if let Ok(__pg) = pool.read() {
-                                                accumulated_bytes = __pg.rebuild_action_bytes_clean(state_idx);
+                                            match pool.read() {
+                                                Ok(__pg) => {
+                                                    accumulated_bytes = __pg.rebuild_action_bytes_clean(state_idx);
+                                                }
+                                                Err(_) => {
+                                                    // Lock poisoned — skip save
+                                                    continue;
+                                                }
                                             }
                                         }
                                         let count = u32::from_le_bytes(
@@ -2366,9 +2382,12 @@ fn stateful_multicore_body(
             // Cache pool stats for monitor (updated at batch boundaries, avoids extra read locks)
             let mut cached_pool_len: usize = 1;
             let mut cached_pool_active: usize = 1;
+            // Cached weight distribution — rebuilt at batch boundaries, reused for splice
+            let mut __weight_cumulative: Vec<f64> = Vec::new();
+            let mut __weight_total: f64 = 0.0;
 
             loop {
-                if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
+                if stop.load(Ordering::Relaxed) || SIGNAL_STOP.load(Ordering::Relaxed) { break; }
 
                 local_iter += 1;
 
@@ -2433,7 +2452,7 @@ fn stateful_multicore_body(
                                     __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
                                     if stop_on_crash {
                                         eprintln!("[STATEFUL W0] First crash found, signaling stop (--stop-on-crash).");
-                                        stop.store(true, Ordering::SeqCst);
+                                        stop.store(true, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -2443,7 +2462,9 @@ fn stateful_multicore_body(
                             // Couldn't get write lock — keep pending_novel for retry next batch.
                             // Cap to prevent unbounded growth if write lock is always contended.
                             if pending_novel.len() > 2048 {
-                                pending_novel.drain(..pending_novel.len() - 1024);
+                                let dropped = pending_novel.len() - 1024;
+                                pending_novel.drain(..dropped);
+                                eprintln!("[STATEFUL W0] Warning: dropped {} pending novel states (write lock contention)", dropped);
                             }
                         }
                     }
@@ -2512,6 +2533,9 @@ fn stateful_multicore_body(
                             }
                         }
                         if let Some(__t) = __t_cross { __phase_pick_crossover_ns += __t.elapsed().as_nanos() as u64; }
+                        // Cache weight distribution for splice donor selection
+                        __weight_cumulative = __wc;
+                        __weight_total = __wt;
                         // Read lock released here — pool is free for other workers
                     }
 
@@ -2541,7 +2565,7 @@ fn stateful_multicore_body(
                 }
 
                 // Pop one state + pre-cloned fixture from local batch (no lock needed)
-                let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut _fixture_arc) =
+                let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc) =
                     local_batch.pop().unwrap();
                 let mut __iter_fixture = w0_fixture_batch.pop().unwrap();
 
@@ -2552,7 +2576,9 @@ fn stateful_multicore_body(
                 if __splice_roll < 5 && cached_pool_len > 10 {
                     // 5%: Donor splice — extract subsequence from an existing chain
                     if let Ok(p) = pool.try_read() {
-                        let __donor_idx = p.pick_random(rng.next()).unwrap_or(0);
+                        // Use cached weight distribution for weighted donor selection
+                        // (consistent with singlecore which uses sample_from_distribution)
+                        let __donor_idx = p.sample_from_distribution(&__weight_cumulative, __weight_total, rng.next()).unwrap_or(0);
                         let __donor_seq = p.reconstruct_variant_field_sequence(__donor_idx);
                         if __donor_seq.len() >= 2 {
                             let __splice_len = (2 + rng.next() as usize % 4).min(__donor_seq.len());
@@ -2577,11 +2603,11 @@ fn stateful_multicore_body(
                                     state_idx = 0;
                                     parent_action_bytes = entry.action_bytes.clone();
                                     parent_fingerprint = entry.fingerprint;
-                                    _fixture_arc = entry.fixture_state.clone();
+                                    fixture_arc = entry.fixture_state.clone();
                                     // Re-clone fixture from initial state under mutex
                                     {
                                         let _guard = fixture_clone_mutex.lock().unwrap();
-                                        if let Some(ref arc) = _fixture_arc {
+                                        if let Some(ref arc) = fixture_arc {
                                             let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
                                             __iter_fixture = wrapper.0.clone();
                                         } else {
@@ -2722,7 +2748,15 @@ fn stateful_multicore_body(
                         let mut crash_bytes = {
                             let raw = (*parent_action_bytes).clone();
                             let stored = if raw.len() >= 4 { u32::from_le_bytes(raw[0..4].try_into().unwrap()) } else { 0 };
-                            if stored != parent_depth { state_pool.read().unwrap().rebuild_action_bytes_clean(state_idx) } else { raw }
+                            if stored != parent_depth {
+                                match state_pool.try_read() {
+                                    Ok(__pg) => __pg.rebuild_action_bytes_clean(state_idx),
+                                    Err(_) => {
+                                        eprintln!("[STATEFUL W0] Warning: crash bytes may have ghost actions (pool lock contended)");
+                                        raw
+                                    }
+                                }
+                            } else { raw }
                         };
                         if crash_bytes.len() >= 4 {
                             let old_count = u32::from_le_bytes(
@@ -2777,6 +2811,22 @@ fn stateful_multicore_body(
 
                             let mut accumulated_bytes = (*parent_action_bytes).clone();
                             if accumulated_bytes.len() >= 4 {
+                                // Validate parent action count matches depth to strip inherited ghosts
+                                let stored_count = u32::from_le_bytes(
+                                    accumulated_bytes[0..4].try_into().unwrap()
+                                );
+                                if stored_count != parent_depth {
+                                    // Parent has ghost actions — rebuild from scratch
+                                    match state_pool.try_read() {
+                                        Ok(__pg) => {
+                                            accumulated_bytes = __pg.rebuild_action_bytes_clean(state_idx);
+                                        }
+                                        Err(_) => {
+                                            // Can't rebuild — skip save rather than store corrupted bytes
+                                            continue;
+                                        }
+                                    }
+                                }
                                 let count = u32::from_le_bytes(
                                     accumulated_bytes[0..4].try_into().unwrap()
                                 );

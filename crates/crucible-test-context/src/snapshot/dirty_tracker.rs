@@ -89,7 +89,9 @@ impl DirtyTracker {
 
 impl Clone for DirtyTracker {
     fn clone(&self) -> Self {
-        // Fresh tracker for cloned contexts — no need to carry dirty state
+        // NOTE: Intentionally returns a fresh tracker, not a copy of `self`.
+        // Cloned contexts start a new iteration with no dirty state — carrying
+        // over the parent's dirty set would cause incorrect snapshot restoration.
         Self::new()
     }
 }

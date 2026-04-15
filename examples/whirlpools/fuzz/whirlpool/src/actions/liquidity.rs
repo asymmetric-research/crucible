@@ -160,6 +160,76 @@
                     "increase_liq: vault_b delta ({}) != user_b delta ({})",
                     vault_delta_b, user_delta_b);
 
+                // ----------------------------------------------------------------
+                // CETUS-STYLE FREE LIQUIDITY MINT DETECTION
+                // ----------------------------------------------------------------
+                // Cetus (May 2025, ~$223M loss): `checked_shlw` had wrong overflow
+                // mask, letting attackers mint huge liquidity for ~0 tokens. The
+                // INTERNAL liquidity math can silently return a near-zero amount
+                // for a huge L, bypassing the vault_delta == user_delta check
+                // (both would be 0). This invariant independently bounds the
+                // required token amounts from L using Whirlpool's own math formulas.
+                //
+                // Whirlpool formulas (from math/token_math.rs):
+                //   amount_a = L × (√upper − √current) × 2^64 / (√current × √upper)  (above-tick contribution)
+                //   amount_b = L × (√current − √lower) / 2^64                         (below-tick contribution)
+                //
+                // For a non-trivial L and non-degenerate range, at least one of
+                // these must be strictly positive. A zero-token mint of positive
+                // liquidity is a direct free-mint exploit signal.
+                if liquidity_amount >= 1_000_000 {
+                    let pos = &self.positions[position_idx];
+                    let sqrt_lower = harness_sqrt_price_from_tick(pos.tick_lower_index);
+                    let sqrt_upper = harness_sqrt_price_from_tick(pos.tick_upper_index);
+                    let sqrt_current = pre_sqrt_price;
+                    let in_range = pos.tick_lower_index <= pre_pool_tick && pre_pool_tick < pos.tick_upper_index;
+                    let above_range = pre_pool_tick >= pos.tick_upper_index;
+                    let below_range = pre_pool_tick < pos.tick_lower_index;
+
+                    // For an in-range position with non-degenerate range,
+                    // at least one vault delta MUST be non-zero.
+                    if in_range && sqrt_upper > sqrt_lower && sqrt_current > 0 {
+                        let both_zero = vault_delta_a == 0 && vault_delta_b == 0;
+                        fuzz_assert!(!both_zero,
+                            "CETUS-STYLE FREE MINT: in-range pos {} minted L={} (ticks=[{},{}] cur={}) but deposited 0 tokens in both vaults",
+                            position_idx, liquidity_amount, pos.tick_lower_index, pos.tick_upper_index, pre_pool_tick);
+
+                        // Additional: compute expected token_b lower bound and compare
+                        // amount_b >= L × (√current − √lower) / 2^64
+                        // Use saturating math; only check when no overflow possible
+                        if sqrt_current > sqrt_lower {
+                            let sqrt_diff_b = sqrt_current - sqrt_lower;
+                            // Guard against overflow: only check when L × diff fits in u128
+                            if sqrt_diff_b > 0 && liquidity_amount <= u128::MAX / sqrt_diff_b.max(1) {
+                                let expected_b_min = (liquidity_amount.saturating_mul(sqrt_diff_b)) >> 64;
+                                // Apply ~10% safety margin + 100 token absolute floor for rounding
+                                let required_b = expected_b_min.saturating_mul(9) / 10;
+                                if required_b > 100 {
+                                    fuzz_assert!((vault_delta_b as u128) + 100 >= required_b,
+                                        "CETUS-STYLE: in-range pos {} L={} needs vault_b>={} got {} (ticks=[{},{}])",
+                                        position_idx, liquidity_amount, required_b, vault_delta_b,
+                                        pos.tick_lower_index, pos.tick_upper_index);
+                                }
+                            }
+                        }
+                    } else if below_range && sqrt_upper > sqrt_lower {
+                        // Below range → only token_a needed, token_b must be 0.
+                        // If vault_delta_a is 0 for L > 1M, it's a free mint.
+                        fuzz_assert!(vault_delta_a > 0,
+                            "CETUS-STYLE FREE MINT: below-range pos {} L={} but vault_a delta=0 (ticks=[{},{}])",
+                            position_idx, liquidity_amount, pos.tick_lower_index, pos.tick_upper_index);
+                        fuzz_assert_eq!(vault_delta_b, 0u64,
+                            "below-range pos {} erroneously took token_b delta={}", position_idx, vault_delta_b);
+                    } else if above_range && sqrt_upper > sqrt_lower {
+                        // Above range → only token_b needed, token_a must be 0.
+                        fuzz_assert!(vault_delta_b > 0,
+                            "CETUS-STYLE FREE MINT: above-range pos {} L={} but vault_b delta=0 (ticks=[{},{}])",
+                            position_idx, liquidity_amount, pos.tick_lower_index, pos.tick_upper_index);
+                        fuzz_assert_eq!(vault_delta_a, 0u64,
+                            "above-range pos {} erroneously took token_a delta={}", position_idx, vault_delta_a);
+                    }
+                }
+
                 self.total_liquidity_added += liquidity_amount;
                 self.positions[position_idx].has_liquidity = true;
                 debug_print!("[INCREASE_LIQ] SUCCESS: pos={} liq={}", position_idx, liquidity_amount);
@@ -310,6 +380,53 @@
                     fuzz_assert_eq!(vault_delta_b, user_delta_b,
                         "decrease_liq: token B vault outflow {} != user inflow {} (pos={})",
                         vault_delta_b, user_delta_b, position_idx);
+
+                    // ----------------------------------------------------------------
+                    // CETUS-INVERSE: INFLATED WITHDRAWAL DETECTION
+                    // ----------------------------------------------------------------
+                    // Classical CLMM drain: attacker removes L units and gets MORE
+                    // tokens than their liquidity should yield (via overflow / rounding
+                    // bug in get_amount_delta_a/b). Upper-bound the withdrawal using
+                    // Whirlpool's own formulas:
+                    //   amount_b_max = L × (√upper − √lower) / 2^64
+                    //   amount_a_max = L × (√upper − √lower) × 2^64 / (√lower × √upper)
+                    // Applies the full-range bound (overestimate safe) for each side.
+                    if liquidity_amount >= 1_000_000 {
+                        let pos = &self.positions[position_idx];
+                        let sqrt_lower = harness_sqrt_price_from_tick(pos.tick_lower_index);
+                        let sqrt_upper = harness_sqrt_price_from_tick(pos.tick_upper_index);
+
+                        if sqrt_upper > sqrt_lower && sqrt_lower > 0 {
+                            let sqrt_diff = sqrt_upper - sqrt_lower;
+
+                            // Upper bound on token_b withdrawal: L × sqrt_diff / 2^64
+                            // Only check when multiplication won't overflow u128
+                            if liquidity_amount <= u128::MAX / sqrt_diff.max(1) {
+                                let max_b = (liquidity_amount.saturating_mul(sqrt_diff)) >> 64;
+                                // 20% margin + 100-token absolute slack for arithmetic
+                                let max_b_with_slack = max_b.saturating_mul(12) / 10 + 100;
+                                fuzz_assert!((vault_delta_b as u128) <= max_b_with_slack,
+                                    "CETUS-INVERSE: inflated withdrawal — pos {} L={} gave vault_b={} but max is {} (ticks=[{},{}])",
+                                    position_idx, liquidity_amount, vault_delta_b, max_b_with_slack,
+                                    pos.tick_lower_index, pos.tick_upper_index);
+                            }
+
+                            // Upper bound on token_a withdrawal: L × sqrt_diff × 2^64 / (sqrt_lower × sqrt_upper)
+                            // Simplified bound: L × (1/sqrt_lower - 1/sqrt_upper) × 2^64
+                            //                 = L × sqrt_diff / (sqrt_lower × sqrt_upper / 2^64) × 2^64 / 2^64
+                            // To avoid overflow, use: token_a ≤ L / sqrt_lower × 2^64 (loosest safe bound)
+                            // when sqrt_lower >= some threshold
+                            if sqrt_lower > (1u128 << 32) {
+                                // Bound: token_a ≤ L × 2^64 / sqrt_lower (only holds for sqrt_lower > 1)
+                                let max_a = liquidity_amount.saturating_mul(1u128 << 32) / (sqrt_lower >> 32).max(1);
+                                let max_a_with_slack = max_a.saturating_mul(12) / 10 + 100;
+                                fuzz_assert!((vault_delta_a as u128) <= max_a_with_slack,
+                                    "CETUS-INVERSE: inflated withdrawal — pos {} L={} gave vault_a={} but max is {} (ticks=[{},{}] sqrt_lower={})",
+                                    position_idx, liquidity_amount, vault_delta_a, max_a_with_slack,
+                                    pos.tick_lower_index, pos.tick_upper_index, sqrt_lower);
+                            }
+                        }
+                    }
                 }
                 if liquidity_amount >= on_chain_liquidity {
                     self.positions[position_idx].has_liquidity = false;

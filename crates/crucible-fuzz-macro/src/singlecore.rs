@@ -197,7 +197,7 @@ pub fn singlecore_mode(
         // Internal macro to avoid code duplication between corpus modes
         // This works around Rust's type system (StdState is generic over corpus type)
         macro_rules! run_fuzz_loop {
-            ($corpus:expr, $use_forced_loading:expr) => {{
+            ($corpus:expr) => {{
                 #monitor_setup
                 #observer_feedback_setup
 
@@ -312,11 +312,11 @@ pub fn singlecore_mode(
             let corpus = CachedOnDiskCorpus::<BytesInput>::no_meta(corpus_out_path, 1000)
                 .expect("failed to create corpus");
 
-            run_fuzz_loop!(corpus, loading_from_same_dir);
+            run_fuzz_loop!(corpus);
         } else {
             // === IN-MEMORY CORPUS MODE (default) ===
             let corpus: InMemoryCorpus<BytesInput> = InMemoryCorpus::new();
-            run_fuzz_loop!(corpus, false);
+            run_fuzz_loop!(corpus);
         }
     }
 }
