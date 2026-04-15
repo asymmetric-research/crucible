@@ -288,7 +288,7 @@ fn test_state_pool_reconstruct_action_sequence() {
 
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         action_bytes.clone(),
@@ -340,7 +340,7 @@ fn test_state_pool_export_corpus_basic() {
     // Initial state with only a 4-byte header (count=0) — should be skipped
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         vec![0, 0, 0, 0], // 4-byte header, count=0
@@ -351,10 +351,10 @@ fn test_state_pool_export_corpus_basic() {
         0, 0, true, None,
     );
 
-    // State with real action bytes — should be written
+    // State with real action bytes — should be written (edge_novelty=1)
     pool.try_add(
         2,
-        SvmSnapshot::empty(make_test_clock(1)),
+        CompactDelta::empty(make_test_clock(1)),
         1,
         Some(0),
         make_action_bytes(1, &[0xAA, 0xBB]),
@@ -362,13 +362,13 @@ fn test_state_pool_export_corpus_basic() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
-    // Another state with different action bytes
+    // Another state with different action bytes (edge_novelty=1)
     pool.try_add(
         3,
-        SvmSnapshot::empty(make_test_clock(2)),
+        CompactDelta::empty(make_test_clock(2)),
         2,
         Some(1),
         make_action_bytes(2, &[0xCC, 0xDD, 0xEE, 0xFF]),
@@ -376,12 +376,12 @@ fn test_state_pool_export_corpus_basic() {
         Some(1),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
-    let count = pool.export_corpus(dir_path).unwrap();
+    let count = pool.export_corpus_no_seeds(dir_path).unwrap();
 
     assert_eq!(count, 2); // skipped the initial <=4-byte entry
 
@@ -399,7 +399,7 @@ fn test_state_pool_export_corpus_empty() {
     // Only initial state with empty action bytes
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         vec![0, 0, 0, 0],
@@ -411,7 +411,7 @@ fn test_state_pool_export_corpus_empty() {
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus(dir.path().to_str().unwrap()).unwrap();
+    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
     assert_eq!(count, 0);
 }
 
@@ -422,7 +422,7 @@ fn test_state_pool_export_corpus_content() {
 
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         expected_bytes.clone(),
@@ -430,12 +430,12 @@ fn test_state_pool_export_corpus_content() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
-    pool.export_corpus(dir_path).unwrap();
+    pool.export_corpus_no_seeds(dir_path).unwrap();
 
     let files: Vec<_> = std::fs::read_dir(dir_path)
         .unwrap()
@@ -452,7 +452,7 @@ fn test_state_pool_export_corpus_creates_dir() {
     let mut pool = StatePool::new(100, 20);
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         make_action_bytes(1, &[0xFF]),
@@ -468,7 +468,7 @@ fn test_state_pool_export_corpus_creates_dir() {
     let nested_str = nested.to_str().unwrap();
 
     assert!(!nested.exists());
-    pool.export_corpus(nested_str).unwrap();
+    pool.export_corpus_no_seeds(nested_str).unwrap();
     assert!(nested.exists());
 }
 
@@ -478,7 +478,7 @@ fn test_state_pool_export_corpus_deterministic() {
     let mut pool = StatePool::new(100, 20);
     pool.try_add(
         1,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0,
         None,
         make_action_bytes(1, &[0xAA, 0xBB, 0xCC]),
@@ -492,8 +492,8 @@ fn test_state_pool_export_corpus_deterministic() {
     let dir1 = tempfile::tempdir().unwrap();
     let dir2 = tempfile::tempdir().unwrap();
 
-    pool.export_corpus(dir1.path().to_str().unwrap()).unwrap();
-    pool.export_corpus(dir2.path().to_str().unwrap()).unwrap();
+    pool.export_corpus_no_seeds(dir1.path().to_str().unwrap()).unwrap();
+    pool.export_corpus_no_seeds(dir2.path().to_str().unwrap()).unwrap();
 
     let files1: Vec<String> = std::fs::read_dir(dir1.path())
         .unwrap()
@@ -655,14 +655,14 @@ fn test_state_pool_coverage_novel_weight_boost() {
 
     // State 0: no novelty_bits
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0xAA]), "".to_string(), None, vec![], None,
         0, 0, true, None,
     );
     // State 1: novelty_bits = 50 (gives rarity weight via coverage floor + novelty power)
     // With bifurcated formula: coverage_floor=10 * 2^(effective_bits/2) >> non-coverage path.
     pool.try_add(
-        2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
+        2, CompactDelta::empty(make_test_clock(1)), 1, None,
         make_action_bytes(1, &[0xBB]), "".to_string(), None, vec![], None,
         50, 50, true, None
     );
@@ -728,7 +728,7 @@ fn test_state_pool_try_add_parent_idx_out_of_bounds() {
     // parent_idx points to nonexistent state — should still add,
     // but the parent credit silently fails (get_mut returns None)
     let added = pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 1, Some(99),
+        1, CompactDelta::empty(make_test_clock(0)), 1, Some(99),
         make_action_bytes(1, &[0xAA]), "test".to_string(), Some(0), vec![], None, 0, 0, true, None,
     );
     assert!(added);
@@ -753,7 +753,7 @@ fn test_state_pool_fixture_state_round_trip() {
     let fixture: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u64);
 
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0xFF]), "".to_string(), Some(0), vec![],
         Some(fixture),
         0, 0, true, None,
@@ -786,16 +786,16 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
     let bytes = make_action_bytes(1, &[0xDE, 0xAD]);
 
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
-        bytes.clone(), "a".to_string(), Some(0), vec![], None, 0, 0, true, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
+        bytes.clone(), "a".to_string(), Some(0), vec![], None, 1, 1, true, None,
     );
     pool.try_add(
-        2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
-        bytes.clone(), "b".to_string(), Some(1), vec![], None, 0, 0, true, None,
+        2, CompactDelta::empty(make_test_clock(1)), 1, None,
+        bytes.clone(), "b".to_string(), Some(1), vec![], None, 1, 1, true, None,
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus(dir.path().to_str().unwrap()).unwrap();
+    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
     // export_corpus returns 2 (it writes twice), but the file is overwritten
     assert_eq!(count, 2);
     let files: Vec<_> = std::fs::read_dir(dir.path())
@@ -966,7 +966,7 @@ fn test_pool_weighted_novelty_differentiates() {
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
     // State 1: high novelty (novelty_bits=40)
     pool.try_add(
-        2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
+        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
         vec![0u8; 8], "novel".into(), Some(0), vec![], None,
         40, 40, true, None
     );
@@ -1005,7 +1005,7 @@ fn test_pool_weighted_coverage_bonus() {
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
     // State 1: novelty_bits=50 (gives novelty weight boost)
     pool.try_add(
-        2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
+        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
         vec![0u8; 8], "coverage_novel".into(), Some(0), vec![], None,
         50, 50, true, None
     );
@@ -1046,13 +1046,13 @@ fn test_pool_weighted_novelty_bits_rarity() {
 
     // State 0: 100 novelty_bits, picks=10 → coverage path with floor=10, novelty_power >> 1
     pool.try_add(
-        1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
+        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
         vec![0u8; 8], "state0".into(), Some(0), vec![], None, 100, 0, true, None,
     );
 
     // State 1: 0 novelty_bits → non-coverage path with fast decay
     pool.try_add(
-        2, make_pool_snapshot(vec![(pk, 20)]), 0, None,
+        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 0, None,
         vec![0u8; 8], "state1".into(), Some(1), vec![], None, 0, 0, true, None,
     );
 
@@ -1090,12 +1090,12 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
 
     // State 0: 0 novelty_bits → novelty = 1.0
     pool.try_add(
-        1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
+        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
         vec![0u8; 8], "zero_novelty".into(), Some(0), vec![], None, 0, 0, true, None,
     );
     // State 1: 50 novelty_bits, picks=5 → coverage path with floor=10 * novelty_power
     pool.try_add(
-        2, make_pool_snapshot(vec![(pk, 20)]), 0, None,
+        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 0, None,
         vec![0u8; 8], "high_novelty".into(), Some(1), vec![], None, 50, 50, true, None,
     );
 
@@ -1262,20 +1262,20 @@ fn test_pool_export_corpus_skips_shallow() {
 
     // Initial state with minimal action_bytes (≤4 bytes → skipped)
     pool.try_add(
-        1, make_pool_snapshot(vec![(pk, 10)]), 0, None,
+        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
         vec![0, 0, 0, 0], // 4-byte header with count=0
         "".into(), None, vec![], None, 0, 0, true, None,
     );
-    // State with real action bytes
+    // State with real action bytes (edge_novelty=1 so it's exported)
     pool.try_add(
-        2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0),
+        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
         vec![1, 0, 0, 0, 0xAA, 0xBB],
-        "action".into(), Some(0), vec![], None, 0, 0, true, None,
+        "action".into(), Some(0), vec![], None, 1, 1, true, None,
     );
 
     let dir = "/tmp/test_pool_export_corpus";
     let _ = std::fs::remove_dir_all(dir);
-    let count = pool.export_corpus(dir).unwrap();
+    let count = pool.export_corpus_no_seeds(dir).unwrap();
     assert_eq!(count, 1, "should skip initial state with ≤4 byte action_bytes");
 
     // Cleanup
@@ -1939,7 +1939,7 @@ fn test_restore_from_overlapping_delta_keys_different_values() {
 #[test]
 fn test_snapshot_empty_has_no_accounts() {
     let empty = SvmSnapshot::empty(make_test_clock(42));
-    assert!(empty.accounts().is_empty());
+    assert_eq!(empty.account_count(), 0);
     assert_eq!(empty.clock().slot, 42);
 
     // Restoring to empty delta means "go back to initial"
@@ -2170,7 +2170,7 @@ fn test_pool_edge_rarity_scoring() {
 
     // State 0: positions [0,1,2] — all brand new (freq=0), max rarity
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0x01]), "rare".to_string(), Some(0), vec![], None,
         5, 5, true, Some(vec![0, 1, 2]),
     );
@@ -2181,7 +2181,7 @@ fn test_pool_edge_rarity_scoring() {
 
     // State 1: positions [0,1,2,3,4] — shares 0,1,2 (now freq=1) + new 3,4 (freq=0)
     pool.try_add(
-        2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
+        2, CompactDelta::empty(make_test_clock(1)), 1, None,
         make_action_bytes(1, &[0x02]), "mixed".to_string(), Some(1), vec![], None,
         5, 5, true, Some(vec![0, 1, 2, 3, 4]),
     );
@@ -2195,7 +2195,7 @@ fn test_pool_edge_rarity_scoring() {
 
     // Non-coverage state (novelty_bits=0): rarity should be 0.0 even with positions
     pool.try_add(
-        3, SvmSnapshot::empty(make_test_clock(2)), 0, None,
+        3, CompactDelta::empty(make_test_clock(2)), 0, None,
         make_action_bytes(1, &[0x03]), "nocov".to_string(), Some(2), vec![], None,
         0, 0, true, Some(vec![10, 11, 12]),
     );
@@ -2204,7 +2204,7 @@ fn test_pool_edge_rarity_scoring() {
 
     // No positions provided: rarity should be 0.0
     pool.try_add(
-        4, SvmSnapshot::empty(make_test_clock(3)), 0, None,
+        4, CompactDelta::empty(make_test_clock(3)), 0, None,
         make_action_bytes(1, &[0x04]), "nopos".to_string(), Some(3), vec![], None,
         5, 5, true, None
     );
@@ -2218,13 +2218,13 @@ fn test_pool_edge_freq_decrement_on_eviction() {
 
     // Add state 0 with positions [0,1]
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
         5, 5, true, Some(vec![0, 1]),
     );
     // Add state 1 with positions [0,2]
     pool.try_add(
-        2, SvmSnapshot::empty(make_test_clock(1)), 0, None,
+        2, CompactDelta::empty(make_test_clock(1)), 0, None,
         make_action_bytes(1, &[0x02]), "s1".to_string(), Some(1), vec![], None,
         5, 5, true, Some(vec![0, 2]),
     );
@@ -2236,7 +2236,7 @@ fn test_pool_edge_freq_decrement_on_eviction() {
 
     // Adding state 2 will evict the weakest → should decrement evicted state's freq
     pool.try_add(
-        3, SvmSnapshot::empty(make_test_clock(2)), 0, None,
+        3, CompactDelta::empty(make_test_clock(2)), 0, None,
         make_action_bytes(1, &[0x03]), "s2".to_string(), Some(2), vec![], None,
         5, 5, true, Some(vec![3]),
     );
@@ -2251,7 +2251,7 @@ fn test_pool_edge_freq_decrement_on_crash() {
     let mut pool = StatePool::new(100, 20);
 
     pool.try_add(
-        1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+        1, CompactDelta::empty(make_test_clock(0)), 0, None,
         make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
         5, 5, true, Some(vec![10, 20, 30]),
     );
@@ -2305,7 +2305,7 @@ fn test_state_registry_accounting() {
 
     // Add initial state (no parent)
     let fp_initial = 0x0001_0000_0000_0001u64; // state_class = 0x0001
-    pool.try_add(fp_initial, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+    pool.try_add(fp_initial, CompactDelta::empty(make_test_clock(0)), 0, None,
         vec![0u8; 8], "initial".into(), None, vec![], None, 0, 0, true, None);
 
     // state_class 0x0001 should have trigger_count=1
@@ -2317,7 +2317,7 @@ fn test_state_registry_accounting() {
 
     // Add child with coverage (novelty_bits > 0), different state_class
     let fp_child = 0x0002_0000_0000_0002u64; // state_class = 0x0002
-    pool.try_add(fp_child, SvmSnapshot::empty(make_test_clock(1)), 1, Some(0),
+    pool.try_add(fp_child, CompactDelta::empty(make_test_clock(1)), 1, Some(0),
         vec![0u8; 8], "action_deposit".into(), Some(0), vec![], None, 5, 0, true, None);
 
     // Child state_class 0x0002 should have trigger_count=1
@@ -2335,7 +2335,7 @@ fn test_state_registry_accounting() {
 
     // Add another child from same parent, same state_class as parent
     let fp_same = 0x0001_0000_0000_0003u64; // state_class = 0x0001 (same as parent)
-    pool.try_add(fp_same, SvmSnapshot::empty(make_test_clock(2)), 1, Some(0),
+    pool.try_add(fp_same, CompactDelta::empty(make_test_clock(2)), 1, Some(0),
         vec![0u8; 8], "action_withdraw".into(), Some(1), vec![], None, 0, 0, true, None);
 
     // Parent's trigger_count should now be 2 (initial + this child share state_class)
@@ -2401,7 +2401,7 @@ fn test_phase_transition() {
     for i in 0..101u64 {
         let sc = (i % 60) as u16; // 60 unique state classes
         let fp = (sc as u64) << 48 | (i + 1);
-        pool.try_add(fp, SvmSnapshot::empty(make_test_clock(i)), 0, None,
+        pool.try_add(fp, CompactDelta::empty(make_test_clock(i)), 0, None,
             vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
     }
 
@@ -2425,9 +2425,9 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
     // Add two non-coverage states (novelty_bits=0)
     let fp1 = 0x0001_0000_0000_0001u64;
     let fp2 = 0x0002_0000_0000_0002u64;
-    pool.try_add(fp1, SvmSnapshot::empty(make_test_clock(0)), 0, None,
+    pool.try_add(fp1, CompactDelta::empty(make_test_clock(0)), 0, None,
         vec![0u8; 8], "a".into(), None, vec![], None, 0, 0, true, None);
-    pool.try_add(fp2, SvmSnapshot::empty(make_test_clock(1)), 1, None,
+    pool.try_add(fp2, CompactDelta::empty(make_test_clock(1)), 1, None,
         vec![0u8; 8], "b".into(), None, vec![], None, 0, 0, true, None);
 
     // Pick state 0 many times
@@ -2435,8 +2435,8 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
     pool.total_picks.store(100, Ordering::Relaxed);
 
     // State 1 (picks=0) should have max priority (1e6)
-    let w0 = pool.compute_weight(&pool.states[0], 100.0, 20);
-    let w1 = pool.compute_weight(&pool.states[1], 100.0, 20);
+    let w0 = pool.compute_weight(&pool.states[0], 20);
+    let w1 = pool.compute_weight(&pool.states[1], 20);
     assert_eq!(w1, 1e6, "never-picked state should get max priority");
     assert!(w0 < w1, "heavily-picked state should have lower weight");
 
@@ -2455,7 +2455,7 @@ fn test_blended_phase_uses_scfuzz_formula() {
     for i in 0..110u64 {
         let sc = (i % 60) as u16;
         let fp = (sc as u64) << 48 | (i + 1);
-        pool.try_add(fp, SvmSnapshot::empty(make_test_clock(i)), 0, None,
+        pool.try_add(fp, CompactDelta::empty(make_test_clock(i)), 0, None,
             vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
     }
     pool.maybe_advance_phase();
@@ -2470,13 +2470,13 @@ fn test_blended_phase_uses_scfuzz_formula() {
     // Compute weight for a non-coverage state in Blended phase
     // Should use SCFuzz formula (state_seed_weight) * depth_factor, not fast-decay
     let fp_test = (sc_good as u64) << 48 | 0xABCD;
-    pool.try_add(fp_test, SvmSnapshot::empty(make_test_clock(200)), 1, None,
+    pool.try_add(fp_test, CompactDelta::empty(make_test_clock(200)), 1, None,
         vec![0u8; 8], "test".into(), None, vec![], None, 0, 0, true, None);
 
     let test_idx = pool.states.len() - 1;
     pool.states[test_idx].pick_count.store(10, Ordering::Relaxed);
 
-    let w = pool.compute_weight(&pool.states[test_idx], 100.0, 20);
+    let w = pool.compute_weight(&pool.states[test_idx], 20);
 
     // In Blended phase, weight should be from SCFuzz formula, not fast-decay
     // Fast-decay for picks=10: 1/(1+10/50) * 2.0 * depth ≈ 1.667

@@ -8,37 +8,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crucible_macro_utils::{RangeConstraint, MaxLenConstraint};
 
-/// Expand `include!("file.rs")` macro invocations inside an impl block by reading
-/// the referenced files relative to CARGO_MANIFEST_DIR and parsing them as impl items.
-fn expand_include_items(items: &[ImplItem]) -> Vec<syn::ImplItemFn> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let src_dir = std::path::PathBuf::from(&manifest_dir).join("src");
-    let mut expanded = Vec::new();
-    for item in items {
-        if let ImplItem::Macro(mac) = item {
-            if mac.mac.path.is_ident("include") {
-                // Parse the include argument as a string literal
-                if let Ok(lit) = mac.mac.parse_body::<syn::LitStr>() {
-                    let file_path = src_dir.join(lit.value());
-                    if let Ok(content) = std::fs::read_to_string(&file_path) {
-                        // Parse file contents as a sequence of impl items
-                        // Wrap in a dummy impl block to parse
-                        let wrapped = format!("impl Dummy {{ {} }}", content);
-                        if let Ok(parsed) = syn::parse_str::<ItemImpl>(&wrapped) {
-                            for inner in parsed.items {
-                                if let ImplItem::Fn(method) = inner {
-                                    expanded.push(method);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    expanded
-}
-
 static FALLBACK_MAIN_EMITTED: AtomicBool = AtomicBool::new(false);
 
 fn read_cargo_features() -> Vec<String> {
@@ -156,6 +125,14 @@ fn field_byte_size(kind: &FieldTypeKind, max_len: Option<usize>) -> usize {
         }
         FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
         FieldTypeKind::Option(inner) => match inner.as_ref() {
+            FieldTypeKind::Vec(vec_inner) => {
+                let ml = max_len.unwrap_or(8);
+                let elem_size = match vec_inner.as_ref() {
+                    FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
+                    _ => 8,
+                };
+                8 + ml * elem_size // Option<Vec<T>> uses same layout as Vec<T>
+            }
             FieldTypeKind::U128 | FieldTypeKind::I128 => 16,
             _ => 8, // Option<T> serializes as u64 (value or u64::MAX for None)
         },
@@ -1240,24 +1217,15 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #fuzz_attr
         fn #fn_name(fixture: &mut #fixture_name, actions: Vec<#mod_name::#enum_name>) {
-            // Cap actions to prevent unbounded input growth causing performance degradation
-            // Each action = one SVM transaction, more actions = exponentially more work
-            let max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
-
             let debug = std::env::var("FUZZ_DEBUG").is_ok();
-            let capped_len = actions.len().min(max_actions);
+            let capped_len = actions.len();
 
             if debug {
-                eprintln!("[FUZZ] Starting iteration with {} actions (capped from {})",
-                    capped_len, actions.len());
+                eprintln!("[FUZZ] Starting iteration with {} actions", capped_len);
             }
 
             // Clear action history and violation tracking at start of iteration
-            crucible_test_context::clear_action_history();
-            crucible_test_context::clear_violation_tracking();
+            crucible_test_context::clear_iteration_state();
             // Track total actions for early exit display
             crucible_test_context::set_total_actions(capped_len);
             // Set test name for metadata
@@ -1273,7 +1241,7 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
             // and full JSON params are materialized lazily when needed.
             let mut __executed_actions: Vec<#mod_name::#enum_name> = Vec::with_capacity(capped_len);
 
-            for (i, mut action) in actions.into_iter().take(max_actions).enumerate() {
+            for (i, mut action) in actions.into_iter().enumerate() {
                 action.constrain_in_place();
 
                 if debug {
@@ -1296,6 +1264,19 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
                 __executed_actions.push(action);
 
                 #fn_body
+
+                // Per-action replay diagnostic: log success + violation + state hash
+                if crucible_test_context::is_debug_replay() {
+                    let __has_viol = crucible_test_context::has_violation();
+                    let __dirty_keys: Vec<_> = fixture.ctx.dirty_tracker.dirty_accounts().iter().copied().collect();
+                    let (__state_hash, __slot) = crucible_test_context::compute_svm_debug_hash(
+                        &fixture.ctx.svm, &__dirty_keys,
+                    );
+                    eprintln!("[REPLAY_DIAG] action={}/{} variant={} success={} violation={} slot={} hash={:016x}",
+                        i + 1, capped_len,
+                        __executed_actions.last().unwrap().action_name(),
+                        success, __has_viol, __slot, __state_hash);
+                }
 
                 // === EARLY EXIT: Stop immediately if invariant was violated ===
                 if crucible_test_context::has_violation() {
@@ -1524,16 +1505,12 @@ mod tests {
         }
     }
 
-    // BUG: Option<Vec<u64>> returns 8 instead of full Vec size (72).
-    // The Option arm only special-cases U128/I128 but not Vec.
     #[test]
-    fn test_byte_size_option_vec_undercount_bug() {
+    fn test_byte_size_option_vec() {
         let kind = FieldTypeKind::Option(Box::new(FieldTypeKind::Vec(Box::new(FieldTypeKind::U64))));
         let actual = field_byte_size(&kind, None);
-        // BUG: returns 8, should return 8 + 8*8 = 72 (same as bare Vec<u64>)
-        assert_eq!(actual, 8, "Documents current (buggy) behavior: Option<Vec<u64>> returns 8");
-        // When fixed, this should be:
-        // assert_eq!(actual, 72, "Option<Vec<u64>> should match Vec<u64> byte size");
+        // Option<Vec<u64>> should match Vec<u64> byte size: 8-byte length prefix + 8*8 elements
+        assert_eq!(actual, 72, "Option<Vec<u64>> should match Vec<u64> byte size");
     }
 
     // ========================================================================

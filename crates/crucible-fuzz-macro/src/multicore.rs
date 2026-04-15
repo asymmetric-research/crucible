@@ -37,66 +37,18 @@ pub fn multicore_mode(
         quote! { let mut u = Unstructured::new(slice); }
     };
 
-    // Max input size: 1024 for both modes (structured max valid ~336 bytes, 1024 is 3x headroom)
-    let max_size_setup = quote! { state.set_max_size(1024); };
+    let max_size_setup = codegen::max_size_setup();
 
     let default_seed_code = if structured {
-        let at = action_type.unwrap();
-        quote! {
-            {
-                use libafl::generators::Generator;
-                let __seed_max: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10)
-                    .min(4);
-                let mut gen = crucible_fuzzer::ActionGenerator::<#at>::new(1, __seed_max);
-                for _ in 0..4 {
-                    if let Ok(input) = gen.generate(&mut state) {
-                        let _ = fuzzer.add_input(&mut state, &mut executor, &mut mgr, input);
-                    }
-                }
-                if state.corpus().count() == 0 {
-                    let input = BytesInput::new(vec![0u8; 256]);
-                    fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                        .expect("failed to add fallback seed");
-                }
-            }
-        }
+        codegen::structured_add_default_seed(action_type.unwrap())
     } else {
-        quote! {
-            let input = BytesInput::new(vec![0u8; 256]);
-            fuzzer.add_input(&mut state, &mut executor, &mut mgr, input)
-                .expect("failed to add default seed");
-        }
+        codegen::add_default_seed()
     };
 
     let mutator_setup = if structured {
-        let at = action_type.unwrap();
-        quote! {
-            let __fuzz_max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
-            let trim_stage = crucible_fuzzer::SuccessTrimStage::<#at>::new();
-            let seq_mutator = crucible_fuzzer::SequenceMutator::<#at>::new(__fuzz_max_actions);
-            let param_mutator = crucible_fuzzer::ParamMutator::<#at>::new();
-            let cross_mutator = crucible_fuzzer::CrossoverMutator::<#at>::new(__fuzz_max_actions);
-            let mutator = StdMOptMutator::new(
-                &mut state,
-                tuple_list!(seq_mutator, param_mutator, cross_mutator),
-                7, 5
-            ).expect("failed to create structured mutator");
-            let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(trim_stage, power_stage);
-        }
+        codegen::structured_mutator_stages_setup(action_type.unwrap())
     } else {
-        quote! {
-            let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
-                .expect("failed to create mutator");
-            let power_stage = StdPowerMutationalStage::new(mutator);
-            let mut stages = tuple_list!(power_stage);
-        }
+        codegen::mutator_stages_setup()
     };
 
     // Generate per-context code blocks
@@ -225,6 +177,15 @@ pub fn multicore_mode(
             shared_execs_shmem.fill(0);
             let shared_execs_ptr = shared_execs_shmem.as_slice().as_ptr() as *mut u8;
 
+            // Guard: discovered variant bitmap supports max 256 variants
+            {
+                let __variant_count = crucible_test_context::TOTAL_ACTION_VARIANTS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                assert!(__variant_count <= 256,
+                    "Action enum has {} variants but discovered bitmap supports max 256. \
+                     File a bug if you need >256 action variants.", __variant_count);
+            }
+
             // Allocate shared memory for discovered variant bitmap (success-seeking)
             // Each byte represents whether a variant has ever succeeded (0 or 1)
             // 256 bytes supports up to 256 action variants
@@ -317,6 +278,7 @@ pub fn multicore_mode(
             // Monitor for aggregated stats across all workers
             // Uses rate-limited caching to avoid expensive operations on every callback
             let monitor = MultiMonitor::new(move |s| {
+                if crucible_test_context::is_corpus_loading() { return; }
                 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
                 // Cached monitor values with rate-limiting (avoid expensive ops on every callback)
@@ -647,8 +609,7 @@ pub fn multicore_mode(
                         }
                     }
                     crucible_test_context::set_current_iteration(current_iteration);
-                    crucible_test_context::clear_action_history();
-                    crucible_test_context::clear_violation_tracking();
+                    crucible_test_context::clear_iteration_state();
                     // Reset the "new coverage" flag for SharedBitmapFeedback
                     #mod_name::reset_new_coverage_flag();
 
@@ -803,6 +764,7 @@ pub fn multicore_mode(
 
                 if !corpus_dirs_to_load.is_empty() {
                     // Full loading: all workers load all inputs for complete seed access
+                    crucible_test_context::set_corpus_loading(true);
                     state.load_initial_inputs_forced(
                         &mut fuzzer,
                         &mut executor,
@@ -811,6 +773,7 @@ pub fn multicore_mode(
                     ).unwrap_or_else(|e| {
                         eprintln!("[Worker {}] Failed to load corpus: {:?}", worker_id, e);
                     });
+                    crucible_test_context::set_corpus_loading(false);
                 }
 
                 // Ensure at least one input - ALL workers need a seed to fuzz
@@ -819,7 +782,11 @@ pub fn multicore_mode(
                 }
 
                 let loaded = state.corpus().count();
-                eprintln!("[Worker {}] Loaded {} corpus entries (ready to fuzz)", worker_id, loaded);
+                let __load_edges = #mod_name::FuzzCallback::count_shared_bits(
+                    shared_edge_ptr as *const u8,
+                    #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
+                );
+                eprintln!("[Worker {}] Loaded {} corpus entries, edges after loading: {} (ready to fuzz)", worker_id, loaded, __load_edges);
 
                 // After corpus loading, switch to non-tracing SVM for max throughput.
                 // The corpus was loaded with tracing enabled so the coverage baseline

@@ -56,18 +56,13 @@ impl ProgramBuilder<'_> {
     }
 
     pub fn send(self) -> Result<TxOutcome> {
+        // Resolve fee payer: explicit > first signer > Pubkey::default (for dirty tracking)
         let fee_payer_pubkey = self
             .fee_payer
             .as_ref()
             .map(|kp| kp.pubkey())
-            .context("At least one signer required if fee payer is not set explicitly")?;
-
-        let fee_payer = self
-            .fee_payer
-            .as_ref()
-            .or(self.signers.first())
-            .context("At least one signer required if fee payer is not set explicitly")?
-            .insecure_clone();
+            .or_else(|| self.signers.first().map(|kp| kp.pubkey()))
+            .unwrap_or_default();
 
         let ixs = std::slice::from_ref(&self.instruction);
 
@@ -76,13 +71,29 @@ impl ProgramBuilder<'_> {
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
-        // SVM execution
+        // SVM execution — pass all signers, including fee payer
         let __t_svm = std::time::Instant::now();
+        let mut all_signers = self.signers;
+        if let Some(ref fp) = self.fee_payer {
+            if !all_signers.iter().any(|k| k.pubkey() == fp.pubkey()) {
+                all_signers.insert(0, fp.insecure_clone());
+            }
+        }
+        let payer = self
+            .fee_payer
+            .as_ref()
+            .unwrap_or(
+                all_signers
+                    .first()
+                    .context("At least one signer required")?,
+            )
+            .insecure_clone();
         let result = instruction_builder::send_instruction(
             &mut self.ctx.svm,
             self.instruction,
-            &self.signers,
-            &fee_payer,
+            &all_signers,
+            &payer,
+            self.ctx.sigverify,
         )?;
         crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 

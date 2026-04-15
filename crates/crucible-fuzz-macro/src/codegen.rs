@@ -31,7 +31,7 @@ pub fn init_program_binaries(mod_name: &syn::Ident) -> proc_macro2::TokenStream 
             );
             program_binaries.insert(program_hash, binary);
         }
-        #mod_name::init_program_binaries(program_binaries.clone());
+        #mod_name::init_program_binaries(program_binaries);
     }
 }
 
@@ -114,6 +114,8 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
         let __csv_ref = __stats_csv.clone();
 
         let monitor = SimpleMonitor::new(move |s| {
+            // Suppress monitor output during corpus loading (too noisy)
+            if crucible_test_context::is_corpus_loading() { return; }
             // Helper to parse numeric values from LibAFL's monitor string
             // Handles SI suffixes: k (1000), M (1000000)
             fn __parse_monitor_val(s: &str, key: &str) -> f64 {
@@ -230,103 +232,26 @@ pub fn singlecore_observer_feedback(mod_name: &syn::Ident) -> proc_macro2::Token
     }
 }
 
-/// Generate the observer and feedback setup for single-core mode (deprecated - use singlecore_observer_feedback)
-#[allow(dead_code)]
-pub fn observer_feedback_setup_singlecore(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
+/// Generate the max input size setup.
+/// Scans `--corpus-in` directory to find the actual max file size so that
+/// stateful corpus entries (which can exceed 1024 bytes) are not truncated.
+/// Falls back to 1024 bytes when no corpus is provided.
+pub fn max_size_setup() -> proc_macro2::TokenStream {
     quote! {
-        // Use StdMapObserver directly (no hitcount bucketing) for simpler/faster coverage
-        let edges_observer = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-        let time_observer = TimeObserver::new("time");
-
-        // MaxMapFeedback decides if input is interesting based on coverage
-        // TimeFeedback only appends execution time metadata (is_interesting returns false)
-        let map_feedback = MaxMapFeedback::new(&edges_observer);
-        let time_feedback = TimeFeedback::new(&time_observer);
-        let mut feedback = feedback_or!(map_feedback, time_feedback);
-        let mut objective = CrashFeedback::new();
-    }
-}
-
-/// Generate the observer and feedback setup for multi-core mode
-#[allow(dead_code)]
-pub fn observer_feedback_setup_multicore(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
-    quote! {
-        // Use StdMapObserver directly (no hitcount bucketing) for simpler/faster coverage
-        let edges_observer = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
-        let time_observer = TimeObserver::new("time");
-
-        // SharedBitmapFeedback checks if any NEW bits were set in the shared bitmap
-        // TimeFeedback stores execution time metadata for PowerQueueScheduler
-        // Using feedback_and_fast! so corpus is added ONLY when SharedBitmapFeedback returns true
-        // (TimeFeedback::is_interesting returns false, so AND would always be false - use OR but verify)
-        let bitmap_feedback = #mod_name::SharedBitmapFeedback::new();
-        let time_feedback = TimeFeedback::new(&time_observer);
-        let mut feedback = feedback_or!(bitmap_feedback, time_feedback);
-        let mut objective = CrashFeedback::new();
-    }
-}
-
-/// Generate the harness wrapper code
-#[allow(dead_code)]
-pub fn harness_wrapper_code(
-    mod_name: &syn::Ident,
-    fn_name: &syn::Ident,
-    _feature_name: &str,
-    iteration_setup: &proc_macro2::TokenStream,
-    deser_stmts: &[proc_macro2::TokenStream],
-    call_args: &[proc_macro2::TokenStream],
-) -> proc_macro2::TokenStream {
-    quote! {
-        let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
-            let bytes_ref = input.target_bytes();
-            let slice = bytes_ref.as_slice();
-            let mut u = Unstructured::new(slice);
-
-            let current_iteration = iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Rate-limit timeout check to every 300 iterations to avoid syscall overhead
-            if let Some(timeout) = timeout_secs {
-                if current_iteration % 300 == 0 {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    if now - start_time >= timeout {
-                        eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
-                        if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            #mod_name::write_lcov_coverage("coverage.lcov");
+        let __max_input_size: usize = {
+            let mut max = 1024usize;
+            if let Some(ref dir) = corpus_in_dir {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            max = max.max(meta.len() as usize);
                         }
-                        std::process::exit(0);
                     }
                 }
             }
-
-            crucible_test_context::set_current_iteration(current_iteration);
-            crucible_test_context::clear_action_history();
-
-            #(#deser_stmts)*
-
-            #iteration_setup
-
-            #fn_name(#(#call_args),*);
-
-            let exec_count = #mod_name::TOTAL_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                #mod_name::maybe_write_coverage(exec_count);
-            }
-
-            if let Some(msg) = crucible_test_context::take_violation() {
-                eprintln!("[VIOLATION] {}", msg);
-                crucible_test_context::print_action_sequence();
-                // Use the same hash as LibAFL (xxh3_64) so our metadata matches LibAFL's crash filenames
-                let input_hash = hash_std(slice);
-                crucible_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
-                ExitKind::Crash
-            } else {
-                ExitKind::Ok
-            }
+            max
         };
+        state.set_max_size(__max_input_size);
     }
 }
 
@@ -403,23 +328,6 @@ pub fn common_fuzz_setup(
             .and_then(|s| s.parse().ok());
 
         let iteration_counter = std::sync::atomic::AtomicU64::new(0);
-    }
-}
-
-/// Generate the corpus loading code using LibAFL's built-in load_initial_inputs
-/// Note: This is currently unused as singlecore.rs inlines the corpus loading logic
-/// in the generic helper function. Kept for potential future use.
-#[allow(dead_code)]
-pub fn load_corpus_from_dir() -> proc_macro2::TokenStream {
-    quote! {
-        eprintln!("[FUZZ] Loading seed corpus from: {}", corpus_dir);
-        // Use LibAFL's built-in corpus loading which properly sets up all metadata
-        // (exec_time, SchedulerTestcaseMetadata, etc.)
-        let corpus_dirs = vec![std::path::PathBuf::from(corpus_dir)];
-        state.load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &corpus_dirs)
-            .expect("failed to load initial corpus");
-        let loaded = state.corpus().count();
-        eprintln!("[FUZZ] Loaded {} seed inputs (corpus loading complete)", loaded);
     }
 }
 
@@ -724,5 +632,393 @@ pub fn is_corpus_input_fn() -> proc_macro2::TokenStream {
             if file_name == ".state.metadata" { return false; }
             true
         }
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::format_ident;
+
+    /// Helper: convert TokenStream to normalized string for pattern matching.
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    // ── max_size_setup ──────────────────────────────────────────────────
+
+    #[test]
+    fn max_size_setup_scans_corpus_dir() {
+        let output = ts(max_size_setup());
+        assert!(output.contains("corpus_in_dir"), "should reference corpus_in_dir env");
+        assert!(output.contains("read_dir"), "should scan directory");
+        assert!(output.contains("metadata"), "should read file metadata");
+        assert!(output.contains("1024"), "should default to 1024 bytes");
+        assert!(output.contains("set_max_size"), "should call state.set_max_size");
+    }
+
+    // ── mutator / seed setup ────────────────────────────────────────────
+
+    #[test]
+    fn mutator_stages_setup_uses_havoc() {
+        let output = ts(mutator_stages_setup());
+        assert!(output.contains("havoc_mutations"), "arbitrary mode should use havoc_mutations");
+        assert!(output.contains("StdMOptMutator"), "should use MOpt mutator");
+        assert!(output.contains("StdPowerMutationalStage"), "should wrap in power stage");
+    }
+
+    #[test]
+    fn structured_mutator_stages_has_all_mutators() {
+        let action_ty = quote! { TestAction };
+        let output = ts(structured_mutator_stages_setup(&action_ty));
+        assert!(output.contains("SuccessTrimStage"), "should include trim stage");
+        assert!(output.contains("SequenceMutator"), "should include sequence mutator");
+        assert!(output.contains("ParamMutator"), "should include param mutator");
+        assert!(output.contains("CrossoverMutator"), "should include crossover mutator");
+        assert!(output.contains("FUZZ_MAX_ACTIONS"), "should respect max actions env");
+    }
+
+    #[test]
+    fn add_default_seed_creates_256_byte_input() {
+        let output = ts(add_default_seed());
+        assert!(output.contains("256"), "default seed should be 256 bytes");
+        assert!(output.contains("BytesInput"), "should create BytesInput");
+        assert!(output.contains("add_input"), "should add to fuzzer");
+    }
+
+    #[test]
+    fn structured_add_default_seed_uses_generator() {
+        let action_ty = quote! { TestAction };
+        let output = ts(structured_add_default_seed(&action_ty));
+        assert!(output.contains("ActionGenerator"), "should use ActionGenerator");
+        assert!(output.contains("generate"), "should call generate()");
+        // Verify fallback seed when corpus is empty
+        assert!(output.contains("count") && output.contains("== 0"),
+            "should check if corpus is empty for fallback");
+    }
+
+    // ── observer / feedback ─────────────────────────────────────────────
+
+    #[test]
+    fn singlecore_observer_feedback_has_hitcounts() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let output = ts(singlecore_observer_feedback(&mod_name));
+        assert!(output.contains("HitcountsMapObserver"), "should use HitcountsMapObserver for bucketing");
+        assert!(output.contains("MaxMapFeedback"), "should use MaxMapFeedback");
+        assert!(output.contains("TimeFeedback"), "should track execution time");
+        assert!(output.contains("SuccessPatternFeedback"), "should track action success patterns");
+        assert!(output.contains("CrashFeedback"), "should detect crashes");
+    }
+
+    // ── template / common setup ─────────────────────────────────────────
+
+    #[test]
+    fn template_setup_enables_tracing() {
+        let fixture = format_ident!("TestFixture");
+        let mod_name = format_ident!("__fuzz_mod");
+        let output = ts(template_setup(&fixture, &mod_name));
+        assert!(output.contains("ANCHOR_FUZZ_DEBUGGABLE"), "should enable tracing env var");
+        assert!(output.contains("setup"), "should call Fixture::setup()");
+        assert!(output.contains("init_program_totals"), "should init coverage totals");
+        assert!(output.contains("init_program_binaries"), "should init binaries");
+    }
+
+    #[test]
+    fn common_fuzz_setup_has_timeout_and_counter() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let output = ts(common_fuzz_setup(&mod_name, &fixture));
+        assert!(output.contains("FUZZ_TIMEOUT_SECS"), "should parse timeout env");
+        assert!(output.contains("AtomicU64"), "should create iteration counter");
+        assert!(output.contains("FUZZER_START_TIME"), "should record start time");
+    }
+
+    #[test]
+    fn monitor_setup_suppresses_during_corpus_loading() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let output = ts(monitor_setup(&mod_name));
+        assert!(output.contains("is_corpus_loading"), "should suppress during corpus loading");
+        assert!(output.contains("FUZZ_PULSE"), "should output [FUZZ_PULSE] prefix");
+        assert!(output.contains("edges"), "should display edge coverage");
+        assert!(output.contains("branches"), "should display branch coverage");
+        assert!(output.contains("actions/exec"), "should display actions per execution");
+        assert!(output.contains("memory_kib"), "should display memory usage");
+    }
+
+    // ── exit handlers ───────────────────────────────────────────────────
+
+    #[test]
+    fn exit_handlers_write_coverage_on_panic() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let output = ts(exit_handlers_setup(&mod_name));
+        assert!(output.contains("set_hook"), "should set panic hook");
+        assert!(output.contains("write_lcov_coverage"), "should write coverage on panic");
+        assert!(output.contains("ctrlc"), "should handle Ctrl+C");
+    }
+
+    // ── multi-context helpers ───────────────────────────────────────────
+
+    #[test]
+    fn contexts_take_snapshot_single() {
+        let contexts = vec![format_ident!("ctx")];
+        let output = ts(contexts_take_snapshot(&contexts));
+        assert!(output.contains("template_fixture . ctx . take_snapshot"), "should snapshot ctx");
+    }
+
+    #[test]
+    fn contexts_take_snapshot_multi() {
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(contexts_take_snapshot(&contexts));
+        assert!(output.contains("template_fixture . ctx . take_snapshot"), "should snapshot ctx");
+        assert!(output.contains("template_fixture . ctx_b . take_snapshot"), "should snapshot ctx_b");
+    }
+
+    #[test]
+    fn contexts_swap_out_creates_refcells() {
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(contexts_swap_out(&contexts));
+        assert!(output.contains("__pristine_svm_0"), "should create pristine for ctx");
+        assert!(output.contains("__saved_svm_0"), "should create saved for ctx");
+        assert!(output.contains("__pristine_svm_1"), "should create pristine for ctx_b");
+        assert!(output.contains("__saved_svm_1"), "should create saved for ctx_b");
+        assert!(output.contains("RefCell"), "should use RefCell for swap trick");
+        assert!(output.contains("LiteSVM :: new"), "should replace with empty SVM");
+    }
+
+    #[test]
+    fn contexts_reset_check_uses_interval() {
+        let contexts = vec![format_ident!("ctx")];
+        let output = ts(contexts_reset_check(&contexts));
+        assert!(output.contains("__svm_reset_interval"), "should check reset interval");
+        assert!(output.contains("current_iteration"), "should check iteration count");
+        assert!(output.contains("__pristine_svm_0"), "should clone from pristine");
+        assert!(output.contains("__saved_svm_0"), "should replace saved");
+    }
+
+    #[test]
+    fn contexts_swap_in_swaps_all() {
+        let fixture = format_ident!("fixture");
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(contexts_swap_in(&fixture, &contexts));
+        assert!(output.contains("fixture . ctx . svm"), "should swap ctx SVM");
+        assert!(output.contains("fixture . ctx_b . svm"), "should swap ctx_b SVM");
+        assert!(output.contains("__saved_svm_0"), "should use saved_svm_0");
+        assert!(output.contains("__saved_svm_1"), "should use saved_svm_1");
+    }
+
+    #[test]
+    fn contexts_restore_and_clear_restores_dirty() {
+        let fixture = format_ident!("fixture");
+        let contexts = vec![format_ident!("ctx")];
+        let output = ts(contexts_restore_and_clear(&fixture, &contexts));
+        assert!(output.contains("snapshot"), "should check snapshot exists");
+        assert!(output.contains("restore"), "should call restore");
+        assert!(output.contains("dirty_tracker . clear"), "should clear dirty tracker");
+    }
+
+    #[test]
+    fn contexts_swap_back_swaps_all() {
+        let fixture = format_ident!("fixture");
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(contexts_swap_back(&fixture, &contexts));
+        assert!(output.contains("fixture . ctx . svm"), "should swap back ctx");
+        assert!(output.contains("fixture . ctx_b . svm"), "should swap back ctx_b");
+    }
+
+    #[test]
+    fn contexts_no_tracing_switch_recreates_all() {
+        let fixture = format_ident!("TestFixture");
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(contexts_no_tracing_switch(&fixture, &contexts));
+        assert!(output.contains("FUZZ_NO_TRACING"), "should check no-tracing env");
+        assert!(output.contains("remove_var"), "should remove debuggable env var");
+        assert!(output.contains("TestFixture :: setup"), "should recreate fixture");
+        assert!(output.contains("take_snapshot"), "should re-snapshot");
+        assert!(output.contains("__pristine_svm_0"), "should update pristine ctx");
+        assert!(output.contains("__pristine_svm_1"), "should update pristine ctx_b");
+    }
+
+    // ── stateful-mode extra context helpers ──────────────────────────────
+
+    #[test]
+    fn stateful_extra_take_snapshot_skips_primary() {
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(stateful_extra_take_snapshot(&contexts));
+        // Should NOT contain ctx (primary), only ctx_b
+        assert!(!output.contains("template_fixture . ctx . take_snapshot"),
+            "should skip primary context");
+        assert!(output.contains("template_fixture . ctx_b . take_snapshot"),
+            "should snapshot additional context");
+    }
+
+    #[test]
+    fn stateful_extra_take_snapshot_empty_for_single_context() {
+        let contexts = vec![format_ident!("ctx")];
+        let output = ts(stateful_extra_take_snapshot(&contexts));
+        assert!(output.is_empty(), "single context should produce no extra snapshot code");
+    }
+
+    #[test]
+    fn stateful_extra_swap_out_creates_mut_vars() {
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(stateful_extra_swap_out(&contexts));
+        assert!(output.contains("__extra_svm_1"), "should create __extra_svm_1 for ctx_b");
+        assert!(!output.contains("__extra_svm_0"), "should not create __extra_svm_0 (primary handled separately)");
+        assert!(output.contains("LiteSVM :: new"), "should replace with empty SVM");
+    }
+
+    #[test]
+    fn stateful_extra_swap_in_uses_fixture_param() {
+        let fixture = format_ident!("my_fixture");
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(stateful_extra_swap_in(&fixture, &contexts));
+        assert!(output.contains("my_fixture . ctx_b . svm"), "should swap ctx_b using fixture param");
+        assert!(output.contains("__extra_svm_1"), "should use __extra_svm_1");
+    }
+
+    #[test]
+    fn stateful_extra_restore_and_swap_back_restores_and_clears() {
+        let fixture = format_ident!("my_fixture");
+        let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
+        let output = ts(stateful_extra_restore_and_swap_back(&fixture, &contexts));
+        assert!(output.contains("restore"), "should call restore");
+        assert!(output.contains("dirty_tracker . clear"), "should clear dirty tracker");
+        assert!(output.contains("__extra_svm_1"), "should swap back using __extra_svm_1");
+    }
+
+    // ── is_corpus_input ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_corpus_input_fn_filters_metadata() {
+        let output = ts(is_corpus_input_fn());
+        assert!(output.contains("starts_with ('.')"), "should skip hidden files");
+        assert!(output.contains(".metadata"), "should skip .metadata files");
+        assert!(output.contains(".meta.json"), "should skip .meta.json files");
+        assert!(output.contains(".state"), "should skip .state file");
+    }
+
+    // ── D7: Corpus dir cleanup (pre-extraction regression test) ────────
+
+    #[test]
+    fn singlecore_mode_cleans_stale_metadata() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Singlecore removes only hidden files (metadata)
+        assert!(output.contains("starts_with ('.')"), "should filter hidden files");
+        assert!(output.contains("remove_file"), "should remove stale metadata files");
+        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+    }
+
+    #[test]
+    fn multicore_mode_cleans_corpus_dir() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Multicore removes all files (not just hidden)
+        assert!(output.contains("remove_file"), "should remove stale files");
+        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+    }
+
+    // ── C1: Multicore % 64 batch flush ─────────────────────────────────
+
+    #[test]
+    fn multicore_batches_counter_flush_every_64() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            &[], &[], false, None, &[format_ident!("ctx")],
+        ));
+        // Should batch flush shared counters every 64 iterations
+        assert!(output.contains("% 64"), "should flush counters every 64 iterations");
+        assert!(output.contains("__local_actions_pending"), "should accumulate actions locally");
+        assert!(output.contains("__local_ok_pending"), "should accumulate ok count locally");
+        assert!(output.contains("__local_execs_pending"), "should accumulate exec count locally");
+    }
+
+    // ── D10: Deser block pattern (pre-extraction regression for modes.rs) ──
+
+    #[test]
+    fn dry_run_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::dry_run_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true,
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn dry_run_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::dry_run_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+    }
+
+    #[test]
+    fn replay_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote! { TestAction };
+        let output = ts(crate::modes::replay_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true, Some(&action_ty),
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn replay_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::replay_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false, None,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+    }
+
+    #[test]
+    fn coverage_only_has_deser_block_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::coverage_only_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], true,
+        ));
+        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+    }
+
+    #[test]
+    fn coverage_only_has_deser_block_arbitrary() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(crate::modes::coverage_only_mode(
+            &mod_name, &fixture, &fn_name, &[], &[], false,
+        ));
+        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
     }
 }

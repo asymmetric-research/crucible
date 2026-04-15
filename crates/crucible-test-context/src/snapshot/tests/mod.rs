@@ -1,10 +1,10 @@
-mod helpers;
-mod dirty_tracker;
 mod account_diff;
-mod svm_snapshot;
+mod adversarial;
+mod dirty_tracker;
+mod edge_cases;
+mod helpers;
+mod mode_differences;
+mod rounds4_6;
 mod state_pool;
 mod stateful;
-mod edge_cases;
-mod adversarial;
-mod rounds4_6;
-mod mode_differences;
+mod svm_snapshot;

@@ -3504,6 +3504,10 @@ fn invariant_test(fixture: &mut KlendFixture) {
     // obligation_deposited_value_bounded — disabled: FP from scaled fraction math mismatch
     referrer_fees_bounded(fixture);
     obligation_borrow_reserve_valid(fixture);
+    // Phase D round 19: deep stateful invariants
+    obligation_pledged_ctokens_bounded(fixture);
+    // fees_within_available — disabled: FP because protocol fees accrue on borrowed-out
+    // liquidity and naturally exceed available_amount under high utilization
 }
 
 fn solvency_check(fixture: &mut KlendFixture) {
@@ -3640,14 +3644,14 @@ fn interest_rate_monotonicity(fixture: &mut KlendFixture) {
 /// check that tracked doesn't exceed total (tokens appearing from nowhere).
 /// The reverse (total >> tracked) is expected since we don't clone all holders.
 fn collateral_supply_conservation(fixture: &mut KlendFixture) {
-    use types::{Reserve, RESERVE_SIZE};
+    use spl_token::state::Mint;
+    use solana_program::program_pack::Pack;
 
     for reserve_data in &fixture.reserves {
-        let Ok(res_account) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
-        if res_account.data.len() < 8 + RESERVE_SIZE { continue; }
-
-        let reserve: &Reserve = bytemuck::from_bytes(&res_account.data[8..8 + RESERVE_SIZE]);
-        let mint_total_supply = reserve.collateral.mint_total_supply;
+        // Read actual SPL mint supply (authoritative) instead of reserve struct field (can be stale)
+        let Ok(mint_account) = fixture.ctx.get_account(&reserve_data.collateral_mint) else { continue };
+        let Ok(mint) = Mint::unpack(&mint_account.data) else { continue };
+        let mint_total_supply = mint.supply;
 
         // Sum all known cToken holdings: reserve collateral vault + all user collateral accounts
         let mut tracked_supply: u64 = fixture.ctx.token_balance(&reserve_data.collateral_supply);
@@ -4269,6 +4273,74 @@ fn obligation_borrow_reserve_valid(fixture: &mut KlendFixture) {
 
 /// Invariant: reserve.liquidity.available_amount must not exceed vault SPL token balance.
 /// If available_amount > vault_balance, the pool can be drained for more than it holds.
+/// Invariant: For each reserve, sum of ObligationCollateral.deposited_amount across all
+/// obligations must not exceed the actual SPL mint total supply for that reserve's cToken.
+/// If pledged > supply, phantom collateral exists — obligations can withdraw more than exists.
+fn obligation_pledged_ctokens_bounded(fixture: &mut KlendFixture) {
+    use types::{Obligation, OBLIGATION_SIZE};
+    use spl_token::state::Mint;
+    use solana_program::program_pack::Pack;
+
+    for reserve_data in &fixture.reserves {
+        // Read actual SPL mint supply (authoritative)
+        let Ok(mint_account) = fixture.ctx.get_account(&reserve_data.collateral_mint) else { continue };
+        let Ok(mint) = Mint::unpack(&mint_account.data) else { continue };
+        let mint_supply = mint.supply;
+
+        let reserve_key_bytes = reserve_data.reserve.to_bytes();
+
+        // Sum deposited_amount across all obligations for this reserve
+        let mut total_pledged: u64 = 0;
+        for user in &fixture.users {
+            let Ok(obl_account) = fixture.ctx.get_account(&user.obligation) else { continue };
+            if obl_account.data.len() < 8 + OBLIGATION_SIZE { continue; }
+            let obligation: &Obligation = bytemuck::from_bytes(&obl_account.data[8..8 + OBLIGATION_SIZE]);
+
+            for deposit in &obligation.deposits {
+                if deposit.deposit_reserve == reserve_key_bytes && deposit.deposited_amount > 0 {
+                    total_pledged = total_pledged.saturating_add(deposit.deposited_amount);
+                }
+            }
+        }
+
+        crucible_test_context::fuzz_assert!(
+            total_pledged <= mint_supply,
+            "PHANTOM COLLATERAL: reserve {} total pledged cTokens {} > mint supply {}",
+            reserve_data.reserve, total_pledged, mint_supply
+        );
+    }
+}
+
+/// Invariant: protocol_fees + referrer_fees <= available_amount.
+/// Protocol fees are a claim WITHIN available liquidity (redeem_fees decrements both).
+/// If fees exceed available, fee redemption will fail — an accounting inconsistency.
+fn fees_within_available(fixture: &mut KlendFixture) {
+    use types::{Reserve, RESERVE_SIZE, u64_pair_to_u128};
+
+    for reserve_data in &fixture.reserves {
+        let Ok(res_acct) = fixture.ctx.get_account(&reserve_data.reserve) else { continue };
+        if res_acct.data.len() < 8 + RESERVE_SIZE { continue; }
+        let reserve: &Reserve = bytemuck::from_bytes(&res_acct.data[8..8 + RESERVE_SIZE]);
+
+        let available = reserve.liquidity.available_amount as u128;
+        let protocol_fees_sf = u64_pair_to_u128(reserve.liquidity.accumulated_protocol_fees_sf);
+        let referrer_fees_sf = u64_pair_to_u128(reserve.liquidity.accumulated_referrer_fees_sf);
+
+        // Convert scaled fractions (60-bit shift) to token amounts
+        let protocol_fees = protocol_fees_sf >> 60;
+        let referrer_fees = referrer_fees_sf >> 60;
+        let total_fees = protocol_fees.saturating_add(referrer_fees);
+
+        // Allow 2% tolerance for rounding across interest accrual cycles
+        let tolerance = (available / 50).max(1);
+        crucible_test_context::fuzz_assert!(
+            total_fees <= available + tolerance,
+            "FEES EXCEED AVAILABLE: reserve {} fees={} (proto={} + ref={}) > available={} + tolerance={}",
+            reserve_data.reserve, total_fees, protocol_fees, referrer_fees, available, tolerance
+        );
+    }
+}
+
 fn reserve_available_lte_vault(fixture: &mut KlendFixture) {
     use types::{Reserve, RESERVE_SIZE};
 

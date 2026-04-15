@@ -102,7 +102,7 @@ fn test_dirty_tracker_clear() {
     };
 
     tracker.record_tx(&[ix], &fee_payer);
-    tracker.mark_clock_dirty();
+    tracker.mark_clock_dirty(100);
 
     assert!(tracker.dirty_count() > 0);
     assert!(tracker.is_clock_dirty());
@@ -128,7 +128,7 @@ fn test_dirty_tracker_mark_account() {
 fn test_dirty_tracker_clone_is_fresh() {
     let mut tracker = DirtyTracker::new();
     tracker.mark_account_dirty(&Pubkey::new_unique());
-    tracker.mark_clock_dirty();
+    tracker.mark_clock_dirty(100);
 
     let cloned = tracker.clone();
     assert_eq!(cloned.dirty_count(), 0);
@@ -155,7 +155,7 @@ fn test_edge_dirty_tracker_clear_is_complete() {
         let ix = Instruction::new_with_bytes(program, &[], accounts);
         tracker.record_tx(&[ix], &fee_payer);
     }
-    tracker.mark_clock_dirty();
+    tracker.mark_clock_dirty(100);
 
     assert!(tracker.dirty_count() > 0);
     assert!(!tracker.dirty_accounts().is_empty());
@@ -229,7 +229,7 @@ fn test_edge_dirty_tracker_clone_is_fresh() {
         ]);
         tracker.record_tx(&[ix], &fee_payer);
     }
-    tracker.mark_clock_dirty();
+    tracker.mark_clock_dirty(100);
 
     assert!(tracker.dirty_count() > 0);
     assert!(tracker.is_clock_dirty());

@@ -13,6 +13,11 @@ pub struct DirtyTracker {
     read_only: FastHashSet<Pubkey>,
     /// Whether slot/clock was modified this iteration.
     clock_dirty: bool,
+    /// Target slot from the most recent warp_to_slot/advance_slots.
+    /// Used by the stateful novelty system: each distinct slot target produces
+    /// a unique fingerprint contribution, ensuring clock advances are never
+    /// collapsed into the same state even when slot_diff_bucket is the same.
+    pub clock_target_slot: Option<u64>,
 }
 
 impl DirtyTracker {
@@ -21,6 +26,7 @@ impl DirtyTracker {
             writable: FastHashSet::default(),
             read_only: FastHashSet::default(),
             clock_dirty: false,
+            clock_target_slot: None,
         }
     }
 
@@ -42,8 +48,9 @@ impl DirtyTracker {
     }
 
     /// Mark the clock sysvar as dirty (called by warp_to_slot/advance_slots).
-    pub fn mark_clock_dirty(&mut self) {
+    pub fn mark_clock_dirty(&mut self, target_slot: u64) {
         self.clock_dirty = true;
+        self.clock_target_slot = Some(target_slot);
     }
 
     /// Mark a specific account as dirty (called by write_account, etc.).
@@ -76,6 +83,7 @@ impl DirtyTracker {
         self.writable.clear();
         self.read_only.clear();
         self.clock_dirty = false;
+        self.clock_target_slot = None;
     }
 }
 

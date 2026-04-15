@@ -4,7 +4,84 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use rustc_hash::FxHasher;
 
-use super::svm_snapshot::{SvmSnapshot, FINGERPRINT_BITS};
+use super::svm_snapshot::{SvmSnapshot, CompactDelta, FINGERPRINT_BITS};
+
+// ============================================================================
+// Memory profiling
+// ============================================================================
+
+/// Detailed memory breakdown of a StatePool, returned by `StatePool::memory_stats()`.
+#[derive(Default)]
+pub struct PoolMemoryStats {
+    pub total_states: usize,
+    pub active_states: usize,
+    pub capacity: usize,
+    /// Sum of delta.accounts.len() across all states.
+    pub total_delta_accounts: usize,
+    /// Sum of estimated heap bytes across all delta snapshots.
+    /// May overcount shared Arc<Account> data between parent/child deltas.
+    pub total_delta_heap_bytes: usize,
+    /// Number of states with Some(fixture_state).
+    pub fixture_state_count: usize,
+    /// Sum of action_bytes.len() across all states.
+    pub total_action_bytes: usize,
+    /// Sum of action_field_bytes.len() across all states.
+    pub total_field_bytes: usize,
+    /// Sum of action_desc.len() across all states.
+    pub total_desc_bytes: usize,
+    /// Sum of edge_positions bytes across all states.
+    pub total_edge_position_bytes: usize,
+    /// Fixed overhead per StateEntry struct (fixed-size fields).
+    pub entry_overhead_bytes: usize,
+    /// edge_freq Vec allocation.
+    pub edge_freq_bytes: usize,
+    /// Number of entries in the seen set.
+    pub seen_entries: usize,
+    /// active_indices Vec backing allocation.
+    pub active_indices_bytes: usize,
+}
+
+impl PoolMemoryStats {
+    /// Total estimated pool memory in bytes.
+    pub fn total_bytes(&self) -> usize {
+        self.total_delta_heap_bytes
+            + self.entry_overhead_bytes
+            + self.total_action_bytes
+            + self.total_field_bytes
+            + self.total_desc_bytes
+            + self.total_edge_position_bytes
+            + self.edge_freq_bytes
+            + self.active_indices_bytes
+            + self.seen_entries * 16 // FastHashSet<u64> ≈ 16 bytes/entry
+    }
+
+    /// Format as a human-readable multi-line breakdown.
+    pub fn format_breakdown(&self) -> String {
+        let total = self.total_bytes();
+        format!(
+            "pool_states: {}/{} (active: {}, cap: {}), \
+             delta_heap: {:.1}MB ({} accts), \
+             fixtures: {}, \
+             action_bytes: {:.1}MB, \
+             desc: {:.1}MB, \
+             entry_overhead: {:.1}MB, \
+             edge_pos: {:.1}MB, \
+             pool_total: {:.1}MB",
+            self.total_states,
+            self.capacity,
+            self.active_states,
+            self.capacity,
+            self.total_delta_heap_bytes as f64 / 1_048_576.0,
+            self.total_delta_accounts,
+            self.fixture_state_count,
+            self.total_action_bytes as f64 / 1_048_576.0,
+            self.total_desc_bytes as f64 / 1_048_576.0,
+            self.entry_overhead_bytes as f64 / 1_048_576.0,
+            self.total_edge_position_bytes as f64 / 1_048_576.0,
+            total as f64 / 1_048_576.0,
+        )
+    }
+}
 
 // ============================================================================
 // FingerprintBitmap — lock-free pre-check for fingerprint novelty
@@ -70,10 +147,10 @@ impl FingerprintBitmap {
 pub struct StateEntry {
     /// Fingerprint of the state (used for dedup).
     pub fingerprint: u64,
-    /// Delta snapshot: only accounts differing from the initial state.
+    /// Compact delta: u64-word diffs for accounts differing from the initial state.
     /// Wrapped in Arc so that cloning under RwLock read lock is just an
-    /// atomic refcount bump (~1ns) instead of a deep HashMap copy (~500μs).
-    pub delta: Arc<SvmSnapshot>,
+    /// atomic refcount bump (~1ns) instead of a deep copy.
+    pub delta: Arc<CompactDelta>,
     /// Depth: number of actions from initial state.
     pub depth: u32,
     /// Index of the parent state in the pool (None for initial state).
@@ -130,6 +207,19 @@ pub struct StateEntry {
     /// Coverage map positions (non-zero entries) this state hit.
     /// Used to decrement edge_freq on eviction/crash. None for non-coverage states.
     pub edge_positions: Option<Arc<Vec<u16>>>,
+    /// Precomputed n-gram rarity score for action-path scheduling.
+    /// max(rarity_2, rarity_3, rarity_4) computed at add-time. Higher = rarer path.
+    pub ngram_rarity: f64,
+    /// N-gram keys for 2/3/4-gram frequency tracking.
+    /// [0]=2-gram, [1]=3-gram, [2]=4-gram. 0 means N/A (state too shallow).
+    pub ngram_keys: [u64; 3],
+    /// Consecutive picks without producing a novel child. Resets to 0 when
+    /// novel_children is incremented. Used for exponential weight decay:
+    /// states that keep failing to produce novelty get deprioritized.
+    pub barren_picks: u32,
+    /// Debug: hash of tracked account state at save time (for restore verification).
+    /// Set when FUZZ_DEBUG_REPLAY=1, otherwise 0.
+    pub debug_state_hash: u64,
 }
 
 // ============================================================================
@@ -463,12 +553,21 @@ pub struct StatePool {
     /// AFLFast-style edge frequency table: how many active states hit each coverage map position.
     /// 65536 entries (128KB). Incremented on add, decremented on eviction/crash.
     pub(crate) edge_freq: Vec<u16>,
+    /// N-gram frequency tables: [0]=2-gram, [1]=3-gram, [2]=4-gram.
+    /// Key: FxHash of variant sequence. Value: count of active states with this n-gram.
+    /// Used to compute action-path rarity at add-time.
+    ngram_freq: [FastHashMap<u64, u32>; 3],
     /// Per-state-class statistics for SCFuzz-inspired scheduling.
     pub(crate) registry: StateRegistry,
     /// Current fuzz phase (Coverage bootstrap vs Blended with SCFuzz formula).
     pub(crate) phase: FuzzPhase,
     /// Current iteration counter (set by the fuzzing loop).
     pub(crate) current_iteration: u64,
+    /// Counter for periodic n-gram rarity refresh.
+    ngram_refresh_counter: u32,
+    /// Number of states loaded from seed corpus (indices 0..seed_count are seeds).
+    /// Used by export_corpus to skip seed intermediates.
+    seed_count: usize,
 }
 
 impl StatePool {
@@ -487,10 +586,104 @@ impl StatePool {
             max_depth,
             total_picks: AtomicU64::new(0),
             edge_freq: vec![0u16; 65536],
+            ngram_freq: [
+                FastHashMap::default(),
+                FastHashMap::default(),
+                FastHashMap::default(),
+            ],
             registry: StateRegistry::new(),
             phase: FuzzPhase::Coverage,
             current_iteration: 0,
+            ngram_refresh_counter: 0,
+            seed_count: 0,
         }
+    }
+
+    /// Compute n-gram keys for a new state being added.
+    /// Walks parent chain up to 3 levels back (for 4-gram).
+    /// Returns [2-gram_key, 3-gram_key, 4-gram_key] where 0 means N/A.
+    fn compute_ngram_keys(&self, action_variant: Option<u16>, parent_idx: Option<usize>) -> [u64; 3] {
+        let self_variant = match action_variant {
+            Some(v) => v,
+            None => return [0; 3],
+        };
+
+        // Collect up to 3 ancestor variants
+        let mut ancestors: [u16; 3] = [0; 3];
+        let mut ancestor_count = 0usize;
+        let mut cur_idx = parent_idx;
+        while ancestor_count < 3 {
+            let idx = match cur_idx {
+                Some(i) if i < self.states.len() => i,
+                _ => break,
+            };
+            match self.states[idx].action_variant {
+                Some(v) => {
+                    ancestors[ancestor_count] = v;
+                    ancestor_count += 1;
+                    cur_idx = self.states[idx].parent_idx;
+                }
+                None => break,
+            }
+        }
+
+        let mut keys = [0u64; 3];
+
+        if ancestor_count >= 1 {
+            let mut h = FxHasher::default();
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[0] = h.finish();
+        }
+        if ancestor_count >= 2 {
+            let mut h = FxHasher::default();
+            ancestors[1].hash(&mut h);
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[1] = h.finish();
+        }
+        if ancestor_count >= 3 {
+            let mut h = FxHasher::default();
+            ancestors[2].hash(&mut h);
+            ancestors[1].hash(&mut h);
+            ancestors[0].hash(&mut h);
+            self_variant.hash(&mut h);
+            keys[2] = h.finish();
+        }
+
+        keys
+    }
+
+    /// Compute n-gram rarity score from frequency tables.
+    /// Returns max(rarity_2, rarity_3, rarity_4), clamped to [0.1, 50.0].
+    /// Uses max_freq/count ratio for strong differentiation: a unique 4-gram
+    /// vs the most common one can get up to 36x boost.
+    fn compute_ngram_rarity(&self, keys: &[u64; 3]) -> f64 {
+        let mut max_rarity = 1.0_f64;
+
+        for (level, &key) in keys.iter().enumerate() {
+            if key == 0 { continue; }
+
+            let freq_map = &self.ngram_freq[level];
+            let count = freq_map.get(&key).copied().unwrap_or(1) as f64;
+
+            // Use max frequency as reference (not mean) for stronger differentiation.
+            // mean_freq/count collapses when the freq table is dense (many entries near mean).
+            // max_freq/count creates a much wider spread: unique sequences vs the most
+            // common one get massive boosts, and common sequences get demoted below 1.0.
+            let max_freq = freq_map.values().copied().max().unwrap_or(1) as f64;
+
+            let ratio = max_freq / count;
+            let rarity = match level {
+                0 => ratio.powf(0.4),    // 2-gram: dampened
+                1 => ratio.powf(0.5),    // 3-gram: moderate
+                _ => ratio.powf(0.6),    // 4-gram: strongest signal
+            };
+
+            max_rarity = max_rarity.max(rarity);
+        }
+
+        max_rarity.clamp(0.1, 50.0)
     }
 
     /// Try to add a new state. Returns true if the state was novel and added.
@@ -500,7 +693,7 @@ impl StatePool {
     pub fn try_add(
         &mut self,
         fingerprint: u64,
-        delta: SvmSnapshot,
+        delta: CompactDelta,
         depth: u32,
         parent_idx: Option<usize>,
         action_bytes: Vec<u8>,
@@ -526,6 +719,21 @@ impl StatePool {
                         self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
                     }
                 }
+                // Decrement n-gram frequencies
+                for (level, &key) in self.states[evict_idx].ngram_keys.iter().enumerate() {
+                    if key != 0 {
+                        if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                }
+                // Free expensive data from evicted entry. Only chain metadata
+                // (parent_idx, action_bytes, action_desc, depth) is kept for
+                // crash reconstruction. Delta, fixture, and edge positions are
+                // only needed for active states (picking + child creation).
+                self.states[evict_idx].delta = Arc::new(CompactDelta::tombstone());
+                self.states[evict_idx].fixture_state = None;
+                self.states[evict_idx].edge_positions = None;
             } else {
                 return false;
             }
@@ -561,6 +769,15 @@ impl StatePool {
             (0.0, None)
         };
 
+        // Compute n-gram keys and rarity score.
+        let ngram_keys = self.compute_ngram_keys(action_variant, parent_idx);
+        for (level, &key) in ngram_keys.iter().enumerate() {
+            if key != 0 {
+                *self.ngram_freq[level].entry(key).or_insert(0) += 1;
+            }
+        }
+        let ngram_rarity = self.compute_ngram_rarity(&ngram_keys);
+
         self.states.push(StateEntry {
             fingerprint,
             delta: Arc::new(delta),
@@ -580,17 +797,40 @@ impl StatePool {
             pool_size_at_add,
             rarity_score,
             edge_positions,
+            ngram_rarity,
+            ngram_keys,
+            barren_picks: 0,
+            debug_state_hash: 0,
         });
         // Only add to active set if depth < max_depth.
         // States at max_depth can't extend further — keep them in `states` + `seen`
         // for dedup and parent chain reconstruction, but don't waste picks on them.
         if depth < self.max_depth {
             self.active_indices.push(idx);
+        } else {
+            // Max-depth: will never be picked. Decrement frequency tables
+            // (edge_freq was incremented above at add time) and free expensive data.
+            if let Some(ref positions) = self.states[idx].edge_positions {
+                for &pos in positions.iter() {
+                    self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
+                }
+            }
+            for (level, &key) in self.states[idx].ngram_keys.iter().enumerate() {
+                if key != 0 {
+                    if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
+            self.states[idx].delta = Arc::new(CompactDelta::tombstone());
+            self.states[idx].fixture_state = None;
+            self.states[idx].edge_positions = None;
         }
-        // Credit parent for producing a novel child
+        // Credit parent for producing a novel child and reset barren counter
         if let Some(pidx) = parent_idx {
             if let Some(parent) = self.states.get_mut(pidx) {
                 parent.novel_children += 1;
+                parent.barren_picks = 0;
             }
         }
 
@@ -625,6 +865,35 @@ impl StatePool {
 
     /// Pick a random active state index using the given random value (uniform).
     /// Returns None if no active (non-crashed) states remain.
+    /// Build cumulative weight array for all active states. Returns (cumulative, total).
+    /// Reuse this for multiple picks within the same batch to avoid O(n) recomputation.
+    pub fn build_weight_distribution(&self) -> (Vec<f64>, f64) {
+        let n = self.active_indices.len();
+        let tp = self.total_picks.load(Ordering::Relaxed) as f64;
+        let mut cumulative = Vec::with_capacity(n);
+        let mut total: f64 = 0.0;
+        for &idx in &self.active_indices {
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
+            total += w;
+            cumulative.push(total);
+        }
+        (cumulative, total)
+    }
+
+    /// Sample one state from a pre-built weight distribution. O(log n).
+    /// Does NOT increment pick_count or total_picks.
+    pub fn sample_from_distribution(&self, cumulative: &[f64], total: f64, rand_val: u64) -> Option<usize> {
+        if cumulative.is_empty() || total <= 0.0 {
+            return self.pick_random(rand_val);
+        }
+        let target = (rand_val as f64 / u64::MAX as f64) * total;
+        let pos = match cumulative.binary_search_by(|w| w.partial_cmp(&target).unwrap()) {
+            Ok(i) => i,
+            Err(i) => i.min(cumulative.len() - 1),
+        };
+        Some(self.active_indices[pos])
+    }
+
     pub fn pick_random(&self, rand_val: u64) -> Option<usize> {
         if self.active_indices.is_empty() {
             None
@@ -657,7 +926,7 @@ impl StatePool {
         let mut cumulative = Vec::with_capacity(n);
         let mut total: f64 = 0.0;
         for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             total += w;
             cumulative.push(total);
         }
@@ -697,7 +966,7 @@ impl StatePool {
     /// Common factors: success boost (2x) and depth preference (shallow bias).
     /// Never-picked states get maximum priority. Max-depth states get zero weight.
     #[inline]
-    pub(crate) fn compute_weight(&self, s: &StateEntry, _total_picks: f64, max_depth: u32) -> f64 {
+    pub(crate) fn compute_weight(&self, s: &StateEntry, max_depth: u32) -> f64 {
         // Max-depth states can't extend — don't pick them as parents
         if s.depth >= max_depth {
             return 0.0;
@@ -713,6 +982,17 @@ impl StatePool {
         let success_boost = if s.action_succeeded { 2.0 } else { 1.0 };
         let depth_factor = 1.0 / (1.0 + 0.025 * s.depth as f64);
 
+        // Barren decay: exponential weight reduction for states that keep failing
+        // to produce novel children. Halves every 50 barren picks.
+        // A state with 200 consecutive barren picks gets 0.0625x weight (1/16).
+        let barren_decay = 1.0 / (1.0 + s.barren_picks as f64 / 50.0);
+
+        // N-gram action-path rarity: precomputed at add-time from 2/3/4-gram frequency tables.
+        // States reached via rare action sequences get higher weight. The longest matching
+        // rare n-gram dominates (e.g., a rare 4-gram like advance→deactivate→withdraw→delegate
+        // gives up to 25x boost vs max 4x from a 2-gram).
+        let ngram_rarity = s.ngram_rarity;
+
         // Gate coverage power schedule on EDGE coverage, not combined novelty.
         // Field-novel states use SCFuzz formula with a modest bonus.
         if s.edge_novelty == 0 {
@@ -722,19 +1002,26 @@ impl StatePool {
                 // The floor ensures every field-novel state gets enough picks to
                 // potentially discover edge coverage in its children.
                 let depth_bonus = 2.0 + 0.5 * s.depth as f64;  // depth 0 → 2x, depth 7 → 5.5x
-                let child_bonus = (1.0 + s.novel_children as f64).sqrt();  // productive parents
+                // Productive parents get a strong boost: if children found novel coverage,
+                // this state is a valuable stepping stone (e.g., advance_slots intermediates
+                // whose children discover new deactivation/withdrawal code paths).
+                let child_bonus = if s.novel_children > 0 {
+                    (2.0 + s.novel_children as f64 * 5.0).sqrt()
+                } else {
+                    1.0
+                };
                 let explore_decay = 1.0 / (1.0 + picks / 200.0);  // slower decay: halves at 200
 
                 match self.phase {
                     FuzzPhase::Coverage => {
-                        return depth_bonus * child_bonus * explore_decay * success_boost * depth_factor;
+                        return depth_bonus * child_bonus * explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                     }
                     FuzzPhase::Blended => {
                         let sc = state_class_from_fingerprint(s.fingerprint);
                         let scfuzz = self.registry.state_seed_weight(sc, picks, s.action_succeeded);
                         // Take max of SCFuzz and exploration floor — don't let SCFuzz zero out exploration
                         let base = scfuzz.max(depth_bonus * explore_decay);
-                        return base * child_bonus * depth_factor;
+                        return base * child_bonus * ngram_rarity * barren_decay * depth_factor;
                     }
                 }
             }
@@ -742,11 +1029,11 @@ impl StatePool {
             match self.phase {
                 FuzzPhase::Coverage => {
                     let explore_decay = 1.0 / (1.0 + picks / 50.0);
-                    return explore_decay * success_boost * depth_factor;
+                    return explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                 }
                 FuzzPhase::Blended => {
                     let sc = state_class_from_fingerprint(s.fingerprint);
-                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * depth_factor;
+                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * ngram_rarity * barren_decay * depth_factor;
                 }
             }
         }
@@ -783,7 +1070,7 @@ impl StatePool {
         let productivity_decay = 1.0 / (1.0 + picks / 500.0);
         let productivity = 1.0 + (productivity_raw - 1.0) * productivity_decay;
 
-        coverage_floor * novelty_power * rarity * productivity * success_boost * depth_factor
+        coverage_floor * novelty_power * rarity * productivity * ngram_rarity * barren_decay * success_boost * depth_factor
     }
 
     /// Fill a batch of picks using weighted selection. Returns the number of picks made.
@@ -794,26 +1081,33 @@ impl StatePool {
     /// weights once and samples multiple times.
     ///
     /// Output tuple: (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
+    /// Pick a batch of states using a pre-built weight distribution.
+    /// Use `build_weight_distribution()` to compute `(cumulative, total)` once,
+    /// then pass them here to avoid redundant O(n) recomputation.
     pub fn pick_weighted_batch(
         &self,
         rng_vals: &[u64],
-        out: &mut Vec<(Arc<SvmSnapshot>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
+    ) -> usize {
+        let (cumulative, total) = self.build_weight_distribution();
+        self.pick_weighted_batch_from(&cumulative, total, rng_vals, out)
+    }
+
+    /// Pick a batch of states using a caller-provided weight distribution.
+    /// Avoids redundant O(n) weight recomputation when the distribution is
+    /// already available from a prior `build_weight_distribution()` call.
+    pub fn pick_weighted_batch_from(
+        &self,
+        cumulative: &[f64],
+        total: f64,
+        rng_vals: &[u64],
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
     ) -> usize {
         if self.active_indices.is_empty() {
             return 0;
         }
 
         let n = self.active_indices.len();
-
-        // Build cumulative weight array once
-        let tp = self.total_picks.load(Ordering::Relaxed) as f64;
-        let mut cumulative = Vec::with_capacity(n);
-        let mut total: f64 = 0.0;
-        for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
-            total += w;
-            cumulative.push(total);
-        }
 
         // If all weights are zero, fall back to uniform random
         if total <= 0.0 {
@@ -872,6 +1166,24 @@ impl StatePool {
         self.states.len()
     }
 
+    /// Set debug state hash for the most recently added entry.
+    pub fn set_last_debug_hash(&mut self, hash: u64) {
+        if let Some(entry) = self.states.last_mut() {
+            entry.debug_state_hash = hash;
+        }
+    }
+
+    /// Get debug state hash for a given entry.
+    pub fn get_debug_hash(&self, idx: usize) -> u64 {
+        self.states[idx].debug_state_hash
+    }
+
+    /// Mark current pool size as the seed boundary.
+    /// Entries at indices 0..seed_count are seed-loaded intermediates.
+    pub fn mark_seed_boundary(&mut self) {
+        self.seed_count = self.states.len();
+    }
+
     /// Number of active (non-crashed) states eligible for picking.
     pub fn active_count(&self) -> usize {
         self.active_indices.len()
@@ -887,6 +1199,53 @@ impl StatePool {
         self.states.len() >= self.capacity
     }
 
+    /// Compute detailed memory breakdown for profiling.
+    pub fn memory_stats(&self) -> PoolMemoryStats {
+        let mut stats = PoolMemoryStats::default();
+        stats.total_states = self.states.len();
+        stats.active_states = self.active_indices.len();
+        stats.capacity = self.capacity;
+
+        // Fixed allocations
+        stats.edge_freq_bytes = self.edge_freq.len() * 2; // Vec<u16>
+        stats.seen_entries = self.seen.len();
+
+        for entry in &self.states {
+            // Delta snapshot memory
+            let delta_accounts = entry.delta.account_count();
+            stats.total_delta_accounts += delta_accounts;
+            stats.total_delta_heap_bytes += entry.delta.estimated_heap_bytes();
+
+            // Fixture state (we can only tell if it's Some, not its size)
+            if entry.fixture_state.is_some() {
+                stats.fixture_state_count += 1;
+            }
+
+            // Action bytes (Arc<Vec<u8>>)
+            stats.total_action_bytes += entry.action_bytes.len();
+            stats.total_field_bytes += entry.action_field_bytes.len();
+            stats.total_desc_bytes += entry.action_desc.len();
+
+            // Edge positions (Option<Arc<Vec<u16>>>)
+            if let Some(ref positions) = entry.edge_positions {
+                stats.total_edge_position_bytes += positions.len() * 2;
+            }
+        }
+
+        // StateEntry struct overhead (fixed fields per entry)
+        // fingerprint(8) + depth(4) + parent_idx(8+4) + pick_count(4) + novel_children(4)
+        // + violation_count(4) + novelty_bits(4) + edge_novelty(4) + action_succeeded(1)
+        // + pool_size_at_add(4) + rarity_score(8) + ngram_rarity(8) + ngram_keys(24)
+        // + barren_picks(4) + debug_state_hash(8) + Arc ptrs(8*4=32) + Option overhead
+        // ≈ 160 bytes per entry
+        stats.entry_overhead_bytes = self.states.len() * 160;
+
+        // Vec + HashSet backing storage
+        stats.active_indices_bytes = self.active_indices.capacity() * 8;
+
+        stats
+    }
+
     /// Remove a state from the pickable set (after a crash).
     /// The state remains in `states` for parent chain reconstruction.
     pub fn mark_crashed(&mut self, state_idx: usize) {
@@ -898,6 +1257,18 @@ impl StatePool {
                     self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
                 }
             }
+            // Decrement n-gram frequencies for crashed state
+            for (level, &key) in self.states[state_idx].ngram_keys.iter().enumerate() {
+                if key != 0 {
+                    if let Some(count) = self.ngram_freq[level].get_mut(&key) {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
+            // Free expensive data — crashed states are never picked again
+            self.states[state_idx].delta = Arc::new(CompactDelta::tombstone());
+            self.states[state_idx].fixture_state = None;
+            self.states[state_idx].edge_positions = None;
         }
     }
 
@@ -920,6 +1291,30 @@ impl StatePool {
         {
             self.phase = FuzzPhase::Blended;
         }
+        // Periodically refresh n-gram rarity scores from current frequency tables.
+        // Every 200 batch boundaries (~12800 iterations). O(active_states) pass.
+        self.ngram_refresh_counter += 1;
+        if self.ngram_refresh_counter >= 200 {
+            self.ngram_refresh_counter = 0;
+            self.refresh_ngram_rarity();
+        }
+    }
+
+    /// Recompute ngram_rarity for all active states from current frequency tables.
+    fn refresh_ngram_rarity(&mut self) {
+        for &idx in &self.active_indices {
+            let keys = self.states[idx].ngram_keys;
+            let rarity = self.compute_ngram_rarity(&keys);
+            self.states[idx].ngram_rarity = rarity;
+        }
+    }
+
+    /// Record a barren pick (no novel child produced). Increments the state's
+    /// consecutive barren counter, which causes exponential weight decay.
+    pub fn record_barren_pick(&mut self, state_idx: usize) {
+        if let Some(entry) = self.states.get_mut(state_idx) {
+            entry.barren_picks = entry.barren_picks.saturating_add(1);
+        }
     }
 
     /// Mutable access to the state registry (for flushing pending selects from macro codegen).
@@ -939,16 +1334,33 @@ impl StatePool {
             return None;
         }
         let tp = self.total_picks.load(Ordering::Relaxed) as f64;
+
+        // First pass: find weakest among states with NO novel children.
+        // States whose children found new coverage are valuable stepping stones
+        // (e.g., advance_slots intermediates) and should be protected from eviction.
         let mut min_weight = f64::MAX;
-        let mut min_pos = 0;
+        let mut min_pos: Option<usize> = None;
         for (pos, &idx) in self.active_indices.iter().enumerate() {
-            let w = self.compute_weight(&self.states[idx], tp, self.max_depth);
+            if self.states[idx].novel_children > 0 { continue; }
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             if w < min_weight {
                 min_weight = w;
-                min_pos = pos;
+                min_pos = Some(pos);
             }
         }
-        Some(min_pos)
+
+        // Fallback: if all active states have novel children, evict the weakest overall.
+        if min_pos.is_none() {
+            for (pos, &idx) in self.active_indices.iter().enumerate() {
+                let w = self.compute_weight(&self.states[idx], self.max_depth);
+                if w < min_weight {
+                    min_weight = w;
+                    min_pos = Some(pos);
+                }
+            }
+        }
+
+        min_pos
     }
 
     /// Check if a crash is novel by its action sequence hash.
@@ -968,21 +1380,96 @@ impl StatePool {
         self.states.len() - self.active_indices.len()
     }
 
+    /// Convenience wrapper: export without seed passthrough.
+    #[cfg(test)]
+    pub fn export_corpus_no_seeds(&self, dir: &str) -> std::io::Result<usize> {
+        self.export_corpus(dir, None)
+    }
+
+    /// Write a single entry to the corpus directory (called incrementally when new coverage is found).
+    /// Only writes if the entry has edge_novelty > 0. Returns true if written.
+    pub fn write_corpus_entry(&self, idx: usize, dir: &str) -> bool {
+        let entry = &self.states[idx];
+        if entry.action_bytes.len() <= 4 || entry.edge_novelty == 0 {
+            return false;
+        }
+        let _ = std::fs::create_dir_all(dir);
+        let mut hasher = FxHasher::default();
+        entry.action_bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        let path = format!("{}/corpus_{:016x}", dir, hash);
+        std::fs::write(&path, &*entry.action_bytes).is_ok()
+    }
+
     /// Write all pool entries' action sequences to disk as FuzzInput binary files.
     /// Returns the number of files written. Skips the initial state (depth 0, empty actions).
-    pub fn export_corpus(&self, dir: &str) -> std::io::Result<usize> {
+    pub fn export_corpus(&self, dir: &str, seed_dir: Option<&str>) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut count = 0;
-        for entry in &self.states {
+
+        // Step 1: Copy seed files (full chains from --corpus-in) directly.
+        // These are proven-replayable chains that provide base coverage.
+        if let Some(src) = seed_dir {
+            if let Ok(entries) = std::fs::read_dir(src) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name() {
+                            let name_str = name.to_string_lossy();
+                            if name_str.starts_with('.') || name_str.ends_with(".metadata") {
+                                continue;
+                            }
+                            let dest = format!("{}/{}", dir, name_str);
+                            std::fs::copy(&path, &dest)?;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Export only non-seed entries that discovered new code-edge coverage.
+        // Seed intermediates are skipped — the full seed chains (step 1) already cover them.
+        let mut new_coverage = 0usize;
+        let mut skipped_state_only = 0usize;
+        for (idx, entry) in self.states.iter().enumerate() {
             // Skip initial empty state (just a 4-byte header with count=0)
             if entry.action_bytes.len() <= 4 { continue; }
+            // Skip seed-loaded intermediates — the original files are already copied.
+            if idx < self.seed_count { continue; }
+            // Only export states that discovered new code-edge coverage.
+            if entry.edge_novelty == 0 {
+                skipped_state_only += 1;
+                continue;
+            }
             let mut hasher = FxHasher::default();
             entry.action_bytes.hash(&mut hasher);
             let hash = hasher.finish();
             let path = format!("{}/corpus_{:016x}", dir, hash);
             std::fs::write(&path, &*entry.action_bytes)?;
+            new_coverage += 1;
             count += 1;
         }
+        // Diagnostic: count unique edge positions across all exported entries.
+        // This shows whether the exported set captures all known coverage.
+        let mut all_positions: FastHashSet<u16> = FastHashSet::default();
+        let mut entries_with_positions = 0usize;
+        let mut entries_without_positions = 0usize;
+        for (idx, entry) in self.states.iter().enumerate() {
+            if entry.action_bytes.len() <= 4 { continue; }
+            if idx < self.seed_count { continue; }
+            if entry.edge_novelty == 0 { continue; }
+            if let Some(ref positions) = entry.edge_positions {
+                all_positions.extend(positions.iter());
+                entries_with_positions += 1;
+            } else {
+                entries_without_positions += 1;
+            }
+        }
+        eprintln!("[STATEFUL] Corpus: {} seed files + {} new coverage entries ({} state-only skipped)",
+            count - new_coverage, new_coverage, skipped_state_only);
+        eprintln!("[STATEFUL] Coverage diagnostic: {} unique edge positions across {} entries ({} without positions)",
+            all_positions.len(), entries_with_positions, entries_without_positions);
         Ok(count)
     }
 
@@ -1008,7 +1495,7 @@ impl StatePool {
         let mut weights: FastHashMap<usize, f64> = FastHashMap::default();
         let mut total_weight: f64 = 0.0;
         for &idx in &self.active_indices {
-            let w = self.compute_weight(&self.states[idx], tp_f, self.max_depth);
+            let w = self.compute_weight(&self.states[idx], self.max_depth);
             weights.insert(idx, w);
             total_weight += w;
         }
@@ -1028,8 +1515,8 @@ impl StatePool {
         // ================================================================
         let _ = writeln!(out, "STATE INDEX");
         let _ = writeln!(out, "-----------");
-        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10} {:<7} {:<18} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7} {}",
-            "idx", "dep", "actv", "picks", "weight", "prob%", "fingerprint", "novl", "ecov", "type", "chld", "viol", "ok", "psz", "rarity", "action");
+        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10} {:<7} {:<18} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7} {:<6} {}",
+            "idx", "dep", "actv", "picks", "weight", "prob%", "fingerprint", "novl", "ecov", "type", "chld", "viol", "ok", "psz", "rarity", "ngram", "action");
 
         for (idx, entry) in self.states.iter().enumerate() {
             let active = if active_set.contains(&idx) { "yes" } else { "-" };
@@ -1037,12 +1524,13 @@ impl StatePool {
             let w = weights.get(&idx).copied().unwrap_or(0.0);
             let prob = if total_weight > 0.0 { w / total_weight * 100.0 } else { 0.0 };
             let wtype = if entry.edge_novelty > 0 { "edge" } else if entry.novelty_bits > 0 { "fld" } else { "none" };
-            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10.2} {:<7.3} {:018x} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7.4} {}",
+            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10.2} {:<7.3} {:018x} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7.4} {:<6.1} {}",
                 idx, entry.depth, active, picks, w, prob, entry.fingerprint,
                 entry.novelty_bits, entry.edge_novelty, wtype, entry.novel_children, entry.violation_count,
                 if entry.action_succeeded { "ok" } else { "fail" },
                 entry.pool_size_at_add,
                 entry.rarity_score,
+                entry.ngram_rarity,
                 if entry.action_desc.is_empty() { "(initial)".to_string() } else {
                     entry.action_desc.lines().collect::<Vec<_>>().join(" | ")
                 });
@@ -1201,6 +1689,94 @@ impl StatePool {
         }
         let _ = writeln!(out, "");
 
+        // ================================================================
+        // Section 7: Memory breakdown
+        // ================================================================
+        let mem = self.memory_stats();
+        let _ = writeln!(out, "MEMORY BREAKDOWN");
+        let _ = writeln!(out, "----------------");
+        let _ = writeln!(out, "  Pool: {} states ({} active, {} evicted), capacity: {}",
+            mem.total_states, mem.active_states, mem.total_states - mem.active_states, mem.capacity);
+        let _ = writeln!(out, "  Delta heap (accounts):  {:.1} MB  ({} total account entries across all deltas)",
+            mem.total_delta_heap_bytes as f64 / 1_048_576.0, mem.total_delta_accounts);
+        let _ = writeln!(out, "  Fixtures stored:        {}  (of {} states have Some(fixture_state))",
+            mem.fixture_state_count, mem.total_states);
+        let _ = writeln!(out, "  Action bytes:           {:.1} MB", mem.total_action_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Action descs:           {:.1} MB", mem.total_desc_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Field bytes:            {:.1} MB", mem.total_field_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge positions:         {:.1} MB", mem.total_edge_position_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Entry struct overhead:  {:.1} MB", mem.entry_overhead_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge freq table:        {:.1} MB", mem.edge_freq_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Seen set:               {} entries", mem.seen_entries);
+        let _ = writeln!(out, "  Active indices:         {:.1} KB", mem.active_indices_bytes as f64 / 1024.0);
+        let _ = writeln!(out, "  ─────────────────────────────────");
+        let _ = writeln!(out, "  POOL TOTAL:             {:.1} MB", mem.total_bytes() as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  (Note: delta heap may overcount shared Arc<Account> data between parent/child)");
+        let _ = writeln!(out, "");
+
+        // Per-entry memory detail (sorted by delta heap size descending, top 50 + bottom 10)
+        let _ = writeln!(out, "PER-ENTRY MEMORY (top 50 by delta heap, then bottom 10)");
+        let _ = writeln!(out, "-------------------------------------------------------");
+        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10} {:<8} {:<8} {}",
+            "idx", "dep", "actv", "accts", "heap_KB", "sysv_KB", "abytes", "top patches by size");
+
+        // Collect per-entry memory info
+        let mut entry_mem: Vec<(usize, usize, usize, Vec<(String, usize)>)> = Vec::with_capacity(self.states.len());
+        for (idx, entry) in self.states.iter().enumerate() {
+            let delta = &*entry.delta;
+            let heap = delta.estimated_heap_bytes();
+            let sysvar_data = delta.sysvar_data_bytes();
+            let mut account_sizes = delta.accounts_report_info();
+            account_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+            entry_mem.push((idx, heap, sysvar_data, account_sizes));
+        }
+        entry_mem.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let write_entry = |out: &mut String, (idx, heap_bytes, sysvar_bytes, ref acct_sizes): &(usize, usize, usize, Vec<(String, usize)>)| {
+            let entry = &self.states[*idx];
+            let active = if active_set.contains(idx) { "yes" } else { "-" };
+            let top_accts: String = acct_sizes.iter().take(5)
+                .map(|(pk, sz)| format!("{}:{:.1}K", pk, *sz as f64 / 1024.0))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10.1} {:<8.1} {:<8} {}",
+                idx, entry.depth, active,
+                entry.delta.account_count(),
+                *heap_bytes as f64 / 1024.0,
+                *sysvar_bytes as f64 / 1024.0,
+                entry.action_bytes.len(),
+                top_accts);
+        };
+
+        // Top 50
+        for item in entry_mem.iter().take(50) {
+            write_entry(&mut out, item);
+        }
+        if entry_mem.len() > 60 {
+            let _ = writeln!(out, "  ... {} entries omitted ...", entry_mem.len() - 60);
+            let _ = writeln!(out, "");
+            let _ = writeln!(out, "  Bottom 10:");
+            let start = entry_mem.len().saturating_sub(10);
+            for item in entry_mem[start..].iter() {
+                write_entry(&mut out, item);
+            }
+        }
+        let _ = writeln!(out, "");
+
+        // Histogram of delta account counts
+        let _ = writeln!(out, "DELTA ACCOUNT COUNT HISTOGRAM");
+        let _ = writeln!(out, "-----------------------------");
+        let mut acct_count_hist: FastHashMap<usize, usize> = FastHashMap::default();
+        for entry in &self.states {
+            *acct_count_hist.entry(entry.delta.account_count()).or_insert(0) += 1;
+        }
+        let mut hist_sorted: Vec<(usize, usize)> = acct_count_hist.into_iter().collect();
+        hist_sorted.sort_by_key(|&(count, _)| count);
+        for (acct_count, num_entries) in &hist_sorted {
+            let _ = writeln!(out, "  {:>4} accounts: {:>5} entries", acct_count, num_entries);
+        }
+        let _ = writeln!(out, "");
+
         std::fs::write(format!("{}/pool_report.txt", dir), &out)?;
         Ok(self.states.len())
     }
@@ -1335,6 +1911,48 @@ impl StatePool {
         (*self.states[state_idx].action_bytes).clone()
     }
 
+    /// Rebuild action bytes by walking the parent chain and extracting each entry's
+    /// individual contribution. This strips ghost actions that may have been inherited
+    /// from ancestor entries created before the chain truncation fix.
+    pub fn rebuild_action_bytes_clean(&self, state_idx: usize) -> Vec<u8> {
+        // Walk parent chain to collect (entry_idx, parent_idx) pairs
+        let mut chain: Vec<usize> = Vec::new();
+        let mut idx = state_idx;
+        loop {
+            chain.push(idx);
+            match self.states[idx].parent_idx {
+                Some(parent) => idx = parent,
+                None => break,
+            }
+        }
+        chain.reverse(); // root → ... → state_idx
+
+        // Rebuild: for each entry, extract its individual bytes by subtracting parent's bytes
+        let mut result: Vec<u8> = 0u32.to_le_bytes().to_vec(); // count header
+        let mut count: u32 = 0;
+        for &entry_idx in &chain {
+            let entry = &self.states[entry_idx];
+            let entry_bytes = &*entry.action_bytes;
+            if entry_bytes.len() <= 4 { continue; } // skip initial empty state
+
+            let parent_byte_len = match entry.parent_idx {
+                Some(pidx) => self.states[pidx].action_bytes.len(),
+                None => 4, // root: just 4-byte header
+            };
+
+            // Entry's individual contribution = entry_bytes[parent_byte_len..]
+            if entry_bytes.len() > parent_byte_len {
+                let individual = &entry_bytes[parent_byte_len..];
+                // Count individual actions by parsing 2-byte variant headers
+                // We trust depth: each entry adds exactly 1 action (or chain_len actions)
+                result.extend_from_slice(individual);
+            }
+            count = entry.depth;
+        }
+        result[0..4].copy_from_slice(&count.to_le_bytes());
+        result
+    }
+
     /// Walk the parent chain and return the sequence of action variant indices (oldest first).
     /// Used for coarse crash deduplication — same action types = same crash class.
     pub fn reconstruct_variant_sequence(&self, state_idx: usize) -> Vec<u16> {
@@ -1399,5 +2017,116 @@ impl StatePool {
         }
         chain.reverse();
         chain
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_empty_delta() -> CompactDelta {
+        CompactDelta::tombstone()
+    }
+
+    fn make_pool_with_entries() -> StatePool {
+        let mut pool = StatePool::new(100, 10);
+        // Add initial state
+        let delta = make_empty_delta();
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
+
+        // Add a field-only entry (edge_novelty=0)
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x01, 0x00, 0xAA]; // 1 action
+        pool.try_add(1, delta, 1, Some(0), action_bytes, "field_action -> OK".into(),
+            Some(0), vec![0xAA], None, 5, 0, true, None);
+
+        // Add a coverage entry (edge_novelty=3)
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x02, 0x00, 0xBB]; // 1 action
+        pool.try_add(2, delta, 1, Some(0), action_bytes, "cov_action -> OK".into(),
+            Some(1), vec![0xBB], None, 3, 3, true, Some(vec![10, 20, 30]));
+
+        pool
+    }
+
+    #[test]
+    fn export_corpus_skips_field_only_entries() {
+        let pool = make_pool_with_entries();
+        let dir = std::env::temp_dir().join("crucible_test_export_field_only");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+
+        // Only the coverage entry should be exported (not the initial or field-only)
+        assert_eq!(count, 1, "should export only coverage entries");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_corpus_skips_seed_entries() {
+        let mut pool = make_pool_with_entries();
+        // Mark current entries as seeds
+        pool.mark_seed_boundary();
+
+        // Add another coverage entry after seed boundary
+        let delta = make_empty_delta();
+        let action_bytes = vec![1, 0, 0, 0, 0x03, 0x00, 0xCC];
+        pool.try_add(3, delta, 1, Some(0), action_bytes, "new_cov -> OK".into(),
+            Some(2), vec![0xCC], None, 2, 2, true, Some(vec![40, 50]));
+
+        let dir = std::env::temp_dir().join("crucible_test_export_seed_skip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+
+        // Only the post-seed coverage entry should be exported
+        assert_eq!(count, 1, "should skip seed entries and only export new coverage");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_corpus_copies_seed_files() {
+        let pool = make_pool_with_entries();
+        let seed_dir = std::env::temp_dir().join("crucible_test_seed_src");
+        let out_dir = std::env::temp_dir().join("crucible_test_seed_dst");
+        let _ = std::fs::remove_dir_all(&seed_dir);
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&seed_dir).unwrap();
+
+        // Create seed files
+        std::fs::write(seed_dir.join("corpus_aaa"), b"seed1").unwrap();
+        std::fs::write(seed_dir.join("corpus_bbb"), b"seed2").unwrap();
+        std::fs::write(seed_dir.join(".hidden"), b"skip").unwrap();
+        std::fs::write(seed_dir.join("x.metadata"), b"skip").unwrap();
+
+        let count = pool.export_corpus(
+            out_dir.to_str().unwrap(),
+            Some(seed_dir.to_str().unwrap()),
+        ).unwrap();
+
+        // 2 seed files + 1 coverage entry = 3
+        assert_eq!(count, 3);
+        assert!(out_dir.join("corpus_aaa").exists());
+        assert!(out_dir.join("corpus_bbb").exists());
+        assert!(!out_dir.join(".hidden").exists());
+        assert!(!out_dir.join("x.metadata").exists());
+
+        let _ = std::fs::remove_dir_all(&seed_dir);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn mark_seed_boundary_sets_count() {
+        let mut pool = StatePool::new(100, 10);
+        let delta = make_empty_delta();
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
+        let delta = make_empty_delta();
+        pool.try_add(1, delta, 1, Some(0), vec![1, 0, 0, 0, 0, 0],
+            "a -> OK".into(), Some(0), vec![], None, 1, 1, true, None);
+
+        pool.mark_seed_boundary();
+        assert_eq!(pool.seed_count, 2);
     }
 }

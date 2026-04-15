@@ -1965,7 +1965,7 @@ fn test_pool_coverage_novel_3x_boost() {
     // State 1: has novelty_bits (use try_add directly to set value)
     pool.try_add(
         2,
-        make_pool_snapshot(vec![(pk2, 2000)]),
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk2, 2000)])),
         1,
         None,
         vec![0u8; 8],
@@ -2387,7 +2387,7 @@ fn test_stateless_restore_resets_clock() {
 
     // Restore with clock_dirty
     let mut dirty = DirtyTracker::new();
-    dirty.mark_clock_dirty();
+    dirty.mark_clock_dirty(100);
     snap.restore(&mut svm, &dirty);
 
     assert_eq!(

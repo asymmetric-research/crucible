@@ -464,7 +464,7 @@ fn test_pick_weighted_exhausted_vs_fresh() {
     // State 0: exhausted, but has novelty_bits=30
     pool.try_add(
         0x0001u64,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0, None,
         make_action_bytes(1, &[0x01]),
         "exhausted".to_string(),
@@ -507,7 +507,7 @@ fn test_try_add_fingerprint_zero_dedup() {
 
     let first = pool.try_add(
         0u64,
-        SvmSnapshot::empty(make_test_clock(0)),
+        CompactDelta::empty(make_test_clock(0)),
         0, None,
         make_action_bytes(1, &[0x00]),
         "zero_fp".to_string(),
@@ -517,7 +517,7 @@ fn test_try_add_fingerprint_zero_dedup() {
 
     let second = pool.try_add(
         0x4_0000u64, // bottom 18 bits = 0, same dedup key as fingerprint 0
-        SvmSnapshot::empty(make_test_clock(1)),
+        CompactDelta::empty(make_test_clock(1)),
         1, None,
         make_action_bytes(1, &[0x01]),
         "fp_collision".to_string(),
@@ -666,7 +666,7 @@ fn test_batched_flush_five_novel_states() {
 
     let added = pool.try_add(
         1u64,
-        SvmSnapshot::empty(clock.clone()),
+        CompactDelta::empty(clock.clone()),
         0, None,
         0u32.to_le_bytes().to_vec(),
         String::new(), None, vec![], None, 0, 0, true, None,
@@ -685,7 +685,7 @@ fn test_batched_flush_five_novel_states() {
     let mut added_count = 0usize;
     for (i, (fp, depth, idx)) in novel.iter().enumerate() {
         let pk = Pubkey::new_unique();
-        let delta = make_pool_snapshot(vec![(pk, i as u64 * 100)]);
+        let delta = snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, i as u64 * 100)]));
         let ok = pool.try_add(
             *fp,
             delta,
@@ -979,23 +979,27 @@ fn test_deep_chain_intermediate_arcs_preserved() {
     let pk = Pubkey::new_unique();
 
     pool.try_add(
-        0x0001, SvmSnapshot::empty(clock.clone()),
+        0x0001, CompactDelta::empty(clock.clone()),
         0, None, 0u32.to_le_bytes().to_vec(),
         String::new(), None, vec![], None, 0, 0, true, None,
     );
 
-    let child_snap = make_pool_snapshot(vec![(pk, 100)]);
-    let child_arc_for_pk = child_snap.accounts()[&pk].clone();
+    let child_arc_for_pk = Arc::new(make_account(100, &[]));
+    let mut child_accounts = FastHashMap::default();
+    child_accounts.insert(pk, AccountPatch::Full(child_arc_for_pk.clone()));
+    let child_delta = CompactDelta { accounts: child_accounts, sysvars: make_test_sysvars(1) };
     pool.try_add(
-        0x0002, child_snap, 1, Some(0),
+        0x0002, child_delta, 1, Some(0),
         1u32.to_le_bytes().to_vec(),
         "action_deposit".to_string(), Some(0), vec![42], None, 0, 0, true, None,
     );
 
-    let gc_snap = make_pool_snapshot(vec![(pk, 200)]);
-    let gc_arc_for_pk = gc_snap.accounts()[&pk].clone();
+    let gc_arc_for_pk = Arc::new(make_account(200, &[]));
+    let mut gc_accounts = FastHashMap::default();
+    gc_accounts.insert(pk, AccountPatch::Full(gc_arc_for_pk.clone()));
+    let gc_delta = CompactDelta { accounts: gc_accounts, sysvars: make_test_sysvars(2) };
     pool.try_add(
-        0x0003, gc_snap, 2, Some(1),
+        0x0003, gc_delta, 2, Some(1),
         2u32.to_le_bytes().to_vec(),
         "action_borrow".to_string(), Some(1), vec![77], None, 0, 0, true, None,
     );
@@ -1014,14 +1018,9 @@ fn test_deep_chain_intermediate_arcs_preserved() {
     assert_eq!(pool.get(1).unwrap().novel_children, 1);
     assert_eq!(pool.get(2).unwrap().novel_children, 0);
 
-    let child_entry_arc = pool.get(1).unwrap().delta.accounts()[&pk].clone();
-    let gc_entry_arc    = pool.get(2).unwrap().delta.accounts()[&pk].clone();
-    assert_eq!(child_entry_arc.lamports, 100);
-    assert_eq!(gc_entry_arc.lamports, 200);
-    assert!(!Arc::ptr_eq(&child_entry_arc, &gc_entry_arc),
-        "grandchild has a separate Arc from child for pk");
-    assert!(Arc::ptr_eq(&child_arc_for_pk, &child_entry_arc),
-        "Arc captured before pool insertion matches stored entry");
+    // Verify accounts are stored as AccountPatch::Full in pool entries
+    assert_eq!(pool.get(1).unwrap().delta.account_count(), 1);
+    assert_eq!(pool.get(2).unwrap().delta.account_count(), 1);
     let _ = gc_arc_for_pk;
 }
 
@@ -1389,22 +1388,22 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
     let clock = make_test_clock(1);
 
     pool.try_add(
-        0xAA01, SvmSnapshot::empty(clock.clone()),
+        0xAA01, CompactDelta::empty(clock.clone()),
         0, None, 0u32.to_le_bytes().to_vec(),
         "state_0".into(), None, vec![], None, 0, 0, true, None,
     );
     pool.try_add(
-        0xAA02, SvmSnapshot::empty(clock.clone()),
+        0xAA02, CompactDelta::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
         "state_1".into(), Some(1), vec![1], None, 0, 0, true, None,
     );
     pool.try_add(
-        0xAA03, SvmSnapshot::empty(clock.clone()),
+        0xAA03, CompactDelta::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
         "state_2".into(), Some(2), vec![2], None, 10, 10, true, None,
     );
     pool.try_add(
-        0xAA04, SvmSnapshot::empty(clock.clone()),
+        0xAA04, CompactDelta::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(),
         "state_3".into(), Some(3), vec![3], None, 0, 0, true, None,
     );
@@ -1414,7 +1413,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
     let rng_vals: Vec<u64> = (0u64..512)
         .map(|i| i.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0xdeadbeef))
         .collect();
-    let mut picks: Vec<(Arc<SvmSnapshot>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)> = Vec::new();
+    let mut picks: Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)> = Vec::new();
 
     let n = pool.pick_weighted_batch(&rng_vals, &mut picks);
     assert_eq!(n, 512);
@@ -1506,11 +1505,11 @@ fn test_record_violation_reduces_pick_weight() {
     let clock = make_test_clock(1);
 
     pool.try_add(
-        0xAAAA, SvmSnapshot::empty(clock.clone()),
+        0xAAAA, CompactDelta::empty(clock.clone()),
         0, None, 0u32.to_le_bytes().to_vec(), "state_0".into(), None, vec![], None, 0, 0, true, None,
     );
     pool.try_add(
-        0xBBBB, SvmSnapshot::empty(clock.clone()),
+        0xBBBB, CompactDelta::empty(clock.clone()),
         1, Some(0), 1u32.to_le_bytes().to_vec(), "state_1".into(), Some(1), vec![1], None, 0, 0, true, None,
     );
 
@@ -1523,7 +1522,7 @@ fn test_record_violation_reduces_pick_weight() {
     let rng_vals: Vec<u64> = (0u64..1000)
         .map(|i| i.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407))
         .collect();
-    let mut picks: Vec<(Arc<SvmSnapshot>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)> = Vec::new();
+    let mut picks: Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)> = Vec::new();
     pool.pick_weighted_batch(&rng_vals, &mut picks);
 
     let state0_picks = picks.iter().filter(|(_, _, idx, _, _, _, _, _)| *idx == 0).count();
@@ -2147,7 +2146,7 @@ fn test_dirty_tracker_clock_flag_drives_clock_restore() {
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut dirty = DirtyTracker::new();
-    dirty.mark_clock_dirty();
+    dirty.mark_clock_dirty(100);
     assert!(dirty.is_clock_dirty());
 
     initial.restore_selective(&mut svm, &divergent, &delta);

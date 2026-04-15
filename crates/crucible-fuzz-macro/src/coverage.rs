@@ -6,15 +6,6 @@
 
 use quote::quote;
 
-/// Constants for coverage map sizes
-/// Note: These are only used in generated code, not at macro compile time
-#[allow(dead_code)]
-pub const MAP_SIZE: usize = 1 << 16;
-#[allow(dead_code)]
-pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 16;   // 64KB = 512K bits for edges
-#[allow(dead_code)]
-pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 16; // 64KB = 512K bits for branches
-
 /// Generate the coverage state struct and related statics
 pub fn coverage_state_code() -> proc_macro2::TokenStream {
     quote! {
