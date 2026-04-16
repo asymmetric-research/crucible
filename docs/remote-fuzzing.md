@@ -306,7 +306,7 @@ bundle/
 │       ├── Cargo.toml
 │       ├── src/main.rs                   # Harness code
 │       ├── idls/myproject.json           # Program IDL
-│       └── target/release/myproject_fuzz # Compiled harness binary
+│       └── target/release/invariant_test # Compiled harness binary
 ├── target/
 │   └── deploy/myproject.so              # Program binary (loaded by harness)
 ├── programs/
@@ -375,7 +375,7 @@ When running under a remote driver (`--mode` set), Crucible behaves slightly dif
 |----------|-----------|----------|
 | Corpus directory | User-specified or `fuzz/<prog>/corpus/` | `./corpus` (CWD-relative) |
 | Crash directory | `fuzz/<prog>/crashes/<test>/` | `./output` |
-| Coverage output | `coverage.lcov` in fuzz target dir | `./output/coverage.lcov` |
+| Coverage output | `./coverage/coverage.lcov` | `./output/coverage.lcov` |
 | Stop-on-crash | Off by default | Always on in `explore` |
 | Account diffs on replay | Auto-enabled | Auto-enabled |
 
