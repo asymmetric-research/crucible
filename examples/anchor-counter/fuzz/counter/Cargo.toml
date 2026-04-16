@@ -18,5 +18,9 @@ solana-keypair = "3.0"
 solana-pubkey = "3.0"
 solana-signer = "3.0"
 
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
 [features]
 invariant_counter = []

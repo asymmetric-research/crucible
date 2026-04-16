@@ -21,6 +21,10 @@ staking = { path = "../../programs/staking", features = ["no-entrypoint"] }
 ctrlc = "3.4"
 serde_json = "1.0"
 
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
 [features]
 fuzz_staking = []
 invariant_fuzz = []
