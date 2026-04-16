@@ -4,7 +4,7 @@ Crucible can generate LCOV coverage reports showing which lines of your Solana p
 
 ## Bytecode-level coverage
 
-Just add `--coverage` to your run command. This generates `coverage.lcov` using SBF program counter addresses as line numbers:
+Just add `--coverage` to your run command. This writes `./coverage/coverage.lcov` by default and uses SBF program counter addresses as line numbers:
 
 ```bash
 crucible run myproject invariant_test --release --coverage --timeout 60
@@ -76,7 +76,7 @@ You should see output like:
 
 ### Step 4: Generate HTML report
 
-The `coverage.lcov` file is written inside the fuzz harness target directory. Use `lcov` and `genhtml` to produce a browsable HTML report.
+By default the LCOV file is written to `./coverage/coverage.lcov` (or the path passed via `--lcov-out`). Use `lcov` and `genhtml` to produce a browsable HTML report.
 
 First, extract only your program's source files (filtering out stdlib and third-party crate paths):
 

@@ -29,6 +29,10 @@ ctrlc = "3.4"
 ctor = "0.6"
 litesvm = { version = "0.9.0", features = ["register-tracing"] }
 
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
 [features]
 fuzz_single = []
 invariant_test = []

@@ -8,6 +8,8 @@
 crucible init <project_name>
 ```
 
+This creates `fuzz/<project_name>/` by default. Use `-C <dir>` to place the harness elsewhere.
+
 ### Run a fuzz test
 
 ```bash

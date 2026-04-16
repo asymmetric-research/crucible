@@ -1,7 +1,10 @@
-use std::env::{self, current_dir};
+mod templates;
+use templates::{generate_cargo_toml, generate_harness, generate_idl_readme};
+
+use std::env::current_dir;
 use std::fs::{self, create_dir_all};
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,9 +17,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Parser)]
 #[command(name = "crucible", about = "Solana smart contract fuzzing framework")]
 struct Cli {
-    /// Specify location of fuzz dir
-    #[arg(short = 'C', long = "fuzz-dir", global = true)]
-    fuzz_dir: Option<PathBuf>,
+    /// Use this directory instead of ./fuzz/<program_name>/
+    #[arg(short = 'C', long = "harness-dir", global = true)]
+    harness_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -40,7 +43,7 @@ enum Commands {
         /// Build in release mode
         #[arg(long)]
         release: bool,
-        /// Enable LCOV coverage output (single-core only)
+        /// Enable coverage reporting (single-core only)
         #[arg(long)]
         coverage: bool,
         /// Stop after N seconds
@@ -85,7 +88,7 @@ enum Commands {
         /// State pool capacity in stateful mode (default: 256000)
         #[arg(long)]
         pool_size: Option<u64>,
-        /// Path to alternative program .so binary (for coverage with debug builds)
+        /// Path to alternative program .so binary
         #[arg(long)]
         program_so: Option<PathBuf>,
         /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
@@ -105,6 +108,9 @@ enum Commands {
     List {
         /// Program name (omit to list all)
         program_name: Option<String>,
+        /// Use this directory instead of ./fuzz/<program_name>/
+        #[arg(short = 'C', long = "harness-dir")]
+        harness_dir: Option<PathBuf>,
     },
     /// View/replay crashes
     Show {
@@ -185,13 +191,10 @@ struct ActionRecord {
 // ============================================================================
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    eprintln!("{:?}", args);
-
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { program_name } => fuzz_init(&program_name, &cli.fuzz_dir),
+        Commands::Init { program_name } => fuzz_init(&program_name, &cli.harness_dir),
         Commands::Run {
             program_name,
             test_name,
@@ -221,7 +224,7 @@ fn main() -> Result<()> {
             &program_name,
             &test_name,
             binary_in,
-            &cli.fuzz_dir,
+            &cli.harness_dir,
             release,
             coverage,
             timeout,
@@ -243,7 +246,10 @@ fn main() -> Result<()> {
             mode,
             lcov_out,
         ),
-        Commands::List { program_name } => fuzz_list(program_name.as_deref()),
+        Commands::List {
+            program_name,
+            harness_dir,
+        } => fuzz_list(program_name.as_deref(), &harness_dir.or(cli.harness_dir)),
         Commands::Show {
             program_name,
             crash_file,
@@ -252,6 +258,7 @@ fn main() -> Result<()> {
             crashes_dir,
         } => fuzz_show(
             &program_name,
+            &cli.harness_dir,
             crash_file.as_deref(),
             replay,
             regen,
@@ -266,7 +273,7 @@ fn main() -> Result<()> {
         } => fuzz_tmin(
             &program_name,
             &test_name,
-            &cli.fuzz_dir,
+            &cli.harness_dir,
             crash_file.as_deref(),
             all,
             release,
@@ -288,7 +295,7 @@ fn main() -> Result<()> {
             fuzz_cmin(
                 &program_name,
                 &test_name,
-                &cli.fuzz_dir,
+                &cli.harness_dir,
                 input,
                 corpus_out.as_deref(),
                 release,
@@ -301,22 +308,32 @@ fn main() -> Result<()> {
 // Init Command
 // ============================================================================
 
-fn fuzz_init(program_name: &str, fuzz_dir: &Option<PathBuf>) -> Result<()> {
+fn fuzz_init(program_name: &str, harness_dir: &Option<PathBuf>) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = fuzz_dir.clone().unwrap_or(cwd.join("fuzz"));
 
-    // Create fuzz/ directory and .gitignore
-    if !fuzz_dir.exists() {
-        create_dir_all(&fuzz_dir)?;
-        fs::write(
-            fuzz_dir.join(".gitignore"),
-            "*/target/\n*/crashes/\n.fuzz-cache/\n",
-        )
-        .context("Failed to create .gitignore")?;
-    }
+    // If --harness-dir is given, use it directly as the harness root.
+    // Otherwise create ./fuzz/<program_name>/.
+    let fuzz_program_path = if let Some(dir) = harness_dir {
+        let dir = if dir.is_absolute() {
+            dir.clone()
+        } else {
+            cwd.join(dir)
+        };
+        dir
+    } else {
+        let fuzz_dir = cwd.join("fuzz");
+        // Create fuzz/ directory and .gitignore
+        if !fuzz_dir.exists() {
+            create_dir_all(&fuzz_dir)?;
+            fs::write(
+                fuzz_dir.join(".gitignore"),
+                "*/target/\n*/crashes/\n.fuzz-cache/\n",
+            )
+            .context("Failed to create .gitignore")?;
+        }
+        fuzz_dir.join(program_name)
+    };
 
-    // Create standalone fuzz package
-    let fuzz_program_path = fuzz_dir.join(program_name);
     if fuzz_program_path.exists() {
         bail!("{} already exists", fuzz_program_path.display());
     }
@@ -348,11 +365,12 @@ fn fuzz_init(program_name: &str, fuzz_dir: &Option<PathBuf>) -> Result<()> {
     )
     .context("Failed to write IDL README")?;
 
-    println!("\nCreated fuzz harness at: fuzz/{}/", program_name);
+    let harness_display = fuzz_program_path.display();
+    println!("\nCreated fuzz harness at: {}/", harness_display);
     println!("\nNext steps:");
     println!(
-        "  1. Copy your IDL to: fuzz/{}/idls/{}.json",
-        program_name, program_name
+        "  1. Copy your IDL to: {}/idls/{}.json",
+        harness_display, program_name
     );
     println!("     (Run `anchor idl convert` if using legacy IDL format)");
     println!(
@@ -360,8 +378,8 @@ fn fuzz_init(program_name: &str, fuzz_dir: &Option<PathBuf>) -> Result<()> {
         program_name
     );
     println!(
-        "  3. Implement action_* methods in: fuzz/{}/src/main.rs",
-        program_name
+        "  3. Implement action_* methods in: {}/src/main.rs",
+        harness_display
     );
     println!(
         "  4. Run: crucible run {} invariant_test --release",
@@ -369,148 +387,6 @@ fn fuzz_init(program_name: &str, fuzz_dir: &Option<PathBuf>) -> Result<()> {
     );
 
     Ok(())
-}
-
-fn generate_cargo_toml(program_name: &str) -> String {
-    let repo = "https://github.com/asymmetric-research/crucible";
-    let branch = "main";
-
-    format!(
-        r#"[package]
-name = "{program_name}_fuzz"
-version = "0.1.0"
-edition = "2021"
-
-[workspace]
-# Standalone workspace - isolated from parent project to avoid Solana version conflicts
-
-[dependencies]
-# Fuzzing framework
-crucible-fuzzer = {{ git = "{repo}", branch = "{branch}" }}
-crucible-test-context = {{ git = "{repo}", branch = "{branch}" }}
-crucible-idl-gen = {{ git = "{repo}", branch = "{branch}" }}
-
-# Anchor (v3-compatible fork with solana-sysvar ~3.1 fix)
-anchor-lang = {{ git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }}
-
-# Solana v3.x (required for litesvm 0.9.0)
-solana-pubkey = "3.0"
-solana-keypair = "3.1"
-solana-signer = "3.0"
-solana-program = "3.0"
-solana-message = "3.0"
-solana-signature = "3.1"
-solana-instruction = "3.1"
-
-# Fuzzing
-libafl = {{ version = "0.15.1", features = ["std", "cli", "prelude"] }}
-libafl_bolts = {{ version = "0.15.1", features = ["std"] }}
-arbitrary = {{ version = "1", features = ["derive"] }}
-
-# Utilities
-anyhow = "1.0"
-bytemuck = "1.14"
-ctor = "0.6"
-
-[features]
-invariant_test = []
-"#
-    )
-}
-
-fn generate_harness(program_name: &str) -> String {
-    let fixture_name = to_pascal_case(program_name);
-    format!(
-        r#"use crucible_fuzzer::*;
-use anchor_lang::prelude::*;
-use solana_keypair::Keypair;
-use solana_signer::Signer;
-use solana_pubkey::Pubkey;
-use anchor_lang::system_program;
-use std::rc::Rc;
-
-// Generate types from IDL (no crate dependency - avoids version conflicts)
-crucible_idl_gen::declare_fuzz_program!("idls/{program_name}.json");
-
-use {program_name}::instruction;
-use {program_name}::accounts;
-
-#[derive(Clone)]
-struct {fixture_name} {{
-    ctx: TestContext,
-    program_id: Pubkey,
-    admin: Rc<Keypair>,
-    // TODO: Add your state here (users, accounts, etc.)
-}}
-
-#[fuzz_fixture]
-impl {fixture_name} {{
-    /// Called ONCE to setup initial state (programs + accounts)
-    pub fn setup() -> Self {{
-        let mut ctx = TestContext::new();
-        let program_id = {program_name}::ID;
-
-        // Load program binary (built separately from fuzz harness)
-        ctx.add_program(&program_id, "../../target/deploy/{program_name}.so").unwrap();
-
-        // Create admin account
-        let admin = Rc::new(Keypair::new());
-        ctx.create_account()
-            .pubkey(admin.pubkey())
-            .lamports(100_000_000_000)
-            .owner(system_program::ID)
-            .create()
-            .unwrap();
-
-        // TODO: Initialize your program state here
-
-        Self {{ ctx, program_id, admin }}
-    }}
-
-    /// ACTIONS - Define actions that the fuzzer can call
-    pub fn action_noop(&mut self) {{
-        // Placeholder - replace with real actions
-    }}
-
-    // TODO: Add your actions here
-}}
-
-#[invariant_test]
-fn invariant_test(fixture: &mut {fixture_name}) {{
-    // TODO: Add invariant checks that should hold after every action
-}}
-"#,
-    )
-}
-
-fn generate_idl_readme(program_name: &str) -> String {
-    format!(
-        r#"# IDL Files
-
-Place your program's IDL JSON file here as `{program_name}.json`.
-
-## Generating IDL
-
-If you have the legacy (v0.29) IDL format:
-```bash
-anchor idl convert target/idl/{program_name}.json -o fuzz/{program_name}/idls/{program_name}.json
-```
-
-If you have the new IDL format (v0.30+), copy it directly.
-"#
-    )
-}
-
-fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        })
-        .collect()
 }
 
 // ============================================================================
@@ -535,7 +411,7 @@ fn fuzz_run(
     program_name: &str,
     test_name: &str,
     binary_in: Option<PathBuf>,
-    fuzz_dir: &Option<PathBuf>,
+    harness_dir: &Option<PathBuf>,
     release: bool,
     coverage: bool,
     timeout: Option<u64>,
@@ -557,7 +433,10 @@ fn fuzz_run(
     mode: Option<String>,
     lcov_out: Option<PathBuf>,
 ) -> Result<()> {
-    // Translate --mode into equivalent existing flags
+    let remote = mode.is_some();
+
+    // Translate --mode into equivalent flags.
+    // All path defaults are relative to cwd (the remote driver's working directory).
     let mut coverage = coverage;
     let mut corpus_in = corpus_in;
     let mut corpus_out = corpus_out;
@@ -574,6 +453,9 @@ fn fuzz_run(
             "explore" => {
                 if corpus_out.is_none() {
                     corpus_out = Some("./corpus".into());
+                }
+                if corpus_in.is_none() {
+                    corpus_in = Some("./corpus".into());
                 }
                 if crashes_out.is_none() {
                     crashes_out = Some("./output".into());
@@ -592,8 +474,7 @@ fn fuzz_run(
                 }
             }
             "corpus_merge" => {
-                // Remote fuzzing corpus_merge: read from ./corpus, write minimized corpus to ./output
-                // Delegates to the cmin (greedy set-cover) codepath via FUZZ_CMIN env var
+                // Read from ./corpus, write minimized corpus to ./output via FUZZ_CMIN
                 if corpus_in.is_none() {
                     corpus_in = Some("./corpus".into());
                 }
@@ -608,7 +489,7 @@ fn fuzz_run(
     }
 
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd.clone()), program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd.clone()), program_name)?;
 
     let mut cmd = if let Some(binary_path) = binary_in {
         let binary_path = resolve_path(&cwd, &binary_path);
@@ -620,35 +501,21 @@ fn fuzz_run(
         cmd.current_dir(&fuzz_dir);
         cmd
     } else {
-        // Build if cargo is available, then run the binary directly
         try_cargo_build(&fuzz_dir, release, test_name)?;
-
         let profile = if release { "release" } else { "debug" };
-        let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
-
+        let binary_path = find_fuzz_binary(&fuzz_dir, profile)?;
         let mut cmd = Command::new(&binary_path);
         cmd.current_dir(&fuzz_dir);
         cmd
     };
-
-    if coverage {
-        cmd.env("FUZZ_COVERAGE", "1");
-        cmd.env(
-            "FUZZ_CORPUS_IN",
-            resolve_path(
-                &cwd,
-                &corpus_in.clone().expect("Need corpus in for coverage"),
-            )
-            .to_str()
-            .unwrap(),
-        );
-    }
 
     if let Some(timeout_secs) = timeout {
         cmd.env("FUZZ_TIMEOUT_SECS", timeout_secs.to_string());
         println!("[FUZZ] Running with {}s timeout", timeout_secs);
     }
 
+    // corpus_in: always pass if non-empty; in remote mode also pass if dir doesn't exist yet
+    // (the remote driver may populate it after the CLI check).
     if let Some(ref corpus_in_path) = corpus_in {
         let abs_path = resolve_path(&cwd, corpus_in_path);
         let has_inputs = abs_path.exists()
@@ -658,9 +525,7 @@ fn fuzz_run(
         if has_inputs {
             cmd.env("FUZZ_CORPUS_IN", &abs_path);
             println!("[FUZZ] Loading corpus from: {}", corpus_in_path.display());
-        } else if mode.is_some() {
-            // In remote --mode, always pass FUZZ_CORPUS_IN — the dir may be
-            // populated by the remote driver after the CLI checks it.
+        } else if remote {
             cmd.env("FUZZ_CORPUS_IN", &abs_path);
             println!(
                 "[FUZZ] Corpus directory passed to harness: {}",
@@ -681,18 +546,19 @@ fn fuzz_run(
 
     if let Some(ref corpus_out_path) = corpus_out {
         let abs_path = resolve_path(&cwd, corpus_out_path);
-        cmd.env("FUZZ_CORPUS_OUT", abs_path);
+        cmd.env("FUZZ_CORPUS_OUT", &abs_path);
         println!("[FUZZ] Writing corpus to: {}", corpus_out_path.display());
     }
 
-    if mode.as_deref() == Some("explore") {
-        assert!(corpus_out.is_some());
-    }
-
+    // crashes_out defaults:
+    //   remote mode → ./output  (already set above per-mode)
+    //   local       → ./crashes/<test_name>
     let crashes_abs_path = if let Some(ref crashes_path) = crashes_out {
         resolve_path(&cwd, crashes_path)
+    } else if remote {
+        fuzz_dir.join("crashes")
     } else {
-        fuzz_dir.join("output").join(test_name)
+        fuzz_dir.join("crashes").join(test_name)
     };
     cmd.env("FUZZ_CRASHES_DIR", &crashes_abs_path);
     println!("[FUZZ] Crashes directory: {}", crashes_abs_path.display());
@@ -703,13 +569,8 @@ fn fuzz_run(
             abs_path
         } else {
             // Search crashes directory for this crash name
-            let crashes_search_root = if let Some(ref cp) = crashes_out {
-                resolve_path(&cwd, cp)
-            } else {
-                fuzz_dir.join("output")
-            };
             match find_crash_file(
-                &crashes_search_root,
+                &crashes_abs_path,
                 program_name,
                 &replay_path.to_string_lossy(),
             ) {
@@ -761,81 +622,67 @@ fn fuzz_run(
         println!("[FUZZ] State pool size: {}", size);
     }
 
-    // --program-so: CLI flag takes priority, then fall back to env var (remote --mode)
     if let Some(ref program_so_path) = program_so {
         let abs_path = resolve_path(&cwd, program_so_path);
         cmd.env("FUZZ_PROGRAM_SO", &abs_path);
         println!("[FUZZ] Program binary override: {}", abs_path.display());
-    } else if mode.is_some() {
-        if let Ok(env_val) = env::var("FUZZ_PROGRAM_SO") {
-            let abs_path = resolve_path(&cwd, &PathBuf::from(&env_val));
-            cmd.env("FUZZ_PROGRAM_SO", &abs_path);
-            println!("[FUZZ] Program binary override (env): {}", abs_path.display());
-        }
     }
 
-    // --symbols: CLI flag takes priority, then fall back to env var (remote --mode)
     if let Some(ref symbols_path) = symbols {
         let abs_path = resolve_path(&cwd, symbols_path);
-        let canonical = abs_path.canonicalize().unwrap_or(abs_path);
+        let canonical = abs_path
+            .canonicalize()
+            .context("Debug symbols file not found")?;
         cmd.env("FUZZ_SYMBOLS", &canonical);
         println!("[FUZZ] Debug symbols: {}", canonical.display());
-    } else if mode.is_some() {
-        if let Ok(env_val) = env::var("FUZZ_SYMBOLS") {
-            let abs_path = resolve_path(&cwd, &PathBuf::from(&env_val));
-            let canonical = abs_path.canonicalize().unwrap_or(abs_path);
-            cmd.env("FUZZ_SYMBOLS", &canonical);
-            println!("[FUZZ] Debug symbols (env): {}", canonical.display());
-        }
     }
 
-    // Default: 8 for stateless (mutation cap), 100 for stateful (deeper exploration).
-    // Replay/corpus-in always executes full sequences (uncapped in invariant macro).
+    // Default: 8 for stateless, 100 for stateful.
     let max_actions = max_actions.unwrap_or(if stateful { 100 } else { 8 });
     cmd.env("FUZZ_MAX_ACTIONS", max_actions.to_string());
     println!("[FUZZ] Max actions per iteration: {}", max_actions);
 
     if mode.as_deref() == Some("corpus_merge") {
-        // corpus_merge uses the cmin (greedy set-cover) codepath to write minimized corpus
         cmd.env("FUZZ_CMIN", "1");
-        println!("[FUZZ] Corpus merge mode: minimizing corpus to ./corpus");
-    } else if coverage && corpus_in.is_some() && timeout.is_none() && !dry_run && replay.is_none() {
-        cmd.env("FUZZ_COVERAGE_ONLY", "1");
-        cmd.env(
-            "FUZZ_CORPUS_IN",
-            resolve_path(
-                &cwd,
-                &corpus_in.clone().expect("Need corpus in for coverage"),
-            )
-            .to_str()
-            .unwrap(),
-        );
-        println!("[FUZZ] Coverage-only mode: generating coverage from corpus");
+        println!("[FUZZ] Corpus merge mode: minimizing corpus");
+    } else if coverage {
+        let corpus_in_abs = corpus_in
+            .as_ref()
+            .map(|p| resolve_path(&cwd, p))
+            .ok_or_else(|| anyhow::anyhow!("--coverage requires --corpus-in"))?;
+        cmd.env("FUZZ_COVERAGE", "1");
+        cmd.env("FUZZ_CORPUS_IN", &corpus_in_abs);
+        // coverage-only (no fuzzing) when no timeout/dry-run/replay override
+        if timeout.is_none() && !dry_run && replay.is_none() {
+            cmd.env("FUZZ_COVERAGE_ONLY", "1");
+            println!("[FUZZ] Coverage-only mode: generating coverage from corpus");
+        }
     }
 
-    // Set LCOV coverage output path
-    if let Some(ref lcov_out_path) = lcov_out {
-        let abs_path = resolve_path(&cwd, lcov_out_path);
-        cmd.env("FUZZ_COVERAGE_OUT", &abs_path);
-        println!("[FUZZ] LCOV output: {}", abs_path.display());
-    } else if mode.as_deref() == Some("coverage") {
-        // Default coverage output for coverage mode
-        let output_dir = resolve_path(&cwd, &PathBuf::from("./output"));
-        let _ = fs::create_dir_all(&output_dir);
-        let lcov_path = output_dir.join("coverage.lcov");
+    // LCOV output path:
+    //   explicit --lcov-out  → that path
+    //   remote coverage mode → ./output/coverage.lcov
+    //   local coverage       → ./coverage/coverage.lcov
+    if coverage || lcov_out.is_some() {
+        let lcov_path = if let Some(ref p) = lcov_out {
+            resolve_path(&cwd, p)
+        } else if remote {
+            let dir = resolve_path(&cwd, &PathBuf::from("./output"));
+            let _ = fs::create_dir_all(&dir);
+            dir.join("coverage.lcov")
+        } else {
+            let dir = resolve_path(&cwd, &PathBuf::from("./coverage"));
+            let _ = fs::create_dir_all(&dir);
+            dir.join("coverage.lcov")
+        };
         cmd.env("FUZZ_COVERAGE_OUT", &lcov_path);
         println!("[FUZZ] LCOV output: {}", lcov_path.display());
     }
 
-    eprintln!("Debug env: {:?}", cmd.get_envs());
-    eprintln!("Debug pwd: {:?}", cmd.get_current_dir());
-
     let status = cmd.status().context("Failed to run fuzz binary")?;
     if !status.success() {
         // In reproduce mode, exit code 1 means crash reproduced (not a failure).
-        // The remote driver uses the "did not reproduce" string on stdout, not exit code.
         if mode.as_deref() == Some("reproduce") {
-            // Pass through the exit code without treating it as an error
             std::process::exit(status.code().unwrap_or(1));
         }
         match status.code() {
@@ -851,23 +698,30 @@ fn fuzz_run(
 // List Command
 // ============================================================================
 
-fn fuzz_list(program_name: Option<&str>) -> Result<()> {
+fn fuzz_list(program_name: Option<&str>, harness_dir: &Option<PathBuf>) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_root = cwd.join("fuzz");
 
     match program_name {
         Some(name) => {
-            let fuzz_dir = fuzz_root.join(name);
-            if !fuzz_dir.exists() {
-                bail!(
-                    "Fuzz directory for {} does not exist. Run `crucible init {}` first.",
-                    name,
-                    name
-                );
-            }
+            let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd.clone()), name)?;
             list_program_tests(&fuzz_dir, name)?;
         }
         None => {
+            // If a harness_dir is given, list just that one harness.
+            if let Some(dir) = harness_dir {
+                let dir = if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    cwd.join(dir)
+                };
+                let name = dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                return list_program_tests(&dir, name);
+            }
+
+            let fuzz_root = cwd.join("fuzz");
             if !fuzz_root.exists() {
                 println!("No fuzz/ directory found. Run `crucible init <program>` to create one.");
                 return Ok(());
@@ -952,6 +806,7 @@ fn list_program_tests(fuzz_dir: &Path, program_name: &str) -> Result<()> {
 
 fn fuzz_show(
     program_name: &str,
+    harness_dir: &Option<PathBuf>,
     crash_file: Option<&str>,
     replay: bool,
     regen: bool,
@@ -978,7 +833,7 @@ fn fuzz_show(
             bail!("Cannot auto-detect fuzz harness. Run from within fuzz harness directory or specify program name.");
         }
     } else {
-        let fuzz_dir = resolve_fuzz_dir(&cwd, program_name)?;
+        let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd.clone()), program_name)?;
         let display_name = fuzz_dir
             .file_name()
             .and_then(|n| n.to_str())
@@ -988,7 +843,7 @@ fn fuzz_show(
     };
 
     match crash_file {
-        None if replay && regen => regen_crashes(&fuzz_dir, &display_name, custom_crashes_dir),
+        None if replay && regen => regen_crashes(&fuzz_dir, custom_crashes_dir),
         None => list_crashes(&fuzz_dir, &display_name, custom_crashes_dir),
         Some(crash_name) if !replay => {
             show_crash_metadata(&fuzz_dir, &display_name, crash_name, custom_crashes_dir)
@@ -1002,9 +857,7 @@ fn list_crashes(
     program_name: &str,
     custom_crashes_dir: Option<&Path>,
 ) -> Result<()> {
-    let crashes_dir = custom_crashes_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| fuzz_dir.join("crashes"));
+    let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
     if !crashes_dir.exists() {
         println!("No crashes directory found at: {}", crashes_dir.display());
         println!("Run the fuzzer first to generate crashes.");
@@ -1219,9 +1072,7 @@ fn show_crash_metadata(
     crash_name: &str,
     custom_crashes_dir: Option<&Path>,
 ) -> Result<()> {
-    let crashes_dir = custom_crashes_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| fuzz_dir.join("crashes"));
+    let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
 
     // Search for .meta.json and/or raw crash file
     let mut meta_path = None;
@@ -1371,20 +1222,18 @@ fn replay_crash(
     crash_name: &str,
     custom_crashes_dir: Option<&Path>,
 ) -> Result<()> {
-    let crashes_dir = custom_crashes_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| fuzz_dir.join("crashes"));
+    let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
 
     // Check if crash_name is a directory — replay all crashes in it
     let replay_dir = resolve_replay_directory(crash_name, &crashes_dir);
     if let Some(dir) = replay_dir {
-        return replay_crash_directory(fuzz_dir, program_name, &dir);
+        return replay_crash_directory(fuzz_dir, &dir);
     }
 
     // Single crash replay
     let (crash_path, test_name) = find_crash_file(&crashes_dir, program_name, crash_name)?;
 
-    let binary_path = build_and_find_replay_binary(fuzz_dir, program_name, test_name.as_deref())?;
+    let binary_path = build_and_find_replay_binary(fuzz_dir, test_name.as_deref())?;
 
     println!("Replaying crash: {}", crash_path.display());
     println!("Using binary: {}\n", binary_path.display());
@@ -1415,7 +1264,7 @@ fn resolve_replay_directory(crash_name: &str, crashes_dir: &Path) -> Option<Path
 }
 
 /// Replay all crash files in a directory.
-fn replay_crash_directory(fuzz_dir: &Path, program_name: &str, dir: &Path) -> Result<()> {
+fn replay_crash_directory(fuzz_dir: &Path, dir: &Path) -> Result<()> {
     // Collect crash files (skip metadata/hidden)
     let mut crash_files: Vec<(String, PathBuf)> = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -1444,7 +1293,7 @@ fn replay_crash_directory(fuzz_dir: &Path, program_name: &str, dir: &Path) -> Re
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
-    let binary_path = build_and_find_replay_binary(fuzz_dir, program_name, test_name.as_deref())?;
+    let binary_path = build_and_find_replay_binary(fuzz_dir, test_name.as_deref())?;
 
     println!(
         "[REPLAY] Replaying {} crash(es) from: {}\n",
@@ -1614,11 +1463,7 @@ fn find_crash_file(
 }
 
 /// Build the replay binary and return its path.
-fn build_and_find_replay_binary(
-    fuzz_dir: &Path,
-    program_name: &str,
-    test_feature: Option<&str>,
-) -> Result<PathBuf> {
+fn build_and_find_replay_binary(fuzz_dir: &Path, test_feature: Option<&str>) -> Result<PathBuf> {
     if has_cargo() {
         if let Some(feature) = test_feature {
             if !feature.is_empty() {
@@ -1649,14 +1494,13 @@ fn build_and_find_replay_binary(
         println!("[REPLAY] cargo not found, looking for pre-built binary...");
     }
 
-    find_fuzz_binary(fuzz_dir, program_name, "release")
-        .or_else(|_| find_fuzz_binary(fuzz_dir, program_name, "debug"))
+    find_fuzz_binary(fuzz_dir, "release").or_else(|_| find_fuzz_binary(fuzz_dir, "debug"))
 }
 
 /// Run the replay binary for a single crash file.
 fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<ExitStatus> {
     // Canonicalize crash path so it works regardless of the binary's working directory
-    let abs_crash = crash_path.canonicalize().unwrap_or_else(|_| crash_path.to_path_buf());
+    let abs_crash = crash_path.canonicalize().context("Crash file not found")?;
     Command::new(binary_path)
         .current_dir(fuzz_dir)
         .env("FUZZ_INPUT_FILE", &abs_crash)
@@ -1685,13 +1529,13 @@ fn print_replay_result(status: &ExitStatus) {
 fn fuzz_tmin(
     program_name: &str,
     test_name: &str,
-    fuzz_dir: &Option<PathBuf>,
+    harness_dir: &Option<PathBuf>,
     crash_file: Option<&str>,
     all: bool,
     release: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd), program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd), program_name)?;
 
     // Auto-detect: if test_name looks like a crash ID and no crash_file was given,
     // search all test directories for it. Allows: crucible tmin stake crash_abc123
@@ -1745,11 +1589,10 @@ fn fuzz_tmin(
             let entry = entry?;
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".meta.json") {
-                    let crash_id = name.strip_suffix(".meta.json").unwrap().to_string();
-                    let binary_path = crashes_dir.join(&crash_id);
+                if let Some(crash_id) = name.strip_suffix(".meta.json") {
+                    let binary_path = crashes_dir.join(crash_id);
                     if binary_path.exists() && binary_path.is_file() {
-                        files.push((crash_id, binary_path));
+                        files.push((crash_id.to_string(), binary_path));
                     }
                 }
             }
@@ -1787,7 +1630,7 @@ fn fuzz_tmin(
     // Build the binary (skipped if cargo not available)
     let profile = if release { "release" } else { "debug" };
     try_cargo_build(&fuzz_dir, release, test_name)?;
-    let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
+    let binary_path = find_fuzz_binary(&fuzz_dir, profile)?;
 
     // Minimize crash(es)
     if all {
@@ -1836,14 +1679,8 @@ fn fuzz_tmin(
     Ok(())
 }
 
-fn regen_crashes(
-    fuzz_dir: &Path,
-    program_name: &str,
-    custom_crashes_dir: Option<&Path>,
-) -> Result<()> {
-    let crashes_dir = custom_crashes_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| fuzz_dir.join("crashes"));
+fn regen_crashes(fuzz_dir: &Path, custom_crashes_dir: Option<&Path>) -> Result<()> {
+    let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
     if !crashes_dir.exists() {
         bail!(
             "No crashes directory found at: {}\nRun the fuzzer first to generate crashes.",
@@ -1852,8 +1689,8 @@ fn regen_crashes(
     }
 
     // Find the binary (try release then debug)
-    let binary_path = find_fuzz_binary(fuzz_dir, program_name, "release")
-        .or_else(|_| find_fuzz_binary(fuzz_dir, program_name, "debug"))?;
+    let binary_path =
+        find_fuzz_binary(fuzz_dir, "release").or_else(|_| find_fuzz_binary(fuzz_dir, "debug"))?;
 
     // Iterate all test subdirectories in crashes/
     let mut total_ok = 0usize;
@@ -1948,13 +1785,13 @@ fn regen_crashes(
 fn fuzz_cmin(
     program_name: &str,
     test_name: &str,
-    fuzz_dir: &Option<PathBuf>,
+    harness_dir: &Option<PathBuf>,
     corpus_in: &Path,
     corpus_out: Option<&Path>,
     release: bool,
 ) -> Result<()> {
     let cwd = current_dir()?;
-    let fuzz_dir = resolve_fuzz_dir(&fuzz_dir.clone().unwrap_or(cwd.clone()), program_name)?;
+    let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd.clone()), program_name)?;
 
     let corpus_in_abs = resolve_path(&cwd, corpus_in);
     if !corpus_in_abs.exists() {
@@ -1988,7 +1825,10 @@ fn fuzz_cmin(
 
     let corpus_out_abs = corpus_out
         .map(|p| resolve_path(&cwd, p))
-        .unwrap_or_else(|| corpus_in_abs.clone());
+        .unwrap_or_else(|| {
+            println!("[CMIN] Merging corpus in place!");
+            corpus_in_abs.clone()
+        });
 
     if corpus_out_abs != corpus_in_abs {
         fs::create_dir_all(&corpus_out_abs)?;
@@ -1997,7 +1837,7 @@ fn fuzz_cmin(
 
     let profile = if release { "release" } else { "debug" };
     try_cargo_build(&fuzz_dir, release, test_name)?;
-    let binary_path = find_fuzz_binary(&fuzz_dir, program_name, profile)?;
+    let binary_path = find_fuzz_binary(&fuzz_dir, profile)?;
 
     println!("[CMIN] Running corpus minimization...");
 
@@ -2025,29 +1865,46 @@ fn fuzz_cmin(
 // Utilities
 // ============================================================================
 
-/// Resolve the fuzz directory for a program name.
-/// Supports running from project root (fuzz/<program>/) or from within a fuzz directory.
+/// Resolve the fuzz harness directory for a program name.
+///
+/// `root` is either:
+/// - the project root (normal case, no --harness-dir): looks under root/fuzz/<program>/
+/// - a custom harness root (--harness-dir): treats root itself as the harness dir if it
+///   contains a Cargo.toml, otherwise looks for root/<program>/ inside it.
+///
 /// Also tries hyphen/underscore conversion and auto-detects if only one harness exists.
-fn resolve_fuzz_dir(cwd: &Path, program_name: &str) -> Result<PathBuf> {
-    // Direct match
-    let fuzz_dir = cwd.join("fuzz").join(program_name);
+fn resolve_fuzz_dir(root: &Path, program_name: &str) -> Result<PathBuf> {
+    // If root itself is a harness dir, use it directly.
+    if root.join("Cargo.toml").exists() && root.join("src").exists() {
+        return Ok(root.to_path_buf());
+    }
+
+    // Try root/fuzz/<program>/ (normal project-root case)
+    let fuzz_dir = root.join("fuzz").join(program_name);
     if fuzz_dir.exists() {
         return Ok(fuzz_dir);
     }
 
-    // Try hyphen <-> underscore conversion
+    // Try root/<program>/ (--harness-dir points to fuzz/ itself)
+    let direct = root.join(program_name);
+    if direct.exists() && direct.join("Cargo.toml").exists() {
+        return Ok(direct);
+    }
+
+    // Try hyphen <-> underscore conversion in both locations
     let alt_name = if program_name.contains('-') {
         program_name.replace('-', "_")
     } else {
         program_name.replace('_', "-")
     };
-    let alt_dir = cwd.join("fuzz").join(&alt_name);
-    if alt_dir.exists() {
-        return Ok(alt_dir);
+    for candidate in [root.join("fuzz").join(&alt_name), root.join(&alt_name)] {
+        if candidate.exists() && candidate.join("Cargo.toml").exists() {
+            return Ok(candidate);
+        }
     }
 
-    // If fuzz/ exists and has exactly one harness, use it
-    let fuzz_root = cwd.join("fuzz");
+    // Auto-detect: if fuzz/ has exactly one harness, use it
+    let fuzz_root = root.join("fuzz");
     if fuzz_root.exists() {
         if let Ok(entries) = fs::read_dir(&fuzz_root) {
             let harnesses: Vec<_> = entries
@@ -2060,30 +1917,11 @@ fn resolve_fuzz_dir(cwd: &Path, program_name: &str) -> Result<PathBuf> {
         }
     }
 
-    // Maybe we're already in the fuzz dir
-    if cwd.join("Cargo.toml").exists() && cwd.join("src").exists() {
-        return Ok(cwd.to_path_buf());
-    }
-
     bail!(
         "Fuzz directory for {} does not exist. Run `crucible init {}` first.",
         program_name,
         program_name
     );
-}
-
-/// Check if a file is executable (unix).
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(_path: &Path) -> bool {
-    true
 }
 
 /// Check if cargo is available in PATH.
@@ -2125,6 +1963,13 @@ fn try_cargo_build(fuzz_dir: &Path, release: bool, feature: &str) -> Result<bool
     Ok(true)
 }
 
+/// Resolve the crashes directory: use the custom path if provided, else default to `<fuzz_dir>/crashes`.
+fn resolve_crashes_dir(fuzz_dir: &Path, custom: Option<&Path>) -> PathBuf {
+    custom
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| fuzz_dir.join("crashes"))
+}
+
 /// Convert a potentially relative path to absolute, relative to cwd.
 fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -2134,556 +1979,45 @@ fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
     }
 }
 
-/// Find the fuzz binary by querying cargo metadata.
-/// Given parsed cargo metadata, resolve the fuzz binary path.
-/// `exists_fn` checks whether a candidate path exists on disk.
-fn resolve_binary_from_metadata(
-    metadata: &serde_json::Value,
-    fuzz_dir: &Path,
-    program_name: &str,
-    profile: &str,
-    exists_fn: impl Fn(&Path) -> bool,
-) -> Result<PathBuf> {
-    let target_dir = metadata["target_directory"].as_str().unwrap_or("");
-    if !target_dir.is_empty() {
-        if let Some(packages) = metadata["packages"].as_array() {
-            // Helper: try to find a bin target in a package
-            let try_package = |package: &serde_json::Value| -> Option<PathBuf> {
-                let pkg_name = package["name"].as_str().unwrap_or("");
-                // Check explicit [[bin]] targets first
-                if let Some(targets) = package["targets"].as_array() {
-                    for target in targets {
-                        let kinds = target["kind"].as_array();
-                        let is_bin =
-                            kinds.map_or(false, |k| k.iter().any(|v| v.as_str() == Some("bin")));
-                        if is_bin {
-                            if let Some(bin_name) = target["name"].as_str() {
-                                let binary = PathBuf::from(target_dir).join(profile).join(bin_name);
-                                if exists_fn(&binary) {
-                                    return Some(binary);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Fall back to package name as binary name
-                let binary = PathBuf::from(target_dir).join(profile).join(pkg_name);
-                if exists_fn(&binary) {
-                    return Some(binary);
-                }
-                None
-            };
-
-            // First pass: match by name
-            for package in packages {
-                let pkg_name = package["name"].as_str().unwrap_or("");
-                if pkg_name.contains(program_name)
-                    || pkg_name.contains(&program_name.replace('-', "_"))
-                {
-                    if let Some(path) = try_package(package) {
-                        return Ok(path);
-                    }
-                }
-            }
-
-            // Second pass: if there's exactly one package (standalone workspace),
-            // use it regardless of name — the fuzz_dir already scoped us correctly
-            if packages.len() == 1 {
-                if let Some(path) = try_package(&packages[0]) {
-                    return Ok(path);
-                }
-            }
-        }
-
-        let standard_name = format!("{}_fuzz", program_name);
-        let standard_path = PathBuf::from(target_dir).join(profile).join(&standard_name);
-        if exists_fn(&standard_path) {
-            return Ok(standard_path);
-        }
+/// Find the fuzz harness binary. The generated Cargo.toml always names the binary
+/// `invariant_test` via `[[bin]]`, so the path is predictable.
+/// Use different binary name if supplied.
+fn find_fuzz_binary(fuzz_dir: &Path, profile: &str) -> Result<PathBuf> {
+    let path = fuzz_dir.join("target").join(profile).join("invariant_test");
+    if path.exists() {
+        return Ok(path);
     }
-
-    let package_name = format!("{}_fuzz", program_name);
-    let fallback = fuzz_dir.join("target").join(profile).join(&package_name);
-    if exists_fn(&fallback) {
-        return Ok(fallback);
-    }
-
     bail!(
-        "Fuzz binary not found. Searched for package matching '{}' in target directory.\n\
-         Build it first with: crucible run {} <test_name> --release",
-        program_name,
-        program_name
-    )
-}
-
-fn find_fuzz_binary(fuzz_dir: &Path, program_name: &str, profile: &str) -> Result<PathBuf> {
-    // Try cargo metadata first (if cargo is available)
-    if has_cargo() {
-        if let Ok(output) = Command::new("cargo")
-            .current_dir(fuzz_dir)
-            .args(["metadata", "--format-version=1", "--no-deps"])
-            .output()
-        {
-            if output.status.success() {
-                if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    return resolve_binary_from_metadata(
-                        &metadata,
-                        fuzz_dir,
-                        program_name,
-                        profile,
-                        |p| p.exists(),
-                    );
-                }
-            }
-        }
-    }
-
-    // Fallback: scan target directory for binaries without cargo metadata
-    let target_dir = fuzz_dir.join("target").join(profile);
-    if target_dir.exists() {
-        // Try common naming patterns
-        let candidates = [
-            format!("{}_fuzz", program_name),
-            format!("{}-fuzz", program_name),
-            program_name.replace('-', "_"),
-            program_name.to_string(),
-        ];
-        for name in &candidates {
-            let path = target_dir.join(name);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-
-        // If there's exactly one executable in target/<profile>/, use it
-        if let Ok(entries) = fs::read_dir(&target_dir) {
-            let executables: Vec<_> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let path = e.path();
-                    path.is_file()
-                        && !path
-                            .extension()
-                            .map_or(false, |ext| ext == "d" || ext == "json" || ext == "rmeta")
-                        && !e.file_name().to_string_lossy().starts_with('.')
-                        && is_executable(&path)
-                })
-                .collect();
-            if executables.len() == 1 {
-                return Ok(executables[0].path());
-            }
-        }
-    }
-
-    bail!(
-        "Fuzz binary not found. Searched for package matching '{}' in target directory.\n\
-         Build it first with: crucible run {} <test_name> --release",
-        program_name,
-        program_name
+        "Fuzz binary not found at: {}\nBuild it first with: crucible run <program> <test_name> --release",
+        path.display()
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use std::collections::HashSet;
-
-    /// Build fake cargo metadata JSON for testing.
-    fn make_metadata(target_dir: &str, packages: serde_json::Value) -> serde_json::Value {
-        json!({
-            "target_directory": target_dir,
-            "packages": packages
-        })
-    }
-
-    fn make_package(name: &str, bin_targets: &[&str]) -> serde_json::Value {
-        let targets: Vec<_> = bin_targets
-            .iter()
-            .map(|bin_name| {
-                json!({
-                    "name": bin_name,
-                    "kind": ["bin"]
-                })
-            })
-            .collect();
-        json!({
-            "name": name,
-            "targets": targets
-        })
-    }
-
-    /// Returns an exists_fn that says "yes" for any path in `existing`.
-    fn exists_set(existing: &[&str]) -> impl Fn(&Path) -> bool {
-        let set: HashSet<PathBuf> = existing.iter().map(PathBuf::from).collect();
-        move |p: &Path| set.contains(p)
-    }
-
-    // === Regression: package name doesn't contain program name (solana_program_fuzz vs "stake") ===
 
     #[test]
-    fn test_single_package_unrelated_name_found_via_fallback() {
-        // This is the exact scenario: package is "solana_program_fuzz", program is "stake"
-        let metadata = make_metadata(
-            "/project/fuzz/stake/target",
-            json!([make_package(
-                "solana_program_fuzz",
-                &["solana_program_fuzz"]
-            )]),
-        );
-        let existing = exists_set(&["/project/fuzz/stake/target/release/solana_program_fuzz"]);
+    fn test_find_fuzz_binary_finds_invariant_test() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("invariant_test"), b"").unwrap();
 
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project/fuzz/stake"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/fuzz/stake/target/release/solana_program_fuzz")
-        );
+        let result = find_fuzz_binary(temp.path(), "release");
+        assert!(result.is_ok(), "should find invariant_test: {:?}", result);
+        assert!(result.unwrap().ends_with("invariant_test"));
     }
 
     #[test]
-    fn test_single_package_with_explicit_bin_target_different_name() {
-        // Package "my_fuzz_harness" with [[bin]] name = "custom_bin", searching for "stake"
-        let metadata = make_metadata(
-            "/project/target",
-            json!([make_package("my_fuzz_harness", &["custom_bin"])]),
-        );
-        let existing = exists_set(&["/project/target/release/custom_bin"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/custom_bin")
-        );
-    }
-
-    // === Name matching still works when package name contains program name ===
-
-    #[test]
-    fn test_name_match_package_contains_program() {
-        // Package "stake_fuzz" contains "stake" — should match on first pass
-        let metadata = make_metadata(
-            "/project/target",
-            json!([make_package("stake_fuzz", &["stake_fuzz"])]),
-        );
-        let existing = exists_set(&["/project/target/release/stake_fuzz"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/stake_fuzz")
-        );
-    }
-
-    #[test]
-    fn test_name_match_with_hyphens_normalized() {
-        // Program "my-program", package "my_program_fuzz"
-        let metadata = make_metadata(
-            "/project/target",
-            json!([make_package("my_program_fuzz", &["my_program_fuzz"])]),
-        );
-        let existing = exists_set(&["/project/target/release/my_program_fuzz"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "my-program",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/my_program_fuzz")
-        );
-    }
-
-    // === Multiple packages: should NOT fallback to unrelated package ===
-
-    #[test]
-    fn test_multiple_packages_no_match_fails() {
-        // Two packages, neither contains "stake" — should fail (no single-package fallback)
-        let metadata = make_metadata(
-            "/project/target",
-            json!([make_package("foo", &["foo"]), make_package("bar", &["bar"])]),
-        );
-        let existing = exists_set(&["/project/target/release/foo", "/project/target/release/bar"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
+    fn test_find_fuzz_binary_fails_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = find_fuzz_binary(temp.path(), "release");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_multiple_packages_picks_matching_one() {
-        // Two packages, one matches "stake"
-        let metadata = make_metadata(
-            "/project/target",
-            json!([
-                make_package("unrelated", &["unrelated"]),
-                make_package("stake_harness", &["stake_harness"])
-            ]),
-        );
-        let existing = exists_set(&[
-            "/project/target/release/unrelated",
-            "/project/target/release/stake_harness",
-        ]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/stake_harness")
-        );
-    }
-
-    // === Explicit [[bin]] target preferred over package name ===
-
-    #[test]
-    fn test_explicit_bin_target_preferred() {
-        // Package "stake_fuzz" has [[bin]] name = "my_binary"
-        let metadata = make_metadata(
-            "/project/target",
-            json!([{
-                "name": "stake_fuzz",
-                "targets": [
-                    { "name": "my_binary", "kind": ["bin"] },
-                    { "name": "stake_fuzz", "kind": ["lib"] }
-                ]
-            }]),
-        );
-        let existing = exists_set(&["/project/target/release/my_binary"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/my_binary")
-        );
-    }
-
-    // === standard_name fallback ({program}_fuzz) ===
-
-    #[test]
-    fn test_standard_name_fallback() {
-        // No packages match, but target_dir/release/stake_fuzz exists
-        let metadata = make_metadata("/project/target", json!([]));
-        let existing = exists_set(&["/project/target/release/stake_fuzz"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/release/stake_fuzz")
-        );
-    }
-
-    // === fuzz_dir fallback ===
-
-    #[test]
-    fn test_fuzz_dir_fallback() {
-        // Empty target_dir in metadata, but fuzz_dir/target/release/stake_fuzz exists
-        let metadata = make_metadata("", json!([]));
-        let existing = exists_set(&["/project/fuzz/stake/target/release/stake_fuzz"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project/fuzz/stake"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/fuzz/stake/target/release/stake_fuzz")
-        );
-    }
-
-    // === Nothing found ===
-
-    #[test]
-    fn test_nothing_found_returns_error() {
-        let metadata = make_metadata("/project/target", json!([]));
-        let existing = exists_set(&[]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "release",
-            existing,
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Fuzz binary not found"));
-    }
-
-    // === Debug profile ===
-
-    #[test]
-    fn test_debug_profile() {
-        let metadata = make_metadata(
-            "/project/target",
-            json!([make_package("stake", &["stake"])]),
-        );
-        let existing = exists_set(&["/project/target/debug/stake"]);
-
-        let result = resolve_binary_from_metadata(
-            &metadata,
-            Path::new("/project"),
-            "stake",
-            "debug",
-            existing,
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/project/target/debug/stake")
-        );
-    }
-
-    // === No-cargo binary fallback tests ===
-    // These test the fallback path in find_fuzz_binary that scans the target
-    // directory directly without cargo metadata (for environments without cargo).
-
-    #[cfg(unix)]
-    fn make_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(path, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_finds_program_name_fuzz_binary() {
-        // Simulates: no cargo, binary at target/release/stake_fuzz
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        make_executable(&target_dir.join("stake_fuzz"));
-
-        // resolve_binary_from_metadata would fail without cargo metadata,
-        // so test the fallback scan directly by calling find_fuzz_binary
-        // with a fuzz_dir that has no Cargo.toml (cargo metadata will fail)
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(
-            result.is_ok(),
-            "should find stake_fuzz binary: {:?}",
-            result
-        );
-        assert!(result.unwrap().ends_with("stake_fuzz"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_finds_hyphenated_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        make_executable(&target_dir.join("stake-fuzz"));
-
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(
-            result.is_ok(),
-            "should find stake-fuzz binary: {:?}",
-            result
-        );
-        assert!(result.unwrap().ends_with("stake-fuzz"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_finds_exact_name_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        make_executable(&target_dir.join("stake"));
-
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_ok(), "should find stake binary: {:?}", result);
-        assert!(result.unwrap().ends_with("stake"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_finds_sole_executable() {
-        // When there's only one executable in target/release/, use it
-        // regardless of name (matches the single-package cargo metadata logic)
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        make_executable(&target_dir.join("solana_program_fuzz"));
-        // Also create non-executable files that should be ignored
-        fs::write(target_dir.join("solana_program_fuzz.d"), "dep info").unwrap();
-        fs::write(target_dir.join(".fingerprint"), "").unwrap();
-
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_ok(), "should find sole executable: {:?}", result);
-        assert!(result.unwrap().ends_with("solana_program_fuzz"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_fails_when_no_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        // Empty target dir, no binaries
-
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_err(), "should fail when no binary found");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_fallback_fails_when_no_target_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        // No target/ directory at all
-
-        let result = find_fuzz_binary(temp.path(), "stake", "release");
-        assert!(result.is_err(), "should fail when target dir missing");
     }
 
     #[test]
     fn test_try_cargo_build_returns_true_when_cargo_available() {
-        // has_cargo() should return true in test environment
         assert!(has_cargo(), "cargo should be available in test env");
     }
 
@@ -2714,17 +2048,17 @@ mod tests {
         // run_replay passes crash_path as FUZZ_INPUT_FILE env var.
         // If crash_path is relative to cwd but binary runs from fuzz_dir,
         // it must be canonicalized to an absolute path.
-        // We can't easily test the full Command execution, but we can verify
-        // the canonicalize logic doesn't panic on non-existent paths.
+        // Non-existent path returns Err (caller gets "Crash file not found").
         let crash = Path::new("crashes/invariant_test/crash_abc123");
-        let abs = crash.canonicalize().unwrap_or_else(|_| crash.to_path_buf());
-        // Non-existent path falls back to the original (no panic)
-        assert_eq!(abs, crash.to_path_buf());
+        assert!(
+            crash.canonicalize().is_err(),
+            "non-existent crash path should fail canonicalize"
+        );
 
-        // Existing path gets canonicalized
+        // Existing path canonicalizes to an absolute path.
         let tmp = std::env::temp_dir().join("crucible_test_crash_replay");
         std::fs::write(&tmp, b"test").unwrap();
-        let abs = tmp.canonicalize().unwrap_or_else(|_| tmp.clone());
+        let abs = tmp.canonicalize().unwrap();
         assert!(abs.is_absolute());
         std::fs::remove_file(&tmp).unwrap();
     }
