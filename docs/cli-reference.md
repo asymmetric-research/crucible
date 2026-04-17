@@ -3,10 +3,10 @@
 ## `crucible init`
 
 ```bash
-crucible init <program_name>
+crucible init <program_name> [-C <HARNESS_DIR>]
 ```
 
-Creates a standalone fuzz workspace in `fuzz/<program_name>/`.
+Creates a standalone fuzz workspace in `fuzz/<program_name>/` by default, or directly in `-C/--harness-dir`.
 
 ## `crucible run`
 
@@ -18,7 +18,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 |------|-------------|
 | `--binary-in <PATH>` | Run a prebuilt harness binary directly |
 | `--release` | Build in release mode (recommended) |
-| `--coverage` | Enable LCOV coverage output |
+| `--coverage` | Enable coverage reporting |
 | `--timeout <SECS>` | Stop after N seconds |
 | `--cores N` / `-j N` | Run N parallel fuzzer workers |
 | `--corpus-in <DIR>` | Load seed corpus from directory |
@@ -30,9 +30,11 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--symbols <PATH>` | Path to debug binary with DWARF symbols (for source-level coverage) |
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
-| `--max-actions <N>` | Max actions per iteration (default: 10) |
+| `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
 | `--stateful` | ItyFuzz-style stateful fuzzing: single action per iteration with state pool |
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
+| `--pool-size <N>` | State pool capacity in stateful mode (default: 256000) |
+| `--program-so <PATH>` | Override the program `.so` loaded by the harness |
 | `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
 | `--lcov-out <PATH>` | Custom LCOV coverage output file path |
 
@@ -43,7 +45,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 crucible run myproject invariant_test --release --timeout 60
 
 # Run a prebuilt harness directly
-crucible run myproject invariant_test --binary-in ./fuzz/myproject/target/release/myproject_fuzz
+crucible run myproject invariant_test --binary-in ./fuzz/myproject/target/release/invariant_test
 
 # Multi-core fuzzing (4 workers)
 crucible run myproject invariant_test --release -j 4
@@ -53,6 +55,9 @@ crucible run myproject invariant_test --release --coverage --timeout 120
 
 # Coverage with custom output path
 crucible run myproject invariant_test --release --coverage --lcov-out ./output/coverage.lcov
+
+# Custom harness directory
+crucible run myproject invariant_test -C ./custom-harness --release
 
 # Dry-run validation
 crucible run myproject invariant_test --dry-run
@@ -81,6 +86,7 @@ crucible run myproject invariant_test --release --stateful --max-depth 20 -j 4
 
 ```bash
 crucible list <program_name>   # List tests for a program
+crucible list -C ./fuzz/myproject  # List tests from a harness dir
 crucible list                  # List all fuzz harnesses
 ```
 
@@ -96,6 +102,8 @@ crucible show . <crash_file>                               # Auto-detect from cu
 ```
 
 Use `"."` as the program name to auto-detect the fuzz harness when running from within the fuzz directory.
+
+`-C/--harness-dir` is a global option for locating a custom harness directory on `init`, `run`, `list`, `show`, `tmin`, and `cmin`.
 
 | Flag | Description |
 |------|-------------|

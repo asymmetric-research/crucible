@@ -38,6 +38,10 @@ ctrlc = "3.4"
 spl-token = "9.0"
 spl-associated-token-account = "7.0"
 
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
 [features]
 fuzz_single = []
 invariant_test = []

@@ -28,6 +28,8 @@ cargo install crucible-fuzz-cli
 crucible init <program_name>
 ```
 
+Defaults to `fuzz/<program_name>/`; pass `-C <dir>` to create or use a harness somewhere else.
+
 ### Run a fuzz test
 
 ```bash
