@@ -2006,94 +2006,15 @@ fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
 
 /// Find the fuzz harness binary. The generated Cargo.toml always names the binary
 /// `invariant_test` via `[[bin]]`, so the path is predictable.
-/// Use different binary name if supplied.
 fn find_fuzz_binary(fuzz_dir: &Path, profile: &str) -> Result<PathBuf> {
-    let target_dir = fuzz_dir.join("target").join(profile);
-
-    // Read binary name from Cargo.toml: [[bin]] name first, then [package] name
-    let cargo_toml = fuzz_dir.join("Cargo.toml");
-    if let Ok(content) = fs::read_to_string(&cargo_toml) {
-        // Check [[bin]] name = "..."
-        if let Some(bin_name) = parse_bin_name(&content) {
-            let path = target_dir.join(&bin_name);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-        // Check [package] name = "..." (cargo converts hyphens to underscores)
-        if let Some(pkg_name) = parse_package_name(&content) {
-            let bin_name = pkg_name.replace('-', "_");
-            let path = target_dir.join(&bin_name);
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-    }
-
-    // Fallback: try "invariant_test" (generated harness default)
-    let path = target_dir.join("invariant_test");
+    let path = fuzz_dir.join("target").join(profile).join("invariant_test");
     if path.exists() {
         return Ok(path);
     }
-
     bail!(
-        "Fuzz binary not found in {}\nBuild it first with: crucible run <program> <test_name> --release",
-        target_dir.display()
+        "Fuzz binary not found at: {}\nBuild it first with: crucible run <program> <test_name> --release",
+        path.display()
     )
-}
-
-/// Parse the first `name = "..."` after a `[[bin]]` header in Cargo.toml content.
-fn parse_bin_name(content: &str) -> Option<String> {
-    let mut in_bin_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[[bin]]" {
-            in_bin_section = true;
-            continue;
-        }
-        if in_bin_section {
-            if trimmed.starts_with('[') {
-                break;
-            }
-            if let Some(rest) = trimmed.strip_prefix("name") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    let val = rest.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        return Some(val.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Parse `name = "..."` from the `[package]` section of Cargo.toml content.
-fn parse_package_name(content: &str) -> Option<String> {
-    let mut in_package = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[package]" {
-            in_package = true;
-            continue;
-        }
-        if in_package {
-            if trimmed.starts_with('[') {
-                break;
-            }
-            if let Some(rest) = trimmed.strip_prefix("name") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    let val = rest.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        return Some(val.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -2113,56 +2034,10 @@ mod tests {
     }
 
     #[test]
-    fn test_find_fuzz_binary_from_bin_section() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        fs::write(target_dir.join("my-custom-fuzz"), b"").unwrap();
-        fs::write(
-            temp.path().join("Cargo.toml"),
-            b"[package]\nname = \"whatever\"\n\n[[bin]]\nname = \"my-custom-fuzz\"\npath = \"src/main.rs\"\n",
-        ).unwrap();
-
-        let result = find_fuzz_binary(temp.path(), "release");
-        assert!(result.is_ok(), "should find binary from [[bin]] name: {:?}", result);
-        assert!(result.unwrap().ends_with("my-custom-fuzz"));
-    }
-
-    #[test]
-    fn test_find_fuzz_binary_from_package_name() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_dir = temp.path().join("target/release");
-        fs::create_dir_all(&target_dir).unwrap();
-        fs::write(target_dir.join("phoenix_fuzzing_fuzz"), b"").unwrap();
-        fs::write(
-            temp.path().join("Cargo.toml"),
-            b"[package]\nname = \"phoenix-fuzzing-fuzz\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
-
-        let result = find_fuzz_binary(temp.path(), "release");
-        assert!(result.is_ok(), "should find binary from [package] name with hyphen->underscore: {:?}", result);
-        assert!(result.unwrap().ends_with("phoenix_fuzzing_fuzz"));
-    }
-
-    #[test]
     fn test_find_fuzz_binary_fails_when_missing() {
         let temp = tempfile::tempdir().unwrap();
         let result = find_fuzz_binary(temp.path(), "release");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_bin_name() {
-        assert_eq!(parse_bin_name("[[bin]]\nname = \"my-fuzz\"\npath = \"src/main.rs\""), Some("my-fuzz".into()));
-        assert_eq!(parse_bin_name("[package]\nname = \"pkg\""), None);
-        assert_eq!(parse_bin_name(""), None);
-    }
-
-    #[test]
-    fn test_parse_package_name() {
-        assert_eq!(parse_package_name("[package]\nname = \"my-pkg\"\nversion = \"0.1.0\""), Some("my-pkg".into()));
-        assert_eq!(parse_package_name("[[bin]]\nname = \"bin\""), None);
-        assert_eq!(parse_package_name(""), None);
     }
 
     #[test]
