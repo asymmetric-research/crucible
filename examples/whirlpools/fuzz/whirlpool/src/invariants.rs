@@ -3942,4 +3942,111 @@ fn invariant_test(fixture: &mut WhirlpoolFixture) {
     // The per-swap fee checks in do_swap (protocol fee bounded by input, fee_growth
     // direction, non-zero fee for non-dust swaps) already provide this coverage correctly.
 
+    // ========================================================================
+    // NEW: Uninitialized reward slot zero-consistency (all pools)
+    // ========================================================================
+    // Source (state/whirlpool.rs:370): a slot is uninitialized iff mint == default.
+    // If mint is default but ANY of (vault, emissions_per_second_x64, growth_global_x64)
+    // is non-zero, state got written to a slot that was supposed to be empty — partial
+    // corruption that could corrupt later set_reward / collect_reward calls when the
+    // slot is eventually initialized.
+    {
+        let check_uninit_zero = |pool_state: &whirlpool::state::Whirlpool, pool_name: &str| {
+            for i in 0..3 {
+                if pool_state.reward_infos[i].mint == Pubkey::default() {
+                    fuzz_assert!(
+                        pool_state.reward_infos[i].vault == Pubkey::default(),
+                        "{} reward[{}] uninitialized (mint=default) but vault={} non-default",
+                        pool_name, i, pool_state.reward_infos[i].vault
+                    );
+                    fuzz_assert!(
+                        pool_state.reward_infos[i].emissions_per_second_x64 == 0,
+                        "{} reward[{}] uninitialized (mint=default) but emissions_per_second_x64={} non-zero",
+                        pool_name, i, pool_state.reward_infos[i].emissions_per_second_x64
+                    );
+                    fuzz_assert!(
+                        pool_state.reward_infos[i].growth_global_x64 == 0,
+                        "{} reward[{}] uninitialized (mint=default) but growth_global_x64={} non-zero",
+                        pool_name, i, pool_state.reward_infos[i].growth_global_x64
+                    );
+                }
+            }
+        };
+        if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+            check_uninit_zero(&ps, "Pool1");
+        }
+        if let Some(ref p2) = fixture.pool_two {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p2.whirlpool) {
+                check_uninit_zero(&ps, "Pool2");
+            }
+        }
+        if let Some(ref p3) = fixture.pool_three {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p3.whirlpool) {
+                check_uninit_zero(&ps, "Pool3");
+            }
+        }
+    }
+
+    // ========================================================================
+    // NEW: Pool account uniqueness — vaults and reward vaults must be distinct
+    // ========================================================================
+    // Catches account-aliasing bugs where the same SPL token account is used
+    // for both sides of a pool, which would let swaps credit and debit the
+    // same balance (effectively zero-cost swaps / vault drain).
+    // token_mint_a < token_mint_b is already checked (canonical ordering), which
+    // implies mint distinctness. This checks vault distinctness explicitly, and
+    // that reward_vaults don't collide with each other or with token vaults.
+    {
+        let check_vault_uniqueness = |pool_state: &whirlpool::state::Whirlpool, pool_name: &str| {
+            fuzz_assert!(
+                pool_state.token_vault_a != pool_state.token_vault_b,
+                "{} token_vault_a == token_vault_b ({}) — account aliasing",
+                pool_name, pool_state.token_vault_a
+            );
+            // Reward vaults must not alias either token vault or each other.
+            let tv_a = pool_state.token_vault_a;
+            let tv_b = pool_state.token_vault_b;
+            for i in 0..3 {
+                let rv_i = pool_state.reward_infos[i].vault;
+                if rv_i == Pubkey::default() {
+                    continue;
+                }
+                fuzz_assert!(
+                    rv_i != tv_a,
+                    "{} reward[{}] vault == token_vault_a ({}) — aliasing",
+                    pool_name, i, rv_i
+                );
+                fuzz_assert!(
+                    rv_i != tv_b,
+                    "{} reward[{}] vault == token_vault_b ({}) — aliasing",
+                    pool_name, i, rv_i
+                );
+                for j in (i + 1)..3 {
+                    let rv_j = pool_state.reward_infos[j].vault;
+                    if rv_j == Pubkey::default() {
+                        continue;
+                    }
+                    fuzz_assert!(
+                        rv_i != rv_j,
+                        "{} reward[{}].vault == reward[{}].vault ({}) — aliasing",
+                        pool_name, i, j, rv_i
+                    );
+                }
+            }
+        };
+        if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&fixture.pool.whirlpool) {
+            check_vault_uniqueness(&ps, "Pool1");
+        }
+        if let Some(ref p2) = fixture.pool_two {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p2.whirlpool) {
+                check_vault_uniqueness(&ps, "Pool2");
+            }
+        }
+        if let Some(ref p3) = fixture.pool_three {
+            if let Ok(ps) = fixture.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&p3.whirlpool) {
+                check_vault_uniqueness(&ps, "Pool3");
+            }
+        }
+    }
+
 }

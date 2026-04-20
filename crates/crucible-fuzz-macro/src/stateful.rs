@@ -81,32 +81,41 @@ pub fn stateful_mode(
             // Smaller pools focus exploration: each state gets picked more often,
             // enabling deeper chain building. With 100K pool and 1 action/iter,
             // each state averages <1 pick, preventing productive depth exploration.
-            let pool_capacity: usize = std::env::var("FUZZ_STATE_POOL_SIZE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(256_000); // 256k
+            let pool_capacity: usize = match std::env::var("FUZZ_STATE_POOL_SIZE") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_STATE_POOL_SIZE='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => 256_000, // 256k
+            };
 
             // Parse max depth from env. Falls back to FUZZ_MAX_ACTIONS, then 10.
-            let max_depth: u32 = std::env::var("FUZZ_MAX_DEPTH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| {
-                    std::env::var("FUZZ_MAX_ACTIONS")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(10)
-                });
+            let max_depth: u32 = match std::env::var("FUZZ_MAX_DEPTH") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_MAX_DEPTH='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => match std::env::var("FUZZ_MAX_ACTIONS") {
+                    Ok(s) => s.parse().unwrap_or_else(|e| {
+                        panic!("[STATEFUL] FUZZ_MAX_ACTIONS='{}' is not a valid number: {}", s, e);
+                    }),
+                    Err(_) => 10,
+                },
+            };
 
 
             // Use seed from env var if provided, otherwise use current time
-            let seed = std::env::var("FUZZ_SEED")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| libafl_bolts::current_nanos().max(1));
+            let seed = match std::env::var("FUZZ_SEED") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_SEED='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => libafl_bolts::current_nanos().max(1),
+            };
 
-            let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok());
+            let timeout_secs: Option<u64> = match std::env::var("FUZZ_TIMEOUT_SECS") {
+                Ok(s) => Some(s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_TIMEOUT_SECS='{}' is not a valid number: {}", s, e);
+                })),
+                Err(_) => None,
+            };
 
             let crash_dir = crashes_dir_env.unwrap_or_else(|| format!("crashes/{}", #feature_name));
             std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
@@ -121,10 +130,12 @@ pub fn stateful_mode(
             let trace_interval: u64 = if no_tracing {
                 0
             } else {
-                std::env::var("FUZZ_TRACE_INTERVAL")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1)
+                match std::env::var("FUZZ_TRACE_INTERVAL") {
+                    Ok(s) => s.parse().unwrap_or_else(|e| {
+                        panic!("[STATEFUL] FUZZ_TRACE_INTERVAL='{}' is not a valid number: {}", s, e);
+                    }),
+                    Err(_) => 1,
+                }
             };
 
             // Global signal flag for clean Ctrl+C / SIGTERM shutdown
@@ -241,10 +252,12 @@ pub fn stateful_mode(
             let __initial_fixture_state: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> =
                 Some(std::sync::Arc::new(__FixtureWrapper(template_fixture.clone())));
 
-            let num_cores: usize = std::env::var("FUZZ_CORES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1);
+            let num_cores: usize = match std::env::var("FUZZ_CORES") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_CORES='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => 1,
+            };
 
             if num_cores > 1 {
                 #multicore_body
@@ -465,8 +478,12 @@ fn gen_corpus_seeding(
             }
             __seed_files.sort();
 
-            let __seed_depth_limit: u32 = std::env::var("FUZZ_SEED_DEPTH")
-                .ok().and_then(|v| v.parse().ok()).unwrap_or(u32::MAX);
+            let __seed_depth_limit: u32 = match std::env::var("FUZZ_SEED_DEPTH") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[STATEFUL] FUZZ_SEED_DEPTH='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => u32::MAX,
+            };
 
             let mut __seeded = 0u64;
             #pre_loop
@@ -612,7 +629,7 @@ fn stateful_singlecore_body(
     _fixture_name: &syn::Ident,
     fn_name: &syn::Ident,
     fixture_param_name: &syn::Ident,
-    feature_name: &str,
+    _feature_name: &str,
     action_ty: &proc_macro2::TokenStream,
     contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
@@ -769,13 +786,6 @@ fn stateful_singlecore_body(
                             match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
-                            }
-                        }
-                        {
-                            let __pool_debug_dir = format!("pool_debug/{}", #feature_name);
-                            match state_pool.export_pool_debug(&__pool_debug_dir, Some(&action_stats)) {
-                                Ok(n) => eprintln!("[STATEFUL] Dumped pool report ({} states) to {}/pool_report.txt", n, __pool_debug_dir),
-                                Err(e) => eprintln!("[STATEFUL] Failed to dump pool: {}", e),
                             }
                         }
                         std::process::exit(0);
@@ -1354,9 +1364,11 @@ fn stateful_singlecore_body(
                     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
                     if cfg!(target_os = "macos") { (usage.ru_maxrss / 1024) as u64 } else { usage.ru_maxrss as u64 }
                 };
+                let __show_stats = std::env::var("FUZZ_STATS").is_ok();
+                let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
                 eprintln!(
                     "[FUZZ_PULSE] [{:02}:{:02}] iter: {}, iter/sec: {:.0}, pool: {}/{}k ({:.1}%), \
-                     crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}, memory_kib: {}",
+                     crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}{}",
                     mins, secs,
                     iteration, iter_sec,
                     state_pool.len(), pool_capacity / 1024, pool_pct,
@@ -1365,10 +1377,10 @@ fn stateful_singlecore_body(
                     discovered, total_variants,
                     edges, total_edges, edge_pct,
                     branches, total_branches,
-                    __memory_kib,
+                    __mem_suffix,
                 );
 
-                if __profiled_iters > 0 {
+                if __profiled_iters > 0 && __show_stats {
                     let total = __phase_total_ns;
                     let n = __profiled_iters;
                     let pct = |ns: u64| -> f64 { if total > 0 { (ns as f64 / total as f64) * 100.0 } else { 0.0 } };
@@ -1449,8 +1461,7 @@ fn stateful_singlecore_body(
                     __profiled_iters = 0;
                 }
 
-                // Memory profiling: pool breakdown + RSS
-                {
+                if std::env::var("FUZZ_STATS").is_ok() {
                     let __mem_stats = state_pool.memory_stats();
                     let __rss_mb = {
                         #[cfg(target_os = "macos")]
@@ -1489,7 +1500,7 @@ fn stateful_singlecore_body(
                         __memory_kib as f64 / 1024.0,
                         __mem_stats.format_breakdown(),
                     );
-                }
+                } // FUZZ_STATS
 
                 last_print_time = now;
                 last_print_iter = total_execs_now;
@@ -1501,13 +1512,6 @@ fn stateful_singlecore_body(
             match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
-            }
-        }
-        {
-            let __pool_debug_dir = format!("pool_debug/{}", #feature_name);
-            match state_pool.export_pool_debug(&__pool_debug_dir, Some(&action_stats)) {
-                Ok(n) => eprintln!("[STATEFUL] Dumped pool report ({} states) to {}/pool_report.txt", n, __pool_debug_dir),
-                Err(e) => eprintln!("[STATEFUL] Failed to dump pool: {}", e),
             }
         }
         eprintln!("\n[STATEFUL] Final stats: {} iterations, {} novel states, {} crashes, pool: {} (active: {})",
@@ -1535,7 +1539,7 @@ fn stateful_multicore_body(
     fixture_name: &syn::Ident,
     fn_name: &syn::Ident,
     _fixture_param_name: &syn::Ident,
-    feature_name: &str,
+    _feature_name: &str,
     action_ty: &proc_macro2::TokenStream,
     contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
@@ -2980,9 +2984,11 @@ fn stateful_multicore_body(
                         unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
                         if cfg!(target_os = "macos") { (usage.ru_maxrss / 1024) as u64 } else { usage.ru_maxrss as u64 }
                     };
+                    let __show_stats = std::env::var("FUZZ_STATS").is_ok();
+                    let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
                     eprintln!(
                         "[FUZZ_PULSE] [{:02}:{:02}] iter: {}, iter/sec: {:.0}, pool: {}/{}k ({:.1}%), \
-                         crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}, workers: {}, memory_kib: {}",
+                         crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}, workers: {}{}",
                         mins, secs,
                         total_iters, iter_sec,
                         cached_pool_len, pool_capacity / 1024, pool_pct,
@@ -2992,10 +2998,10 @@ fn stateful_multicore_body(
                         edges, total_edges, edge_pct,
                         branches, total_branches,
                         num_cores,
-                        __memory_kib,
+                        __mem_suffix,
                     );
 
-                    if __profiled_iters > 0 {
+                    if __profiled_iters > 0 && __show_stats {
                         let total = __phase_total_ns;
                         let n = __profiled_iters;
                         let pct = |ns: u64| -> f64 { if total > 0 { (ns as f64 / total as f64) * 100.0 } else { 0.0 } };
@@ -3076,8 +3082,7 @@ fn stateful_multicore_body(
                         __profiled_iters = 0;
                     }
 
-                    // Memory profiling: pool breakdown + RSS
-                    {
+                    if std::env::var("FUZZ_STATS").is_ok() {
                         let __mem_pool = state_pool.read().unwrap();
                         let __mem_stats = __mem_pool.memory_stats();
                         // Current RSS (resident set size) on macOS via task_info
@@ -3119,7 +3124,7 @@ fn stateful_multicore_body(
                             __memory_kib as f64 / 1024.0,
                             __mem_stats.format_breakdown(),
                         );
-                    }
+                    } // FUZZ_STATS
 
                     last_print_time = now;
                     last_print_iters = total_iters;
@@ -3153,14 +3158,6 @@ fn stateful_multicore_body(
             match pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
-            }
-        }
-        {
-            let pool = state_pool.read().unwrap();
-            let __pool_debug_dir = format!("pool_debug/{}", #feature_name);
-            match pool.export_pool_debug(&__pool_debug_dir, None) {
-                Ok(n) => eprintln!("[STATEFUL] Dumped pool report ({} states) to {}/pool_report.txt", n, __pool_debug_dir),
-                Err(e) => eprintln!("[STATEFUL] Failed to dump pool: {}", e),
             }
         }
 

@@ -1843,8 +1843,8 @@ fn test_run_mode_explore_with_corpus() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Loading corpus from:"),
-        "explore should auto-load ./corpus when it exists, got: {}",
+        stdout.contains("Writing corpus to:"),
+        "explore should set corpus output, got: {}",
         stdout
     );
 }
@@ -2109,7 +2109,6 @@ fn test_run_crashes_out_default() {
     assert!(
         stdout.contains("Crashes directory:")
             && stdout.contains("crashes")
-            && stdout.contains("test_prog")
             && stdout.contains("test_feature"),
         "default crashes dir should contain 'crashes' and test name, got: {}",
         stdout

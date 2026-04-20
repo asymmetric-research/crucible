@@ -1,11 +1,7 @@
-//! Common code generation blocks for the anchor-fuzz macro.
-//!
-//! This module contains reusable `quote!` blocks that are shared between
-//! different execution modes (single-core, multi-core, dry-run, etc.).
+//! Shared quote! blocks used across execution modes (single-core, multi-core, dry-run, etc.).
 
 use quote::quote;
 
-/// Generate the initialization code for coverage totals
 pub fn init_coverage_totals(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         let mut edge_totals: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
@@ -21,7 +17,6 @@ pub fn init_coverage_totals(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the initialization code for program binaries
 pub fn init_program_binaries(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         let mut program_binaries: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
@@ -35,7 +30,6 @@ pub fn init_program_binaries(mod_name: &syn::Ident) -> proc_macro2::TokenStream 
     }
 }
 
-/// Generate the initialization code for DWARF source maps (for source-level LCOV)
 pub fn init_dwarf_maps(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         // Only build DWARF maps when --coverage + --symbols are both active
@@ -64,7 +58,6 @@ pub fn init_dwarf_maps(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the template setup code
 pub fn template_setup(
     fixture_name: &syn::Ident,
     mod_name: &syn::Ident,
@@ -95,10 +88,8 @@ pub fn template_setup(
     }
 }
 
-/// Generate the monitor setup code
 pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
-        // CSV stats file setup (when FUZZ_STATS_CSV env var is set)
         let __stats_csv: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>> =
             std::env::var("FUZZ_STATS_CSV").ok().map(|path| {
                 let mut f = std::fs::OpenOptions::new()
@@ -114,10 +105,7 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
         let __csv_ref = __stats_csv.clone();
 
         let monitor = SimpleMonitor::new(move |s| {
-            // Suppress monitor output during corpus loading (too noisy)
             if crucible_test_context::is_corpus_loading() { return; }
-            // Helper to parse numeric values from LibAFL's monitor string
-            // Handles SI suffixes: k (1000), M (1000000)
             fn __parse_monitor_val(s: &str, key: &str) -> f64 {
                 s.find(key)
                     .and_then(|i| {
@@ -137,11 +125,9 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
             }
 
             let mut s = s.replace("objectives", "crashes").replace("(GLOBAL) ", "");
-            // Replace LibAFL's [Testcase #N] prefix with [FUZZ_PULSE]
             if let Some(bracket_end) = s.find(']') {
                 s = format!("[FUZZ_PULSE]{}", &s[bracket_end + 1..]);
             }
-            // Remove LibAFL's "edges: N" if present (we add our own program-level stats)
             let s = {
                 let mut result = s.clone();
                 if let Some(start) = result.find(", edges:") {
@@ -158,7 +144,6 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
             drop(state);
             let total_edges: usize = #mod_name::PROGRAM_TOTALS.get().map(|t| t.values().sum()).unwrap_or(0);
             let total_branches = total_edges / 2;
-            // Append program-level coverage stats to LibAFL's output
             if let Some(_idx) = s.find("exec/sec:") {
                 let edge_pct = if total_edges > 0 { (true_edges as f64 / total_edges as f64) * 100.0 } else { 0.0 };
                 let branch_pct = if total_branches > 0 { (branches as f64 / total_branches as f64) * 100.0 } else { 0.0 };
@@ -174,19 +159,21 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                 } else {
                     String::new()
                 };
-                let __memory_kib = {
+                let __memory_str = if std::env::var("FUZZ_STATS").is_ok() {
                     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
                     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-                    if cfg!(target_os = "macos") {
+                    let kib = if cfg!(target_os = "macos") {
                         (usage.ru_maxrss / 1024) as u64
                     } else {
                         usage.ru_maxrss as u64
-                    }
+                    };
+                    format!(", memory_kib: {}", kib)
+                } else {
+                    String::new()
                 };
-                eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}, memory_kib: {}",
-                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str, __memory_kib);
+                eprintln!("{}, edges: {}/{} ({:.1}%), branches: {}/{} ({:.1}%), actions/exec: {:.1}, ok: {}/{} ({:.1}%){}{}",
+                    s.trim_end(), true_edges, total_edges, edge_pct, branches, total_branches, branch_pct, avg_actions, total_ok, total_actions, ok_pct, discovered_str, __memory_str);
 
-                // Write CSV stats row if enabled
                 if let Some(ref csv) = __csv_ref {
                     let elapsed = #mod_name::FUZZER_START_TIME.get()
                         .map(|start| {
@@ -214,13 +201,8 @@ pub fn monitor_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the observer and feedback setup for single-core mode (shared between on-disk and in-memory corpus modes)
-/// HitcountsMapObserver applies AFL-style bucketing (1,2,3,4-7,8-15,16-31,32-127,128+)
-/// This reduces noise and helps focus on meaningful coverage differences
 pub fn singlecore_observer_feedback(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
-        // HitcountsMapObserver applies AFL-style bucketing (1,2,3,4-7,8-15,16-31,32-127,128+)
-        // This reduces noise and helps focus on meaningful coverage differences
         let edges_observer = unsafe { StdMapObserver::from_mut_ptr("edges", cov_ptr, #mod_name::MAP_SIZE) };
         let edges_observer = HitcountsMapObserver::new(edges_observer);
         let time_observer = TimeObserver::new("time");
@@ -232,9 +214,7 @@ pub fn singlecore_observer_feedback(mod_name: &syn::Ident) -> proc_macro2::Token
     }
 }
 
-/// Generate the max input size setup.
-/// Scans `--corpus-in` directory to find the actual max file size so that
-/// stateful corpus entries (which can exceed 1024 bytes) are not truncated.
+/// Scans `--corpus-in` for max file size so stateful corpus entries aren't truncated.
 /// Falls back to 1024 bytes when no corpus is provided.
 pub fn max_size_setup() -> proc_macro2::TokenStream {
     quote! {
@@ -255,7 +235,6 @@ pub fn max_size_setup() -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the mutator and stages setup (arbitrary mode - havoc mutations)
 pub fn mutator_stages_setup() -> proc_macro2::TokenStream {
     quote! {
         let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)
@@ -265,14 +244,14 @@ pub fn mutator_stages_setup() -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the mutator and stages setup for structured mode
-/// Uses custom SequenceMutator, ParamMutator, CrossoverMutator instead of havoc
 pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     quote! {
-        let __fuzz_max_actions: usize = std::env::var("FUZZ_MAX_ACTIONS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10);
+        let __fuzz_max_actions: usize = match std::env::var("FUZZ_MAX_ACTIONS") {
+            Ok(s) => s.parse().unwrap_or_else(|e| {
+                panic!("[FUZZ] FUZZ_MAX_ACTIONS='{}' is not a valid number: {}", s, e);
+            }),
+            Err(_) => 10,
+        };
         let trim_stage = crucible_fuzzer::SuccessTrimStage::<#action_type>::new();
         let seq_mutator = crucible_fuzzer::SequenceMutator::<#action_type>::new(__fuzz_max_actions);
         let param_mutator = crucible_fuzzer::ParamMutator::<#action_type>::new();
@@ -287,7 +266,6 @@ pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -
     }
 }
 
-/// Generate the exit handlers setup
 pub fn exit_handlers_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         let default_panic = std::panic::take_hook();
@@ -298,16 +276,17 @@ pub fn exit_handlers_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
             default_panic(info);
         }));
 
-        ctrlc::set_handler(move || {
+        if let Err(e) = ctrlc::set_handler(move || {
             if coverage_enabled {
                 eprintln!("\n[COVERAGE] Ctrl+C received. Coverage files written by periodic updates.");
             }
             std::process::exit(0);
-        }).ok();
+        }) {
+            eprintln!("[FUZZ] Warning: failed to install Ctrl+C handler: {}", e);
+        }
     }
 }
 
-/// Generate the common fuzzing setup
 pub fn common_fuzz_setup(
     mod_name: &syn::Ident,
     fixture_name: &syn::Ident,
@@ -323,15 +302,17 @@ pub fn common_fuzz_setup(
             .as_secs();
         let _ = #mod_name::FUZZER_START_TIME.set(start_time);
 
-        let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok());
+        let timeout_secs: Option<u64> = match std::env::var("FUZZ_TIMEOUT_SECS") {
+            Ok(s) => Some(s.parse().unwrap_or_else(|e| {
+                panic!("[FUZZ] FUZZ_TIMEOUT_SECS='{}' is not a valid number: {}", s, e);
+            })),
+            Err(_) => None,
+        };
 
         let iteration_counter = std::sync::atomic::AtomicU64::new(0);
     }
 }
 
-/// Generate the default seed input code (arbitrary mode)
 pub fn add_default_seed() -> proc_macro2::TokenStream {
     quote! {
         let input = BytesInput::new(vec![0u8; 256]);
@@ -340,17 +321,16 @@ pub fn add_default_seed() -> proc_macro2::TokenStream {
     }
 }
 
-/// Generate the default seed input code for structured mode
-/// Uses ActionGenerator to create properly-formatted seed inputs
 pub fn structured_add_default_seed(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     quote! {
         {
             use libafl::generators::Generator;
-            let __seed_max: usize = std::env::var("FUZZ_MAX_ACTIONS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10)
-                .min(4);
+            let __seed_max: usize = match std::env::var("FUZZ_MAX_ACTIONS") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[FUZZ] FUZZ_MAX_ACTIONS='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => 10,
+            }.min(4);
             let mut gen = crucible_fuzzer::ActionGenerator::<#action_type>::new(1, __seed_max);
             // Generate a few diverse seed inputs
             for _ in 0..4 {
@@ -614,7 +594,6 @@ pub fn stateful_extra_swap_back(
     quote! { #(#stmts)* }
 }
 
-/// Generate the is_corpus_input helper function
 pub fn is_corpus_input_fn() -> proc_macro2::TokenStream {
     quote! {
         // Helper to check if a file is a corpus input (not metadata)
@@ -634,10 +613,6 @@ pub fn is_corpus_input_fn() -> proc_macro2::TokenStream {
         }
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1020,5 +995,122 @@ mod tests {
             &mod_name, &fixture, &fn_name, &[], &[], false,
         ));
         assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+    }
+}
+
+#[cfg(test)]
+mod tests_new {
+    use super::*;
+    use quote::format_ident;
+
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    // ── FuzzArgs parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn fuzz_args_default_is_arbitrary_with_ctx() {
+        let args = crate::FuzzArgs::default();
+        assert!(!args.structured, "default should be arbitrary mode");
+        assert_eq!(args.contexts.len(), 1);
+        assert_eq!(args.contexts[0].to_string(), "ctx");
+    }
+
+    #[test]
+    fn fuzz_args_debug_impl() {
+        let args = crate::FuzzArgs::default();
+        let debug_str = format!("{:?}", args);
+        assert!(debug_str.contains("FuzzArgs"), "Debug impl should include struct name");
+    }
+
+    // ── extract_vec_inner_type ──────────────────────────────────────────
+
+    #[test]
+    fn extract_vec_inner_type_returns_inner() {
+        let ty: syn::Type = syn::parse_quote! { Vec<u64> };
+        let inner = crate::extract_vec_inner_type(&ty);
+        assert!(inner.is_some(), "should extract inner type from Vec<u64>");
+        let inner_str = quote::quote! { #inner }.to_string();
+        assert!(inner_str.contains("u64"), "inner type should be u64");
+    }
+
+    #[test]
+    fn extract_vec_inner_type_returns_none_for_non_vec() {
+        let ty: syn::Type = syn::parse_quote! { HashMap<String, u64> };
+        assert!(crate::extract_vec_inner_type(&ty).is_none());
+    }
+
+    #[test]
+    fn extract_vec_inner_type_returns_none_for_plain() {
+        let ty: syn::Type = syn::parse_quote! { u64 };
+        assert!(crate::extract_vec_inner_type(&ty).is_none());
+    }
+
+    // ── env var defensive parsing ──────────────────────────────────────
+
+    #[test]
+    fn common_fuzz_setup_panics_on_bad_timeout() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let output = ts(common_fuzz_setup(&mod_name, &fixture));
+        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
+        assert!(output.contains("FUZZ_TIMEOUT_SECS"), "should mention the env var name");
+    }
+
+    #[test]
+    fn structured_mutator_panics_on_bad_max_actions() {
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(structured_mutator_stages_setup(&action_ty));
+        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
+        assert!(output.contains("FUZZ_MAX_ACTIONS"), "should mention FUZZ_MAX_ACTIONS");
+    }
+
+    #[test]
+    fn structured_seed_panics_on_bad_max_actions() {
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(structured_add_default_seed(&action_ty));
+        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
+    }
+
+    // ── ctrlc handler ──────────────────────────────────────────────────
+
+    #[test]
+    fn exit_handlers_warns_on_ctrlc_failure() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let output = ts(exit_handlers_setup(&mod_name));
+        assert!(output.contains("Warning"), "should warn on ctrlc failure");
+        assert!(output.contains("if let Err"), "should use if let Err pattern");
+        assert!(!output.contains(". ok ()"), "should not silently ignore ctrlc errors");
+    }
+
+    // ── stateful mode entry ────────────────────────────────────────────
+
+    #[test]
+    fn stateful_mode_requires_structured() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::stateful::stateful_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            false, None, &[format_ident!("ctx")],
+        ));
+        assert!(output.contains("only supports structured"), "should reject non-structured mode");
+    }
+
+    #[test]
+    fn stateful_mode_has_pool_capacity() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(crate::stateful::stateful_mode(
+            &mod_name, &fixture, &fn_name, &param, "test",
+            true, Some(&action_ty), &[format_ident!("ctx")],
+        ));
+        assert!(output.contains("pool_capacity"), "should have pool capacity setting");
+        assert!(output.contains("FUZZ_STATE_POOL_SIZE"), "should parse pool size from env");
     }
 }

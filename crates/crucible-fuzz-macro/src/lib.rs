@@ -21,6 +21,7 @@ mod stateful;
 /// - `#[anchor_fuzz(structured)]` — structured mutation mode
 /// - `#[anchor_fuzz(contexts = [ctx, ctx_b])]` — multiple TestContext fields
 /// - `#[anchor_fuzz(structured, contexts = [ctx, ctx_b])]` — both
+#[derive(Debug)]
 struct FuzzArgs {
     structured: bool,
     contexts: Vec<syn::Ident>,
@@ -304,83 +305,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
-    let show_fn_name = quote::format_ident!("__show_{}", fn_name);
-
-    // Generate show code (deserialize + print each param)
-    let show_body = if structured {
-        let action_ty = action_type.as_ref().unwrap();
-        quote! {
-            println!("Crash Input (structured):");
-            let (__fuzz_input, __parse_info) = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes_with_info(&bytes);
-            if __parse_info.actual_count < __parse_info.expected_count {
-                println!("[WARN] Deserialized {}/{} actions — harness may have changed since crash was recorded",
-                    __parse_info.actual_count, __parse_info.expected_count);
-            }
-            println!("Actions ({} total):", __fuzz_input.actions.len());
-            for (i, action) in __fuzz_input.actions.iter().enumerate() {
-                println!("  {}: {:?}", i, action);
-            }
-        }
-    } else {
-        let param_deserializations: Vec<_> = params.iter().map(|param| {
-            let name = &param.name;
-            let ty = &param.ty;
-
-            let base_deser = quote! {
-                let mut #name: #ty = arbitrary::Arbitrary::arbitrary(&mut u)
-                    .expect("Failed to deserialize parameter");
-            };
-
-            if let Some(ref constraint) = param.constraint {
-                let constraint_code = gen_range_constraint(name, ty, constraint);
-                quote! {
-                    #base_deser
-                    #constraint_code
-                    println!("{}: {:#?}", stringify!(#name), #name);
-                }
-            } else {
-                quote! {
-                    #base_deser
-                    println!("{}: {:#?}", stringify!(#name), #name);
-                }
-            }
-        }).collect();
-
-        quote! {
-            println!("Crash Input:");
-            #(#param_deserializations)*
-        }
-    };
-
-    // Show function: conditionally use Unstructured or FuzzInput
-    let show_fn_code = if structured {
-        quote! {
-            pub fn #show_fn_name() {
-                use std::io::Read;
-
-                let mut bytes = Vec::new();
-                std::io::stdin().read_to_end(&mut bytes)
-                    .expect("Failed to read crash input from stdin");
-
-                #show_body
-            }
-        }
-    } else {
-        quote! {
-            pub fn #show_fn_name() {
-                use arbitrary::Unstructured;
-                use std::io::Read;
-
-                let mut bytes = Vec::new();
-                std::io::stdin().read_to_end(&mut bytes)
-                    .expect("Failed to read crash input from stdin");
-
-                let mut u = Unstructured::new(&bytes);
-
-                #show_body
-            }
-        }
-    };
 
     // Generate coverage-related code from coverage module
     let coverage_code = coverage::all_coverage_code();
@@ -476,7 +400,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         &contexts,
     );
 
-    // Conditionally include Unstructured import
     let unstructured_import = if structured {
         quote! {}
     } else {
@@ -500,16 +423,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #[cfg(feature = #feature_name)]
-        #show_fn_code
-
-        #[cfg(feature = #feature_name)]
         fn main() {
-            if std::env::var("SHOW_CRASH").is_ok() {
-                #show_fn_name();
-                return;
-            }
-
-            // Parse --coverage flag (CLI arg or env var)
             let coverage_enabled = std::env::args().any(|a| a == "--coverage")
                 || std::env::var("FUZZ_COVERAGE").is_ok();
             #mod_name::COVERAGE_ENABLED.store(coverage_enabled, std::sync::atomic::Ordering::Relaxed);
@@ -529,7 +443,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             use std::time::Duration;
             #unstructured_import
 
-            // Parse environment variables for new modes
             let dry_run_mode = std::env::var("FUZZ_DRY_RUN").is_ok();
             let input_file = std::env::var("FUZZ_INPUT_FILE").ok();
             let coverage_only_mode = std::env::var("FUZZ_COVERAGE_ONLY").is_ok();
@@ -539,7 +452,6 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             let crashes_dir_env = std::env::var("FUZZ_CRASHES_DIR").ok();
             let verbose = std::env::var("FUZZ_VERBOSE").is_ok();
 
-            // Coverage map - just a simple vec, no shared memory needed for InProcessExecutor
             let mut coverage_map = vec![0u8; #mod_name::MAP_SIZE];
             let cov_ptr = coverage_map.as_mut_ptr();
 

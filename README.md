@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/crucible.png" alt="Crucible" width="400">
+  <img src="assets/crucible_logo.png" alt="Crucible" width="400">
 </p>
 
 <p align="center">

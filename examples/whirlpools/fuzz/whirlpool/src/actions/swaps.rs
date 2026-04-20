@@ -176,14 +176,15 @@
         let price_pre = self.read_pool_sqrt_price().unwrap_or(0);
         let user_a_pre = self.ctx.token_balance(&user.token_account_a);
         let user_b_pre = self.ctx.token_balance(&user.token_account_b);
-        // Pre-swap protocol fee + fee_growth + fee_rate + reward_timestamp snapshot
+        // Pre-swap protocol fee + fee_growth + fee_rate + reward_timestamp + tick snapshot
         let (pre_proto_fee_a, pre_proto_fee_b, pre_fee_growth_a, pre_fee_growth_b, pre_liquidity,
-             pre_fee_rate, pre_proto_fee_rate, pre_reward_ts) =
+             pre_fee_rate, pre_proto_fee_rate, pre_reward_ts, pre_tick_current) =
             self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&pool.whirlpool)
             .map(|s| (s.protocol_fee_owed_a, s.protocol_fee_owed_b,
                        s.fee_growth_global_a, s.fee_growth_global_b, s.liquidity,
-                       s.fee_rate, s.protocol_fee_rate, s.reward_last_updated_timestamp))
-            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0));
+                       s.fee_rate, s.protocol_fee_rate, s.reward_last_updated_timestamp,
+                       s.tick_current_index))
+            .unwrap_or((0, 0, 0, 0, 0, 0, 0, 0, 0));
 
         let result = self.ctx.program(self.program_id)
             .call(instruction::Swap {
@@ -425,6 +426,33 @@
                             fuzz_assert!(total_fee_evidence > 0,
                                 "Non-dust swap charged zero fees: input={} fee_rate={} min_fee={} proto_delta={} fg_delta={}",
                                 vault_input, pre_fee_rate, min_fee_owed, proto_delta, fee_growth_delta);
+                        }
+                    }
+                }
+
+                // NEW (subscope 20 — zero_dust_swap_tick_advance):
+                // Tick advance through active liquidity and non-zero fee_rate must accrue fees.
+                // Gate: amount_specified_is_input && pre_liquidity > 0 && pre_fee_rate > 0 && non-zero vault movement.
+                // Catches the poison pattern where tick_current_index advances without token transfer
+                // (zero-amount swap with sqrt_price_limit past a tick, corrupting fee_growth_outside flips).
+                if amount_specified_is_input && pre_fee_rate > 0 && pre_liquidity > 0 && amount > 0 {
+                    if let Ok(pp) = self.ctx.read_anchor_account::<whirlpool::state::Whirlpool>(&self.pool.whirlpool) {
+                        let tick_moved = pp.tick_current_index != pre_tick_current;
+                        let vault_input = if a_to_b {
+                            vault_a_post.saturating_sub(vault_a_pre)
+                        } else {
+                            vault_b_post.saturating_sub(vault_b_pre)
+                        };
+                        if tick_moved && vault_input > 0 {
+                            let fee_a_accrued = pp.fee_growth_global_a.wrapping_sub(pre_fee_growth_a) > 0;
+                            let fee_b_accrued = pp.fee_growth_global_b.wrapping_sub(pre_fee_growth_b) > 0;
+                            let proto_a_accrued = pp.protocol_fee_owed_a > pre_proto_fee_a;
+                            let proto_b_accrued = pp.protocol_fee_owed_b > pre_proto_fee_b;
+                            fuzz_assert!(
+                                fee_a_accrued || fee_b_accrued || proto_a_accrued || proto_b_accrued,
+                                "tick_current_index advanced {} -> {} with input={} at fee_rate={} but no fee accrual (zero-dust poison?)",
+                                pre_tick_current, pp.tick_current_index, vault_input, pre_fee_rate
+                            );
                         }
                     }
                 }

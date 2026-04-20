@@ -1,21 +1,11 @@
-//! Single-core fuzzing support for the anchor-fuzz macro.
-//!
-//! This module contains code generation for single-threaded fuzzing modes:
-//! - On-disk corpus mode (when --corpus-out is specified)
-//! - In-memory corpus mode (default)
-//!
-//! The code is structured to minimize duplication while working within Rust's
-//! type system constraints (StdState is generic over corpus type).
+//! Single-core fuzzing: on-disk corpus mode (--corpus-out) and in-memory corpus mode (default).
+//! Uses macro_rules! internally to avoid duplication between corpus modes
+//! (StdState is generic over corpus type).
 
 use quote::quote;
 
 use crate::codegen;
 
-/// Generate the single-core fuzzing mode code
-///
-/// Uses a macro_rules! macro internally to avoid code duplication between
-/// on-disk and in-memory corpus modes. The macro handles all common logic
-/// while the outer code handles corpus-specific setup.
 pub fn singlecore_mode(
     mod_name: &syn::Ident,
     fixture_name: &syn::Ident,
@@ -80,10 +70,12 @@ pub fn singlecore_mode(
         #ctx_swap_out
 
         // Periodic full SVM reset interval (0 = disabled)
-        let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1000);
+        let __svm_reset_interval: u64 = match std::env::var("FUZZ_SVM_RESET_INTERVAL") {
+            Ok(s) => s.parse().unwrap_or_else(|e| {
+                panic!("[FUZZ] FUZZ_SVM_RESET_INTERVAL='{}' is not a valid number: {}", s, e);
+            }),
+            Err(_) => 1000,
+        };
 
         let mut harness_wrapper = |input: &BytesInput| -> ExitKind {
             let bytes_ref = input.target_bytes();
@@ -185,10 +177,12 @@ pub fn singlecore_mode(
         // === SINGLE-THREADED MODE (default) ===
 
         // Use seed from env var if provided, otherwise use current time
-        let seed = std::env::var("FUZZ_SEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| current_nanos().max(1));
+        let seed = match std::env::var("FUZZ_SEED") {
+            Ok(s) => s.parse().unwrap_or_else(|e| {
+                panic!("[FUZZ] FUZZ_SEED='{}' is not a valid number: {}", s, e);
+            }),
+            Err(_) => current_nanos().max(1),
+        };
 
         // Configure directories based on environment variables
         let crash_dir = crashes_dir_env.unwrap_or_else(|| format!("crashes/{}", #feature_name));

@@ -1,8 +1,4 @@
-//! Corpus management for the anchor-fuzz macro.
-//!
-//! This module contains code generation for corpus-related operations:
-//! - Corpus minimization (cmin mode)
-//! - Corpus loading utilities
+//! Corpus management: cmin mode and corpus loading utilities.
 
 use quote::quote;
 
@@ -163,7 +159,8 @@ pub fn cmin_mode(
 
             // Phase 3: Copy selected inputs to output directory
             if corpus_out != corpus_dir {
-                std::fs::create_dir_all(&corpus_out).ok();
+                std::fs::create_dir_all(&corpus_out)
+                    .unwrap_or_else(|e| panic!("[CMIN] Failed to create output directory {}: {}", corpus_out, e));
             }
 
             let mut copied = 0usize;
@@ -232,5 +229,54 @@ pub fn load_inputs_into_memory() -> proc_macro2::TokenStream {
             }
             inputs
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::format_ident;
+
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    #[test]
+    fn cmin_mode_has_greedy_set_cover() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(output.contains("greedy_set_cover"), "should use greedy set cover algorithm");
+        assert!(output.contains("cmin_mode"), "should check cmin_mode flag");
+        assert!(output.contains("corpus_in_dir"), "should require corpus input dir");
+    }
+
+    #[test]
+    fn cmin_mode_uses_exact_edge_tracking() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(output.contains("cmin_edge_set_enable"), "should enable exact edge tracking");
+        assert!(output.contains("cmin_edge_set_take"), "should take edge set after execution");
+    }
+
+    #[test]
+    fn cmin_mode_panics_on_bad_output_dir() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(output.contains("Failed to create output directory"),
+            "should panic with descriptive message on mkdir failure");
+    }
+
+    #[test]
+    fn load_inputs_into_memory_uses_is_corpus_input() {
+        let output = ts(load_inputs_into_memory());
+        assert!(output.contains("is_corpus_input"), "should filter using is_corpus_input");
+        assert!(output.contains("BytesInput"), "should create BytesInput from files");
+        assert!(output.contains("load_inputs_from_dir"), "should define load_inputs_from_dir fn");
     }
 }

@@ -1,21 +1,9 @@
-//! Multi-core fuzzing support for the anchor-fuzz macro.
-//!
-//! This module contains code generation for multi-core fuzzing using LibAFL's Launcher.
-//! Key features:
-//! - Uses `load_initial_inputs_forced` so all workers have full corpus access
-//! - Monitor displays actual corpus file count (not N× inflated LibAFL count)
-//! - Shared memory bitmaps for edge/branch tracking
-//! - LLMP message passing for corpus synchronization
+//! Multi-core fuzzing via LibAFL Launcher with shared memory bitmaps and LLMP corpus sync.
 
 use quote::quote;
 
 use crate::codegen;
 
-/// Generate the multi-core fuzzing mode code
-///
-/// This version uses LibAFL's `load_initial_inputs_forced` so all workers have
-/// access to all seed inputs. The monitor is patched to show actual corpus file
-/// count instead of LibAFL's N× inflated count.
 pub fn multicore_mode(
     mod_name: &syn::Ident,
     fixture_name: &syn::Ident,
@@ -76,7 +64,7 @@ pub fn multicore_mode(
             use libafl::Error as LibAflError;
 
             let num_cores: usize = cores_spec.as_ref().unwrap().parse()
-                .expect("FUZZ_CORES must be a valid number");
+                .unwrap_or_else(|e| panic!("[FUZZ] FUZZ_CORES='{}' is not a valid number: {}", cores_spec.as_ref().unwrap(), e));
 
             if coverage_enabled {
                 eprintln!("[FUZZ] Warning: --coverage LCOV output disabled in multi-core mode");
@@ -85,10 +73,12 @@ pub fn multicore_mode(
             }
 
             // Use seed from env var if provided, otherwise use current time
-            let seed = std::env::var("FUZZ_SEED")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| current_nanos().max(1));
+            let seed = match std::env::var("FUZZ_SEED") {
+                Ok(s) => s.parse().unwrap_or_else(|e| {
+                    panic!("[FUZZ] FUZZ_SEED='{}' is not a valid number: {}", s, e);
+                }),
+                Err(_) => current_nanos().max(1),
+            };
             let crash_dir = crashes_dir_env.clone().unwrap_or_else(|| format!("crashes/{}", #feature_name));
             std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
 
@@ -509,10 +499,12 @@ pub fn multicore_mode(
                 #ctx_swap_out
 
                 // Periodic full SVM reset interval (0 = disabled)
-                let __svm_reset_interval: u64 = std::env::var("FUZZ_SVM_RESET_INTERVAL")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1000);
+                let __svm_reset_interval: u64 = match std::env::var("FUZZ_SVM_RESET_INTERVAL") {
+                    Ok(s) => s.parse().unwrap_or_else(|e| {
+                        panic!("[FUZZ] FUZZ_SVM_RESET_INTERVAL='{}' is not a valid number: {}", s, e);
+                    }),
+                    Err(_) => 1000,
+                };
 
                 // Observer and feedback setup (multi-core uses SharedBitmapFeedback)
                 // HitcountsMapObserver applies AFL-style bucketing (1,2,3,4-7,8-15,16-31,32-127,128+)
@@ -553,9 +545,12 @@ pub fn multicore_mode(
                     .as_secs();
                 let _ = #mod_name::FUZZER_START_TIME.set(start_time);
 
-                let timeout_secs: Option<u64> = std::env::var("FUZZ_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok());
+                let timeout_secs: Option<u64> = match std::env::var("FUZZ_TIMEOUT_SECS") {
+                    Ok(s) => Some(s.parse().unwrap_or_else(|e| {
+                        panic!("[FUZZ] FUZZ_TIMEOUT_SECS='{}' is not a valid number: {}", s, e);
+                    })),
+                    Err(_) => None,
+                };
 
                 let iteration_counter = std::sync::atomic::AtomicU64::new(0);
 
