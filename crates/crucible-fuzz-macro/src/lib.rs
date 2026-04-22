@@ -1,10 +1,10 @@
+use crucible_macro_utils::RangeConstraint;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, ItemFn, FnArg, Type,
     parse::{Parse, ParseStream},
+    parse_macro_input, FnArg, ItemFn, Type,
 };
-use crucible_macro_utils::RangeConstraint;
 
 mod codegen;
 mod corpus;
@@ -103,12 +103,16 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     let feature_name = fn_name.to_string();
 
     // Parse range constraints
-    let range_constraints: std::collections::HashMap<usize, RangeConstraint> = input_fn.sig.inputs
+    let range_constraints: std::collections::HashMap<usize, RangeConstraint> = input_fn
+        .sig
+        .inputs
         .iter()
         .enumerate()
         .filter_map(|(i, arg)| {
             if let FnArg::Typed(pat_ty) = arg {
-                pat_ty.attrs.iter()
+                pat_ty
+                    .attrs
+                    .iter()
                     .find(|a| a.path().is_ident("range"))
                     .and_then(|attr| RangeConstraint::from_attr(attr).ok())
                     .map(|constraint| (i, constraint))
@@ -132,16 +136,20 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     if inputs.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig,
-            "Function must have at least one parameter (fixture: &mut FixtureType)"
-        ).to_compile_error().into();
+            "Function must have at least one parameter (fixture: &mut FixtureType)",
+        )
+        .to_compile_error()
+        .into();
     }
 
     // Extract fixture type from first parameter
     let FnArg::Typed(first_param) = inputs[0] else {
         return syn::Error::new_spanned(
             inputs[0],
-            "First parameter must be typed (fixture: &mut FixtureType)"
-        ).to_compile_error().into();
+            "First parameter must be typed (fixture: &mut FixtureType)",
+        )
+        .to_compile_error()
+        .into();
     };
 
     // Extract type from &mut FixtureType
@@ -150,16 +158,20 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             if type_ref.mutability.is_none() {
                 return syn::Error::new_spanned(
                     &first_param.ty,
-                    "Fixture parameter must be mutable (&mut FixtureType)"
-                ).to_compile_error().into();
+                    "Fixture parameter must be mutable (&mut FixtureType)",
+                )
+                .to_compile_error()
+                .into();
             }
             &*type_ref.elem
         }
         _ => {
             return syn::Error::new_spanned(
                 &first_param.ty,
-                "Fixture parameter must be a mutable reference (&mut FixtureType)"
-            ).to_compile_error().into();
+                "Fixture parameter must be a mutable reference (&mut FixtureType)",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -173,8 +185,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 fixture_type,
-                "Expected a simple type path for fixture"
-            ).to_compile_error().into();
+                "Expected a simple type path for fixture",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -184,8 +198,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 &first_param.pat,
-                "Expected simple identifier for fixture parameter"
-            ).to_compile_error().into();
+                "Expected simple identifier for fixture parameter",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -208,16 +224,21 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         ty: Type,
         constraint: Option<RangeConstraint>,
     }
-    let params: Vec<ParamInfo> = inputs.iter().enumerate().skip(1).map(|(i, arg)| {
-        let FnArg::Typed(pat_ty) = arg else {
-            panic!("Expected typed parameter");
-        };
-        ParamInfo {
-            name: quote::format_ident!("param_{}", i),
-            ty: (*pat_ty.ty).clone(),
-            constraint: range_constraints.get(&i).cloned(),
-        }
-    }).collect();
+    let params: Vec<ParamInfo> = inputs
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, arg)| {
+            let FnArg::Typed(pat_ty) = arg else {
+                panic!("Expected typed parameter");
+            };
+            ParamInfo {
+                name: quote::format_ident!("param_{}", i),
+                ty: (*pat_ty.ty).clone(),
+                constraint: range_constraints.get(&i).cloned(),
+            }
+        })
+        .collect();
 
     // Extract action type for structured mode
     let action_type: Option<Type> = if structured {
@@ -231,8 +252,10 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         if inner.is_none() {
             return syn::Error::new_spanned(
                 &input_fn.sig,
-                "#[anchor_fuzz(structured)] second parameter must be Vec<ActionType>"
-            ).to_compile_error().into();
+                "#[anchor_fuzz(structured)] second parameter must be Vec<ActionType>",
+            )
+            .to_compile_error()
+            .into();
         }
         inner
     } else {
@@ -283,25 +306,28 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         // Generate simple mode deserialization (uses expect() - for dry-run, replay, coverage-only)
-        simple_deser_stmts = params.iter().map(|param| {
-            let name = &param.name;
-            let ty = &param.ty;
+        simple_deser_stmts = params
+            .iter()
+            .map(|param| {
+                let name = &param.name;
+                let ty = &param.ty;
 
-            let base_deser = quote! {
-                let mut #name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
-                    .expect("Failed to deserialize input");
-            };
+                let base_deser = quote! {
+                    let mut #name: #ty = <#ty as arbitrary::Arbitrary>::arbitrary(&mut u)
+                        .expect("Failed to deserialize input");
+                };
 
-            if let Some(ref constraint) = param.constraint {
-                let constraint_code = gen_range_constraint(name, ty, constraint);
-                quote! {
-                    #base_deser
-                    #constraint_code
+                if let Some(ref constraint) = param.constraint {
+                    let constraint_code = gen_range_constraint(name, ty, constraint);
+                    quote! {
+                        #base_deser
+                        #constraint_code
+                    }
+                } else {
+                    base_deser
                 }
-            } else {
-                base_deser
-            }
-        }).collect();
+            })
+            .collect();
     }
 
     let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
@@ -316,7 +342,8 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     let load_inputs_fn = corpus::load_inputs_into_memory();
 
     // Convert action_type to TokenStream for passing to codegen functions
-    let action_type_tokens: Option<proc_macro2::TokenStream> = action_type.as_ref().map(|ty| quote! { #ty });
+    let action_type_tokens: Option<proc_macro2::TokenStream> =
+        action_type.as_ref().map(|ty| quote! { #ty });
 
     // Generate mode-specific code
     let dry_run_code = modes::dry_run_mode(

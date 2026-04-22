@@ -16,12 +16,12 @@ use std::sync::Arc;
 fn test_value_bucket() {
     assert_eq!(value_bucket(0), 0);
     assert_eq!(value_bucket(1), 1);
-    assert_eq!(value_bucket(2), 2);    // 2..=9 => bucket 2
+    assert_eq!(value_bucket(2), 2); // 2..=9 => bucket 2
     assert_eq!(value_bucket(5), 2);
     assert_eq!(value_bucket(9), 2);
-    assert_eq!(value_bucket(10), 3);   // 10..=99 => bucket 3
+    assert_eq!(value_bucket(10), 3); // 10..=99 => bucket 3
     assert_eq!(value_bucket(99), 3);
-    assert_eq!(value_bucket(100), 4);  // 100..=999 => bucket 4
+    assert_eq!(value_bucket(100), 4); // 100..=999 => bucket 4
     assert_eq!(value_bucket(999), 4);
     assert_eq!(value_bucket(1_000), 5);
     assert_eq!(value_bucket(9_999), 5);
@@ -84,10 +84,7 @@ fn test_state_class_from_fingerprint() {
     assert_eq!(state_class_from_fingerprint(0), 0);
     assert_eq!(state_class_from_fingerprint(u64::MAX), 0xFFFF);
     // Lower bits shouldn't affect state class
-    assert_eq!(
-        state_class_from_fingerprint(0xDEAD_1234_5678_9ABC),
-        0xDEAD
-    );
+    assert_eq!(state_class_from_fingerprint(0xDEAD_1234_5678_9ABC), 0xDEAD);
 }
 
 // =========================================================================
@@ -120,13 +117,16 @@ fn test_svm_snapshot_accounts_and_clock() {
     };
     let mut accounts = FastHashMap::default();
     let pk = Pubkey::new_unique();
-    accounts.insert(pk, Arc::new(Account {
-        lamports: 999,
-        data: vec![1, 2, 3],
-        owner: Pubkey::new_unique(),
-        executable: false,
-        rent_epoch: 0,
-    }));
+    accounts.insert(
+        pk,
+        Arc::new(Account {
+            lamports: 999,
+            data: vec![1, 2, 3],
+            owner: Pubkey::new_unique(),
+            executable: false,
+            rent_epoch: 0,
+        }),
+    );
     let sysvars = clock_to_sysvars(&clock);
     let snap = SvmSnapshot { accounts, sysvars };
     assert_eq!(snap.account_count(), 1);
@@ -179,7 +179,8 @@ fn test_svm_snapshot_take_and_restore_round_trip() {
 fn test_svm_snapshot_restore_removes_created_accounts() {
     let mut svm = LiteSVM::new();
     let pk_original = Pubkey::new_unique();
-    svm.set_account(pk_original, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_original, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_original].into_iter().collect();
     let snap = SvmSnapshot::take(&svm, &tracked);
@@ -221,14 +222,16 @@ fn test_restore_skips_zeroing_executable_accounts() {
     // causing a desync panic in litesvm.
     let mut svm = LiteSVM::new();
     let pk_original = Pubkey::new_unique();
-    svm.set_account(pk_original, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_original, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_original].into_iter().collect();
     let snap = SvmSnapshot::take(&svm, &tracked);
 
     // Simulate a program being deployed during an iteration
     let pk_program = Pubkey::new_unique();
-    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32]))
+        .unwrap();
     assert!(svm.get_account(&pk_program).is_some());
 
     // Restore — pk_program should be SKIPPED (not zeroed)
@@ -238,7 +241,10 @@ fn test_restore_skips_zeroing_executable_accounts() {
 
     // Executable account must still exist
     let prog = svm.get_account(&pk_program);
-    assert!(prog.is_some(), "executable account should NOT be zeroed by restore");
+    assert!(
+        prog.is_some(),
+        "executable account should NOT be zeroed by restore"
+    );
     assert_eq!(prog.unwrap().lamports, 5000);
 }
 
@@ -248,15 +254,18 @@ fn test_restore_zeroes_non_executable_but_skips_executable() {
     // iteration, restore should zero only the non-executable ones.
     let mut svm = LiteSVM::new();
     let pk_initial = Pubkey::new_unique();
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let snap = SvmSnapshot::take(&svm, &tracked);
 
     let pk_data = Pubkey::new_unique();
     let pk_program = Pubkey::new_unique();
-    svm.set_account(pk_data, make_account(500, &[9, 9])).unwrap();
-    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    svm.set_account(pk_data, make_account(500, &[9, 9]))
+        .unwrap();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32]))
+        .unwrap();
 
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk_data);
@@ -264,11 +273,15 @@ fn test_restore_zeroes_non_executable_but_skips_executable() {
     snap.restore(&mut svm, &dirty);
 
     // Non-executable gets zeroed (deleted)
-    assert!(svm.get_account(&pk_data).is_none(),
-        "non-executable created account should be zeroed");
+    assert!(
+        svm.get_account(&pk_data).is_none(),
+        "non-executable created account should be zeroed"
+    );
     // Executable survives
-    assert!(svm.get_account(&pk_program).is_some(),
-        "executable account should NOT be zeroed");
+    assert!(
+        svm.get_account(&pk_program).is_some(),
+        "executable account should NOT be zeroed"
+    );
 }
 
 #[test]
@@ -277,17 +290,20 @@ fn test_restore_selective_skips_zeroing_executable_accounts() {
     // initial snapshot must not be zeroed.
     let mut svm = LiteSVM::new();
     let pk_initial = Pubkey::new_unique();
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
 
     // Simulate: previous iteration deployed a program
     let pk_program = Pubkey::new_unique();
-    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32]))
+        .unwrap();
     // And created a data account
     let pk_data = Pubkey::new_unique();
-    svm.set_account(pk_data, make_account(300, &[7, 8])).unwrap();
+    svm.set_account(pk_data, make_account(300, &[7, 8]))
+        .unwrap();
 
     // Both are in divergent_keys (dirtied by previous iteration)
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -299,11 +315,15 @@ fn test_restore_selective_skips_zeroing_executable_accounts() {
     initial.restore_selective(&mut svm, &divergent, &empty_delta);
 
     // Data account gets zeroed
-    assert!(svm.get_account(&pk_data).is_none(),
-        "non-executable divergent account should be zeroed");
+    assert!(
+        svm.get_account(&pk_data).is_none(),
+        "non-executable divergent account should be zeroed"
+    );
     // Program account survives
-    assert!(svm.get_account(&pk_program).is_some(),
-        "executable divergent account should NOT be zeroed by restore_selective");
+    assert!(
+        svm.get_account(&pk_program).is_some(),
+        "executable divergent account should NOT be zeroed by restore_selective"
+    );
 }
 
 #[test]
@@ -312,16 +332,19 @@ fn test_restore_selective_from_skips_zeroing_executable_accounts() {
     // delta-to-delta comparison.
     let mut svm = LiteSVM::new();
     let pk_initial = Pubkey::new_unique();
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
 
     // Simulate: previous iteration deployed a program and created a data account
     let pk_program = Pubkey::new_unique();
-    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32])).unwrap();
+    svm.set_account(pk_program, make_executable_account(5000, &[0xEF; 32]))
+        .unwrap();
     let pk_data = Pubkey::new_unique();
-    svm.set_account(pk_data, make_account(300, &[7, 8])).unwrap();
+    svm.set_account(pk_data, make_account(300, &[7, 8]))
+        .unwrap();
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk_program);
@@ -332,15 +355,23 @@ fn test_restore_selective_from_skips_zeroing_executable_accounts() {
     let prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
 
     initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     // Data account gets zeroed
-    assert!(svm.get_account(&pk_data).is_none(),
-        "non-executable divergent account should be zeroed");
+    assert!(
+        svm.get_account(&pk_data).is_none(),
+        "non-executable divergent account should be zeroed"
+    );
     // Program account survives
-    assert!(svm.get_account(&pk_program).is_some(),
-        "executable divergent account should NOT be zeroed by restore_selective_from");
+    assert!(
+        svm.get_account(&pk_program).is_some(),
+        "executable divergent account should NOT be zeroed by restore_selective_from"
+    );
 }
 
 #[test]
@@ -413,7 +444,8 @@ fn test_svm_snapshot_take_all() {
 fn test_svm_snapshot_restore_full_round_trip() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
-    svm.set_account(pk, make_account(777, &[0xAB, 0xCD])).unwrap();
+    svm.set_account(pk, make_account(777, &[0xAB, 0xCD]))
+        .unwrap();
 
     // take_all captures everything
     let snap = SvmSnapshot::take_all(&svm);
@@ -434,14 +466,17 @@ fn test_svm_snapshot_take_delta() {
     let mut svm = LiteSVM::new();
     let pk_initial = Pubkey::new_unique();
     let pk_changed = Pubkey::new_unique();
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
-    svm.set_account(pk_changed, make_account(200, &[2])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
+    svm.set_account(pk_changed, make_account(200, &[2]))
+        .unwrap();
 
     // Parent delta is empty (initial state)
     let parent_delta = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Simulate an action that modifies pk_changed
-    svm.set_account(pk_changed, make_account(999, &[9, 9, 9])).unwrap();
+    svm.set_account(pk_changed, make_account(999, &[9, 9, 9]))
+        .unwrap();
 
     // Track which accounts were dirty
     let mut dirty = DirtyTracker::new();
@@ -538,7 +573,8 @@ fn test_svm_snapshot_restore_selective_from_skips_shared_arcs() {
     let pk_changed = Pubkey::new_unique();
 
     svm.set_account(pk_shared, make_account(100, &[1])).unwrap();
-    svm.set_account(pk_changed, make_account(200, &[2])).unwrap();
+    svm.set_account(pk_changed, make_account(200, &[2]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_shared, pk_changed].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
@@ -562,8 +598,10 @@ fn test_svm_snapshot_restore_selective_from_skips_shared_arcs() {
     };
 
     // Set SVM to prev_delta values (simulate previous iteration)
-    svm.set_account(pk_shared, make_account(555, &[5, 5, 5])).unwrap();
-    svm.set_account(pk_changed, make_account(888, &[8])).unwrap();
+    svm.set_account(pk_shared, make_account(555, &[5, 5, 5]))
+        .unwrap();
+    svm.set_account(pk_changed, make_account(888, &[8]))
+        .unwrap();
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk_shared);
@@ -653,8 +691,10 @@ fn test_dirty_tracker_snapshot_iteration_cycle() {
     let program_id = Pubkey::new_unique();
 
     // Both accounts must have non-zero lamports — LiteSVM deletes zero-lamport accounts
-    svm.set_account(pk_user, make_account(1_000_000, &[0; 32])).unwrap();
-    svm.set_account(pk_vault, make_account(1, &[0; 64])).unwrap();
+    svm.set_account(pk_user, make_account(1_000_000, &[0; 32]))
+        .unwrap();
+    svm.set_account(pk_vault, make_account(1, &[0; 64]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_user, pk_vault].into_iter().collect();
     let snap = SvmSnapshot::take(&svm, &tracked);
@@ -673,8 +713,10 @@ fn test_dirty_tracker_snapshot_iteration_cycle() {
     dirty.record_tx(&[ix], &fee_payer);
 
     // Simulate the state change (normally done by SVM execution)
-    svm.set_account(pk_user, make_account(500_000, &[0; 32])).unwrap();
-    svm.set_account(pk_vault, make_account(500_001, &[0; 64])).unwrap();
+    svm.set_account(pk_user, make_account(500_000, &[0; 32]))
+        .unwrap();
+    svm.set_account(pk_vault, make_account(500_001, &[0; 64]))
+        .unwrap();
 
     // Verify dirty tracker caught the right accounts
     assert!(dirty.dirty_accounts().contains(&pk_user));
@@ -689,11 +731,14 @@ fn test_dirty_tracker_snapshot_iteration_cycle() {
     dirty.clear();
     let ix2 = anchor_lang::solana_program::instruction::Instruction {
         program_id,
-        accounts: vec![anchor_lang::solana_program::instruction::AccountMeta::new(pk_vault, false)],
+        accounts: vec![anchor_lang::solana_program::instruction::AccountMeta::new(
+            pk_vault, false,
+        )],
         data: vec![0x02],
     };
     dirty.record_tx(&[ix2], &fee_payer);
-    svm.set_account(pk_vault, make_account(999_999, &[0xFF; 64])).unwrap();
+    svm.set_account(pk_vault, make_account(999_999, &[0xFF; 64]))
+        .unwrap();
 
     snap.restore(&mut svm, &dirty);
     assert_eq!(svm.get_account(&pk_vault).unwrap().lamports, 1);
@@ -741,7 +786,10 @@ fn test_fingerprint_empty_dirty_set() {
         accounts: FastHashMap::default(),
         sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
-    assert_eq!(compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial), 0);
+    assert_eq!(
+        compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial),
+        0
+    );
 }
 
 #[test]
@@ -757,7 +805,8 @@ fn test_fingerprint_changes_with_data() {
 
     // Use data that crosses log2_bucket boundaries:
     // [0,0,0,0,0,0,0,0] → u64 LE = 0 → bucket 0
-    svm.set_account(pk, make_account(1000, &[0, 0, 0, 0, 0, 0, 0, 0])).unwrap();
+    svm.set_account(pk, make_account(1000, &[0, 0, 0, 0, 0, 0, 0, 0]))
+        .unwrap();
 
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk);
@@ -766,18 +815,26 @@ fn test_fingerprint_changes_with_data() {
     assert_ne!(fp1, 0); // non-zero because pubkey + lamports also contribute
 
     // [1,0,0,0,0,0,0,0] → u64 LE = 1 → bucket 1 (different from bucket 0)
-    svm.set_account(pk, make_account(1000, &[1, 0, 0, 0, 0, 0, 0, 0])).unwrap();
+    svm.set_account(pk, make_account(1000, &[1, 0, 0, 0, 0, 0, 0, 0]))
+        .unwrap();
     let fp2 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
 
-    assert_ne!(fp1, fp2, "data crossing bucket boundaries should produce different fingerprints");
+    assert_ne!(
+        fp1, fp2,
+        "data crossing bucket boundaries should produce different fingerprints"
+    );
 
     // Also test lamports bucket boundary:
     // lamports=1 (diff from 0 = 1 → bucket 1) vs lamports=u64::MAX (diff from 0 = MAX → overflow bucket)
     svm.set_account(pk, make_account(1, &[0; 8])).unwrap();
     let fp3 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
-    svm.set_account(pk, make_account(u64::MAX, &[0; 8])).unwrap();
+    svm.set_account(pk, make_account(u64::MAX, &[0; 8]))
+        .unwrap();
     let fp4 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
-    assert_ne!(fp3, fp4, "lamports crossing bucket boundary should change fingerprint");
+    assert_ne!(
+        fp3, fp4,
+        "lamports crossing bucket boundary should change fingerprint"
+    );
 }
 
 #[test]
@@ -908,7 +965,14 @@ fn test_delta_chain_middle_deletes_account() {
     let delta_a = SvmSnapshot::take_delta(&svm, &delta_root, &dirty_a);
 
     // Action B: delete X (simulate by setting lamports=0, which makes get_account return None)
-    svm.set_account(pk_x, Account { lamports: 0, ..Default::default() }).unwrap();
+    svm.set_account(
+        pk_x,
+        Account {
+            lamports: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut dirty_b = DirtyTracker::new();
     dirty_b.mark_account_dirty(&pk_x);
     let delta_b = SvmSnapshot::take_delta(&svm, &delta_a, &dirty_b);
@@ -954,7 +1018,8 @@ fn test_delta_chain_sibling_branches() {
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Action A: modify base → 111
-    svm.set_account(pk_base, make_account(111, &[0xAA])).unwrap();
+    svm.set_account(pk_base, make_account(111, &[0xAA]))
+        .unwrap();
     let mut dirty_a = DirtyTracker::new();
     dirty_a.mark_account_dirty(&pk_base);
     let delta_a = SvmSnapshot::take_delta(&svm, &delta_root, &dirty_a);
@@ -997,9 +1062,8 @@ fn test_delta_chain_sibling_branches() {
     }
     let prev_exec_dirty = FastHashSet::default();
 
-    let count = initial.restore_selective_from(
-        &mut svm, &divergent, &delta_b, &delta_c, &prev_exec_dirty,
-    );
+    let count =
+        initial.restore_selective_from(&mut svm, &divergent, &delta_b, &delta_c, &prev_exec_dirty);
 
     // pk_base shares Arc → skipped. X is in divergent but not in delta_c → restored to initial.
     // Y is in delta_c but not in delta_b → unconditional write.
@@ -1024,7 +1088,8 @@ fn test_restore_selective_divergent_not_in_initial_or_delta() {
     let pk_initial = Pubkey::new_unique();
     let pk_cpi = Pubkey::new_unique();
 
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
 
@@ -1060,14 +1125,20 @@ fn test_restore_selective_from_next_has_new_accounts() {
     // prev_delta: only X=500
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk_x, Arc::new(make_account(500, &[5])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
+    let prev_delta = SvmSnapshot {
+        accounts: prev_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // next_delta: X=500 (same Arc) + Y=700 (new)
     let shared_x = prev_delta.accounts()[&pk_x].clone();
     let mut next_accounts = FastHashMap::default();
     next_accounts.insert(pk_x, shared_x);
     next_accounts.insert(pk_y, Arc::new(make_account(700, &[7])));
-    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: initial.sysvars.clone() };
+    let next_delta = SvmSnapshot {
+        accounts: next_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // SVM starts at prev_delta state
     svm.set_account(pk_x, make_account(500, &[5])).unwrap();
@@ -1077,7 +1148,11 @@ fn test_restore_selective_from_next_has_new_accounts() {
     let prev_exec_dirty = FastHashSet::default();
 
     let count = initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     // X: shared Arc, not exec-dirty → skipped
@@ -1104,12 +1179,18 @@ fn test_restore_selective_from_prev_accounts_not_in_divergent() {
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk_x, Arc::new(make_account(500, &[5])));
     prev_accounts.insert(pk_y, Arc::new(make_account(600, &[6])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
+    let prev_delta = SvmSnapshot {
+        accounts: prev_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     let mut next_accounts = FastHashMap::default();
     next_accounts.insert(pk_x, Arc::new(make_account(700, &[7])));
     // next_delta does NOT have Y
-    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: initial.sysvars.clone() };
+    let next_delta = SvmSnapshot {
+        accounts: next_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // SVM at prev_delta state
     svm.set_account(pk_x, make_account(500, &[5])).unwrap();
@@ -1122,7 +1203,11 @@ fn test_restore_selective_from_prev_accounts_not_in_divergent() {
     let prev_exec_dirty = FastHashSet::default();
 
     initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     // X: in divergent AND in next_delta → skipped in step 1, written with next_delta value in step 2
@@ -1153,7 +1238,10 @@ fn test_restore_selective_empty_divergent_with_delta() {
     delta_accounts.insert(pk_a, Arc::new(make_account(111, &[0xAA])));
     delta_accounts.insert(pk_b, Arc::new(make_account(222, &[0xBB])));
     delta_accounts.insert(pk_c, Arc::new(make_account(333, &[0xCC])));
-    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: initial.sysvars.clone() };
+    let delta = SvmSnapshot {
+        accounts: delta_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // Empty divergent (first iteration, SVM has initial state)
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1344,7 +1432,9 @@ fn test_dirty_tracker_same_key_writable_and_program() {
     // Instruction 1: dual_key is writable account
     let ix1 = anchor_lang::solana_program::instruction::Instruction {
         program_id: other_program,
-        accounts: vec![anchor_lang::solana_program::instruction::AccountMeta::new(dual_key, false)],
+        accounts: vec![anchor_lang::solana_program::instruction::AccountMeta::new(
+            dual_key, false,
+        )],
         data: vec![],
     };
     // Instruction 2: dual_key is the program_id
@@ -1357,8 +1447,14 @@ fn test_dirty_tracker_same_key_writable_and_program() {
     tracker.record_tx(&[ix1, ix2], &fee_payer);
 
     // dual_key should be in BOTH sets
-    assert!(tracker.dirty_accounts().contains(&dual_key), "should be in writable set");
-    assert!(tracker.read_accounts().contains(&dual_key), "should be in read_only set");
+    assert!(
+        tracker.dirty_accounts().contains(&dual_key),
+        "should be in writable set"
+    );
+    assert!(
+        tracker.read_accounts().contains(&dual_key),
+        "should be in read_only set"
+    );
     // dirty_accounts() (writable) is what restore uses
     assert!(tracker.dirty_accounts().contains(&dual_key));
 }
@@ -1371,12 +1467,14 @@ fn test_restore_with_fee_payer_not_in_snapshot() {
     let pk_initial = Pubkey::new_unique();
     let pk_fee_payer = Pubkey::new_unique();
 
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let snap = SvmSnapshot::take(&svm, &tracked);
 
     // Fee payer created during iteration
-    svm.set_account(pk_fee_payer, make_account(1_000_000, &[0xFF; 32])).unwrap();
+    svm.set_account(pk_fee_payer, make_account(1_000_000, &[0xFF; 32]))
+        .unwrap();
 
     let program_id = Pubkey::new_unique();
     let mut dirty = DirtyTracker::new();
@@ -1424,7 +1522,11 @@ fn test_restore_selective_from_different_clocks() {
     let prev_exec_dirty = FastHashSet::default();
 
     initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     let clock = svm.get_sysvar::<Clock>();
@@ -1490,10 +1592,14 @@ fn test_fingerprint_changes_with_different_states() {
     let fp_a = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
 
     // State B: 10000 lamports (different magnitude)
-    svm.set_account(pk, make_account(10000, &[0u8; 16])).unwrap();
+    svm.set_account(pk, make_account(10000, &[0u8; 16]))
+        .unwrap();
     let fp_b = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
 
-    assert_ne!(fp_a, fp_b, "different lamport magnitudes should produce different fingerprints");
+    assert_ne!(
+        fp_a, fp_b,
+        "different lamport magnitudes should produce different fingerprints"
+    );
 
     // State C: same as A (150 lamports, same magnitude)
     svm.set_account(pk, make_account(150, &[0u8; 16])).unwrap();
@@ -1513,7 +1619,8 @@ fn test_field_novelty_first_change_is_novel() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
     let initial_data = vec![0u8; 32];
-    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+    svm.set_account(pk, make_account(1000, &initial_data))
+        .unwrap();
 
     // Take initial snapshot
     let mut tracked = HashSet::new();
@@ -1529,10 +1636,15 @@ fn test_field_novelty_first_change_is_novel() {
     tracker.mark_account_dirty(&pk);
 
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
 
     // Should detect novelty: changed field at offset 8 + lamports check
-    assert!(novel >= 1, "first field change should be novel, got {}", novel);
+    assert!(
+        novel >= 1,
+        "first field change should be novel, got {}",
+        novel
+    );
 }
 
 #[test]
@@ -1540,7 +1652,8 @@ fn test_field_novelty_same_bucket_not_novel() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
     let initial_data = vec![0u8; 32];
-    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+    svm.set_account(pk, make_account(1000, &initial_data))
+        .unwrap();
 
     let mut tracked = HashSet::new();
     tracked.insert(pk);
@@ -1554,14 +1667,16 @@ fn test_field_novelty_same_bucket_not_novel() {
     let mut data1 = initial_data.clone();
     data1[8..16].copy_from_slice(&100u64.to_le_bytes());
     svm.set_account(pk, make_account(1000, &data1)).unwrap();
-    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel1 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     assert!(novel1 >= 1);
 
     // Second: set field to 150 (same bucket as 100 — both bucket 5)
     let mut data2 = initial_data.clone();
     data2[8..16].copy_from_slice(&150u64.to_le_bytes());
     svm.set_account(pk, make_account(1000, &data2)).unwrap();
-    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel2 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     // Same magnitude bucket → should NOT be novel (lamports also unchanged)
     assert_eq!(novel2, 0, "same bucket should not be novel");
 }
@@ -1571,7 +1686,8 @@ fn test_field_novelty_different_bucket_is_novel() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
     let initial_data = vec![0u8; 32];
-    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+    svm.set_account(pk, make_account(1000, &initial_data))
+        .unwrap();
 
     let mut tracked = HashSet::new();
     tracked.insert(pk);
@@ -1585,16 +1701,22 @@ fn test_field_novelty_different_bucket_is_novel() {
     let mut data1 = initial_data.clone();
     data1[8..16].copy_from_slice(&100u64.to_le_bytes());
     svm.set_account(pk, make_account(1000, &data1)).unwrap();
-    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel1 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     assert!(novel1 >= 1);
 
     // Second: set field to 5000 (bucket 6: 1000-9999) — different bucket
     let mut data2 = initial_data.clone();
     data2[8..16].copy_from_slice(&5000u64.to_le_bytes());
     svm.set_account(pk, make_account(1000, &data2)).unwrap();
-    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel2 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     // Different magnitude → at least the field should be novel
-    assert!(novel2 >= 1, "different bucket should be novel, got {}", novel2);
+    assert!(
+        novel2 >= 1,
+        "different bucket should be novel, got {}",
+        novel2
+    );
 }
 
 #[test]
@@ -1612,8 +1734,10 @@ fn test_field_novelty_lamports_change() {
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
 
     // Change lamports to different magnitude (1000 → 1_000_000)
-    svm.set_account(pk, make_account(1_000_000, &[0u8; 16])).unwrap();
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    svm.set_account(pk, make_account(1_000_000, &[0u8; 16]))
+        .unwrap();
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     // Lamports changed bucket → novel
     assert!(novel >= 1, "lamports change should be novel, got {}", novel);
 }
@@ -1623,7 +1747,8 @@ fn test_field_novelty_multiple_regions() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
     let initial_data = vec![0u8; 64];
-    svm.set_account(pk, make_account(1000, &initial_data)).unwrap();
+    svm.set_account(pk, make_account(1000, &initial_data))
+        .unwrap();
 
     let mut tracked = HashSet::new();
     tracked.insert(pk);
@@ -1639,16 +1764,22 @@ fn test_field_novelty_multiple_regions() {
     new_data[32..40].copy_from_slice(&999u64.to_le_bytes()); // field at offset 32
     svm.set_account(pk, make_account(1000, &new_data)).unwrap();
 
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     // 2 changed regions + lamports (same bucket) = at least 2 novel field bits
-    assert!(novel >= 2, "two changed regions should produce at least 2 novel bits, got {}", novel);
+    assert!(
+        novel >= 2,
+        "two changed regions should produce at least 2 novel bits, got {}",
+        novel
+    );
 }
 
 #[test]
 fn test_field_novelty_no_change_not_novel() {
     let mut svm = LiteSVM::new();
     let pk = Pubkey::new_unique();
-    svm.set_account(pk, make_account(1000, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap();
+    svm.set_account(pk, make_account(1000, &[1, 2, 3, 4, 5, 6, 7, 8]))
+        .unwrap();
 
     let mut tracked = HashSet::new();
     tracked.insert(pk);
@@ -1659,11 +1790,16 @@ fn test_field_novelty_no_change_not_novel() {
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
 
     // First check with same data (no actual changes) → novel due to first-time lamports bit
-    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel1 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
 
     // Second check with same data → not novel (all bits already set)
-    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
-    assert_eq!(novel2, 0, "unchanged state should not be novel on second check");
+    let novel2 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert_eq!(
+        novel2, 0,
+        "unchanged state should not be novel on second check"
+    );
 }
 
 #[test]
@@ -1677,13 +1813,15 @@ fn test_field_novelty_new_account() {
     };
 
     // Create account after initial
-    svm.set_account(pk, make_account(5000, &[10, 20, 30, 40])).unwrap();
+    svm.set_account(pk, make_account(5000, &[10, 20, 30, 40]))
+        .unwrap();
 
     let mut tracker = DirtyTracker::new();
     tracker.mark_account_dirty(&pk);
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
 
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     // New account: lamports + all bytes differ from empty initial → novel
     assert!(novel >= 1, "new account should be novel, got {}", novel);
 }
@@ -1742,15 +1880,25 @@ fn test_field_novelty_new_accounts_different_data() {
     data_a[8..16].copy_from_slice(&1u64.to_le_bytes());
     svm.set_account(pk, make_account(5000, &data_a)).unwrap();
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
-    let novel_a = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
-    assert!(novel_a >= 2, "new account should have novel lamports + data fields, got {}", novel_a);
+    let novel_a =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(
+        novel_a >= 2,
+        "new account should have novel lamports + data fields, got {}",
+        novel_a
+    );
 
     // State B: different data magnitude in same field
     let mut data_b = vec![0u8; 16];
     data_b[8..16].copy_from_slice(&999_999u64.to_le_bytes());
     svm.set_account(pk, make_account(5000, &data_b)).unwrap();
-    let novel_b = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
-    assert!(novel_b >= 1, "new account with different data magnitude should be novel, got {}", novel_b);
+    let novel_b =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(
+        novel_b >= 1,
+        "new account with different data magnitude should be novel, got {}",
+        novel_b
+    );
 }
 
 // =========================================================================
@@ -1777,9 +1925,14 @@ fn test_field_novelty_clock_change_is_novel() {
 
     let tracker = DirtyTracker::new(); // empty — no dirty accounts
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
 
-    assert!(novel >= 1, "clock-only change should produce novelty, got {}", novel);
+    assert!(
+        novel >= 1,
+        "clock-only change should produce novelty, got {}",
+        novel
+    );
 }
 
 #[test]
@@ -1801,15 +1954,21 @@ fn test_field_novelty_clock_epoch_change_is_novel() {
     let mut clock1 = make_test_clock(500);
     clock1.epoch = 1;
     svm.set_sysvar(&clock1);
-    let novel1 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel1 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
     assert!(novel1 >= 1, "epoch change should be novel, got {}", novel1);
 
     // Epoch 2 (different epoch bucket)
     let mut clock2 = make_test_clock(900);
     clock2.epoch = 2;
     svm.set_sysvar(&clock2);
-    let novel2 = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
-    assert!(novel2 >= 1, "different epoch should be novel, got {}", novel2);
+    let novel2 =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    assert!(
+        novel2 >= 1,
+        "different epoch should be novel, got {}",
+        novel2
+    );
 }
 
 #[test]
@@ -1826,7 +1985,12 @@ fn test_field_novelty_same_clock_not_novel() {
 
     let tracker = DirtyTracker::new();
     let mut bitmap = vec![0u8; FIELD_NOVELTY_BITMAP_SIZE];
-    let novel = unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
+    let novel =
+        unsafe { check_field_novelty(&svm, &tracker, &initial, bitmap.as_mut_ptr(), bitmap.len()) };
 
-    assert_eq!(novel, 0, "unchanged clock should produce zero novelty, got {}", novel);
+    assert_eq!(
+        novel, 0,
+        "unchanged clock should produce zero novelty, got {}",
+        novel
+    );
 }

@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::{FastHashMap, FastHashSet};
-use anchor_lang::prelude::Clock;
 use anchor_lang::prelude::sysvar::SysvarId;
+use anchor_lang::prelude::Clock;
 use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_pubkey::Pubkey;
@@ -19,13 +19,16 @@ pub fn make_test_clock(slot: u64) -> Clock {
 
 /// Convert a Clock into a sysvars vec suitable for SvmSnapshot construction.
 pub fn clock_to_sysvars(clock: &Clock) -> Vec<(Pubkey, Option<Account>)> {
-    vec![(Clock::id(), Some(Account {
-        lamports: 1,
-        data: bincode::serialize(clock).unwrap(),
-        owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
-        executable: false,
-        rent_epoch: 0,
-    }))]
+    vec![(
+        Clock::id(),
+        Some(Account {
+            lamports: 1,
+            data: bincode::serialize(clock).unwrap(),
+            owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
+            executable: false,
+            rent_epoch: 0,
+        }),
+    )]
 }
 
 /// Create test sysvars (containing a Clock with the given slot) for SvmSnapshot construction.
@@ -111,38 +114,73 @@ pub fn verify_full_state(
     for (pk, initial_acct) in initial.accounts() {
         let expected = delta.accounts().get(pk).unwrap_or(initial_acct);
         if expected.lamports == 0 {
-            assert!(svm.get_account(pk).is_none(),
-                "{}: pk {:?} should be tombstoned (0 lamports)", context, pk);
+            assert!(
+                svm.get_account(pk).is_none(),
+                "{}: pk {:?} should be tombstoned (0 lamports)",
+                context,
+                pk
+            );
         } else {
             let got = svm.get_account(pk);
-            assert!(got.is_some(),
-                "{}: pk {:?} expected lamports={} but account missing", context, pk, expected.lamports);
+            assert!(
+                got.is_some(),
+                "{}: pk {:?} expected lamports={} but account missing",
+                context,
+                pk,
+                expected.lamports
+            );
             let got = got.unwrap();
-            assert_eq!(got.lamports, expected.lamports,
-                "{}: pk {:?} lamports mismatch", context, pk);
-            assert_eq!(got.data, expected.data,
-                "{}: pk {:?} data mismatch", context, pk);
-            assert_eq!(got.owner, expected.owner,
-                "{}: pk {:?} owner mismatch", context, pk);
+            assert_eq!(
+                got.lamports, expected.lamports,
+                "{}: pk {:?} lamports mismatch",
+                context, pk
+            );
+            assert_eq!(
+                got.data, expected.data,
+                "{}: pk {:?} data mismatch",
+                context, pk
+            );
+            assert_eq!(
+                got.owner, expected.owner,
+                "{}: pk {:?} owner mismatch",
+                context, pk
+            );
         }
     }
     // Delta accounts NOT in initial must also be set
     for (pk, delta_acct) in delta.accounts() {
-        if initial.accounts().contains_key(pk) { continue; }
+        if initial.accounts().contains_key(pk) {
+            continue;
+        }
         if delta_acct.lamports == 0 {
-            assert!(svm.get_account(pk).is_none(),
-                "{}: CPI pk {:?} should be tombstoned", context, pk);
+            assert!(
+                svm.get_account(pk).is_none(),
+                "{}: CPI pk {:?} should be tombstoned",
+                context,
+                pk
+            );
         } else {
-            let got = svm.get_account(pk).unwrap_or_else(||
-                panic!("{}: CPI pk {:?} expected lamports={} but missing", context, pk, delta_acct.lamports));
-            assert_eq!(got.lamports, delta_acct.lamports,
-                "{}: CPI pk {:?} lamports mismatch", context, pk);
+            let got = svm.get_account(pk).unwrap_or_else(|| {
+                panic!(
+                    "{}: CPI pk {:?} expected lamports={} but missing",
+                    context, pk, delta_acct.lamports
+                )
+            });
+            assert_eq!(
+                got.lamports, delta_acct.lamports,
+                "{}: CPI pk {:?} lamports mismatch",
+                context, pk
+            );
         }
     }
     // Extra accounts must be gone
     for pk in extra_must_be_gone {
-        assert!(svm.get_account(pk).is_none(),
-            "{}: stale pk {:?} should be gone", context, pk);
+        assert!(
+            svm.get_account(pk).is_none(),
+            "{}: stale pk {:?} should be gone",
+            context,
+            pk
+        );
     }
 }
 
@@ -199,7 +237,10 @@ pub fn make_pool_snapshot(accounts: Vec<(Pubkey, u64)>) -> SvmSnapshot {
     for (pk, lamports) in accounts {
         map.insert(pk, std::sync::Arc::new(make_account(lamports, &[])));
     }
-    SvmSnapshot { accounts: map, sysvars: make_test_sysvars(0) }
+    SvmSnapshot {
+        accounts: map,
+        sysvars: make_test_sysvars(0),
+    }
 }
 
 /// Helper to create a pool entry with minimal boilerplate.
@@ -214,7 +255,10 @@ pub fn add_pool_entry(
 ) -> bool {
     let compact = snapshot_to_compact_delta(delta);
     pool.try_add(
-        fingerprint, compact, depth, parent_idx,
+        fingerprint,
+        compact,
+        depth,
+        parent_idx,
         vec![0u8; 8], // action_bytes (dummy 4-byte header + 4-byte action)
         format!("action_fp_{:x}", fingerprint),
         Some((fingerprint & 0xF) as u16),
@@ -234,5 +278,8 @@ pub fn snapshot_to_compact_delta(snap: SvmSnapshot) -> CompactDelta {
     for (pk, arc_acct) in snap.accounts {
         accounts.insert(pk, AccountPatch::Full(arc_acct));
     }
-    CompactDelta { accounts, sysvars: snap.sysvars }
+    CompactDelta {
+        accounts,
+        sysvars: snap.sysvars,
+    }
 }

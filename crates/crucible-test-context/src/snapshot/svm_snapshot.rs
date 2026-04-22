@@ -1,7 +1,8 @@
 use crate::{FastHashMap, FastHashSet};
-use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::prelude::sysvar::SysvarId;
+use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use litesvm::LiteSVM;
+use rustc_hash::FxHasher;
 use solana_account::{Account, ReadableAccount};
 use solana_pubkey::Pubkey;
 use solana_sysvar::epoch_rewards::EpochRewards;
@@ -12,7 +13,6 @@ use solana_sysvar::rent::Rent;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use rustc_hash::FxHasher;
 
 use super::dirty_tracker::DirtyTracker;
 
@@ -97,11 +97,15 @@ impl SvmSnapshot {
         // HashMap overhead: ~80 bytes per entry (key + value + hash + metadata)
         let map_overhead = self.accounts.len() * 80;
         // Account data behind Arc pointers (counted per-reference, not deduplicated)
-        let account_data: usize = self.accounts.values()
+        let account_data: usize = self
+            .accounts
+            .values()
             .map(|a| std::mem::size_of::<Account>() + a.data.len())
             .sum();
         // Sysvar data
-        let sysvar_data: usize = self.sysvars.iter()
+        let sysvar_data: usize = self
+            .sysvars
+            .iter()
             .map(|(_, opt)| match opt {
                 Some(a) => std::mem::size_of::<Account>() + a.data.len(),
                 None => 0,
@@ -112,11 +116,7 @@ impl SvmSnapshot {
 
     /// Take a full snapshot by cloning a base snapshot's accounts then overwriting
     /// dirty ones from the current SVM. Captures the complete state after an action.
-    pub fn take_full(
-        svm: &LiteSVM,
-        base_snapshot: &SvmSnapshot,
-        dirty: &DirtyTracker,
-    ) -> Self {
+    pub fn take_full(svm: &LiteSVM, base_snapshot: &SvmSnapshot, dirty: &DirtyTracker) -> Self {
         let mut accounts = base_snapshot.accounts.clone();
         // Overwrite dirty accounts with current SVM state
         for pubkey in dirty.dirty_accounts() {
@@ -211,7 +211,8 @@ impl SvmSnapshot {
         next_delta: &SvmSnapshot,
         prev_exec_dirty: &FastHashSet<Pubkey>,
     ) -> usize {
-        let mut count = self.restore_divergent_to_initial(svm, divergent_keys, &next_delta.accounts);
+        let mut count =
+            self.restore_divergent_to_initial(svm, divergent_keys, &next_delta.accounts);
 
         // 2. Delta accounts — skip if same Arc as prev_delta AND not dirtied by execution
         for (pubkey, next_acct) in &next_delta.accounts {
@@ -258,7 +259,13 @@ impl SvmSnapshot {
                         continue;
                     }
                 }
-                let _ = svm.set_account(*pubkey, Account { lamports: 0, ..Default::default() });
+                let _ = svm.set_account(
+                    *pubkey,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                );
             }
             count += 1;
         }
@@ -274,8 +281,8 @@ impl SvmSnapshot {
     /// Used for save/restore verification: hash at save time, hash again after restore,
     /// if they differ the snapshot is lossy.
     pub fn hash_tracked_state(&self, svm: &LiteSVM) -> u64 {
-        use std::hash::{Hash, Hasher};
         use rustc_hash::FxHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = FxHasher::default();
         // Sort keys for deterministic order
         let mut keys: Vec<_> = self.accounts.keys().copied().collect();
@@ -324,13 +331,16 @@ impl SvmSnapshot {
         let clock_data = bincode::serialize(&clock).unwrap_or_default();
         Self {
             accounts: FastHashMap::default(),
-            sysvars: vec![(Clock::id(), Some(Account {
-                lamports: 1,
-                data: clock_data,
-                owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
-                executable: false,
-                rent_epoch: 0,
-            }))],
+            sysvars: vec![(
+                Clock::id(),
+                Some(Account {
+                    lamports: 1,
+                    data: clock_data,
+                    owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            )],
         }
     }
 
@@ -341,20 +351,24 @@ impl SvmSnapshot {
     /// With `Arc<Account>`, cloning the parent map is O(n * 40B) — just Pubkey copies
     /// + Arc refcount bumps — instead of O(n * avg_account_data_len) deep copies.
     /// Only the newly dirty accounts (from this action) allocate fresh `Arc`s.
-    pub fn take_delta(
-        svm: &LiteSVM,
-        parent_delta: &SvmSnapshot,
-        dirty: &DirtyTracker,
-    ) -> Self {
+    pub fn take_delta(svm: &LiteSVM, parent_delta: &SvmSnapshot, dirty: &DirtyTracker) -> Self {
         // Clone parent's delta — cheap with Arc<Account>: only bumps refcounts
         let mut accounts = parent_delta.accounts.clone();
         // Update/add dirty accounts from current SVM state
         for pk in dirty.dirty_accounts() {
             match svm.get_account(pk) {
-                Some(acct) => { accounts.insert(*pk, Arc::new(acct)); }
+                Some(acct) => {
+                    accounts.insert(*pk, Arc::new(acct));
+                }
                 None => {
                     // Account deleted — store tombstone so restore_full zeroes it
-                    accounts.insert(*pk, Arc::new(Account { lamports: 0, ..Default::default() }));
+                    accounts.insert(
+                        *pk,
+                        Arc::new(Account {
+                            lamports: 0,
+                            ..Default::default()
+                        }),
+                    );
                 }
             }
         }
@@ -376,7 +390,10 @@ impl SvmSnapshot {
         changed_accounts: FastHashMap<Pubkey, Arc<Account>>,
     ) -> Self {
         let sysvars = Self::take_sysvars(svm);
-        Self { accounts: changed_accounts, sysvars }
+        Self {
+            accounts: changed_accounts,
+            sysvars,
+        }
     }
 
     fn take_sysvars(svm: &LiteSVM) -> Vec<(Pubkey, Option<Account>)> {
@@ -404,7 +421,10 @@ impl SvmSnapshot {
             } else {
                 let _ = svm.set_account(
                     *sysvar,
-                    Account { lamports: 0, ..Default::default() },
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
                 );
             }
         }
@@ -495,13 +515,16 @@ impl CompactDelta {
         let clock_data = bincode::serialize(&clock).unwrap_or_default();
         Self {
             accounts: FastHashMap::default(),
-            sysvars: vec![(Clock::id(), Some(Account {
-                lamports: 1,
-                data: clock_data,
-                owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
-                executable: false,
-                rent_epoch: 0,
-            }))],
+            sysvars: vec![(
+                Clock::id(),
+                Some(Account {
+                    lamports: 1,
+                    data: clock_data,
+                    owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            )],
         }
     }
 
@@ -520,9 +543,11 @@ impl CompactDelta {
 
         for (pk, arc_acct) in changed {
             let patch = match initial.accounts.get(&pk) {
-                Some(init_arc) if init_arc.data.len() == arc_acct.data.len()
-                    && init_arc.owner == arc_acct.owner
-                    && init_arc.executable == arc_acct.executable => {
+                Some(init_arc)
+                    if init_arc.data.len() == arc_acct.data.len()
+                        && init_arc.owner == arc_acct.owner
+                        && init_arc.executable == arc_acct.executable =>
+                {
                     // Same size + same metadata — compute u64 word diff
                     let init_data = &init_arc.data;
                     let cur_data = &arc_acct.data;
@@ -532,8 +557,10 @@ impl CompactDelta {
                     // Compare full u64 words
                     for wi in 0..num_full_words {
                         let off = wi * 8;
-                        let init_word = u64::from_le_bytes(init_data[off..off + 8].try_into().unwrap());
-                        let cur_word = u64::from_le_bytes(cur_data[off..off + 8].try_into().unwrap());
+                        let init_word =
+                            u64::from_le_bytes(init_data[off..off + 8].try_into().unwrap());
+                        let cur_word =
+                            u64::from_le_bytes(cur_data[off..off + 8].try_into().unwrap());
                         if init_word != cur_word {
                             patches.push((wi as u32, cur_word));
                         }
@@ -581,9 +608,17 @@ impl CompactDelta {
         let mut changed: FastHashMap<Pubkey, Arc<Account>> = FastHashMap::default();
         for pk in dirty_accounts {
             match svm.get_account(pk) {
-                Some(acct) => { changed.insert(*pk, Arc::new(acct)); }
+                Some(acct) => {
+                    changed.insert(*pk, Arc::new(acct));
+                }
                 None => {
-                    changed.insert(*pk, Arc::new(Account { lamports: 0, ..Default::default() }));
+                    changed.insert(
+                        *pk,
+                        Arc::new(Account {
+                            lamports: 0,
+                            ..Default::default()
+                        }),
+                    );
                 }
             }
         }
@@ -591,12 +626,12 @@ impl CompactDelta {
     }
 
     /// Build a compact delta from pre-built patches (from `fingerprint_and_collect_changed`).
-    pub fn from_patches(
-        svm: &LiteSVM,
-        patches: FastHashMap<Pubkey, AccountPatch>,
-    ) -> Self {
+    pub fn from_patches(svm: &LiteSVM, patches: FastHashMap<Pubkey, AccountPatch>) -> Self {
         let sysvars = SvmSnapshot::take_sysvars(svm);
-        Self { accounts: patches, sysvars }
+        Self {
+            accounts: patches,
+            sysvars,
+        }
     }
 
     /// Build a child delta by inheriting parent patches and overlaying new changes.
@@ -663,10 +698,14 @@ impl CompactDelta {
     /// Estimated heap bytes for memory profiling.
     pub fn estimated_heap_bytes(&self) -> usize {
         let map_overhead = self.accounts.len() * 80;
-        let patch_data: usize = self.accounts.values()
+        let patch_data: usize = self
+            .accounts
+            .values()
             .map(|p| p.estimated_heap_bytes())
             .sum();
-        let sysvar_data: usize = self.sysvars.iter()
+        let sysvar_data: usize = self
+            .sysvars
+            .iter()
             .map(|(_, opt)| match opt {
                 Some(a) => std::mem::size_of::<Account>() + a.data.len(),
                 None => 0,
@@ -718,9 +757,17 @@ impl CompactDelta {
                 }
                 None => {
                     if let Some(existing) = svm.get_account(pubkey) {
-                        if existing.executable { continue; }
+                        if existing.executable {
+                            continue;
+                        }
                     }
-                    let _ = svm.set_account(*pubkey, Account { lamports: 0, ..Default::default() });
+                    let _ = svm.set_account(
+                        *pubkey,
+                        Account {
+                            lamports: 0,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
             count += 1;
@@ -781,9 +828,17 @@ impl CompactDelta {
                 }
                 None => {
                     if let Some(existing) = svm.get_account(pubkey) {
-                        if existing.executable { continue; }
+                        if existing.executable {
+                            continue;
+                        }
                     }
-                    let _ = svm.set_account(*pubkey, Account { lamports: 0, ..Default::default() });
+                    let _ = svm.set_account(
+                        *pubkey,
+                        Account {
+                            lamports: 0,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
             count += 1;
@@ -828,10 +883,15 @@ impl CompactDelta {
 
     /// Per-account size info for diagnostics. Returns (pubkey_short, patch_bytes) pairs.
     pub fn accounts_report_info(&self) -> Vec<(String, usize)> {
-        self.accounts.iter()
+        self.accounts
+            .iter()
             .map(|(pk, patch)| {
                 let pk_str = pk.to_string();
-                let short = format!("{}..{}", &pk_str[..4], &pk_str[pk_str.len().saturating_sub(4)..]);
+                let short = format!(
+                    "{}..{}",
+                    &pk_str[..4],
+                    &pk_str[pk_str.len().saturating_sub(4)..]
+                );
                 let bytes = patch.estimated_heap_bytes();
                 (short, bytes)
             })
@@ -840,7 +900,8 @@ impl CompactDelta {
 
     /// Total sysvar data bytes.
     pub fn sysvar_data_bytes(&self) -> usize {
-        self.sysvars.iter()
+        self.sysvars
+            .iter()
             .map(|(_, opt)| opt.as_ref().map(|a| a.data.len()).unwrap_or(0))
             .sum()
     }
@@ -852,7 +913,10 @@ impl CompactDelta {
             } else {
                 let _ = svm.set_account(
                     *sysvar,
-                    Account { lamports: 0, ..Default::default() },
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
                 );
             }
         }
@@ -864,8 +928,14 @@ fn patches_equal(a: &AccountPatch, b: &AccountPatch) -> bool {
     match (a, b) {
         (AccountPatch::Full(a_arc), AccountPatch::Full(b_arc)) => Arc::ptr_eq(a_arc, b_arc),
         (
-            AccountPatch::Diff { lamports: la, patches: pa },
-            AccountPatch::Diff { lamports: lb, patches: pb },
+            AccountPatch::Diff {
+                lamports: la,
+                patches: pa,
+            },
+            AccountPatch::Diff {
+                lamports: lb,
+                patches: pb,
+            },
         ) => la == lb && pa == pb,
         _ => false,
     }
@@ -919,14 +989,14 @@ pub fn value_bucket(val: u64) -> u8 {
 pub fn slot_bucket(val: u64) -> u8 {
     match val {
         0 => 0,
-        1..=9 => val as u8,                                        // buckets 1-9 (individual)
-        10..=99 => 9 + (val / 10) as u8,                           // buckets 10-18 (per-10)
-        100..=999 => 18 + (val / 100) as u8,                       // buckets 19-27 (per-100)
-        1_000..=9_999 => 27 + (val / 1_000) as u8,                 // buckets 28-36 (per-1K)
-        10_000..=99_999 => 36 + (val / 10_000) as u8,              // buckets 37-45 (per-10K)
-        100_000..=999_999 => 45 + (val / 100_000) as u8,           // buckets 46-54 (per-100K)
-        1_000_000..=9_999_999 => 54 + (val / 1_000_000) as u8,     // buckets 55-63 (per-1M)
-        _ => 64,                                                    // 10M+ overflow
+        1..=9 => val as u8,                           // buckets 1-9 (individual)
+        10..=99 => 9 + (val / 10) as u8,              // buckets 10-18 (per-10)
+        100..=999 => 18 + (val / 100) as u8,          // buckets 19-27 (per-100)
+        1_000..=9_999 => 27 + (val / 1_000) as u8,    // buckets 28-36 (per-1K)
+        10_000..=99_999 => 36 + (val / 10_000) as u8, // buckets 37-45 (per-10K)
+        100_000..=999_999 => 45 + (val / 100_000) as u8, // buckets 46-54 (per-100K)
+        1_000_000..=9_999_999 => 54 + (val / 1_000_000) as u8, // buckets 55-63 (per-1M)
+        _ => 64,                                      // 10M+ overflow
     }
 }
 
@@ -936,13 +1006,13 @@ pub fn slot_bucket(val: u64) -> u8 {
 #[inline]
 pub fn slot_diff_bucket(diff: u64) -> u8 {
     match diff {
-        0..=9 => diff as u8,                                // buckets 0-9
-        10..=99 => 9 + (diff / 10) as u8,                   // buckets 10-18
-        100..=999 => 18 + (diff / 100) as u8,               // buckets 19-27
-        1_000..=9_999 => 27 + (diff / 1_000) as u8,         // buckets 28-36
-        10_000..=99_999 => 36 + (diff / 10_000) as u8,      // buckets 37-45
-        100_000..=999_999 => 45 + (diff / 100_000) as u8,   // buckets 46-54
-        _ => 55,                                             // overflow (≥1M)
+        0..=9 => diff as u8,                              // buckets 0-9
+        10..=99 => 9 + (diff / 10) as u8,                 // buckets 10-18
+        100..=999 => 18 + (diff / 100) as u8,             // buckets 19-27
+        1_000..=9_999 => 27 + (diff / 1_000) as u8,       // buckets 28-36
+        10_000..=99_999 => 36 + (diff / 10_000) as u8,    // buckets 37-45
+        100_000..=999_999 => 45 + (diff / 100_000) as u8, // buckets 46-54
+        _ => 55,                                          // overflow (≥1M)
     }
 }
 
@@ -1008,13 +1078,19 @@ pub fn compute_state_fingerprint_from_snapshot(
         value_bucket(data.len() as u64).hash(&mut hasher);
 
         // Field-boundary-aware diffing: find contiguous changed regions vs initial
-        let init_data = initial.accounts.get(pubkey).map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let init_data = initial
+            .accounts
+            .get(pubkey)
+            .map(|a| a.data.as_slice())
+            .unwrap_or(&[]);
         let min_len = data.len().min(init_data.len());
         let mut i = 0usize;
         while i < min_len {
             if data[i] != init_data[i] {
                 let start = i;
-                while i < min_len && data[i] != init_data[i] { i += 1; }
+                while i < min_len && data[i] != init_data[i] {
+                    i += 1;
+                }
                 let val = read_region_value(&data[start..i]);
                 (start as u32, value_bucket(val)).hash(&mut hasher);
             } else {
@@ -1027,7 +1103,9 @@ pub fn compute_state_fingerprint_from_snapshot(
             while i < data.len() {
                 if data[i] != 0 {
                     let start = i;
-                    while i < data.len() && data[i] != 0 { i += 1; }
+                    while i < data.len() && data[i] != 0 {
+                        i += 1;
+                    }
                     let val = read_region_value(&data[start..i]);
                     (start as u32, value_bucket(val)).hash(&mut hasher);
                 } else {
@@ -1062,7 +1140,11 @@ pub unsafe fn fingerprint_and_collect_changed(
     field_bitmap_len: usize,
 ) -> (u64, FastHashMap<Pubkey, AccountPatch>, u32) {
     let do_field_novelty = !field_bitmap_ptr.is_null();
-    let total_bits = if do_field_novelty { field_bitmap_len * 8 } else { 0 };
+    let total_bits = if do_field_novelty {
+        field_bitmap_len * 8
+    } else {
+        0
+    };
     let mut field_novel_count: u32 = 0;
 
     let mut hasher = FxHasher::default();
@@ -1082,12 +1164,21 @@ pub unsafe fn fingerprint_and_collect_changed(
     // Field novelty: clock checks
     if do_field_novelty && (slot_diff > 0 || clock.epoch != initial_clock.epoch) {
         field_novel_count += check_and_set_bit_atomic(
-            field_bitmap_ptr, total_bits, field_hash(CLOCK_TYPE_KEY, 0, sdb));
+            field_bitmap_ptr,
+            total_bits,
+            field_hash(CLOCK_TYPE_KEY, 0, sdb),
+        );
         field_novel_count += check_and_set_bit_atomic(
-            field_bitmap_ptr, total_bits, field_hash(CLOCK_TYPE_KEY, 1, value_bucket(clock.epoch)));
+            field_bitmap_ptr,
+            total_bits,
+            field_hash(CLOCK_TYPE_KEY, 1, value_bucket(clock.epoch)),
+        );
         if let Some(target) = dirty.clock_target_slot {
             field_novel_count += check_and_set_bit_atomic(
-                field_bitmap_ptr, total_bits, field_hash(CLOCK_TYPE_KEY, 2, slot_bucket(target)));
+                field_bitmap_ptr,
+                total_bits,
+                field_hash(CLOCK_TYPE_KEY, 2, slot_bucket(target)),
+            );
         }
     }
 
@@ -1119,10 +1210,16 @@ pub unsafe fn fingerprint_and_collect_changed(
         if do_field_novelty {
             if slot_diff > 0 {
                 field_novel_count += check_and_set_bit_atomic(
-                    field_bitmap_ptr, total_bits, field_hash(type_key, LAMPORTS_SENTINEL - 1, sdb));
+                    field_bitmap_ptr,
+                    total_bits,
+                    field_hash(type_key, LAMPORTS_SENTINEL - 1, sdb),
+                );
             }
             field_novel_count += check_and_set_bit_atomic(
-                field_bitmap_ptr, total_bits, field_hash(type_key, LAMPORTS_SENTINEL, value_bucket(lamports)));
+                field_bitmap_ptr,
+                total_bits,
+                field_hash(type_key, LAMPORTS_SENTINEL, value_bucket(lamports)),
+            );
         }
 
         // Walk bytes for changed regions: fingerprint + field novelty + patch collection
@@ -1133,13 +1230,18 @@ pub unsafe fn fingerprint_and_collect_changed(
             if data[i] != init_data[i] {
                 any_diff = true;
                 let start = i;
-                while i < min_len && data[i] != init_data[i] { i += 1; }
+                while i < min_len && data[i] != init_data[i] {
+                    i += 1;
+                }
                 let val = read_region_value(&data[start..i]);
                 let vb = value_bucket(val);
                 (start as u32, vb).hash(&mut hasher);
                 if do_field_novelty {
                     field_novel_count += check_and_set_bit_atomic(
-                        field_bitmap_ptr, total_bits, field_hash(type_key, start as u32, vb));
+                        field_bitmap_ptr,
+                        total_bits,
+                        field_hash(type_key, start as u32, vb),
+                    );
                 }
             } else {
                 i += 1;
@@ -1151,13 +1253,18 @@ pub unsafe fn fingerprint_and_collect_changed(
             while i < data.len() {
                 if data[i] != 0 {
                     let start = i;
-                    while i < data.len() && data[i] != 0 { i += 1; }
+                    while i < data.len() && data[i] != 0 {
+                        i += 1;
+                    }
                     let val = read_region_value(&data[start..i]);
                     let vb = value_bucket(val);
                     (start as u32, vb).hash(&mut hasher);
                     if do_field_novelty {
                         field_novel_count += check_and_set_bit_atomic(
-                            field_bitmap_ptr, total_bits, field_hash(type_key, start as u32, vb));
+                            field_bitmap_ptr,
+                            total_bits,
+                            field_hash(type_key, start as u32, vb),
+                        );
                     }
                 } else {
                     i += 1;
@@ -1169,8 +1276,10 @@ pub unsafe fn fingerprint_and_collect_changed(
             (min_len as u32, value_bucket(data.len() as u64)).hash(&mut hasher);
             if do_field_novelty {
                 field_novel_count += check_and_set_bit_atomic(
-                    field_bitmap_ptr, total_bits,
-                    field_hash(type_key, min_len as u32, value_bucket(data.len() as u64)));
+                    field_bitmap_ptr,
+                    total_bits,
+                    field_hash(type_key, min_len as u32, value_bucket(data.len() as u64)),
+                );
             }
         }
         if lamports != init_lamports {
@@ -1192,8 +1301,8 @@ pub unsafe fn fingerprint_and_collect_changed(
             pubkey.hash(&mut id_hasher);
             value_bucket(lamports).hash(&mut id_hasher);
             value_bucket(data.len() as u64).hash(&mut id_hasher);
-            field_novel_count += check_and_set_bit_atomic(
-                field_bitmap_ptr, total_bits, id_hasher.finish());
+            field_novel_count +=
+                check_and_set_bit_atomic(field_bitmap_ptr, total_bits, id_hasher.finish());
 
             if slot_diff > 0 {
                 let mut id_clock_hasher = FxHasher::default();
@@ -1201,7 +1310,10 @@ pub unsafe fn fingerprint_and_collect_changed(
                 value_bucket(lamports).hash(&mut id_clock_hasher);
                 sdb.hash(&mut id_clock_hasher);
                 field_novel_count += check_and_set_bit_atomic(
-                    field_bitmap_ptr, total_bits, id_clock_hasher.finish());
+                    field_bitmap_ptr,
+                    total_bits,
+                    id_clock_hasher.finish(),
+                );
             }
         }
 
@@ -1244,10 +1356,13 @@ pub unsafe fn fingerprint_and_collect_changed(
             } else {
                 // Deleted account: was in initial but now absent from SVM.
                 // Store a zero-lamport tombstone so restore correctly zeroes it.
-                changed.insert(**pubkey, AccountPatch::Full(Arc::new(Account {
-                    lamports: 0,
-                    ..Default::default()
-                })));
+                changed.insert(
+                    **pubkey,
+                    AccountPatch::Full(Arc::new(Account {
+                        lamports: 0,
+                        ..Default::default()
+                    })),
+                );
             }
         }
     }
@@ -1258,8 +1373,8 @@ pub unsafe fn fingerprint_and_collect_changed(
         for pk in &sorted_dirty {
             pk.hash(&mut set_hasher);
         }
-        field_novel_count += check_and_set_bit_atomic(
-            field_bitmap_ptr, total_bits, set_hasher.finish());
+        field_novel_count +=
+            check_and_set_bit_atomic(field_bitmap_ptr, total_bits, set_hasher.finish());
 
         if slot_diff > 0 {
             let mut set_clock_hasher = FxHasher::default();
@@ -1267,8 +1382,8 @@ pub unsafe fn fingerprint_and_collect_changed(
                 pk.hash(&mut set_clock_hasher);
             }
             sdb.hash(&mut set_clock_hasher);
-            field_novel_count += check_and_set_bit_atomic(
-                field_bitmap_ptr, total_bits, set_clock_hasher.finish());
+            field_novel_count +=
+                check_and_set_bit_atomic(field_bitmap_ptr, total_bits, set_clock_hasher.finish());
         }
     }
 
@@ -1348,7 +1463,11 @@ unsafe fn check_and_set_bit_atomic(bitmap_ptr: *mut u8, total_bits: usize, hash:
     let byte_ptr = bitmap_ptr.add(idx / 8) as *const AtomicU8;
     let bit_mask = 1u8 << (idx % 8);
     let prev = (*byte_ptr).fetch_or(bit_mask, Ordering::Relaxed);
-    if prev & bit_mask == 0 { 1 } else { 0 }
+    if prev & bit_mask == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Check per-field state novelty by diffing each dirty account against initial state.
@@ -1372,9 +1491,11 @@ pub unsafe fn check_field_novelty(
     bitmap_ptr: *mut u8,
     bitmap_len: usize,
 ) -> u32 {
-    debug_assert_eq!(bitmap_len, FIELD_NOVELTY_BITMAP_SIZE,
+    debug_assert_eq!(
+        bitmap_len, FIELD_NOVELTY_BITMAP_SIZE,
         "check_field_novelty: bitmap_len ({}) must equal FIELD_NOVELTY_BITMAP_SIZE ({})",
-        bitmap_len, FIELD_NOVELTY_BITMAP_SIZE);
+        bitmap_len, FIELD_NOVELTY_BITMAP_SIZE
+    );
     let mut novel_count: u32 = 0;
     let total_bits = bitmap_len * 8;
 
@@ -1389,12 +1510,11 @@ pub unsafe fn check_field_novelty(
     // the clock (ctx.advance_slots, svm.set_sysvar, etc.) without relying on
     // DirtyTracker's clock_dirty flag.
     if slot_diff > 0 || clock.epoch != initial_clock.epoch {
+        novel_count +=
+            check_and_set_bit_atomic(bitmap_ptr, total_bits, field_hash(CLOCK_TYPE_KEY, 0, sdb));
         novel_count += check_and_set_bit_atomic(
-            bitmap_ptr, total_bits,
-            field_hash(CLOCK_TYPE_KEY, 0, sdb),
-        );
-        novel_count += check_and_set_bit_atomic(
-            bitmap_ptr, total_bits,
+            bitmap_ptr,
+            total_bits,
             field_hash(CLOCK_TYPE_KEY, 1, value_bucket(clock.epoch)),
         );
 
@@ -1405,7 +1525,8 @@ pub unsafe fn check_field_novelty(
         // is the same. Use slot_bucket (not slot_diff_bucket) for finer discrimination.
         if let Some(target) = dirty.clock_target_slot {
             novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits,
+                bitmap_ptr,
+                total_bits,
                 field_hash(CLOCK_TYPE_KEY, 2, slot_bucket(target)),
             );
         }
@@ -1426,18 +1547,22 @@ pub unsafe fn check_field_novelty(
         // Combined account×clock novelty: "this account is dirty at this time depth."
         if slot_diff > 0 {
             novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits,
+                bitmap_ptr,
+                total_bits,
                 field_hash(type_key, LAMPORTS_SENTINEL - 1, sdb),
             );
         }
 
         // Check lamports novelty
         novel_count += check_and_set_bit_atomic(
-            bitmap_ptr, total_bits,
+            bitmap_ptr,
+            total_bits,
             field_hash(type_key, LAMPORTS_SENTINEL, value_bucket(cur_lamports)),
         );
 
-        let init_data = initial.accounts.get(pubkey)
+        let init_data = initial
+            .accounts
+            .get(pubkey)
             .map(|a| a.data.as_slice())
             .unwrap_or(&[]);
 
@@ -1452,7 +1577,8 @@ pub unsafe fn check_field_novelty(
                 }
                 let val = read_region_value(&cur_data[start..i]);
                 novel_count += check_and_set_bit_atomic(
-                    bitmap_ptr, total_bits,
+                    bitmap_ptr,
+                    total_bits,
                     field_hash(type_key, start as u32, value_bucket(val)),
                 );
             } else {
@@ -1468,10 +1594,13 @@ pub unsafe fn check_field_novelty(
             while i < cur_data.len() {
                 if cur_data[i] != 0 {
                     let start = i;
-                    while i < cur_data.len() && cur_data[i] != 0 { i += 1; }
+                    while i < cur_data.len() && cur_data[i] != 0 {
+                        i += 1;
+                    }
                     let val = read_region_value(&cur_data[start..i]);
                     novel_count += check_and_set_bit_atomic(
-                        bitmap_ptr, total_bits,
+                        bitmap_ptr,
+                        total_bits,
                         field_hash(type_key, start as u32, value_bucket(val)),
                     );
                 } else {
@@ -1483,8 +1612,13 @@ pub unsafe fn check_field_novelty(
         // Trailing bytes (account grew or shrank) — resize signal
         if cur_data.len() != init_data.len() {
             novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits,
-                field_hash(type_key, min_len as u32, value_bucket(cur_data.len() as u64)),
+                bitmap_ptr,
+                total_bits,
+                field_hash(
+                    type_key,
+                    min_len as u32,
+                    value_bucket(cur_data.len() as u64),
+                ),
             );
         }
 
@@ -1496,9 +1630,7 @@ pub unsafe fn check_field_novelty(
             pubkey.hash(&mut id_hasher);
             value_bucket(cur_lamports).hash(&mut id_hasher);
             value_bucket(cur_data.len() as u64).hash(&mut id_hasher);
-            novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits, id_hasher.finish(),
-            );
+            novel_count += check_and_set_bit_atomic(bitmap_ptr, total_bits, id_hasher.finish());
         }
 
         // Per-identity × clock: "this specific account at this time depth."
@@ -1508,9 +1640,8 @@ pub unsafe fn check_field_novelty(
             pubkey.hash(&mut id_clock_hasher);
             value_bucket(cur_lamports).hash(&mut id_clock_hasher);
             sdb.hash(&mut id_clock_hasher);
-            novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits, id_clock_hasher.finish(),
-            );
+            novel_count +=
+                check_and_set_bit_atomic(bitmap_ptr, total_bits, id_clock_hasher.finish());
         }
     }
 
@@ -1524,9 +1655,7 @@ pub unsafe fn check_field_novelty(
         for pk in &__dirty_pubkeys {
             pk.hash(&mut set_hasher);
         }
-        novel_count += check_and_set_bit_atomic(
-            bitmap_ptr, total_bits, set_hasher.finish(),
-        );
+        novel_count += check_and_set_bit_atomic(bitmap_ptr, total_bits, set_hasher.finish());
 
         // Combined set × clock: same pubkey combination at a different
         // time depth is novel (e.g. {stake_A, vote_V} dirty at epoch 7 vs epoch 0).
@@ -1536,12 +1665,10 @@ pub unsafe fn check_field_novelty(
                 pk.hash(&mut set_clock_hasher);
             }
             sdb.hash(&mut set_clock_hasher);
-            novel_count += check_and_set_bit_atomic(
-                bitmap_ptr, total_bits, set_clock_hasher.finish(),
-            );
+            novel_count +=
+                check_and_set_bit_atomic(bitmap_ptr, total_bits, set_clock_hasher.finish());
         }
     }
 
     novel_count
 }
-

@@ -10,18 +10,22 @@
 //! - **SvmSnapshot** — captures account state at setup time, restores only dirty accounts
 //! - **AccountDiff** — before/after diffs for account state comparison
 
-pub mod dirty_tracker;
 pub mod account_diff;
-pub mod svm_snapshot;
+pub mod dirty_tracker;
 pub mod state_pool;
+pub mod svm_snapshot;
 
-pub use dirty_tracker::DirtyTracker;
 pub use account_diff::AccountDiff;
-pub use svm_snapshot::{SvmSnapshot, CompactDelta, AccountPatch, compute_state_fingerprint_from_snapshot, fingerprint_and_collect_changed, value_bucket, slot_bucket, slot_diff_bucket, check_field_novelty, FIELD_NOVELTY_BITMAP_SIZE};
+pub use dirty_tracker::DirtyTracker;
 pub use state_pool::{
-    StateEntry, ActionStats, ActionStatsMap, StatePool, PoolMemoryStats,
-    FingerprintBitmap, state_class_from_fingerprint, extract_coverage_positions,
-    StateRegistry, StateStats, FuzzPhase,
+    extract_coverage_positions, state_class_from_fingerprint, ActionStats, ActionStatsMap,
+    FingerprintBitmap, FuzzPhase, PoolMemoryStats, StateEntry, StatePool, StateRegistry,
+    StateStats,
+};
+pub use svm_snapshot::{
+    check_field_novelty, compute_state_fingerprint_from_snapshot, fingerprint_and_collect_changed,
+    slot_bucket, slot_diff_bucket, value_bucket, AccountPatch, CompactDelta, SvmSnapshot,
+    FIELD_NOVELTY_BITMAP_SIZE,
 };
 
 #[cfg(test)]

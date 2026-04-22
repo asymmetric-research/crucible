@@ -9,13 +9,32 @@ use libafl_bolts::rands::Rand;
 #[derive(Clone, Debug, PartialEq)]
 pub enum TestAction {
     NoFields,
-    OneField { amount: u64 },
-    TwoFields { user_idx: usize, flag: bool },
-    FourFields { a: u64, b: usize, c: u64, d: bool },
-    SixFields { a: u64, b: u64, c: usize, d: usize, e: u64, f: bool },
+    OneField {
+        amount: u64,
+    },
+    TwoFields {
+        user_idx: usize,
+        flag: bool,
+    },
+    FourFields {
+        a: u64,
+        b: usize,
+        c: u64,
+        d: bool,
+    },
+    SixFields {
+        a: u64,
+        b: u64,
+        c: usize,
+        d: usize,
+        e: u64,
+        f: bool,
+    },
     /// Vec<u64> field with max_len=4, range 0..1000 on elements
     /// Byte size: (1 + 4) * 8 = 40
-    VecField { items: Vec<u64> },
+    VecField {
+        items: Vec<u64>,
+    },
 }
 
 const VEC_MAX_LEN: usize = 4;
@@ -54,9 +73,11 @@ impl FuzzAction for TestAction {
             },
             5 => {
                 let len = rand_below(rng, VEC_MAX_LEN + 1);
-                let items: Vec<u64> = (0..len).map(|_| gen_range_u64(rng, VEC_LO, VEC_HI)).collect();
+                let items: Vec<u64> = (0..len)
+                    .map(|_| gen_range_u64(rng, VEC_LO, VEC_HI))
+                    .collect();
                 Self::VecField { items }
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -214,8 +235,7 @@ impl FuzzAction for TestAction {
                 }
                 let a = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
                 *cursor += 8;
-                let b =
-                    u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
+                let b = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
                 *cursor += 8;
                 let c = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
                 *cursor += 8;
@@ -231,11 +251,9 @@ impl FuzzAction for TestAction {
                 *cursor += 8;
                 let b = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
                 *cursor += 8;
-                let c =
-                    u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
+                let c = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
                 *cursor += 8;
-                let d =
-                    u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
+                let d = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
                 *cursor += 8;
                 let e = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
                 *cursor += 8;
@@ -247,7 +265,9 @@ impl FuzzAction for TestAction {
                 if *cursor + VEC_BYTE_SIZE > bytes.len() {
                     return None;
                 }
-                let len = (u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize).min(VEC_MAX_LEN);
+                let len = (u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?)
+                    as usize)
+                    .min(VEC_MAX_LEN);
                 *cursor += 8;
                 let mut items = Vec::with_capacity(len);
                 for i in 0..VEC_MAX_LEN {
@@ -332,7 +352,11 @@ pub enum SmallIntTestAction {
     /// Option<u8> — tests Fix 1e (option inner deser)
     OptionU8 { val: Option<u8> },
     /// Mixed: u8 + i16 + Option<u32> in one variant
-    Mixed { small: u8, signed: i16, opt: Option<u32> },
+    Mixed {
+        small: u8,
+        signed: i16,
+        opt: Option<u32>,
+    },
 }
 
 impl FuzzAction for SmallIntTestAction {
@@ -354,16 +378,26 @@ impl FuzzAction for SmallIntTestAction {
             },
             2 => {
                 let len = rand_below(rng, SMALL_VEC_MAX_LEN + 1);
-                let items: Vec<u16> = (0..len).map(|_| gen_range_u64(rng, 0, 65536) as u16).collect();
+                let items: Vec<u16> = (0..len)
+                    .map(|_| gen_range_u64(rng, 0, 65536) as u16)
+                    .collect();
                 Self::VecU16 { items }
-            },
+            }
             3 => Self::OptionU8 {
-                val: if rand_below(rng, 4) == 0 { None } else { Some(gen_range_u64(rng, 0, 256) as u8) },
+                val: if rand_below(rng, 4) == 0 {
+                    None
+                } else {
+                    Some(gen_range_u64(rng, 0, 256) as u8)
+                },
             },
             4 => Self::Mixed {
                 small: gen_range_u64(rng, 0, 256) as u8,
                 signed: rng.next() as i16,
-                opt: if rand_below(rng, 4) == 0 { None } else { Some(rng.next() as u32) },
+                opt: if rand_below(rng, 4) == 0 {
+                    None
+                } else {
+                    Some(rng.next() as u32)
+                },
             },
             _ => unreachable!(),
         }
@@ -371,46 +405,42 @@ impl FuzzAction for SmallIntTestAction {
 
     fn mutate<R: Rand>(&mut self, rng: &mut R) {
         match self {
-            Self::UnsignedSmall { a, b, c } => {
-                match rand_below(rng, 3) {
-                    0 => {
-                        let mut v = *a as u64;
-                        mutate_u64(&mut v, 0, 256, rng);
-                        *a = v as u8;
-                    }
-                    1 => {
-                        let mut v = *b as u64;
-                        mutate_u64(&mut v, 0, 65536, rng);
-                        *b = v as u16;
-                    }
-                    2 => {
-                        let mut v = *c as u64;
-                        mutate_u64(&mut v, 0, u32::MAX as u64 + 1, rng);
-                        *c = v as u32;
-                    }
-                    _ => {}
+            Self::UnsignedSmall { a, b, c } => match rand_below(rng, 3) {
+                0 => {
+                    let mut v = *a as u64;
+                    mutate_u64(&mut v, 0, 256, rng);
+                    *a = v as u8;
                 }
-            }
-            Self::SignedSmall { x, y, z } => {
-                match rand_below(rng, 3) {
-                    0 => {
-                        let mut v = *x as i64;
-                        mutate_i64(&mut v, i8::MIN as i64, i8::MAX as i64 + 1, rng);
-                        *x = v as i8;
-                    }
-                    1 => {
-                        let mut v = *y as i64;
-                        mutate_i64(&mut v, i16::MIN as i64, i16::MAX as i64 + 1, rng);
-                        *y = v as i16;
-                    }
-                    2 => {
-                        let mut v = *z as i64;
-                        mutate_i64(&mut v, i32::MIN as i64, i32::MAX as i64 + 1, rng);
-                        *z = v as i32;
-                    }
-                    _ => {}
+                1 => {
+                    let mut v = *b as u64;
+                    mutate_u64(&mut v, 0, 65536, rng);
+                    *b = v as u16;
                 }
-            }
+                2 => {
+                    let mut v = *c as u64;
+                    mutate_u64(&mut v, 0, u32::MAX as u64 + 1, rng);
+                    *c = v as u32;
+                }
+                _ => {}
+            },
+            Self::SignedSmall { x, y, z } => match rand_below(rng, 3) {
+                0 => {
+                    let mut v = *x as i64;
+                    mutate_i64(&mut v, i8::MIN as i64, i8::MAX as i64 + 1, rng);
+                    *x = v as i8;
+                }
+                1 => {
+                    let mut v = *y as i64;
+                    mutate_i64(&mut v, i16::MIN as i64, i16::MAX as i64 + 1, rng);
+                    *y = v as i16;
+                }
+                2 => {
+                    let mut v = *z as i64;
+                    mutate_i64(&mut v, i32::MIN as i64, i32::MAX as i64 + 1, rng);
+                    *z = v as i32;
+                }
+                _ => {}
+            },
             Self::VecU16 { items } => {
                 if rand_below(rng, 100) < 20 {
                     if items.is_empty() || rand_below(rng, 2) == 0 {
@@ -430,37 +460,43 @@ impl FuzzAction for SmallIntTestAction {
             }
             Self::OptionU8 { val } => {
                 if rand_below(rng, 100) < 15 {
-                    *val = if val.is_some() { None } else { Some(gen_range_u64(rng, 0, 256) as u8) };
+                    *val = if val.is_some() {
+                        None
+                    } else {
+                        Some(gen_range_u64(rng, 0, 256) as u8)
+                    };
                 } else if let Some(ref mut inner) = val {
                     let mut v = *inner as u64;
                     mutate_u64(&mut v, 0, 256, rng);
                     *inner = v as u8;
                 }
             }
-            Self::Mixed { small, signed, opt } => {
-                match rand_below(rng, 3) {
-                    0 => {
-                        let mut v = *small as u64;
-                        mutate_u64(&mut v, 0, 256, rng);
-                        *small = v as u8;
-                    }
-                    1 => {
-                        let mut v = *signed as i64;
-                        mutate_i64(&mut v, i16::MIN as i64, i16::MAX as i64 + 1, rng);
-                        *signed = v as i16;
-                    }
-                    2 => {
-                        if rand_below(rng, 100) < 15 {
-                            *opt = if opt.is_some() { None } else { Some(rng.next() as u32) };
-                        } else if let Some(ref mut inner) = opt {
-                            let mut v = *inner as u64;
-                            mutate_u64(&mut v, 0, u64::MAX, rng);
-                            *inner = v as u32;
-                        }
-                    }
-                    _ => {}
+            Self::Mixed { small, signed, opt } => match rand_below(rng, 3) {
+                0 => {
+                    let mut v = *small as u64;
+                    mutate_u64(&mut v, 0, 256, rng);
+                    *small = v as u8;
                 }
-            }
+                1 => {
+                    let mut v = *signed as i64;
+                    mutate_i64(&mut v, i16::MIN as i64, i16::MAX as i64 + 1, rng);
+                    *signed = v as i16;
+                }
+                2 => {
+                    if rand_below(rng, 100) < 15 {
+                        *opt = if opt.is_some() {
+                            None
+                        } else {
+                            Some(rng.next() as u32)
+                        };
+                    } else if let Some(ref mut inner) = opt {
+                        let mut v = *inner as u64;
+                        mutate_u64(&mut v, 0, u64::MAX, rng);
+                        *inner = v as u32;
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -508,12 +544,10 @@ impl FuzzAction for SmallIntTestAction {
                     buf.extend_from_slice(&0u64.to_le_bytes());
                 }
             }
-            Self::OptionU8 { val } => {
-                match val {
-                    Some(v) => buf.extend_from_slice(&(*v as u64).to_le_bytes()),
-                    None => buf.extend_from_slice(&u64::MAX.to_le_bytes()),
-                }
-            }
+            Self::OptionU8 { val } => match val {
+                Some(v) => buf.extend_from_slice(&(*v as u64).to_le_bytes()),
+                None => buf.extend_from_slice(&u64::MAX.to_le_bytes()),
+            },
             Self::Mixed { small, signed, opt } => {
                 buf.extend_from_slice(&(*small as u64).to_le_bytes());
                 buf.extend_from_slice(&(*signed as u64).to_le_bytes());
@@ -529,7 +563,9 @@ impl FuzzAction for SmallIntTestAction {
         match variant_idx {
             0 => {
                 // Fix 1b: cast u64 down to target type
-                if *cursor + 24 > bytes.len() { return None; }
+                if *cursor + 24 > bytes.len() {
+                    return None;
+                }
                 let a = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as u8;
                 *cursor += 8;
                 let b = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as u16;
@@ -539,7 +575,9 @@ impl FuzzAction for SmallIntTestAction {
                 Some(Self::UnsignedSmall { a, b, c })
             }
             1 => {
-                if *cursor + 24 > bytes.len() { return None; }
+                if *cursor + 24 > bytes.len() {
+                    return None;
+                }
                 let x = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as i8;
                 *cursor += 8;
                 let y = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as i16;
@@ -550,8 +588,12 @@ impl FuzzAction for SmallIntTestAction {
             }
             2 => {
                 // Fix 1d: vec element deserialization casts through u64
-                if *cursor + SMALL_VEC_BYTE_SIZE > bytes.len() { return None; }
-                let len = (u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize).min(SMALL_VEC_MAX_LEN);
+                if *cursor + SMALL_VEC_BYTE_SIZE > bytes.len() {
+                    return None;
+                }
+                let len = (u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?)
+                    as usize)
+                    .min(SMALL_VEC_MAX_LEN);
                 *cursor += 8;
                 let mut items = Vec::with_capacity(len);
                 for i in 0..SMALL_VEC_MAX_LEN {
@@ -565,20 +607,33 @@ impl FuzzAction for SmallIntTestAction {
             }
             3 => {
                 // Fix 1e: option inner deserialization casts through u64
-                if *cursor + 8 > bytes.len() { return None; }
+                if *cursor + 8 > bytes.len() {
+                    return None;
+                }
                 let raw = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
-                let val = if raw == u64::MAX { None } else { Some(raw as u8) };
+                let val = if raw == u64::MAX {
+                    None
+                } else {
+                    Some(raw as u8)
+                };
                 *cursor += 8;
                 Some(Self::OptionU8 { val })
             }
             4 => {
-                if *cursor + 24 > bytes.len() { return None; }
+                if *cursor + 24 > bytes.len() {
+                    return None;
+                }
                 let small = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as u8;
                 *cursor += 8;
-                let signed = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as i16;
+                let signed =
+                    u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as i16;
                 *cursor += 8;
                 let raw = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?);
-                let opt = if raw == u64::MAX { None } else { Some(raw as u32) };
+                let opt = if raw == u64::MAX {
+                    None
+                } else {
+                    Some(raw as u32)
+                };
                 *cursor += 8;
                 Some(Self::Mixed { small, signed, opt })
             }
@@ -611,7 +666,8 @@ impl FuzzAction for SmallIntTestAction {
             }),
             "vec_u16" => {
                 let arr = params.get("items")?.as_array()?;
-                let items: Option<Vec<u16>> = arr.iter().map(|v| v.as_u64().map(|n| n as u16)).collect();
+                let items: Option<Vec<u16>> =
+                    arr.iter().map(|v| v.as_u64().map(|n| n as u16)).collect();
                 Some(Self::VecU16 { items: items? })
             }
             "option_u8" => {

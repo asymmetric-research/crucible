@@ -33,9 +33,17 @@ pub fn gen_range_usize<R: Rand>(rng: &mut R, lo: usize, hi: usize) -> usize {
 #[inline]
 fn pick_interesting_u64<R: Rand>(lo: u64, hi: u64, rng: &mut R) -> Option<u64> {
     const STATIC_CANDIDATES: [u64; 11] = [
-        0, 1, 2, u64::MAX, u64::MAX / 2,
-        1 << 8, 1 << 16, 1 << 32,
-        (1u64 << 8) - 1, (1u64 << 16) - 1, (1u64 << 32) - 1,
+        0,
+        1,
+        2,
+        u64::MAX,
+        u64::MAX / 2,
+        1 << 8,
+        1 << 16,
+        1 << 32,
+        (1u64 << 8) - 1,
+        (1u64 << 16) - 1,
+        (1u64 << 32) - 1,
     ];
     // Dynamic candidates depend on lo/hi
     let dynamic: [u64; 3] = [lo, hi.saturating_sub(1), 1u64 << 63];
@@ -212,10 +220,21 @@ pub fn gen_range_u128<R: Rand>(rng: &mut R, lo: u128, hi: u128) -> u128 {
 #[inline]
 fn pick_interesting_u128<R: Rand>(lo: u128, hi: u128, rng: &mut R) -> Option<u128> {
     const STATIC_CANDIDATES: [u128; 15] = [
-        0, 1, 2, u128::MAX, u128::MAX / 2,
-        1 << 8, 1 << 16, 1 << 32, 1 << 64,
-        (1u128 << 8) - 1, (1u128 << 16) - 1, (1u128 << 32) - 1, (1u128 << 64) - 1,
-        u64::MAX as u128, (u64::MAX as u128) + 1,
+        0,
+        1,
+        2,
+        u128::MAX,
+        u128::MAX / 2,
+        1 << 8,
+        1 << 16,
+        1 << 32,
+        1 << 64,
+        (1u128 << 8) - 1,
+        (1u128 << 16) - 1,
+        (1u128 << 32) - 1,
+        (1u128 << 64) - 1,
+        u64::MAX as u128,
+        (u64::MAX as u128) + 1,
     ];
     let dynamic: [u128; 2] = [lo, hi.saturating_sub(1)];
 

@@ -247,9 +247,15 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
-        assert!(output.contains("greedy_set_cover"), "should use greedy set cover algorithm");
+        assert!(
+            output.contains("greedy_set_cover"),
+            "should use greedy set cover algorithm"
+        );
         assert!(output.contains("cmin_mode"), "should check cmin_mode flag");
-        assert!(output.contains("corpus_in_dir"), "should require corpus input dir");
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should require corpus input dir"
+        );
     }
 
     #[test]
@@ -258,8 +264,14 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
-        assert!(output.contains("cmin_edge_set_enable"), "should enable exact edge tracking");
-        assert!(output.contains("cmin_edge_set_take"), "should take edge set after execution");
+        assert!(
+            output.contains("cmin_edge_set_enable"),
+            "should enable exact edge tracking"
+        );
+        assert!(
+            output.contains("cmin_edge_set_take"),
+            "should take edge set after execution"
+        );
     }
 
     #[test]
@@ -268,15 +280,26 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
-        assert!(output.contains("Failed to create output directory"),
-            "should panic with descriptive message on mkdir failure");
+        assert!(
+            output.contains("Failed to create output directory"),
+            "should panic with descriptive message on mkdir failure"
+        );
     }
 
     #[test]
     fn load_inputs_into_memory_uses_is_corpus_input() {
         let output = ts(load_inputs_into_memory());
-        assert!(output.contains("is_corpus_input"), "should filter using is_corpus_input");
-        assert!(output.contains("BytesInput"), "should create BytesInput from files");
-        assert!(output.contains("load_inputs_from_dir"), "should define load_inputs_from_dir fn");
+        assert!(
+            output.contains("is_corpus_input"),
+            "should filter using is_corpus_input"
+        );
+        assert!(
+            output.contains("BytesInput"),
+            "should create BytesInput from files"
+        );
+        assert!(
+            output.contains("load_inputs_from_dir"),
+            "should define load_inputs_from_dir fn"
+        );
     }
 }

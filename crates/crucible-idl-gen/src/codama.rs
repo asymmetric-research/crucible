@@ -57,13 +57,9 @@ pub fn convert(root: &RootNode) -> anyhow::Result<Idl> {
     for name in &referenced_names {
         if !defined_names.contains(name) {
             // Try to find a matching type by stripping common suffixes
-            let stripped = name
-                .trim_end_matches("Args")
-                .trim_end_matches("Params");
+            let stripped = name.trim_end_matches("Args").trim_end_matches("Params");
             if let Some(target) = types.iter().find(|t| {
-                let t_stripped = t.name
-                    .trim_end_matches("Args")
-                    .trim_end_matches("Params");
+                let t_stripped = t.name.trim_end_matches("Args").trim_end_matches("Params");
                 t_stripped == stripped
             }) {
                 let target_name = target.name.clone();
@@ -162,11 +158,7 @@ fn convert_instruction(ix: &InstructionNode) -> anyhow::Result<IdlInstruction> {
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // Convert accounts
-    let accounts = ix
-        .accounts
-        .iter()
-        .map(convert_account)
-        .collect::<Vec<_>>();
+    let accounts = ix.accounts.iter().map(convert_account).collect::<Vec<_>>();
 
     Ok(IdlInstruction {
         name: ix.name.to_string(),
@@ -187,14 +179,16 @@ fn convert_argument(arg: &InstructionArgumentNode) -> anyhow::Result<IdlField> {
 }
 
 fn convert_account(acc: &InstructionAccountNode) -> IdlInstructionAccountItem {
-    let is_signer = matches!(acc.is_signer, IsAccountSigner::True | IsAccountSigner::Either);
+    let is_signer = matches!(
+        acc.is_signer,
+        IsAccountSigner::True | IsAccountSigner::Either
+    );
 
     // Extract fixed address from default value (e.g. sysvar addresses)
     let address = match &acc.default_value {
-        Some(InstructionInputValueNode::PublicKey(PublicKeyValueNode {
-            public_key,
-            ..
-        })) => Some(public_key.clone()),
+        Some(InstructionInputValueNode::PublicKey(PublicKeyValueNode { public_key, .. })) => {
+            Some(public_key.clone())
+        }
         _ => None,
     };
 
@@ -402,16 +396,13 @@ fn convert_type_node(node: &TypeNode) -> anyhow::Result<IdlType> {
         // FixedSize wrapping another type → Array of that type
         TypeNode::FixedSize(fs) => {
             let inner = convert_type_node(&fs.r#type)?;
-            Ok(IdlType::Array(
-                Box::new(inner),
-                IdlArrayLen::Value(fs.size),
-            ))
+            Ok(IdlType::Array(Box::new(inner), IdlArrayLen::Value(fs.size)))
         }
 
         // Amount and SolAmount are wrappers around numbers
-        TypeNode::Amount(a) => {
-            Ok(number_format_to_idl_type(&a.number.get_nested_type_node().format))
-        }
+        TypeNode::Amount(a) => Ok(number_format_to_idl_type(
+            &a.number.get_nested_type_node().format,
+        )),
         TypeNode::SolAmount(_) => Ok(IdlType::U64),
         TypeNode::DateTime(_) => Ok(IdlType::I64),
 
@@ -522,10 +513,7 @@ mod tests {
 
         // Metadata
         assert_eq!(idl.metadata.name, "solanaStakeInterface");
-        assert_eq!(
-            idl.address,
-            "Stake11111111111111111111111111111111111111"
-        );
+        assert_eq!(idl.address, "Stake11111111111111111111111111111111111111");
 
         // Should have 18 instructions
         assert_eq!(idl.instructions.len(), 18, "Expected 18 instructions");
@@ -546,7 +534,10 @@ mod tests {
         // rentSysvar should have a fixed address
         if let IdlInstructionAccountItem::Single(rent) = &init.accounts[1] {
             assert_eq!(rent.name, "rentSysvar");
-            assert!(rent.address.is_some(), "rentSysvar should have fixed address");
+            assert!(
+                rent.address.is_some(),
+                "rentSysvar should have fixed address"
+            );
             assert_eq!(
                 rent.address.as_deref().unwrap(),
                 "SysvarRent111111111111111111111111111111111"
@@ -705,11 +696,18 @@ mod tests {
         }
 
         // -- Deep: createAccount instruction args and accounts --
-        let create = idl.instructions.iter().find(|ix| ix.name == "createAccount")
+        let create = idl
+            .instructions
+            .iter()
+            .find(|ix| ix.name == "createAccount")
             .expect("should have createAccount instruction");
         // Args: lamports, space, programAddress (discriminator filtered out)
-        assert_eq!(create.args.len(), 3, "createAccount should have 3 args, got {:?}",
-            create.args.iter().map(|a| &a.name).collect::<Vec<_>>());
+        assert_eq!(
+            create.args.len(),
+            3,
+            "createAccount should have 3 args, got {:?}",
+            create.args.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
         assert_eq!(create.args[0].name, "lamports");
         assert_eq!(create.args[0].ty, IdlType::U64);
         assert_eq!(create.args[1].name, "space");
@@ -718,10 +716,14 @@ mod tests {
         assert_eq!(create.args[2].ty, IdlType::Pubkey);
 
         // Accounts: payer (writable+signer), newAccount (writable+signer)
-        let accs: Vec<_> = create.accounts.iter().filter_map(|a| match a {
-            IdlInstructionAccountItem::Single(s) => Some(s),
-            _ => None,
-        }).collect();
+        let accs: Vec<_> = create
+            .accounts
+            .iter()
+            .filter_map(|a| match a {
+                IdlInstructionAccountItem::Single(s) => Some(s),
+                _ => None,
+            })
+            .collect();
         assert_eq!(accs[0].name, "payer");
         assert!(accs[0].writable, "payer should be writable");
         assert!(accs[0].signer, "payer should be signer");
@@ -739,7 +741,11 @@ mod tests {
         let type_names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
         // Look for nonce-related types (exact names may vary with CamelCase conversion)
         let has_nonce = type_names.iter().any(|n| n.contains("Nonce"));
-        assert!(has_nonce, "system should have nonce types, found: {:?}", type_names);
+        assert!(
+            has_nonce,
+            "system should have nonce types, found: {:?}",
+            type_names
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -770,22 +776,40 @@ mod tests {
         let idl = convert(&root).expect("Conversion failed");
 
         let auth_type = idl.types.iter().find(|t| t.name == "AuthorityType");
-        assert!(auth_type.is_some(), "token should have AuthorityType enum, found types: {:?}",
-            idl.types.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert!(
+            auth_type.is_some(),
+            "token should have AuthorityType enum, found types: {:?}",
+            idl.types.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
 
         if let Some(td) = auth_type {
             if let IdlTypeDefTy::Enum { variants } = &td.ty {
-                assert!(variants.len() >= 3, "AuthorityType should have multiple variants");
+                assert!(
+                    variants.len() >= 3,
+                    "AuthorityType should have multiple variants"
+                );
                 // -- Deep: verify specific variant names --
                 let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-                assert!(names.contains(&"MintTokens"),
-                    "AuthorityType should have MintTokens variant, got {:?}", names);
-                assert!(names.contains(&"FreezeAccount"),
-                    "AuthorityType should have FreezeAccount variant, got {:?}", names);
-                assert!(names.contains(&"AccountOwner"),
-                    "AuthorityType should have AccountOwner variant, got {:?}", names);
-                assert!(names.contains(&"CloseAccount"),
-                    "AuthorityType should have CloseAccount variant, got {:?}", names);
+                assert!(
+                    names.contains(&"MintTokens"),
+                    "AuthorityType should have MintTokens variant, got {:?}",
+                    names
+                );
+                assert!(
+                    names.contains(&"FreezeAccount"),
+                    "AuthorityType should have FreezeAccount variant, got {:?}",
+                    names
+                );
+                assert!(
+                    names.contains(&"AccountOwner"),
+                    "AuthorityType should have AccountOwner variant, got {:?}",
+                    names
+                );
+                assert!(
+                    names.contains(&"CloseAccount"),
+                    "AuthorityType should have CloseAccount variant, got {:?}",
+                    names
+                );
             } else {
                 panic!("AuthorityType should be an enum");
             }
@@ -807,8 +831,11 @@ mod tests {
         let idl = convert(&root).expect("Compute budget conversion failed");
 
         assert!(!idl.metadata.name.is_empty());
-        assert!(idl.instructions.len() >= 3,
-            "compute_budget should have >= 3 instructions, got {}", idl.instructions.len());
+        assert!(
+            idl.instructions.len() >= 3,
+            "compute_budget should have >= 3 instructions, got {}",
+            idl.instructions.len()
+        );
         // Minimal program — should have few or no types
         // (just verify it doesn't crash)
     }
@@ -819,8 +846,11 @@ mod tests {
         let idl = convert(&root).expect("Conversion failed");
         // Compute budget is a minimal program, may have zero defined types
         // This is fine — we just want to make sure the pipeline handles it
-        assert!(idl.types.len() <= 5,
-            "compute_budget should have few types, got {}", idl.types.len());
+        assert!(
+            idl.types.len() <= 5,
+            "compute_budget should have few types, got {}",
+            idl.types.len()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -839,7 +869,10 @@ mod tests {
 
         assert!(!idl.metadata.name.is_empty());
         // Memo is minimal: typically 1 instruction
-        assert!(!idl.instructions.is_empty(), "memo should have at least 1 instruction");
+        assert!(
+            !idl.instructions.is_empty(),
+            "memo should have at least 1 instruction"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -866,9 +899,13 @@ mod tests {
 
         // Every referenced type should either be defined directly or have an alias
         for ref_name in &referenced {
-            assert!(type_names.contains(&ref_name.as_str()),
+            assert!(
+                type_names.contains(&ref_name.as_str()),
                 "Referenced type '{}' should exist in types list (directly or as alias), \
-                 available types: {:?}", ref_name, type_names);
+                 available types: {:?}",
+                ref_name,
+                type_names
+            );
         }
     }
 
@@ -879,16 +916,25 @@ mod tests {
         let idl = convert(&root).expect("Conversion failed");
 
         // Find any type aliases (Type variant, not Struct/Enum)
-        let aliases: Vec<&IdlTypeDef> = idl.types.iter().filter(|t| {
-            matches!(&t.ty, IdlTypeDefTy::Type { .. })
-        }).collect();
+        let aliases: Vec<&IdlTypeDef> = idl
+            .types
+            .iter()
+            .filter(|t| matches!(&t.ty, IdlTypeDefTy::Type { .. }))
+            .collect();
 
         // Each alias should point to a real type
         let type_names: HashSet<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
         for alias in &aliases {
-            if let IdlTypeDefTy::Type { alias: IdlType::Defined { name, .. } } = &alias.ty {
-                assert!(type_names.contains(name.as_str()),
-                    "Alias '{}' points to '{}' which should exist in types", alias.name, name);
+            if let IdlTypeDefTy::Type {
+                alias: IdlType::Defined { name, .. },
+            } = &alias.ty
+            {
+                assert!(
+                    type_names.contains(name.as_str()),
+                    "Alias '{}' points to '{}' which should exist in types",
+                    alias.name,
+                    name
+                );
             }
         }
     }

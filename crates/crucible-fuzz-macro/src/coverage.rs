@@ -972,134 +972,293 @@ mod tests {
     fn coverage_state_has_map_size() {
         let output = ts(coverage_state_code());
         assert!(output.contains("MAP_SIZE"), "should define MAP_SIZE");
-        assert!(output.contains("SHARED_EDGE_BITMAP_SIZE"), "should define shared edge bitmap size");
-        assert!(output.contains("SHARED_BRANCH_BITMAP_SIZE"), "should define shared branch bitmap size");
+        assert!(
+            output.contains("SHARED_EDGE_BITMAP_SIZE"),
+            "should define shared edge bitmap size"
+        );
+        assert!(
+            output.contains("SHARED_BRANCH_BITMAP_SIZE"),
+            "should define shared branch bitmap size"
+        );
     }
 
     #[test]
     fn coverage_state_has_coverage_struct() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("CoverageState"), "should define CoverageState struct");
-        assert!(output.contains("COVERAGE_STATE"), "should define COVERAGE_STATE static");
-        assert!(output.contains("COVERAGE_ENABLED"), "should define COVERAGE_ENABLED flag");
+        assert!(
+            output.contains("CoverageState"),
+            "should define CoverageState struct"
+        );
+        assert!(
+            output.contains("COVERAGE_STATE"),
+            "should define COVERAGE_STATE static"
+        );
+        assert!(
+            output.contains("COVERAGE_ENABLED"),
+            "should define COVERAGE_ENABLED flag"
+        );
     }
 
     #[test]
     fn coverage_state_no_dead_code() {
         let output = ts(coverage_state_code());
-        assert!(!output.contains("clear_local_bitmap_buffers"), "clear_local_bitmap_buffers should be removed");
-        assert!(!output.contains("set_force_interesting"), "set_force_interesting should be removed");
-        assert!(!output.contains("TOTAL_ACTIONS"), "TOTAL_ACTIONS should be removed");
+        assert!(
+            !output.contains("clear_local_bitmap_buffers"),
+            "clear_local_bitmap_buffers should be removed"
+        );
+        assert!(
+            !output.contains("set_force_interesting"),
+            "set_force_interesting should be removed"
+        );
+        assert!(
+            !output.contains("TOTAL_ACTIONS"),
+            "TOTAL_ACTIONS should be removed"
+        );
     }
 
     #[test]
     fn coverage_state_has_flush_buffers() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("flush_local_bitmap_buffers"), "should keep flush_local_bitmap_buffers");
-        assert!(output.contains("is_force_interesting"), "should keep is_force_interesting");
-        assert!(output.contains("TOTAL_EXECUTIONS"), "should keep TOTAL_EXECUTIONS");
-        assert!(output.contains("FUZZER_START_TIME"), "should keep FUZZER_START_TIME");
+        assert!(
+            output.contains("flush_local_bitmap_buffers"),
+            "should keep flush_local_bitmap_buffers"
+        );
+        assert!(
+            output.contains("is_force_interesting"),
+            "should keep is_force_interesting"
+        );
+        assert!(
+            output.contains("TOTAL_EXECUTIONS"),
+            "should keep TOTAL_EXECUTIONS"
+        );
+        assert!(
+            output.contains("FUZZER_START_TIME"),
+            "should keep FUZZER_START_TIME"
+        );
     }
 
     #[test]
     fn coverage_state_has_cmin_edge_set() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("CMIN_EDGE_SET"), "should define CMIN_EDGE_SET");
-        assert!(output.contains("cmin_edge_set_enable"), "should define cmin_edge_set_enable");
-        assert!(output.contains("cmin_edge_set_take"), "should define cmin_edge_set_take");
+        assert!(
+            output.contains("CMIN_EDGE_SET"),
+            "should define CMIN_EDGE_SET"
+        );
+        assert!(
+            output.contains("cmin_edge_set_enable"),
+            "should define cmin_edge_set_enable"
+        );
+        assert!(
+            output.contains("cmin_edge_set_take"),
+            "should define cmin_edge_set_take"
+        );
     }
 
     #[test]
     fn coverage_state_has_total_edges_atomic() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("TOTAL_EDGES_ATOMIC"), "should define TOTAL_EDGES_ATOMIC");
+        assert!(
+            output.contains("TOTAL_EDGES_ATOMIC"),
+            "should define TOTAL_EDGES_ATOMIC"
+        );
     }
 
     #[test]
     fn fuzz_callback_has_process_trace() {
         let output = ts(fuzz_callback_code());
-        assert!(output.contains("FuzzCallback"), "should define FuzzCallback struct");
-        assert!(output.contains("process_trace"), "should have process_trace method");
-        assert!(output.contains("count_shared_bits"), "should have count_shared_bits method");
+        assert!(
+            output.contains("FuzzCallback"),
+            "should define FuzzCallback struct"
+        );
+        assert!(
+            output.contains("process_trace"),
+            "should have process_trace method"
+        );
+        assert!(
+            output.contains("count_shared_bits"),
+            "should have count_shared_bits method"
+        );
     }
 
     #[test]
     fn fuzz_callback_has_shared_memory() {
         let output = ts(fuzz_callback_code());
-        assert!(output.contains("with_shared_memory"), "should have with_shared_memory constructor");
-        assert!(output.contains("shared_edge_bitmap"), "should track shared edge bitmap");
-        assert!(output.contains("shared_branch_bitmap"), "should track shared branch bitmap");
+        assert!(
+            output.contains("with_shared_memory"),
+            "should have with_shared_memory constructor"
+        );
+        assert!(
+            output.contains("shared_edge_bitmap"),
+            "should track shared edge bitmap"
+        );
+        assert!(
+            output.contains("shared_branch_bitmap"),
+            "should track shared branch bitmap"
+        );
     }
 
     #[test]
     fn invocation_callback_impl_filters_branches() {
         let output = ts(invocation_callback_impl_code());
-        assert!(output.contains("InvocationInspectCallback"), "should implement InvocationInspectCallback");
-        assert!(output.contains("register_trace"), "should use register trace");
-        assert!(output.contains("BPF_JMP"), "should filter for JMP instructions");
+        assert!(
+            output.contains("InvocationInspectCallback"),
+            "should implement InvocationInspectCallback"
+        );
+        assert!(
+            output.contains("register_trace"),
+            "should use register trace"
+        );
+        assert!(
+            output.contains("BPF_JMP"),
+            "should filter for JMP instructions"
+        );
     }
 
     #[test]
     fn shared_bitmap_feedback_checks_new_coverage() {
         let output = ts(shared_bitmap_feedback_code());
-        assert!(output.contains("SharedBitmapFeedback"), "should define SharedBitmapFeedback");
-        assert!(output.contains("found_new_coverage"), "should check found_new_coverage");
-        assert!(output.contains("is_force_interesting"), "should check force interesting flag");
+        assert!(
+            output.contains("SharedBitmapFeedback"),
+            "should define SharedBitmapFeedback"
+        );
+        assert!(
+            output.contains("found_new_coverage"),
+            "should check found_new_coverage"
+        );
+        assert!(
+            output.contains("is_force_interesting"),
+            "should check force interesting flag"
+        );
     }
 
     #[test]
     fn lcov_code_has_write_functions() {
         let output = ts(lcov_coverage_code());
-        assert!(output.contains("write_lcov_coverage"), "should define write_lcov_coverage");
-        assert!(output.contains("maybe_write_coverage"), "should define maybe_write_coverage");
-        assert!(output.contains("generate_source_lcov"), "should try source-level LCOV");
-        assert!(output.contains("generate_bytecode_lcov"), "should fall back to bytecode LCOV");
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should define write_lcov_coverage"
+        );
+        assert!(
+            output.contains("maybe_write_coverage"),
+            "should define maybe_write_coverage"
+        );
+        assert!(
+            output.contains("generate_source_lcov"),
+            "should try source-level LCOV"
+        );
+        assert!(
+            output.contains("generate_bytecode_lcov"),
+            "should fall back to bytecode LCOV"
+        );
     }
 
     #[test]
     fn success_pattern_has_feedback() {
         let output = ts(success_pattern_code());
-        assert!(output.contains("SuccessPatternFeedback"), "should define SuccessPatternFeedback");
-        assert!(output.contains("set_success_pattern"), "should define set_success_pattern");
-        assert!(output.contains("get_success_pattern"), "should define get_success_pattern");
-        assert!(output.contains("append_metadata"), "should implement append_metadata");
+        assert!(
+            output.contains("SuccessPatternFeedback"),
+            "should define SuccessPatternFeedback"
+        );
+        assert!(
+            output.contains("set_success_pattern"),
+            "should define set_success_pattern"
+        );
+        assert!(
+            output.contains("get_success_pattern"),
+            "should define get_success_pattern"
+        );
+        assert!(
+            output.contains("append_metadata"),
+            "should implement append_metadata"
+        );
     }
 
     #[test]
     fn all_coverage_code_includes_everything() {
         let output = ts(all_coverage_code());
-        assert!(output.contains("CoverageState"), "should include coverage state");
+        assert!(
+            output.contains("CoverageState"),
+            "should include coverage state"
+        );
         assert!(output.contains("FuzzCallback"), "should include callback");
-        assert!(output.contains("SharedBitmapFeedback"), "should include feedback");
-        assert!(output.contains("write_lcov_coverage"), "should include LCOV");
-        assert!(output.contains("SuccessPatternFeedback"), "should include success pattern");
+        assert!(
+            output.contains("SharedBitmapFeedback"),
+            "should include feedback"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should include LCOV"
+        );
+        assert!(
+            output.contains("SuccessPatternFeedback"),
+            "should include success pattern"
+        );
     }
 
     #[test]
     fn coverage_state_has_new_coverage_tracking() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("NEW_COVERAGE_BITS"), "should define NEW_COVERAGE_BITS TLS");
-        assert!(output.contains("reset_new_coverage_flag"), "should define reset function");
-        assert!(output.contains("found_new_coverage"), "should define found_new_coverage check");
-        assert!(output.contains("new_coverage_count"), "should define new_coverage_count");
-        assert!(output.contains("mark_new_coverage"), "should define mark_new_coverage");
+        assert!(
+            output.contains("NEW_COVERAGE_BITS"),
+            "should define NEW_COVERAGE_BITS TLS"
+        );
+        assert!(
+            output.contains("reset_new_coverage_flag"),
+            "should define reset function"
+        );
+        assert!(
+            output.contains("found_new_coverage"),
+            "should define found_new_coverage check"
+        );
+        assert!(
+            output.contains("new_coverage_count"),
+            "should define new_coverage_count"
+        );
+        assert!(
+            output.contains("mark_new_coverage"),
+            "should define mark_new_coverage"
+        );
     }
 
     #[test]
     fn coverage_state_has_program_totals() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("PROGRAM_TOTALS"), "should define PROGRAM_TOTALS");
-        assert!(output.contains("PROGRAM_TOTAL_INSTRUCTIONS"), "should define instruction totals");
-        assert!(output.contains("PROGRAM_BINARIES"), "should define program binaries storage");
-        assert!(output.contains("DWARF_SOURCE_MAP"), "should define DWARF source map storage");
-        assert!(output.contains("init_program_totals"), "should define init function");
-        assert!(output.contains("init_dwarf_source_maps"), "should define DWARF init");
+        assert!(
+            output.contains("PROGRAM_TOTALS"),
+            "should define PROGRAM_TOTALS"
+        );
+        assert!(
+            output.contains("PROGRAM_TOTAL_INSTRUCTIONS"),
+            "should define instruction totals"
+        );
+        assert!(
+            output.contains("PROGRAM_BINARIES"),
+            "should define program binaries storage"
+        );
+        assert!(
+            output.contains("DWARF_SOURCE_MAP"),
+            "should define DWARF source map storage"
+        );
+        assert!(
+            output.contains("init_program_totals"),
+            "should define init function"
+        );
+        assert!(
+            output.contains("init_dwarf_source_maps"),
+            "should define DWARF init"
+        );
     }
 
     #[test]
     fn coverage_state_has_to_bucket() {
         let output = ts(coverage_state_code());
-        assert!(output.contains("to_bucket"), "should define to_bucket function");
-        assert!(output.contains("mix_hash"), "should define mix_hash function");
+        assert!(
+            output.contains("to_bucket"),
+            "should define to_bucket function"
+        );
+        assert!(
+            output.contains("mix_hash"),
+            "should define mix_hash function"
+        );
     }
 }

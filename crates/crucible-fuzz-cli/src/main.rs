@@ -61,6 +61,9 @@ enum Commands {
         /// Custom crash output directory
         #[arg(long)]
         crashes_out: Option<PathBuf>,
+        /// Custom directory for .meta.json files (default: same as crashes_out)
+        #[arg(long)]
+        crashes_meta_out: Option<PathBuf>,
         /// Replay a single crash/input file
         #[arg(long)]
         replay: Option<PathBuf>,
@@ -130,6 +133,9 @@ enum Commands {
         /// Custom crashes directory to read from
         #[arg(long)]
         crashes_dir: Option<PathBuf>,
+        /// Custom directory for .meta.json files (default: same as crashes_dir)
+        #[arg(long)]
+        crash_meta_dir: Option<PathBuf>,
     },
     /// Minimize a crash to smallest reproducing action sequence
     Tmin {
@@ -145,6 +151,9 @@ enum Commands {
         /// Build in release mode
         #[arg(long)]
         release: bool,
+        /// Custom directory for .meta.json files (default: same as crashes directory)
+        #[arg(long)]
+        crash_meta_dir: Option<PathBuf>,
     },
     /// Minimize corpus to smallest set preserving coverage
     Cmin {
@@ -209,6 +218,7 @@ fn main() -> Result<()> {
             corpus_in,
             corpus_out,
             crashes_out,
+            crashes_meta_out,
             replay,
             dry_run,
             seed,
@@ -235,6 +245,7 @@ fn main() -> Result<()> {
             corpus_in,
             corpus_out,
             crashes_out,
+            crashes_meta_out,
             replay,
             dry_run,
             cores,
@@ -261,6 +272,7 @@ fn main() -> Result<()> {
             replay,
             regen,
             crashes_dir,
+            crash_meta_dir,
         } => fuzz_show(
             &program_name,
             &cli.harness_dir,
@@ -268,6 +280,7 @@ fn main() -> Result<()> {
             replay,
             regen,
             crashes_dir.as_deref(),
+            crash_meta_dir.as_deref(),
         ),
         Commands::Tmin {
             program_name,
@@ -275,6 +288,7 @@ fn main() -> Result<()> {
             crash_file,
             all,
             release,
+            crash_meta_dir,
         } => fuzz_tmin(
             &program_name,
             &test_name,
@@ -282,6 +296,7 @@ fn main() -> Result<()> {
             crash_file.as_deref(),
             all,
             release,
+            crash_meta_dir.as_deref(),
         ),
         Commands::Cmin {
             program_name,
@@ -423,6 +438,7 @@ fn fuzz_run(
     corpus_in: Option<PathBuf>,
     corpus_out: Option<PathBuf>,
     crashes_out: Option<PathBuf>,
+    meta_out: Option<PathBuf>,
     replay: Option<PathBuf>,
     dry_run: bool,
     cores: Option<usize>,
@@ -579,6 +595,11 @@ fn fuzz_run(
     };
     cmd.env("FUZZ_CRASHES_DIR", &crashes_abs_path);
     println!("[FUZZ] Crashes directory: {}", crashes_abs_path.display());
+    if let Some(ref meta_path) = meta_out {
+        let meta_abs_path = resolve_path(&cwd, meta_path);
+        cmd.env("FUZZ_META_DIR", &meta_abs_path);
+        println!("[FUZZ] Meta directory: {}", meta_abs_path.display());
+    }
 
     if let Some(ref replay_path) = replay {
         let abs_path = resolve_path(&cwd, replay_path);
@@ -832,6 +853,7 @@ fn fuzz_show(
     replay: bool,
     regen: bool,
     custom_crashes_dir: Option<&Path>,
+    custom_meta_dir: Option<&Path>,
 ) -> Result<()> {
     if regen && !replay {
         bail!(
@@ -865,10 +887,19 @@ fn fuzz_show(
 
     match crash_file {
         None if replay && regen => regen_crashes(&fuzz_dir, custom_crashes_dir),
-        None => list_crashes(&fuzz_dir, &display_name, custom_crashes_dir),
-        Some(crash_name) if !replay => {
-            show_crash_metadata(&fuzz_dir, &display_name, crash_name, custom_crashes_dir)
-        }
+        None => list_crashes(
+            &fuzz_dir,
+            &display_name,
+            custom_crashes_dir,
+            custom_meta_dir,
+        ),
+        Some(crash_name) if !replay => show_crash_metadata(
+            &fuzz_dir,
+            &display_name,
+            crash_name,
+            custom_crashes_dir,
+            custom_meta_dir,
+        ),
         Some(crash_name) => replay_crash(&fuzz_dir, &display_name, crash_name, custom_crashes_dir),
     }
 }
@@ -877,8 +908,12 @@ fn list_crashes(
     fuzz_dir: &Path,
     program_name: &str,
     custom_crashes_dir: Option<&Path>,
+    custom_meta_dir: Option<&Path>,
 ) -> Result<()> {
     let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
+    let meta_dir = custom_meta_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| crashes_dir.clone());
     if !crashes_dir.exists() {
         println!("No crashes directory found at: {}", crashes_dir.display());
         println!("Run the fuzzer first to generate crashes.");
@@ -903,8 +938,13 @@ fn list_crashes(
             .to_string();
 
         // First pass: collect .meta.json crash IDs
+        let meta_test_dir = meta_dir.join(&test_name);
         let mut meta_ids = std::collections::HashSet::new();
-        for file_entry in fs::read_dir(&test_dir)? {
+        for file_entry in fs::read_dir(if meta_test_dir.is_dir() {
+            &meta_test_dir
+        } else {
+            &test_dir
+        })? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
             let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -952,7 +992,7 @@ fn list_crashes(
     // Also scan flat layout: files directly in crashes_dir (no test subdirectory)
     {
         let mut flat_meta_ids = std::collections::HashSet::new();
-        for file_entry in fs::read_dir(&crashes_dir)? {
+        for file_entry in fs::read_dir(&meta_dir)? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
             if !file_path.is_file() {
@@ -1092,8 +1132,12 @@ fn show_crash_metadata(
     program_name: &str,
     crash_name: &str,
     custom_crashes_dir: Option<&Path>,
+    custom_meta_dir: Option<&Path>,
 ) -> Result<()> {
     let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
+    let meta_dir = custom_meta_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| crashes_dir.clone());
 
     // Search for .meta.json and/or raw crash file
     let mut meta_path = None;
@@ -1104,7 +1148,10 @@ fn show_crash_metadata(
             if !test_dir.is_dir() {
                 continue;
             }
-            let meta_candidate = test_dir.join(format!("{}.meta.json", crash_name));
+            let test_name = test_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let meta_candidate = meta_dir
+                .join(test_name)
+                .join(format!("{}.meta.json", crash_name));
             if meta_candidate.exists() {
                 meta_path = Some(meta_candidate);
             }
@@ -1115,9 +1162,9 @@ fn show_crash_metadata(
         }
     }
 
-    // Also check flat layout: files directly in crashes_dir
+    // Also check flat layout: files directly in crashes_dir / meta_dir
     if meta_path.is_none() {
-        let flat_meta = crashes_dir.join(format!("{}.meta.json", crash_name));
+        let flat_meta = meta_dir.join(format!("{}.meta.json", crash_name));
         if flat_meta.exists() {
             meta_path = Some(flat_meta);
         }
@@ -1554,6 +1601,7 @@ fn fuzz_tmin(
     crash_file: Option<&str>,
     all: bool,
     release: bool,
+    crash_meta_dir: Option<&Path>,
 ) -> Result<()> {
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd), program_name)?;
@@ -1594,6 +1642,9 @@ fn fuzz_tmin(
     let crash_file = crash_file.as_deref();
 
     let crashes_dir = fuzz_dir.join("crashes").join(test_name);
+    let meta_dir = crash_meta_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| crashes_dir.clone());
 
     if !crashes_dir.exists() {
         bail!(
@@ -1606,7 +1657,7 @@ fn fuzz_tmin(
     let crash_files: Vec<(String, PathBuf)> = if all {
         // Find all crash binary files (those with a corresponding .meta.json)
         let mut files = Vec::new();
-        for entry in fs::read_dir(&crashes_dir)? {
+        for entry in fs::read_dir(&meta_dir)? {
             let entry = entry?;
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -1665,6 +1716,7 @@ fn fuzz_tmin(
             .current_dir(&fuzz_dir)
             .env("FUZZ_TMIN_ALL_DIR", &crashes_dir)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
+            .env("FUZZ_META_DIR", &meta_dir)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -1683,6 +1735,7 @@ fn fuzz_tmin(
             .env("FUZZ_TMIN_FILE", crash_path)
             .env("FUZZ_TMIN_CRASH_ID", crash_id)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
+            .env("FUZZ_META_DIR", &meta_dir)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -1898,7 +1951,8 @@ fn resolve_fuzz_dir(root: &Path, program_name: &str) -> Result<PathBuf> {
     // If root itself is a harness dir (has [package], not a bare virtual workspace), use it directly.
     if root.join("Cargo.toml").exists() && root.join("src").exists() {
         let content = fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
-        let is_virtual_workspace = content.contains("[workspace]") && !content.contains("[package]");
+        let is_virtual_workspace =
+            content.contains("[workspace]") && !content.contains("[package]");
         if !is_virtual_workspace {
             return Ok(root.to_path_buf());
         }

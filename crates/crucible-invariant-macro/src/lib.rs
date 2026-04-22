@@ -1,12 +1,9 @@
+use crucible_macro_utils::{MaxLenConstraint, RangeConstraint};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{
-    parse_macro_input, FnArg, Ident, ImplItem, ItemFn, ItemImpl,
-    PatType, Type,
-};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crucible_macro_utils::{RangeConstraint, MaxLenConstraint};
+use syn::{parse_macro_input, FnArg, Ident, ImplItem, ItemFn, ItemImpl, PatType, Type};
 
 static FALLBACK_MAIN_EMITTED: AtomicBool = AtomicBool::new(false);
 
@@ -182,7 +179,9 @@ fn gen_inner_random_expr(
             let (lo, hi) = c.exclusive_bounds(&quote! { i128 });
             quote! { crucible_fuzzer::gen_i128(rng, #lo, #hi) }
         }
-        (FieldTypeKind::I128, None) => quote! { crucible_fuzzer::gen_i128(rng, i128::MIN, i128::MAX) },
+        (FieldTypeKind::I128, None) => {
+            quote! { crucible_fuzzer::gen_i128(rng, i128::MIN, i128::MAX) }
+        }
         // i8/i16/i32 — boundary-aware via gen_i64 then cast
         (FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32, Some(c)) => {
             let (lo, hi) = c.exclusive_bounds(&quote! { i64 });
@@ -201,7 +200,9 @@ fn gen_inner_random_expr(
         (FieldTypeKind::Usize, None) => quote! { crucible_fuzzer::gen_usize(rng, 0, usize::MAX) },
         // bool — no boundary concept
         (FieldTypeKind::Bool, _) => quote! { crucible_fuzzer::rand_below(rng, 2) == 1 },
-        (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => unreachable!("handled at top level"),
+        (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => {
+            unreachable!("handled at top level")
+        }
     }
 }
 
@@ -288,7 +289,9 @@ fn gen_inner_mutate_stmt(
         (FieldTypeKind::Bool, _) => {
             quote! { crucible_fuzzer::mutate_bool(#ref_tok, rng); }
         }
-        (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => unreachable!("handled at top level"),
+        (FieldTypeKind::Option(_), _) | (FieldTypeKind::Vec(_), _) => {
+            unreachable!("handled at top level")
+        }
     }
 }
 
@@ -319,7 +322,11 @@ fn gen_random_field_code(
         FieldTypeKind::Option(inner) => (inner.as_ref(), true),
         other => (other, false),
     };
-    let inner_ty = if is_option { extract_option_inner(ty) } else { Some(ty) };
+    let inner_ty = if is_option {
+        extract_option_inner(ty)
+    } else {
+        Some(ty)
+    };
     let inner_expr = gen_inner_random_expr(inner_kind, inner_ty, constraint);
 
     if is_option {
@@ -395,18 +402,40 @@ fn gen_mutate_field_code(
 }
 
 /// Generate code for serializing a field in FuzzAction::serialize_fields
-fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> proc_macro2::TokenStream {
+fn gen_serialize_field_code(
+    name: &Ident,
+    ty: &Type,
+    max_len: Option<usize>,
+) -> proc_macro2::TokenStream {
     let kind = classify_field_type(ty);
 
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
         let (elem_bytes, pad_bytes) = match inner_kind.as_ref() {
-            FieldTypeKind::U128 => (quote! { (*__item as u128).to_le_bytes() }, quote! { 0u128.to_le_bytes() }),
-            FieldTypeKind::I128 => (quote! { (*__item as u128).to_le_bytes() }, quote! { 0u128.to_le_bytes() }),
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
-            FieldTypeKind::Usize => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
-            FieldTypeKind::Bool => (quote! { (if *__item { 1u64 } else { 0u64 }).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => (quote! { (*__item as u64).to_le_bytes() }, quote! { 0u64.to_le_bytes() }),
+            FieldTypeKind::U128 => (
+                quote! { (*__item as u128).to_le_bytes() },
+                quote! { 0u128.to_le_bytes() },
+            ),
+            FieldTypeKind::I128 => (
+                quote! { (*__item as u128).to_le_bytes() },
+                quote! { 0u128.to_le_bytes() },
+            ),
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => (
+                quote! { (*__item as u64).to_le_bytes() },
+                quote! { 0u64.to_le_bytes() },
+            ),
+            FieldTypeKind::Usize => (
+                quote! { (*__item as u64).to_le_bytes() },
+                quote! { 0u64.to_le_bytes() },
+            ),
+            FieldTypeKind::Bool => (
+                quote! { (if *__item { 1u64 } else { 0u64 }).to_le_bytes() },
+                quote! { 0u64.to_le_bytes() },
+            ),
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => (
+                quote! { (*__item as u64).to_le_bytes() },
+                quote! { 0u64.to_le_bytes() },
+            ),
             _ => unreachable!(),
         };
         return quote! {
@@ -426,14 +455,20 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
     };
 
     // Expression that converts a value to le bytes.
-    let to_bytes = |val_tok: proc_macro2::TokenStream, kind: &FieldTypeKind| -> proc_macro2::TokenStream {
+    let to_bytes = |val_tok: proc_macro2::TokenStream,
+                    kind: &FieldTypeKind|
+     -> proc_macro2::TokenStream {
         match kind {
             FieldTypeKind::U128 => quote! { (#val_tok as u128).to_le_bytes() },
             FieldTypeKind::I128 => quote! { (#val_tok as u128).to_le_bytes() },
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! { (#val_tok as u64).to_le_bytes() },
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                quote! { (#val_tok as u64).to_le_bytes() }
+            }
             FieldTypeKind::Usize => quote! { (#val_tok as u64).to_le_bytes() },
             FieldTypeKind::Bool => quote! { (if #val_tok { 1u64 } else { 0u64 }).to_le_bytes() },
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! { (#val_tok as u64).to_le_bytes() },
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                quote! { (#val_tok as u64).to_le_bytes() }
+            }
             FieldTypeKind::Option(_) | FieldTypeKind::Vec(_) => unreachable!(),
         }
     };
@@ -457,12 +492,19 @@ fn gen_serialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> 
 }
 
 /// Generate code for deserializing a field in FuzzAction::deserialize_fields
-fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -> proc_macro2::TokenStream {
+fn gen_deserialize_field_code(
+    name: &Ident,
+    ty: &Type,
+    max_len: Option<usize>,
+) -> proc_macro2::TokenStream {
     let kind = classify_field_type(ty);
 
     if let FieldTypeKind::Vec(ref inner_kind) = kind {
         let ml = max_len.unwrap_or(8);
-        let is_128 = matches!(inner_kind.as_ref(), FieldTypeKind::U128 | FieldTypeKind::I128);
+        let is_128 = matches!(
+            inner_kind.as_ref(),
+            FieldTypeKind::U128 | FieldTypeKind::I128
+        );
         let elem_size: usize = if is_128 { 16 } else { 8 };
         let (read_raw, raw_to_val) = if is_128 {
             let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
@@ -472,7 +514,10 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
             )
         } else {
             match inner_kind.as_ref() {
-                FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                FieldTypeKind::U8
+                | FieldTypeKind::U16
+                | FieldTypeKind::U32
+                | FieldTypeKind::U64 => {
                     let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
                     (
                         quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
@@ -487,7 +532,10 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
                     quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
                     quote! { __raw != 0 },
                 ),
-                FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                FieldTypeKind::I8
+                | FieldTypeKind::I16
+                | FieldTypeKind::I32
+                | FieldTypeKind::I64 => {
                     let inner_ty = extract_vec_inner(ty).expect("Vec<T> inner type");
                     (
                         quote! { u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) },
@@ -528,13 +576,19 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
             }
             _ => {
                 let raw_to_val = match inner_kind {
-                    FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                    FieldTypeKind::U8
+                    | FieldTypeKind::U16
+                    | FieldTypeKind::U32
+                    | FieldTypeKind::U64 => {
                         let inner_ty = extract_option_inner(ty).unwrap_or(ty);
                         quote! { __raw as #inner_ty }
                     }
                     FieldTypeKind::Usize => quote! { __raw as usize },
                     FieldTypeKind::Bool => quote! { __raw != 0 },
-                    FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                    FieldTypeKind::I8
+                    | FieldTypeKind::I16
+                    | FieldTypeKind::I32
+                    | FieldTypeKind::I64 => {
                         let inner_ty = extract_option_inner(ty).unwrap_or(ty);
                         quote! { __raw as #inner_ty }
                     }
@@ -558,10 +612,12 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
                 let #name = u128::from_le_bytes(bytes[*cursor..*cursor + 16].try_into().ok()?) as #ty;
                 *cursor += 16;
             },
-            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => quote! {
-                let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
-                *cursor += 8;
-            },
+            FieldTypeKind::U8 | FieldTypeKind::U16 | FieldTypeKind::U32 | FieldTypeKind::U64 => {
+                quote! {
+                    let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
+                    *cursor += 8;
+                }
+            }
             FieldTypeKind::Usize => quote! {
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as usize;
                 *cursor += 8;
@@ -570,10 +626,12 @@ fn gen_deserialize_field_code(name: &Ident, ty: &Type, max_len: Option<usize>) -
                 let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) != 0;
                 *cursor += 8;
             },
-            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => quote! {
-                let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
-                *cursor += 8;
-            },
+            FieldTypeKind::I8 | FieldTypeKind::I16 | FieldTypeKind::I32 | FieldTypeKind::I64 => {
+                quote! {
+                    let #name = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().ok()?) as #ty;
+                    *cursor += 8;
+                }
+            }
             FieldTypeKind::Option(_) | FieldTypeKind::Vec(_) => unreachable!(),
         }
     }
@@ -587,7 +645,12 @@ fn gen_from_json_field_code(name: &Ident, ty: &Type) -> proc_macro2::TokenStream
     gen_from_json_kind(name, &name_str, ty, &kind)
 }
 
-fn gen_from_json_kind(name: &Ident, name_str: &str, ty: &Type, kind: &FieldTypeKind) -> proc_macro2::TokenStream {
+fn gen_from_json_kind(
+    name: &Ident,
+    name_str: &str,
+    ty: &Type,
+    kind: &FieldTypeKind,
+) -> proc_macro2::TokenStream {
     match kind {
         FieldTypeKind::U64 => quote! { let #name = __params.get(#name_str)?.as_u64()?; },
         FieldTypeKind::U8 => quote! { let #name = __params.get(#name_str)?.as_u64()? as u8; },
@@ -742,23 +805,29 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
                 if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg {
                     if let syn::Pat::Ident(pat_ident) = &**pat {
                         if pat_ident.ident != "self" {
-                            if let Some(range_attr) = attrs.iter().find(|a| a.path().is_ident("range")) {
+                            if let Some(range_attr) =
+                                attrs.iter().find(|a| a.path().is_ident("range"))
+                            {
                                 if let Ok(constraint) = RangeConstraint::from_attr(range_attr) {
                                     constraints.insert(
                                         (action_ident.to_string(), pat_ident.ident.to_string()),
-                                        constraint
+                                        constraint,
                                     );
                                 }
                             }
-                            if let Some(ml_attr) = attrs.iter().find(|a| a.path().is_ident("max_len")) {
+                            if let Some(ml_attr) =
+                                attrs.iter().find(|a| a.path().is_ident("max_len"))
+                            {
                                 if let Ok(ml) = MaxLenConstraint::from_attr(ml_attr) {
                                     max_lens.insert(
                                         (action_ident.to_string(), pat_ident.ident.to_string()),
-                                        ml
+                                        ml,
                                     );
                                 }
                             }
-                            attrs.retain(|a| !a.path().is_ident("range") && !a.path().is_ident("max_len"));
+                            attrs.retain(|a| {
+                                !a.path().is_ident("range") && !a.path().is_ident("max_len")
+                            });
                             params.push((pat_ident.ident.clone(), ty.clone()));
                         }
                     }
@@ -771,7 +840,13 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
 
     for item in &mut input.items {
         if let ImplItem::Fn(method) = item {
-            process_method(method, &mut actions, &mut constraints, &mut max_lens, &mut has_after_action);
+            process_method(
+                method,
+                &mut actions,
+                &mut constraints,
+                &mut max_lens,
+                &mut has_after_action,
+            );
         }
     }
 
@@ -847,26 +922,33 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
     });
 
     // Generate constrain_in_place method to apply constraints to the inputs
-    let constrain_arms: Vec<_> = actions.iter().map(|(action_name, _, params)| {
-        // Get each constraint for the field
-        let field_constraints: Vec<_> = params.iter().filter_map(|(field_name, field_type)| {
-            constraints.get(&(action_name.to_string(), field_name.to_string()))
-                .map(|constraint| gen_constraint_code(field_name, field_type, constraint))
-        }).collect();
+    let constrain_arms: Vec<_> = actions
+        .iter()
+        .map(|(action_name, _, params)| {
+            // Get each constraint for the field
+            let field_constraints: Vec<_> = params
+                .iter()
+                .filter_map(|(field_name, field_type)| {
+                    constraints
+                        .get(&(action_name.to_string(), field_name.to_string()))
+                        .map(|constraint| gen_constraint_code(field_name, field_type, constraint))
+                })
+                .collect();
 
-        if field_constraints.is_empty() {
-            quote! { #enum_name::#action_name { .. } => {} }
-        } else if params.is_empty() {
-            quote! { #enum_name::#action_name => {} }
-        } else {
-            let field_names = params.iter().map(|(name, _)| name);
-            quote! {
-                #enum_name::#action_name { #(#field_names),* } => {
-                    #(#field_constraints)*
+            if field_constraints.is_empty() {
+                quote! { #enum_name::#action_name { .. } => {} }
+            } else if params.is_empty() {
+                quote! { #enum_name::#action_name => {} }
+            } else {
+                let field_names = params.iter().map(|(name, _)| name);
+                quote! {
+                    #enum_name::#action_name { #(#field_names),* } => {
+                        #(#field_constraints)*
+                    }
                 }
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     // ===== Generate FuzzAction trait implementation arms =====
     let num_actions = actions.len();
@@ -897,34 +979,60 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             let num_fields = params.len();
 
             // Compute cumulative byte offsets for variable-width fields (Vec)
-            let field_sizes: Vec<usize> = params.iter().map(|(name, ty)| {
-                let kind = classify_field_type(ty);
-                let ml = max_lens.get(&(action_name.to_string(), name.to_string())).map(|m| m.max_len);
-                field_byte_size(&kind, ml)
-            }).collect();
+            let field_sizes: Vec<usize> = params
+                .iter()
+                .map(|(name, ty)| {
+                    let kind = classify_field_type(ty);
+                    let ml = max_lens
+                        .get(&(action_name.to_string(), name.to_string()))
+                        .map(|m| m.max_len);
+                    field_byte_size(&kind, ml)
+                })
+                .collect();
             let total_bytes: usize = field_sizes.iter().sum();
 
-            let random_fields: Vec<_> = params.iter().map(|(name, ty)| {
-                let c = constraints.get(&(action_name.to_string(), name.to_string()));
-                let ml = max_lens.get(&(action_name.to_string(), name.to_string())).map(|m| m.max_len);
-                gen_random_field_code(name, ty, c, ml)
-            }).collect();
+            let random_fields: Vec<_> = params
+                .iter()
+                .map(|(name, ty)| {
+                    let c = constraints.get(&(action_name.to_string(), name.to_string()));
+                    let ml = max_lens
+                        .get(&(action_name.to_string(), name.to_string()))
+                        .map(|m| m.max_len);
+                    gen_random_field_code(name, ty, c, ml)
+                })
+                .collect();
 
-            let mutate_field_arms: Vec<_> = params.iter().enumerate().map(|(fi, (name, ty))| {
-                let c = constraints.get(&(action_name.to_string(), name.to_string()));
-                let ml = max_lens.get(&(action_name.to_string(), name.to_string())).map(|m| m.max_len);
-                gen_mutate_field_code(fi, name, ty, c, ml)
-            }).collect();
+            let mutate_field_arms: Vec<_> = params
+                .iter()
+                .enumerate()
+                .map(|(fi, (name, ty))| {
+                    let c = constraints.get(&(action_name.to_string(), name.to_string()));
+                    let ml = max_lens
+                        .get(&(action_name.to_string(), name.to_string()))
+                        .map(|m| m.max_len);
+                    gen_mutate_field_code(fi, name, ty, c, ml)
+                })
+                .collect();
 
-            let ser_fields: Vec<_> = params.iter().map(|(name, ty)| {
-                let ml = max_lens.get(&(action_name.to_string(), name.to_string())).map(|m| m.max_len);
-                gen_serialize_field_code(name, ty, ml)
-            }).collect();
+            let ser_fields: Vec<_> = params
+                .iter()
+                .map(|(name, ty)| {
+                    let ml = max_lens
+                        .get(&(action_name.to_string(), name.to_string()))
+                        .map(|m| m.max_len);
+                    gen_serialize_field_code(name, ty, ml)
+                })
+                .collect();
 
-            let deser_fields: Vec<_> = params.iter().map(|(name, ty)| {
-                let ml = max_lens.get(&(action_name.to_string(), name.to_string())).map(|m| m.max_len);
-                gen_deserialize_field_code(name, ty, ml)
-            }).collect();
+            let deser_fields: Vec<_> = params
+                .iter()
+                .map(|(name, ty)| {
+                    let ml = max_lens
+                        .get(&(action_name.to_string(), name.to_string()))
+                        .map(|m| m.max_len);
+                    gen_deserialize_field_code(name, ty, ml)
+                })
+                .collect();
 
             random_variant_arms.push(quote! {
                 #idx => Self::#action_name { #(#random_fields)* },
@@ -965,9 +1073,10 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             field_byte_count_arms.push(quote! { #idx => #total_bytes, });
 
             // Generate from_name_and_params arm for this variant
-            let from_json_fields: Vec<_> = params.iter().map(|(name, ty)| {
-                gen_from_json_field_code(name, ty)
-            }).collect();
+            let from_json_fields: Vec<_> = params
+                .iter()
+                .map(|(name, ty)| gen_from_json_field_code(name, ty))
+                .collect();
             from_json_arms.push(quote! {
                 #action_str => {
                     #(#from_json_fields)*
@@ -1131,9 +1240,12 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
         if features.is_empty() {
             quote! {}
         } else {
-            let feature_guards: Vec<_> = features.iter().map(|f| {
-                quote! { feature = #f }
-            }).collect();
+            let feature_guards: Vec<_> = features
+                .iter()
+                .map(|f| {
+                    quote! { feature = #f }
+                })
+                .collect();
             quote! {
                 #[cfg(not(any(#(#feature_guards),*)))]
                 fn main() {
@@ -1162,8 +1274,10 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     if !args_tokens.is_empty() {
         return syn::Error::new_spanned(
             args_tokens,
-            "invariant_test no longer accepts arguments. Structured mutation is now the default."
-        ).to_compile_error().into();
+            "invariant_test no longer accepts arguments. Structured mutation is now the default.",
+        )
+        .to_compile_error()
+        .into();
     }
 
     let input_fn = parse_macro_input!(item as ItemFn);
@@ -1171,14 +1285,16 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
     let fn_body = &input_fn.block;
 
     // Extract fixture type from first parameter
-    let fixture_param = input_fn.sig.inputs.first()
+    let fixture_param = input_fn
+        .sig
+        .inputs
+        .first()
         .expect("invariant_test function must have a fixture parameter");
 
     let FnArg::Typed(pat_type) = fixture_param else {
-        return syn::Error::new_spanned(
-            fixture_param,
-            "Expected typed parameter"
-        ).to_compile_error().into();
+        return syn::Error::new_spanned(fixture_param, "Expected typed parameter")
+            .to_compile_error()
+            .into();
     };
 
     // Extract type from &mut FixtureType or &FixtureType
@@ -1187,8 +1303,10 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 &pat_type.ty,
-                "Fixture parameter must be a reference (&mut FixtureType)"
-            ).to_compile_error().into();
+                "Fixture parameter must be a reference (&mut FixtureType)",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -1202,8 +1320,10 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 fixture_type,
-                "Expected a simple type path for fixture"
-            ).to_compile_error().into();
+                "Expected a simple type path for fixture",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -1377,39 +1497,60 @@ mod tests {
 
     #[test]
     fn test_classify_u8() {
-        assert!(matches!(classify_field_type(&parse_type("u8")), FieldTypeKind::U8));
+        assert!(matches!(
+            classify_field_type(&parse_type("u8")),
+            FieldTypeKind::U8
+        ));
     }
 
     #[test]
     fn test_classify_u64() {
-        assert!(matches!(classify_field_type(&parse_type("u64")), FieldTypeKind::U64));
+        assert!(matches!(
+            classify_field_type(&parse_type("u64")),
+            FieldTypeKind::U64
+        ));
     }
 
     #[test]
     fn test_classify_u128() {
-        assert!(matches!(classify_field_type(&parse_type("u128")), FieldTypeKind::U128));
+        assert!(matches!(
+            classify_field_type(&parse_type("u128")),
+            FieldTypeKind::U128
+        ));
     }
 
     #[test]
     fn test_classify_bool() {
-        assert!(matches!(classify_field_type(&parse_type("bool")), FieldTypeKind::Bool));
+        assert!(matches!(
+            classify_field_type(&parse_type("bool")),
+            FieldTypeKind::Bool
+        ));
     }
 
     #[test]
     fn test_classify_i64() {
-        assert!(matches!(classify_field_type(&parse_type("i64")), FieldTypeKind::I64));
+        assert!(matches!(
+            classify_field_type(&parse_type("i64")),
+            FieldTypeKind::I64
+        ));
     }
 
     #[test]
     fn test_classify_usize() {
-        assert!(matches!(classify_field_type(&parse_type("usize")), FieldTypeKind::Usize));
+        assert!(matches!(
+            classify_field_type(&parse_type("usize")),
+            FieldTypeKind::Usize
+        ));
     }
 
     #[test]
     fn test_classify_vec_u64() {
         match classify_field_type(&parse_type("Vec<u64>")) {
             FieldTypeKind::Vec(inner) => assert!(matches!(*inner, FieldTypeKind::U64)),
-            other => panic!("Expected Vec(U64), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Vec(U64), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1417,7 +1558,10 @@ mod tests {
     fn test_classify_option_u64() {
         match classify_field_type(&parse_type("Option<u64>")) {
             FieldTypeKind::Option(inner) => assert!(matches!(*inner, FieldTypeKind::U64)),
-            other => panic!("Expected Option(U64), got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected Option(U64), got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1435,8 +1579,14 @@ mod tests {
     #[test]
     fn test_classify_unknown_defaults_u64() {
         // Unknown type names default to U64
-        assert!(matches!(classify_field_type(&parse_type("Pubkey")), FieldTypeKind::U64));
-        assert!(matches!(classify_field_type(&parse_type("MyCustomType")), FieldTypeKind::U64));
+        assert!(matches!(
+            classify_field_type(&parse_type("Pubkey")),
+            FieldTypeKind::U64
+        ));
+        assert!(matches!(
+            classify_field_type(&parse_type("MyCustomType")),
+            FieldTypeKind::U64
+        ));
     }
 
     // ========================================================================
@@ -1496,21 +1646,36 @@ mod tests {
     #[test]
     fn test_byte_size_all_scalars_are_8() {
         for kind in [
-            FieldTypeKind::U8, FieldTypeKind::U16, FieldTypeKind::U32,
-            FieldTypeKind::U64, FieldTypeKind::I8, FieldTypeKind::I16,
-            FieldTypeKind::I32, FieldTypeKind::I64, FieldTypeKind::Usize,
+            FieldTypeKind::U8,
+            FieldTypeKind::U16,
+            FieldTypeKind::U32,
+            FieldTypeKind::U64,
+            FieldTypeKind::I8,
+            FieldTypeKind::I16,
+            FieldTypeKind::I32,
+            FieldTypeKind::I64,
+            FieldTypeKind::Usize,
             FieldTypeKind::Bool,
         ] {
-            assert_eq!(field_byte_size(&kind, None), 8, "Scalar {:?} should be 8 bytes", std::mem::discriminant(&kind));
+            assert_eq!(
+                field_byte_size(&kind, None),
+                8,
+                "Scalar {:?} should be 8 bytes",
+                std::mem::discriminant(&kind)
+            );
         }
     }
 
     #[test]
     fn test_byte_size_option_vec() {
-        let kind = FieldTypeKind::Option(Box::new(FieldTypeKind::Vec(Box::new(FieldTypeKind::U64))));
+        let kind =
+            FieldTypeKind::Option(Box::new(FieldTypeKind::Vec(Box::new(FieldTypeKind::U64))));
         let actual = field_byte_size(&kind, None);
         // Option<Vec<u64>> should match Vec<u64> byte size: 8-byte length prefix + 8*8 elements
-        assert_eq!(actual, 72, "Option<Vec<u64>> should match Vec<u64> byte size");
+        assert_eq!(
+            actual, 72,
+            "Option<Vec<u64>> should match Vec<u64> byte size"
+        );
     }
 
     // ========================================================================
@@ -1567,7 +1732,10 @@ mod tests {
         let ty = parse_type("Vec<u64>");
         let inner = extract_vec_inner(&ty);
         assert!(inner.is_some());
-        assert!(matches!(classify_field_type(inner.unwrap()), FieldTypeKind::U64));
+        assert!(matches!(
+            classify_field_type(inner.unwrap()),
+            FieldTypeKind::U64
+        ));
     }
 
     #[test]
@@ -1575,7 +1743,10 @@ mod tests {
         let ty = parse_type("Option<bool>");
         let inner = extract_option_inner(&ty);
         assert!(inner.is_some());
-        assert!(matches!(classify_field_type(inner.unwrap()), FieldTypeKind::Bool));
+        assert!(matches!(
+            classify_field_type(inner.unwrap()),
+            FieldTypeKind::Bool
+        ));
     }
 
     #[test]

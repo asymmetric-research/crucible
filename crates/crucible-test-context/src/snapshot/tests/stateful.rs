@@ -169,13 +169,19 @@ fn test_restore_selective_to_from_transition() {
     // State 1: pk_a=500 (from action on state 0)
     let mut delta_1_accounts = FastHashMap::default();
     delta_1_accounts.insert(pk_a, Arc::new(make_account(500, &[5])));
-    let delta_1 = SvmSnapshot { accounts: delta_1_accounts, sysvars: make_test_sysvars(10) };
+    let delta_1 = SvmSnapshot {
+        accounts: delta_1_accounts,
+        sysvars: make_test_sysvars(10),
+    };
 
     // State 2: pk_a=500 (inherited), pk_b=600 (from action on state 1)
     let mut delta_2_accounts = FastHashMap::default();
     delta_2_accounts.insert(pk_a, delta_1.accounts()[&pk_a].clone()); // same Arc
     delta_2_accounts.insert(pk_b, Arc::new(make_account(600, &[6])));
-    let delta_2 = SvmSnapshot { accounts: delta_2_accounts, sysvars: make_test_sysvars(20) };
+    let delta_2 = SvmSnapshot {
+        accounts: delta_2_accounts,
+        sysvars: make_test_sysvars(20),
+    };
 
     // === ITERATION 1: Pick state 1, use restore_selective ===
     // (prev_delta_arc is None)
@@ -215,9 +221,7 @@ fn test_restore_selective_to_from_transition() {
     // === ITERATION 2: Pick state 2, use restore_selective_from ===
     assert!(prev_delta_arc.is_some());
     let prev = prev_delta_arc.as_ref().unwrap();
-    initial.restore_selective_from(
-        &mut svm, &divergent_keys, prev, &delta_2, &prev_exec_dirty,
-    );
+    initial.restore_selective_from(&mut svm, &divergent_keys, prev, &delta_2, &prev_exec_dirty);
 
     // Real loop: divergent_keys = delta.keys()
     divergent_keys.clear();
@@ -260,7 +264,10 @@ fn test_divergent_keys_union_exec_dirty_outside_delta() {
     // Delta has pk_a=500 only
     let mut delta_accounts = FastHashMap::default();
     delta_accounts.insert(pk_a, Arc::new(make_account(500, &[5])));
-    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: initial.sysvars.clone() };
+    let delta = SvmSnapshot {
+        accounts: delta_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // === Iteration 1: restore_selective ===
     initial.restore_selective(&mut svm, &divergent_keys, &delta);
@@ -284,7 +291,11 @@ fn test_divergent_keys_union_exec_dirty_outside_delta() {
     let prev_delta = delta.clone();
 
     initial.restore_selective_from(
-        &mut svm, &divergent_keys, &prev_delta, &empty_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent_keys,
+        &prev_delta,
+        &empty_delta,
+        &prev_exec_dirty,
     );
 
     // pk_a: in divergent, NOT in empty_delta → restored to initial (100)
@@ -309,7 +320,10 @@ fn test_divergent_keys_prev_exec_dirty_account_in_initial() {
     // prev_delta only has pk_delta=500
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk_delta, Arc::new(make_account(500, &[5])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
+    let prev_delta = SvmSnapshot {
+        accounts: prev_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // next_delta also only has pk_delta=500 (same state picked again)
     let next_delta = prev_delta.clone();
@@ -330,7 +344,11 @@ fn test_divergent_keys_prev_exec_dirty_account_in_initial() {
     svm.set_account(pk_target, make_account(999, &[9])).unwrap();
 
     initial.restore_selective_from(
-        &mut svm, &divergent_keys, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent_keys,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     // pk_target: in divergent, NOT in next_delta → restored to initial (100)
@@ -365,7 +383,10 @@ fn test_same_state_picked_consecutively() {
     let mut delta_accounts = FastHashMap::default();
     delta_accounts.insert(pk_a, Arc::new(make_account(500, &[5])));
     delta_accounts.insert(pk_b, Arc::new(make_account(600, &[6])));
-    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: make_test_sysvars(50) };
+    let delta = SvmSnapshot {
+        accounts: delta_accounts,
+        sysvars: make_test_sysvars(50),
+    };
 
     // === Iteration 1: restore_selective (no prev) ===
     let mut divergent_keys: FastHashSet<Pubkey> = FastHashSet::default();
@@ -387,9 +408,8 @@ fn test_same_state_picked_consecutively() {
 
     // === Iteration 2: SAME state picked again ===
     // prev_delta and next_delta are the same object → all Arcs are ptr_eq
-    let count = initial.restore_selective_from(
-        &mut svm, &divergent_keys, &delta, &delta, &prev_exec_dirty,
-    );
+    let count =
+        initial.restore_selective_from(&mut svm, &divergent_keys, &delta, &delta, &prev_exec_dirty);
 
     // pk_a: same Arc, BUT in prev_exec_dirty → forced write (1 call)
     // pk_b: same Arc, NOT in prev_exec_dirty → skipped (0 calls)
@@ -421,11 +441,21 @@ fn test_restore_selective_tombstone_overlay() {
 
     // Delta has a tombstone for pk_tombstoned (account was deleted in this state)
     let mut delta_accounts = FastHashMap::default();
-    delta_accounts.insert(pk_tombstoned, Arc::new(Account { lamports: 0, ..Default::default() }));
-    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: initial.sysvars.clone() };
+    delta_accounts.insert(
+        pk_tombstoned,
+        Arc::new(Account {
+            lamports: 0,
+            ..Default::default()
+        }),
+    );
+    let delta = SvmSnapshot {
+        accounts: delta_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // SVM has a live account at pk_tombstoned (CPI-created in prior iteration)
-    svm.set_account(pk_tombstoned, make_account(999, &[9, 9])).unwrap();
+    svm.set_account(pk_tombstoned, make_account(999, &[9, 9]))
+        .unwrap();
     assert!(svm.get_account(&pk_tombstoned).is_some());
 
     let divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -449,12 +479,24 @@ fn test_restore_selective_from_tombstone_overlay() {
     // prev_delta: pk=500 (live)
     let mut prev_accounts = FastHashMap::default();
     prev_accounts.insert(pk, Arc::new(make_account(500, &[5])));
-    let prev_delta = SvmSnapshot { accounts: prev_accounts, sysvars: initial.sysvars.clone() };
+    let prev_delta = SvmSnapshot {
+        accounts: prev_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // next_delta: pk=tombstone (deleted in this state)
     let mut next_accounts = FastHashMap::default();
-    next_accounts.insert(pk, Arc::new(Account { lamports: 0, ..Default::default() }));
-    let next_delta = SvmSnapshot { accounts: next_accounts, sysvars: initial.sysvars.clone() };
+    next_accounts.insert(
+        pk,
+        Arc::new(Account {
+            lamports: 0,
+            ..Default::default()
+        }),
+    );
+    let next_delta = SvmSnapshot {
+        accounts: next_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // SVM has pk=500 (from prev_delta restore)
     svm.set_account(pk, make_account(500, &[5])).unwrap();
@@ -464,7 +506,11 @@ fn test_restore_selective_from_tombstone_overlay() {
     let prev_exec_dirty = FastHashSet::default();
 
     initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &next_delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &next_delta,
+        &prev_exec_dirty,
     );
 
     // pk: in next_delta (tombstone), different Arc from prev_delta → written
@@ -494,7 +540,10 @@ fn test_failed_action_empty_prev_exec_dirty() {
     // State delta: pk_a=500
     let mut delta_accounts = FastHashMap::default();
     delta_accounts.insert(pk_a, Arc::new(make_account(500, &[5])));
-    let delta = SvmSnapshot { accounts: delta_accounts, sysvars: make_test_sysvars(10) };
+    let delta = SvmSnapshot {
+        accounts: delta_accounts,
+        sysvars: make_test_sysvars(10),
+    };
 
     // === Iteration 1: restore + execute (action SUCCEEDS) ===
     let mut divergent_keys: FastHashSet<Pubkey> = FastHashSet::default();
@@ -515,7 +564,11 @@ fn test_failed_action_empty_prev_exec_dirty() {
 
     // === Iteration 2: same state picked, action FAILS ===
     initial.restore_selective_from(
-        &mut svm, &divergent_keys, &prev_delta, &delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent_keys,
+        &prev_delta,
+        &delta,
+        &prev_exec_dirty,
     );
     divergent_keys.clear();
     divergent_keys.extend(delta.accounts().keys().copied());
@@ -537,7 +590,11 @@ fn test_failed_action_empty_prev_exec_dirty() {
     // prev_exec_dirty is EMPTY. pk_a has same Arc in both deltas → SKIPPED.
     // But SVM has pk_a=777 (garbage from failed execution)!
     let count = initial.restore_selective_from(
-        &mut svm, &divergent_keys, &prev_delta_2, &delta, &prev_exec_dirty,
+        &mut svm,
+        &divergent_keys,
+        &prev_delta_2,
+        &delta,
+        &prev_exec_dirty,
     );
 
     // pk_a: same Arc, NOT in prev_exec_dirty → SKIPPED. SVM still has 777 (STALE!)
@@ -577,7 +634,8 @@ fn test_deep_chain_five_levels() {
 
     // Initial state: each account has lamports = 10 * (index+1)
     for (i, pk) in pks.iter().enumerate() {
-        svm.set_account(*pk, make_account((i as u64 + 1) * 10, &[i as u8])).unwrap();
+        svm.set_account(*pk, make_account((i as u64 + 1) * 10, &[i as u8]))
+            .unwrap();
     }
     let tracked: HashSet<Pubkey> = pks.iter().copied().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
@@ -598,7 +656,10 @@ fn test_deep_chain_five_levels() {
     let delta_2 = SvmSnapshot::take_delta(&svm, &delta_1, &dirty);
     assert_eq!(delta_2.account_count(), 2);
     // A inherited from delta_1 via Arc
-    assert!(Arc::ptr_eq(&delta_2.accounts()[&pk_a], &delta_1.accounts()[&pk_a]));
+    assert!(Arc::ptr_eq(
+        &delta_2.accounts()[&pk_a],
+        &delta_1.accounts()[&pk_a]
+    ));
 
     // Level 3: modify C → 300 (parent=delta_2)
     svm.set_account(pk_c, make_account(300, &[0x03])).unwrap();
@@ -607,8 +668,14 @@ fn test_deep_chain_five_levels() {
     let delta_3 = SvmSnapshot::take_delta(&svm, &delta_2, &dirty);
     assert_eq!(delta_3.account_count(), 3);
     // A and B inherited via Arc from delta_2
-    assert!(Arc::ptr_eq(&delta_3.accounts()[&pk_a], &delta_1.accounts()[&pk_a]));
-    assert!(Arc::ptr_eq(&delta_3.accounts()[&pk_b], &delta_2.accounts()[&pk_b]));
+    assert!(Arc::ptr_eq(
+        &delta_3.accounts()[&pk_a],
+        &delta_1.accounts()[&pk_a]
+    ));
+    assert!(Arc::ptr_eq(
+        &delta_3.accounts()[&pk_b],
+        &delta_2.accounts()[&pk_b]
+    ));
 
     // Level 4: modify A AGAIN → 400 (parent=delta_3)
     svm.set_account(pk_a, make_account(400, &[0x04])).unwrap();
@@ -617,9 +684,18 @@ fn test_deep_chain_five_levels() {
     let delta_4 = SvmSnapshot::take_delta(&svm, &delta_3, &dirty);
     assert_eq!(delta_4.account_count(), 3);
     // A is a NEW Arc (overwritten), B and C inherited
-    assert!(!Arc::ptr_eq(&delta_4.accounts()[&pk_a], &delta_3.accounts()[&pk_a]));
-    assert!(Arc::ptr_eq(&delta_4.accounts()[&pk_b], &delta_2.accounts()[&pk_b]));
-    assert!(Arc::ptr_eq(&delta_4.accounts()[&pk_c], &delta_3.accounts()[&pk_c]));
+    assert!(!Arc::ptr_eq(
+        &delta_4.accounts()[&pk_a],
+        &delta_3.accounts()[&pk_a]
+    ));
+    assert!(Arc::ptr_eq(
+        &delta_4.accounts()[&pk_b],
+        &delta_2.accounts()[&pk_b]
+    ));
+    assert!(Arc::ptr_eq(
+        &delta_4.accounts()[&pk_c],
+        &delta_3.accounts()[&pk_c]
+    ));
 
     // Level 5: modify D and E → 500, 600 (parent=delta_4)
     svm.set_account(pk_d, make_account(500, &[0x05])).unwrap();
@@ -736,7 +812,11 @@ fn test_deep_chain_selective_from_between_levels() {
 
     // === Iteration 2: jump to delta_5 ===
     let count = initial.restore_selective_from(
-        &mut svm, &divergent_keys, &delta_3, &delta_5, &prev_exec_dirty,
+        &mut svm,
+        &divergent_keys,
+        &delta_3,
+        &delta_5,
+        &prev_exec_dirty,
     );
 
     // Analyze what happens:
@@ -787,12 +867,18 @@ fn test_full_mini_fuzzing_loop() {
     // State 1: A=100 (from action on state 0)
     let mut s1_accounts = FastHashMap::default();
     s1_accounts.insert(pk_a, Arc::new(make_account(100, &[0x11])));
-    let state_1 = SvmSnapshot { accounts: s1_accounts, sysvars: make_test_sysvars(10) };
+    let state_1 = SvmSnapshot {
+        accounts: s1_accounts,
+        sysvars: make_test_sysvars(10),
+    };
     // State 2: A=100 (inherited from state 1), B=200
     let mut s2_accounts = FastHashMap::default();
     s2_accounts.insert(pk_a, state_1.accounts()[&pk_a].clone()); // same Arc
     s2_accounts.insert(pk_b, Arc::new(make_account(200, &[0x22])));
-    let state_2 = SvmSnapshot { accounts: s2_accounts, sysvars: make_test_sysvars(20) };
+    let state_2 = SvmSnapshot {
+        accounts: s2_accounts,
+        sysvars: make_test_sysvars(20),
+    };
 
     // Loop state
     let mut divergent_keys: FastHashSet<Pubkey> = FastHashSet::default();
@@ -827,7 +913,11 @@ fn test_full_mini_fuzzing_loop() {
         let delta = &state_1;
         let prev = prev_delta_arc.as_ref().unwrap();
         let count = initial.restore_selective_from(
-            &mut svm, &divergent_keys, prev, delta, &prev_exec_dirty,
+            &mut svm,
+            &divergent_keys,
+            prev,
+            delta,
+            &prev_exec_dirty,
         );
         divergent_keys.clear();
         divergent_keys.extend(delta.accounts().keys().copied());
@@ -855,9 +945,7 @@ fn test_full_mini_fuzzing_loop() {
     {
         let delta = &state_2;
         let prev = prev_delta_arc.as_ref().unwrap();
-        initial.restore_selective_from(
-            &mut svm, &divergent_keys, prev, delta, &prev_exec_dirty,
-        );
+        initial.restore_selective_from(&mut svm, &divergent_keys, prev, delta, &prev_exec_dirty);
         divergent_keys.clear();
         divergent_keys.extend(delta.accounts().keys().copied());
 
@@ -885,9 +973,7 @@ fn test_full_mini_fuzzing_loop() {
     {
         let delta = &state_0;
         let prev = prev_delta_arc.as_ref().unwrap();
-        initial.restore_selective_from(
-            &mut svm, &divergent_keys, prev, delta, &prev_exec_dirty,
-        );
+        initial.restore_selective_from(&mut svm, &divergent_keys, prev, delta, &prev_exec_dirty);
         divergent_keys.clear();
         divergent_keys.extend(delta.accounts().keys().copied());
 
@@ -929,10 +1015,14 @@ fn test_stateful_setup_captures_initial_state() {
     let mint = Pubkey::new_unique();
     let reserve = Pubkey::new_unique();
 
-    svm.set_account(user, make_account(5_000_000, &[0; 165])).unwrap();
-    svm.set_account(vault, make_account(1_000, &[0; 64])).unwrap();
-    svm.set_account(mint, make_account(1_461_600, &[0; 82])).unwrap();
-    svm.set_account(reserve, make_account(2_000_000, &[0xAB; 256])).unwrap();
+    svm.set_account(user, make_account(5_000_000, &[0; 165]))
+        .unwrap();
+    svm.set_account(vault, make_account(1_000, &[0; 64]))
+        .unwrap();
+    svm.set_account(mint, make_account(1_461_600, &[0; 82]))
+        .unwrap();
+    svm.set_account(reserve, make_account(2_000_000, &[0xAB; 256]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [user, vault, mint, reserve].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
@@ -957,7 +1047,8 @@ fn test_stateful_setup_empty_delta_represents_initial() {
     let mut svm = LiteSVM::new();
     let pk_a = Pubkey::new_unique();
     let pk_b = Pubkey::new_unique();
-    svm.set_account(pk_a, make_account(100, &[1, 2, 3])).unwrap();
+    svm.set_account(pk_a, make_account(100, &[1, 2, 3]))
+        .unwrap();
     svm.set_account(pk_b, make_account(200, &[4, 5])).unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_a, pk_b].into_iter().collect();
@@ -1003,7 +1094,10 @@ fn test_stateful_pick_restores_delta_accounts() {
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk_a, Arc::new(make_account(100, &[0xAA])));
     delta_accts.insert(pk_b, Arc::new(make_account(200, &[0xBB])));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // Scramble everything first
     svm.set_account(pk_a, make_account(0, &[])).unwrap();
@@ -1035,7 +1129,8 @@ fn test_stateful_pick_restores_delta_with_tombstone() {
     let pk_deleted = Pubkey::new_unique();
 
     svm.set_account(pk_alive, make_account(100, &[1])).unwrap();
-    svm.set_account(pk_deleted, make_account(200, &[2])).unwrap();
+    svm.set_account(pk_deleted, make_account(200, &[2]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_alive, pk_deleted].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
@@ -1043,8 +1138,17 @@ fn test_stateful_pick_restores_delta_with_tombstone() {
     // Delta: pk_deleted has tombstone (lamports=0 = deleted)
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk_alive, Arc::new(make_account(150, &[0xAA])));
-    delta_accts.insert(pk_deleted, Arc::new(Account { lamports: 0, ..Default::default() }));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: initial.sysvars.clone() };
+    delta_accts.insert(
+        pk_deleted,
+        Arc::new(Account {
+            lamports: 0,
+            ..Default::default()
+        }),
+    );
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     divergent.insert(pk_alive);
@@ -1065,14 +1169,16 @@ fn test_stateful_dirty_tracking_created_account() {
     // restore can clean it up (zero it out).
     let mut svm = LiteSVM::new();
     let pk_initial = Pubkey::new_unique();
-    svm.set_account(pk_initial, make_account(100, &[1])).unwrap();
+    svm.set_account(pk_initial, make_account(100, &[1]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_initial].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
 
     // Action creates a brand-new account
     let pk_created = Pubkey::new_unique();
-    svm.set_account(pk_created, make_account(500, &[9, 9, 9])).unwrap();
+    svm.set_account(pk_created, make_account(500, &[9, 9, 9]))
+        .unwrap();
     assert!(svm.get_account(&pk_created).is_some());
 
     // Dirty tracker records it
@@ -1105,14 +1211,23 @@ fn test_stateful_dirty_tracking_deleted_account() {
     let mut svm = LiteSVM::new();
     let pk_will_delete = Pubkey::new_unique();
     let pk_survives = Pubkey::new_unique();
-    svm.set_account(pk_will_delete, make_account(100, &[1, 2])).unwrap();
-    svm.set_account(pk_survives, make_account(200, &[3, 4])).unwrap();
+    svm.set_account(pk_will_delete, make_account(100, &[1, 2]))
+        .unwrap();
+    svm.set_account(pk_survives, make_account(200, &[3, 4]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_will_delete, pk_survives].into_iter().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
 
     // Action deletes pk_will_delete
-    svm.set_account(pk_will_delete, Account { lamports: 0, ..Default::default() }).unwrap();
+    svm.set_account(
+        pk_will_delete,
+        Account {
+            lamports: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(svm.get_account(&pk_will_delete).is_none()); // LiteSVM: 0 lamports = gone
 
     let mut dirty = DirtyTracker::new();
@@ -1179,8 +1294,16 @@ fn test_stateful_dirty_tracking_create_and_delete_same_iteration() {
 
     // Create then delete
     let pk_ephemeral = Pubkey::new_unique();
-    svm.set_account(pk_ephemeral, make_account(500, &[9])).unwrap();
-    svm.set_account(pk_ephemeral, Account { lamports: 0, ..Default::default() }).unwrap();
+    svm.set_account(pk_ephemeral, make_account(500, &[9]))
+        .unwrap();
+    svm.set_account(
+        pk_ephemeral,
+        Account {
+            lamports: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk_ephemeral);
@@ -1247,7 +1370,14 @@ fn test_stateful_tree_branching_all_nodes_reachable() {
     for (pk, acct) in delta_b.accounts() {
         let _ = svm.set_account(*pk, (**acct).clone());
     }
-    svm.set_account(pk_new, Account { lamports: 0, ..Default::default() }).unwrap();
+    svm.set_account(
+        pk_new,
+        Account {
+            lamports: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     svm.set_account(pk_y, make_account(400, &[0xEE])).unwrap();
     let mut dirty_d = DirtyTracker::new();
     dirty_d.mark_account_dirty(&pk_new);
@@ -1279,7 +1409,9 @@ fn test_stateful_tree_branching_all_nodes_reachable() {
 
     // Restore to A
     divergent.clear();
-    for &pk in &all_keys { divergent.insert(pk); }
+    for &pk in &all_keys {
+        divergent.insert(pk);
+    }
     initial.restore_selective(&mut svm, &divergent, &delta_a);
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 10);
     assert_eq!(svm.get_account(&pk_y).unwrap().lamports, 20);
@@ -1287,7 +1419,9 @@ fn test_stateful_tree_branching_all_nodes_reachable() {
 
     // Restore to B
     divergent.clear();
-    for &pk in &all_keys { divergent.insert(pk); }
+    for &pk in &all_keys {
+        divergent.insert(pk);
+    }
     initial.restore_selective(&mut svm, &divergent, &delta_b);
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100);
     assert_eq!(svm.get_account(&pk_y).unwrap().lamports, 20); // initial (not in delta_b)
@@ -1295,7 +1429,9 @@ fn test_stateful_tree_branching_all_nodes_reachable() {
 
     // Restore to C
     divergent.clear();
-    for &pk in &all_keys { divergent.insert(pk); }
+    for &pk in &all_keys {
+        divergent.insert(pk);
+    }
     initial.restore_selective(&mut svm, &divergent, &delta_c);
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 200);
     assert_eq!(svm.get_account(&pk_y).unwrap().lamports, 300);
@@ -1303,7 +1439,9 @@ fn test_stateful_tree_branching_all_nodes_reachable() {
 
     // Restore to D
     divergent.clear();
-    for &pk in &all_keys { divergent.insert(pk); }
+    for &pk in &all_keys {
+        divergent.insert(pk);
+    }
     initial.restore_selective(&mut svm, &divergent, &delta_d);
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100); // inherited from B
     assert_eq!(svm.get_account(&pk_y).unwrap().lamports, 400);
@@ -1365,9 +1503,8 @@ fn test_stateful_tree_arc_sharing_between_siblings() {
     divergent.extend(prev_exec_dirty.iter().copied());
 
     // Jump C → D
-    let count = initial.restore_selective_from(
-        &mut svm, &divergent, &delta_c, &delta_d, &prev_exec_dirty,
-    );
+    let count =
+        initial.restore_selective_from(&mut svm, &divergent, &delta_c, &delta_d, &prev_exec_dirty);
 
     // pk_x: same Arc, not exec-dirtied → SKIPPED
     // pk_y: exec-dirtied → forced write (even though both C and D have pk_y in delta)
@@ -1394,23 +1531,37 @@ fn test_stateful_no_carryover_created_account() {
     // State B: pk_x=100
     let mut b_accounts = FastHashMap::default();
     b_accounts.insert(pk_x, Arc::new(make_account(100, &[0xBB])));
-    let delta_b = SvmSnapshot { accounts: b_accounts, sysvars: initial.sysvars.clone() };
+    let delta_b = SvmSnapshot {
+        accounts: b_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // State D: pk_x=100 (same arc from B)
     let mut d_accounts = FastHashMap::default();
     d_accounts.insert(pk_x, delta_b.accounts()[&pk_x].clone());
-    let delta_d = SvmSnapshot { accounts: d_accounts, sysvars: initial.sysvars.clone() };
+    let delta_d = SvmSnapshot {
+        accounts: d_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // --- Iteration 1: pick D, execute, create pk_new ---
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
-    simulate_restore(&initial, &mut svm, &divergent, &delta_d, None, &prev_exec_dirty);
+    simulate_restore(
+        &initial,
+        &mut svm,
+        &divergent,
+        &delta_d,
+        None,
+        &prev_exec_dirty,
+    );
     divergent.clear();
     divergent.extend(delta_d.accounts().keys().copied());
 
     // Action creates pk_new
     let pk_new = Pubkey::new_unique();
-    svm.set_account(pk_new, make_account(999, &[0xFF; 64])).unwrap();
+    svm.set_account(pk_new, make_account(999, &[0xFF; 64]))
+        .unwrap();
 
     // Track dirty accounts (the fix: always track regardless of success)
     prev_exec_dirty.clear();
@@ -1421,13 +1572,19 @@ fn test_stateful_no_carryover_created_account() {
 
     // --- Iteration 2: pick B ---
     simulate_restore(
-        &initial, &mut svm, &divergent, &delta_b,
-        prev_delta.as_ref(), &prev_exec_dirty,
+        &initial,
+        &mut svm,
+        &divergent,
+        &delta_b,
+        prev_delta.as_ref(),
+        &prev_exec_dirty,
     );
 
     // pk_new must NOT exist — it was created by iteration 1, not in B's lineage
-    assert!(svm.get_account(&pk_new).is_none(),
-        "CARRYOVER BUG: pk_new from iteration 1 leaked into iteration 2");
+    assert!(
+        svm.get_account(&pk_new).is_none(),
+        "CARRYOVER BUG: pk_new from iteration 1 leaked into iteration 2"
+    );
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100);
 }
 
@@ -1448,19 +1605,38 @@ fn test_stateful_no_carryover_deleted_account() {
     let mut b_accounts = FastHashMap::default();
     b_accounts.insert(pk_x, Arc::new(make_account(100, &[0xAA])));
     b_accounts.insert(pk_y, Arc::new(make_account(200, &[0xBB])));
-    let delta_b = SvmSnapshot { accounts: b_accounts, sysvars: initial.sysvars.clone() };
+    let delta_b = SvmSnapshot {
+        accounts: b_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // State C: inherits from B but pk_y=tombstone (deleted)
     let mut c_accounts = FastHashMap::default();
     c_accounts.insert(pk_x, delta_b.accounts()[&pk_x].clone());
-    c_accounts.insert(pk_y, Arc::new(Account { lamports: 0, ..Default::default() }));
-    let delta_c = SvmSnapshot { accounts: c_accounts, sysvars: initial.sysvars.clone() };
+    c_accounts.insert(
+        pk_y,
+        Arc::new(Account {
+            lamports: 0,
+            ..Default::default()
+        }),
+    );
+    let delta_c = SvmSnapshot {
+        accounts: c_accounts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // --- Iteration 1: pick C ---
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
 
-    simulate_restore(&initial, &mut svm, &divergent, &delta_c, None, &prev_exec_dirty);
+    simulate_restore(
+        &initial,
+        &mut svm,
+        &divergent,
+        &delta_c,
+        None,
+        &prev_exec_dirty,
+    );
     divergent.extend(delta_c.accounts().keys().copied());
 
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100);
@@ -1475,12 +1651,19 @@ fn test_stateful_no_carryover_deleted_account() {
 
     // --- Iteration 2: pick B ---
     initial.restore_selective_from(
-        &mut svm, &divergent, &prev_delta, &delta_b, &prev_exec_dirty,
+        &mut svm,
+        &divergent,
+        &prev_delta,
+        &delta_b,
+        &prev_exec_dirty,
     );
 
     // pk_y must be restored to B's value (200), NOT still deleted
-    assert_eq!(svm.get_account(&pk_y).unwrap().lamports, 200,
-        "CARRYOVER BUG: pk_y deletion from C leaked into B's restoration");
+    assert_eq!(
+        svm.get_account(&pk_y).unwrap().lamports,
+        200,
+        "CARRYOVER BUG: pk_y deletion from C leaked into B's restoration"
+    );
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100);
 }
 
@@ -1499,11 +1682,17 @@ fn test_stateful_no_carryover_modified_account() {
     // Two states with different pk_x values
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk_x, Arc::new(make_account(100, &[0xAA])));
-    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
+    let delta_1 = SvmSnapshot {
+        accounts: s1_accts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     let mut s2_accts = FastHashMap::default();
     s2_accts.insert(pk_x, Arc::new(make_account(200, &[0xBB])));
-    let delta_2 = SvmSnapshot { accounts: s2_accts, sysvars: initial.sysvars.clone() };
+    let delta_2 = SvmSnapshot {
+        accounts: s2_accts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     // --- Iteration 1: pick state 1, execute ---
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1514,19 +1703,21 @@ fn test_stateful_no_carryover_modified_account() {
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 100);
 
     // Execution modifies pk_x to garbage value
-    svm.set_account(pk_x, make_account(77777, &[0xFF; 100])).unwrap();
+    svm.set_account(pk_x, make_account(77777, &[0xFF; 100]))
+        .unwrap();
     prev_exec_dirty.clear();
     prev_exec_dirty.insert(pk_x);
     divergent.extend(prev_exec_dirty.iter().copied());
 
     // --- Iteration 2: pick state 2 ---
-    initial.restore_selective_from(
-        &mut svm, &divergent, &delta_1, &delta_2, &prev_exec_dirty,
-    );
+    initial.restore_selective_from(&mut svm, &divergent, &delta_1, &delta_2, &prev_exec_dirty);
 
     // pk_x must be 200 (state 2's value), not 77777 (execution garbage)
-    assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 200,
-        "CARRYOVER BUG: execution-modified pk_x leaked into next iteration");
+    assert_eq!(
+        svm.get_account(&pk_x).unwrap().lamports,
+        200,
+        "CARRYOVER BUG: execution-modified pk_x leaked into next iteration"
+    );
     assert_eq!(svm.get_account(&pk_x).unwrap().data, vec![0xBB]);
 }
 
@@ -1545,7 +1736,10 @@ fn test_stateful_no_carryover_failed_action_with_side_effects() {
 
     let mut s1_accts = FastHashMap::default();
     s1_accts.insert(pk_x, Arc::new(make_account(100, &[0xAA])));
-    let delta_1 = SvmSnapshot { accounts: s1_accts, sysvars: initial.sysvars.clone() };
+    let delta_1 = SvmSnapshot {
+        accounts: s1_accts,
+        sysvars: initial.sysvars.clone(),
+    };
 
     let delta_initial = SvmSnapshot::empty(initial.clock().clone());
 
@@ -1558,7 +1752,8 @@ fn test_stateful_no_carryover_failed_action_with_side_effects() {
 
     // Action: tx1 creates pk_new (succeeds)
     let pk_new = Pubkey::new_unique();
-    svm.set_account(pk_new, make_account(999, &[0xBB; 32])).unwrap();
+    svm.set_account(pk_new, make_account(999, &[0xBB; 32]))
+        .unwrap();
     // tx2 modifies pk_x (but tx fails, SVM rolls back pk_x)
     // However, pk_new from tx1 is still in the SVM!
 
@@ -1577,13 +1772,19 @@ fn test_stateful_no_carryover_failed_action_with_side_effects() {
 
     // --- Iteration 2: pick initial state ---
     simulate_restore(
-        &initial, &mut svm, &divergent, &delta_initial,
-        prev_delta, &prev_exec_dirty,
+        &initial,
+        &mut svm,
+        &divergent,
+        &delta_initial,
+        prev_delta,
+        &prev_exec_dirty,
     );
 
     // pk_new MUST be cleaned up — it was created by the failed action
-    assert!(svm.get_account(&pk_new).is_none(),
-        "CARRYOVER BUG: pk_new from failed action leaked into next iteration");
+    assert!(
+        svm.get_account(&pk_new).is_none(),
+        "CARRYOVER BUG: pk_new from failed action leaked into next iteration"
+    );
     assert_eq!(svm.get_account(&pk_x).unwrap().lamports, 10); // initial
 }
 
@@ -1606,7 +1807,8 @@ fn test_stateful_no_carryover_rapid_state_switching() {
     // 4 states with distinct values for all 3 accounts
     let states: Vec<SvmSnapshot> = vec![
         SvmSnapshot::empty(initial.clock().clone()), // state 0: initial
-        SvmSnapshot { // state 1: A=10, B=20
+        SvmSnapshot {
+            // state 1: A=10, B=20
             accounts: {
                 let mut m = FastHashMap::default();
                 m.insert(pk_a, Arc::new(make_account(10, &[0x10])));
@@ -1615,7 +1817,8 @@ fn test_stateful_no_carryover_rapid_state_switching() {
             },
             sysvars: initial.sysvars.clone(),
         },
-        SvmSnapshot { // state 2: B=30, C=40
+        SvmSnapshot {
+            // state 2: B=30, C=40
             accounts: {
                 let mut m = FastHashMap::default();
                 m.insert(pk_b, Arc::new(make_account(30, &[0x30])));
@@ -1624,7 +1827,8 @@ fn test_stateful_no_carryover_rapid_state_switching() {
             },
             sysvars: initial.sysvars.clone(),
         },
-        SvmSnapshot { // state 3: A=50, C=60
+        SvmSnapshot {
+            // state 3: A=50, C=60
             accounts: {
                 let mut m = FastHashMap::default();
                 m.insert(pk_a, Arc::new(make_account(50, &[0x50])));
@@ -1637,10 +1841,10 @@ fn test_stateful_no_carryover_rapid_state_switching() {
 
     // Expected values for each state (lamports for A, B, C)
     let expected: Vec<(u64, u64, u64)> = vec![
-        (1, 2, 3),      // state 0: all initial
-        (10, 20, 3),    // state 1: A=10, B=20, C=initial
-        (1, 30, 40),    // state 2: A=initial, B=30, C=40
-        (50, 2, 60),    // state 3: A=50, B=initial, C=60
+        (1, 2, 3),   // state 0: all initial
+        (10, 20, 3), // state 1: A=10, B=20, C=initial
+        (1, 30, 40), // state 2: A=initial, B=30, C=40
+        (50, 2, 60), // state 3: A=50, B=initial, C=60
     ];
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1655,8 +1859,12 @@ fn test_stateful_no_carryover_rapid_state_switching() {
         let (ea, eb, ec) = expected[state_idx];
 
         simulate_restore(
-            &initial, &mut svm, &divergent, delta,
-            prev_delta.as_ref(), &prev_exec_dirty,
+            &initial,
+            &mut svm,
+            &divergent,
+            delta,
+            prev_delta.as_ref(),
+            &prev_exec_dirty,
         );
         divergent.clear();
         divergent.extend(delta.accounts().keys().copied());
@@ -1665,16 +1873,26 @@ fn test_stateful_no_carryover_rapid_state_switching() {
         let got_b = svm.get_account(&pk_b).map_or(0, |a| a.lamports);
         let got_c = svm.get_account(&pk_c).map_or(0, |a| a.lamports);
 
-        assert_eq!(got_a, ea,
-            "iter {} state {}: pk_a expected {} got {}", iter, state_idx, ea, got_a);
-        assert_eq!(got_b, eb,
-            "iter {} state {}: pk_b expected {} got {}", iter, state_idx, eb, got_b);
-        assert_eq!(got_c, ec,
-            "iter {} state {}: pk_c expected {} got {}", iter, state_idx, ec, got_c);
+        assert_eq!(
+            got_a, ea,
+            "iter {} state {}: pk_a expected {} got {}",
+            iter, state_idx, ea, got_a
+        );
+        assert_eq!(
+            got_b, eb,
+            "iter {} state {}: pk_b expected {} got {}",
+            iter, state_idx, eb, got_b
+        );
+        assert_eq!(
+            got_c, ec,
+            "iter {} state {}: pk_c expected {} got {}",
+            iter, state_idx, ec, got_c
+        );
 
         // Simulate execution dirtying a random account
         let dirty_pk = [pk_a, pk_b, pk_c][iter % 3];
-        svm.set_account(dirty_pk, make_account(99999, &[0xDE, 0xAD])).unwrap();
+        svm.set_account(dirty_pk, make_account(99999, &[0xDE, 0xAD]))
+            .unwrap();
         prev_exec_dirty.clear();
         prev_exec_dirty.insert(dirty_pk);
         divergent.extend(prev_exec_dirty.iter().copied());

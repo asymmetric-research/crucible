@@ -1,5 +1,5 @@
 use super::super::*;
-use anchor_lang::solana_program::instruction::{Instruction, AccountMeta};
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
 #[test]
@@ -190,29 +190,34 @@ fn test_edge_dirty_tracker_duplicate_writable() {
     let pk_shared = Pubkey::new_unique();
 
     // Tx 1: 2 instructions both writing pk_shared
-    let ix1 = Instruction::new_with_bytes(program, &[], vec![
-        AccountMeta::new(pk_shared, false),
-        AccountMeta::new(Pubkey::new_unique(), false),
-    ]);
-    let ix2 = Instruction::new_with_bytes(program, &[], vec![
-        AccountMeta::new(pk_shared, false),
-    ]);
+    let ix1 = Instruction::new_with_bytes(
+        program,
+        &[],
+        vec![
+            AccountMeta::new(pk_shared, false),
+            AccountMeta::new(Pubkey::new_unique(), false),
+        ],
+    );
+    let ix2 = Instruction::new_with_bytes(program, &[], vec![AccountMeta::new(pk_shared, false)]);
     tracker.record_tx(&[ix1, ix2], &fee_payer);
 
     // Tx 2: pk_shared again
-    let ix3 = Instruction::new_with_bytes(program, &[], vec![
-        AccountMeta::new(pk_shared, false),
-    ]);
+    let ix3 = Instruction::new_with_bytes(program, &[], vec![AccountMeta::new(pk_shared, false)]);
     tracker.record_tx(&[ix3], &fee_payer);
 
     // pk_shared should appear only once
-    let count = tracker.dirty_accounts().iter()
+    let count = tracker
+        .dirty_accounts()
+        .iter()
         .filter(|&&pk| pk == pk_shared)
         .count();
     assert_eq!(count, 1, "pk_shared should be deduplicated in dirty set");
 
     // But total dirty count includes fee_payer + pk_shared + the unique one
-    assert!(tracker.dirty_count() >= 2, "should have at least fee_payer and pk_shared");
+    assert!(
+        tracker.dirty_count() >= 2,
+        "should have at least fee_payer and pk_shared"
+    );
 }
 
 #[test]
@@ -224,9 +229,11 @@ fn test_edge_dirty_tracker_clone_is_fresh() {
     let program = Pubkey::new_unique();
 
     for _ in 0..5 {
-        let ix = Instruction::new_with_bytes(program, &[], vec![
-            AccountMeta::new(Pubkey::new_unique(), false),
-        ]);
+        let ix = Instruction::new_with_bytes(
+            program,
+            &[],
+            vec![AccountMeta::new(Pubkey::new_unique(), false)],
+        );
         tracker.record_tx(&[ix], &fee_payer);
     }
     tracker.mark_clock_dirty(100);
@@ -238,5 +245,8 @@ fn test_edge_dirty_tracker_clone_is_fresh() {
     assert_eq!(cloned.dirty_count(), 0, "cloned tracker should be empty");
     assert!(cloned.dirty_accounts().is_empty());
     assert!(cloned.read_accounts().is_empty());
-    assert!(!cloned.is_clock_dirty(), "cloned tracker should not have clock dirty");
+    assert!(
+        !cloned.is_clock_dirty(),
+        "cloned tracker should not have clock dirty"
+    );
 }

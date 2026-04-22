@@ -1,10 +1,10 @@
-use std::marker::PhantomData;
+use libafl::corpus::CorpusId;
 use libafl::inputs::BytesInput;
 use libafl::mutators::{MutationResult, Mutator};
 use libafl::state::HasRand;
 use libafl::Error;
 use libafl_bolts::Named;
-use libafl::corpus::CorpusId;
+use std::marker::PhantomData;
 
 use crate::action::FuzzAction;
 use crate::input::FuzzInput;
@@ -117,7 +117,10 @@ where
                     return Ok(MutationResult::Skipped);
                 }
                 let start = crate::mutators::primitives::rand_below(rng, len - 1);
-                let end = (start + 2 + crate::mutators::primitives::rand_below(rng, (len - start - 1).min(4))).min(len);
+                let end = (start
+                    + 2
+                    + crate::mutators::primitives::rand_below(rng, (len - start - 1).min(4)))
+                .min(len);
 
                 // Fisher-Yates shuffle on the subsequence
                 for i in (1..(end - start)).rev() {

@@ -137,11 +137,7 @@ mod tests {
     fn greedy_picks_largest_first() {
         // Input 0 covers 1 edge, input 1 covers 5 edges, input 2 covers 2 edges
         // Greedy should pick input 1 first (most coverage)
-        let inputs = vec![
-            edges(&[10]),
-            edges(&[1, 2, 3, 4, 5]),
-            edges(&[10, 20]),
-        ];
+        let inputs = vec![edges(&[10]), edges(&[1, 2, 3, 4, 5]), edges(&[10, 20])];
         let result = greedy_set_cover(&inputs);
         // Input 1 covers {1,2,3,4,5}, then input 2 covers {10,20}
         // Input 0 is redundant (edge 10 covered by input 2)
@@ -175,8 +171,11 @@ mod tests {
             .collect();
 
         // Build selected-only input list
-        let selected_inputs: Vec<HashSet<u64>> =
-            result1.selected.iter().map(|&i| inputs[i].clone()).collect();
+        let selected_inputs: Vec<HashSet<u64>> = result1
+            .selected
+            .iter()
+            .map(|&i| inputs[i].clone())
+            .collect();
 
         let result2 = greedy_set_cover(&selected_inputs);
         let edges2: HashSet<u64> = result2
@@ -186,7 +185,8 @@ mod tests {
             .collect();
 
         assert_eq!(
-            edges1, edges2,
+            edges1,
+            edges2,
             "Running cmin twice must preserve all edges. Lost: {:?}",
             edges1.difference(&edges2).collect::<Vec<_>>()
         );
@@ -218,8 +218,11 @@ mod tests {
             .flat_map(|&i| inputs[i].iter().copied())
             .collect();
 
-        let selected_inputs: Vec<HashSet<u64>> =
-            result1.selected.iter().map(|&i| inputs[i].clone()).collect();
+        let selected_inputs: Vec<HashSet<u64>> = result1
+            .selected
+            .iter()
+            .map(|&i| inputs[i].clone())
+            .collect();
 
         let result2 = greedy_set_cover(&selected_inputs);
         let edges2: HashSet<u64> = result2
@@ -229,7 +232,8 @@ mod tests {
             .collect();
 
         assert_eq!(
-            edges1, edges2,
+            edges1,
+            edges2,
             "Idempotency violated on large set. Lost {} edges",
             edges1.difference(&edges2).count()
         );
@@ -262,10 +266,7 @@ mod tests {
     }
 
     /// Simulate the FIXED cmin behavior: exact edge tracking via HashSet.
-    fn simulate_fixed_edge_set(
-        edge_hits: &[(usize, u32)],
-        _map_size: usize,
-    ) -> HashSet<u64> {
+    fn simulate_fixed_edge_set(edge_hits: &[(usize, u32)], _map_size: usize) -> HashSet<u64> {
         edge_hits.iter().map(|&(edge, _)| edge as u64).collect()
     }
 
@@ -280,10 +281,7 @@ mod tests {
             !buggy.contains(&42),
             "Old buggy code should miss edge 42 (u8 wrapped to 0)"
         );
-        assert!(
-            fixed.contains(&42),
-            "Fixed code should see edge 42"
-        );
+        assert!(fixed.contains(&42), "Fixed code should see edge 42");
         assert_eq!(fixed.len(), 2);
         assert_eq!(buggy.len(), 1); // lost an edge!
     }
@@ -327,10 +325,7 @@ mod tests {
             map[bucket] = map[bucket].wrapping_add(1);
         }
 
-        assert_eq!(
-            map[bucket], 0,
-            "Combined 200+56=256 wraps to 0"
-        );
+        assert_eq!(map[bucket], 0, "Combined 200+56=256 wraps to 0");
 
         // With exact tracking, both edges would be recorded separately
         let fixed = simulate_fixed_edge_set(&[(bucket, 200), (bucket, 56)], map_size);
@@ -356,23 +351,27 @@ mod tests {
         //   Edge 3 lost! Set-cover: A covers {1,2}, B covers {4,5}, C covers {5,6,7} → 6 edges
 
         // Run 1: no wrapping issues
-        let run1 = vec![
-            edges(&[1, 2, 3]),
-            edges(&[3, 4, 5]),
-            edges(&[5, 6, 7]),
-        ];
+        let run1 = vec![edges(&[1, 2, 3]), edges(&[3, 4, 5]), edges(&[5, 6, 7])];
         let r1 = greedy_set_cover(&run1);
-        let e1: HashSet<u64> = r1.selected.iter().flat_map(|&i| run1[i].iter().copied()).collect();
+        let e1: HashSet<u64> = r1
+            .selected
+            .iter()
+            .flat_map(|&i| run1[i].iter().copied())
+            .collect();
         assert_eq!(e1.len(), 7);
 
         // Run 2: simulate edge 3 being lost from both A and B due to wrapping
         let run2 = vec![
-            edges(&[1, 2]),        // edge 3 wrapped away
-            edges(&[4, 5]),        // edge 3 wrapped away
+            edges(&[1, 2]), // edge 3 wrapped away
+            edges(&[4, 5]), // edge 3 wrapped away
             edges(&[5, 6, 7]),
         ];
         let r2 = greedy_set_cover(&run2);
-        let e2: HashSet<u64> = r2.selected.iter().flat_map(|&i| run2[i].iter().copied()).collect();
+        let e2: HashSet<u64> = r2
+            .selected
+            .iter()
+            .flat_map(|&i| run2[i].iter().copied())
+            .collect();
 
         // Progressive loss: 7 → 6 edges
         assert!(
@@ -388,19 +387,23 @@ mod tests {
     fn no_progressive_loss_with_exact_tracking() {
         // Same scenario but with exact edge tracking (the fix).
         // Both runs should see the same edges.
-        let inputs = vec![
-            edges(&[1, 2, 3]),
-            edges(&[3, 4, 5]),
-            edges(&[5, 6, 7]),
-        ];
+        let inputs = vec![edges(&[1, 2, 3]), edges(&[3, 4, 5]), edges(&[5, 6, 7])];
 
         let r1 = greedy_set_cover(&inputs);
-        let e1: HashSet<u64> = r1.selected.iter().flat_map(|&i| inputs[i].iter().copied()).collect();
+        let e1: HashSet<u64> = r1
+            .selected
+            .iter()
+            .flat_map(|&i| inputs[i].iter().copied())
+            .collect();
 
         // Re-run on selected only — with exact tracking, edges are preserved
         let selected: Vec<HashSet<u64>> = r1.selected.iter().map(|&i| inputs[i].clone()).collect();
         let r2 = greedy_set_cover(&selected);
-        let e2: HashSet<u64> = r2.selected.iter().flat_map(|&i| selected[i].iter().copied()).collect();
+        let e2: HashSet<u64> = r2
+            .selected
+            .iter()
+            .flat_map(|&i| selected[i].iter().copied())
+            .collect();
 
         assert_eq!(e1, e2, "No loss with exact tracking");
     }
@@ -414,7 +417,7 @@ mod tests {
         // In real cmin, inputs with empty edge sets are filtered before set-cover.
         // If one sneaks through, algorithm should handle it gracefully.
         let inputs = vec![
-            edges(&[]),  // no coverage
+            edges(&[]), // no coverage
             edges(&[1, 2, 3]),
         ];
         let result = greedy_set_cover(&inputs);
@@ -424,11 +427,7 @@ mod tests {
 
     #[test]
     fn all_inputs_cover_same_single_edge() {
-        let inputs = vec![
-            edges(&[42]),
-            edges(&[42]),
-            edges(&[42]),
-        ];
+        let inputs = vec![edges(&[42]), edges(&[42]), edges(&[42])];
         let result = greedy_set_cover(&inputs);
         assert_eq!(result.selected.len(), 1);
         assert_eq!(result.total_edges, 1);
@@ -438,12 +437,13 @@ mod tests {
     fn tie_breaking_prefers_earlier_input() {
         // Inputs 0 and 1 cover the same edges. Input 0 should be preferred
         // (it appears first in the iteration, simulating smaller file size).
-        let inputs = vec![
-            edges(&[1, 2, 3]),
-            edges(&[1, 2, 3]),
-        ];
+        let inputs = vec![edges(&[1, 2, 3]), edges(&[1, 2, 3])];
         let result = greedy_set_cover(&inputs);
-        assert_eq!(result.selected, vec![0], "Tie-breaking should prefer earlier (smaller) input");
+        assert_eq!(
+            result.selected,
+            vec![0],
+            "Tie-breaking should prefer earlier (smaller) input"
+        );
     }
 
     // =================================================================
@@ -459,7 +459,8 @@ mod tests {
             .flat_map(|&i| inputs[i].iter().copied())
             .collect();
         assert_eq!(
-            all_edges, selected_edges,
+            all_edges,
+            selected_edges,
             "Edge loss detected! Lost: {:?}",
             all_edges.difference(&selected_edges).collect::<Vec<_>>()
         );
@@ -468,11 +469,7 @@ mod tests {
 
     #[test]
     fn no_regression_basic_overlapping() {
-        let inputs = vec![
-            edges(&[1, 2, 3]),
-            edges(&[3, 4, 5]),
-            edges(&[5, 6, 7]),
-        ];
+        let inputs = vec![edges(&[1, 2, 3]), edges(&[3, 4, 5]), edges(&[5, 6, 7])];
         let result = greedy_set_cover(&inputs);
         assert_no_edge_loss(&inputs, &result);
     }
@@ -602,11 +599,7 @@ mod tests {
 
     #[test]
     fn total_edges_matches_union() {
-        let inputs = vec![
-            edges(&[1, 2, 3]),
-            edges(&[3, 4, 5]),
-            edges(&[5, 6]),
-        ];
+        let inputs = vec![edges(&[1, 2, 3]), edges(&[3, 4, 5]), edges(&[5, 6])];
         let all: HashSet<u64> = inputs.iter().flat_map(|s| s.iter().copied()).collect();
         let result = greedy_set_cover(&inputs);
         assert_eq!(result.total_edges, all.len());
@@ -706,7 +699,11 @@ mod tests {
                 uncovered.remove(e);
             }
         }
-        assert!(uncovered.is_empty(), "Uncovered edges remain: {:?}", uncovered);
+        assert!(
+            uncovered.is_empty(),
+            "Uncovered edges remain: {:?}",
+            uncovered
+        );
     }
 
     // =================================================================
@@ -731,7 +728,10 @@ mod tests {
         ];
 
         let result = greedy_set_cover(&inputs);
-        assert_eq!(result.total_edges, 2, "Same edges in different order = 2 unique edges");
+        assert_eq!(
+            result.total_edges, 2,
+            "Same edges in different order = 2 unique edges"
+        );
         assert_eq!(result.selected.len(), 1, "One input suffices");
     }
 

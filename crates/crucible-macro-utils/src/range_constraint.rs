@@ -1,6 +1,5 @@
-use syn::{Expr, ExprRange, RangeLimits, Lit, Meta};
 use quote::quote;
-
+use syn::{Expr, ExprRange, Lit, Meta, RangeLimits};
 
 #[derive(Clone)]
 pub struct RangeConstraint {
@@ -29,15 +28,22 @@ impl std::fmt::Debug for RangeConstraint {
 impl RangeConstraint {
     pub fn from_attr(attr: &syn::Attribute) -> syn::Result<Self> {
         let Meta::List(meta_list) = &attr.meta else {
-            return Err(syn::Error::new_spanned(attr, "Expected #[range(start..end)]"));
+            return Err(syn::Error::new_spanned(
+                attr,
+                "Expected #[range(start..end)]",
+            ));
         };
 
         let range_expr: ExprRange = syn::parse2(meta_list.tokens.clone())?;
 
-        let start_node = range_expr.start.as_deref()
+        let start_node = range_expr
+            .start
+            .as_deref()
             .ok_or_else(|| syn::Error::new_spanned(&range_expr, "Range must have start value"))?;
 
-        let end_node = range_expr.end.as_deref()
+        let end_node = range_expr
+            .end
+            .as_deref()
             .ok_or_else(|| syn::Error::new_spanned(&range_expr, "Range must have end value"))?;
 
         let inclusive = matches!(range_expr.limits, RangeLimits::Closed(_));
@@ -52,10 +58,16 @@ impl RangeConstraint {
         // Validate when both sides are integer literals
         if let (Some(s), Some(e)) = (start_literal, end_literal) {
             if inclusive && s > e {
-                return Err(syn::Error::new_spanned(&range_expr, "Range start must be <= end for inclusive range"));
+                return Err(syn::Error::new_spanned(
+                    &range_expr,
+                    "Range start must be <= end for inclusive range",
+                ));
             }
             if !inclusive && s >= e {
-                return Err(syn::Error::new_spanned(&range_expr, "Range start must be < end"));
+                return Err(syn::Error::new_spanned(
+                    &range_expr,
+                    "Range start must be < end",
+                ));
             }
         }
 
@@ -87,7 +99,12 @@ impl RangeConstraint {
         if let Expr::Lit(expr_lit) = expr {
             match &expr_lit.lit {
                 Lit::Int(_) => {} // OK
-                _ => return Err(syn::Error::new_spanned(expr, "Expected integer literal or const expression")),
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        expr,
+                        "Expected integer literal or const expression",
+                    ))
+                }
             }
         }
         Ok(())
@@ -99,13 +116,16 @@ impl RangeConstraint {
     pub fn generate_constraint_expr(
         &self,
         field_name: &syn::Ident,
-        field_type: &syn::Type
+        field_type: &syn::Type,
     ) -> proc_macro2::TokenStream {
         // Optimized path: if both bounds are known literals, use the original
         // compile-time-computed constants (handles full-range no-op for inclusive).
         if let (Some(start_val), Some(end_val)) = (self.start_literal, self.end_literal) {
             let range_size = if self.inclusive {
-                match end_val.checked_sub(start_val).and_then(|d| d.checked_add(1)) {
+                match end_val
+                    .checked_sub(start_val)
+                    .and_then(|d| d.checked_add(1))
+                {
                     Some(rs) => rs,
                     None => {
                         // Full type range — no constraint needed
@@ -190,9 +210,14 @@ impl RangeConstraint {
         // Optimized path for known literals
         if let (Some(start_val), Some(end_val)) = (self.start_literal, self.end_literal) {
             let range_size = if self.inclusive {
-                match end_val.checked_sub(start_val).and_then(|d| d.checked_add(1)) {
+                match end_val
+                    .checked_sub(start_val)
+                    .and_then(|d| d.checked_add(1))
+                {
                     Some(rs) => rs,
-                    None => { return quote! {}; }
+                    None => {
+                        return quote! {};
+                    }
                 }
             } else {
                 end_val - start_val
@@ -230,7 +255,10 @@ impl RangeConstraint {
     ///
     /// `hi` is always exclusive: `end + 1` for inclusive ranges, `end` for exclusive.
     /// Used by random-generation and mutation codegen that need `[lo, hi)` bounds.
-    pub fn exclusive_bounds(&self, cast_type: &proc_macro2::TokenStream) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    pub fn exclusive_bounds(
+        &self,
+        cast_type: &proc_macro2::TokenStream,
+    ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
         let start = &self.start_expr;
         let end = &self.end_expr;
         let lo = quote! { ((#start) as #cast_type) };
@@ -283,7 +311,8 @@ mod tests {
 
     #[test]
     fn exclusive_range_large_values() {
-        let attr = parse_range_attr(quote! { #[range(0..340282366920938463463374607431768211455)] });
+        let attr =
+            parse_range_attr(quote! { #[range(0..340282366920938463463374607431768211455)] });
         let rc = RangeConstraint::from_attr(&attr).unwrap();
         assert_eq!(rc.start_literal, Some(0));
         assert_eq!(rc.end_literal, Some(u128::MAX));
@@ -424,7 +453,8 @@ mod tests {
         let attr = parse_range_attr(quote! { #[range("a".."z")] });
         let err = RangeConstraint::from_attr(&attr).unwrap_err();
         assert!(
-            err.to_string().contains("integer literal or const expression"),
+            err.to_string()
+                .contains("integer literal or const expression"),
             "unexpected error: {err}"
         );
     }
@@ -526,7 +556,10 @@ mod tests {
         let tokens = rc.generate_constraint_expr(&field_name, &field_type);
         let code = tokens.to_string();
 
-        assert!(code.contains("NUM_ACCOUNTS"), "expected const ident in: {code}");
+        assert!(
+            code.contains("NUM_ACCOUNTS"),
+            "expected const ident in: {code}"
+        );
         assert!(code.contains("idx"), "expected field name in: {code}");
         assert!(code.contains("u8"), "expected field type in: {code}");
         // Should be parseable as valid syntax
@@ -544,7 +577,10 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("MAX_IDX"), "expected const ident in: {code}");
-        assert!(code.contains("wrapping_sub"), "inclusive expr path should use wrapping arithmetic in: {code}");
+        assert!(
+            code.contains("wrapping_sub"),
+            "inclusive expr path should use wrapping arithmetic in: {code}"
+        );
     }
 
     #[test]
@@ -577,7 +613,10 @@ mod tests {
 
         assert!(code.contains("user_idx"), "expected param name in: {code}");
         // Should NOT contain deref (*) since this is a local var
-        assert!(!code.contains("* user_idx"), "should not deref local var in: {code}");
+        assert!(
+            !code.contains("* user_idx"),
+            "should not deref local var in: {code}"
+        );
     }
 
     #[test]
@@ -590,7 +629,10 @@ mod tests {
         let tokens = rc.generate_local_constraint(&param_name, &param_type);
         let code = tokens.to_string();
 
-        assert!(code.contains("NUM_USERS"), "expected const ident in: {code}");
+        assert!(
+            code.contains("NUM_USERS"),
+            "expected const ident in: {code}"
+        );
         assert!(code.contains("idx"), "expected param name in: {code}");
     }
 
@@ -623,7 +665,10 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("Some"), "expected Option matching in: {code}");
-        assert!(code.contains("NUM_AUTHORITIES"), "expected const ident in: {code}");
+        assert!(
+            code.contains("NUM_AUTHORITIES"),
+            "expected const ident in: {code}"
+        );
     }
 
     // =========================================================================
@@ -640,7 +685,10 @@ mod tests {
         let tokens = rc.generate_vec_constraint_expr(&field_name, &inner_type);
         let code = tokens.to_string();
 
-        assert!(code.contains("iter_mut"), "expected Vec iteration in: {code}");
+        assert!(
+            code.contains("iter_mut"),
+            "expected Vec iteration in: {code}"
+        );
         assert!(code.contains("amounts"), "expected field name in: {code}");
     }
 
@@ -666,7 +714,8 @@ mod tests {
     fn codegen_full_u128_inclusive_range_emits_no_constraint() {
         // #[range(0..=u128::MAX)] — range_size would overflow to 0.
         // The codegen should emit an empty token stream (no constraint needed).
-        let attr = parse_range_attr(quote! { #[range(0..=340282366920938463463374607431768211455)] });
+        let attr =
+            parse_range_attr(quote! { #[range(0..=340282366920938463463374607431768211455)] });
         let rc = RangeConstraint::from_attr(&attr).unwrap();
         let field_name = syn::Ident::new("x", proc_macro2::Span::call_site());
         let field_type: syn::Type = syn::parse_str("u128").unwrap();
@@ -692,7 +741,10 @@ mod tests {
         let code = tokens.to_string();
         assert!(!code.is_empty(), "should produce a constraint");
         // range_size = u128::MAX = 340282366920938463463374607431768211455
-        assert!(code.contains("340282366920938463463374607431768211455"), "expected u128::MAX in: {code}");
+        assert!(
+            code.contains("340282366920938463463374607431768211455"),
+            "expected u128::MAX in: {code}"
+        );
     }
 
     #[test]
@@ -751,8 +803,12 @@ mod tests {
         // Simulate the generated code: result = start + (input % range_size)
         for input in 0u128..100 {
             let result = start + (input % range_size);
-            assert!(result >= 10 && result < 20,
-                "exclusive codegen out of range for input={}: result={}", input, result);
+            assert!(
+                result >= 10 && result < 20,
+                "exclusive codegen out of range for input={}: result={}",
+                input,
+                result
+            );
         }
     }
 
@@ -766,8 +822,12 @@ mod tests {
 
         for input in 0u128..100 {
             let result = start + (input % range_size);
-            assert!(result >= 5 && result <= 14,
-                "inclusive codegen out of range for input={}: result={}", input, result);
+            assert!(
+                result >= 5 && result <= 14,
+                "inclusive codegen out of range for input={}: result={}",
+                input,
+                result
+            );
         }
     }
 

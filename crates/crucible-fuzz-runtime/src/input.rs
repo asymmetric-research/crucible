@@ -69,7 +69,13 @@ impl<A: FuzzAction> FuzzInput<A> {
         };
         let input = Self::from_bytes(bytes);
         let actual_count = input.actions.len();
-        (input, ParseInfo { expected_count, actual_count })
+        (
+            input,
+            ParseInfo {
+                expected_count,
+                actual_count,
+            },
+        )
     }
 
     /// Try to deserialize from bytes. Returns None on failure.
@@ -187,15 +193,13 @@ mod tests {
         let mut rng = make_rng(99999);
         for _ in 0..1000 {
             let count = 1 + (rng.next() as usize % 8);
-            let actions: Vec<TestAction> = (0..count).map(|_| TestAction::random(&mut rng)).collect();
+            let actions: Vec<TestAction> =
+                (0..count).map(|_| TestAction::random(&mut rng)).collect();
             let input = FuzzInput::new(actions);
             let bytes = input.to_bytes();
             let decoded = FuzzInput::<TestAction>::from_bytes(&bytes);
             let re_encoded = FuzzInput::new(decoded.actions.clone()).to_bytes();
-            assert_eq!(
-                bytes, re_encoded,
-                "encode → decode → re-encode mismatch"
-            );
+            assert_eq!(bytes, re_encoded, "encode → decode → re-encode mismatch");
         }
     }
 
@@ -285,7 +289,7 @@ mod tests {
         // Header says 3 actions but only enough data for 1 (NoFields variant=0)
         let mut data = vec![3, 0, 0, 0]; // count=3
         data.extend_from_slice(&[0, 0]); // variant 0 (NoFields, 0 field bytes)
-        // No more data — should parse 1 action then stop
+                                         // No more data — should parse 1 action then stop
         let decoded = FuzzInput::<TestAction>::from_bytes(&data);
         assert_eq!(decoded.actions.len(), 1);
         assert_eq!(decoded.actions[0], TestAction::NoFields);
@@ -306,7 +310,10 @@ mod tests {
         // Serialize with TestAction (variant 1 = OneField { amount })
         let original = FuzzInput::new(vec![
             TestAction::OneField { amount: 12345 },
-            TestAction::TwoFields { user_idx: 2, flag: true },
+            TestAction::TwoFields {
+                user_idx: 2,
+                flag: true,
+            },
         ]);
         let bytes = original.to_bytes();
 
@@ -340,9 +347,16 @@ mod tests {
         // Build bytes manually: 3 actions, variant indices 0, 3, 5
         // TestAction has 6 variants (0-5), all valid
         let actions = vec![
-            TestAction::NoFields,                    // variant 0
-            TestAction::FourFields { a: 1, b: 2, c: 3, d: true }, // variant 3
-            TestAction::VecField { items: vec![10, 20] }, // variant 5
+            TestAction::NoFields, // variant 0
+            TestAction::FourFields {
+                a: 1,
+                b: 2,
+                c: 3,
+                d: true,
+            }, // variant 3
+            TestAction::VecField {
+                items: vec![10, 20],
+            }, // variant 5
         ];
         let bytes = FuzzInput::new(actions.clone()).to_bytes();
 

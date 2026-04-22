@@ -6,8 +6,8 @@ use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 // =========================================================================
 // StatePool — Core operations
@@ -296,7 +296,10 @@ fn test_state_pool_reconstruct_action_sequence() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     let reconstructed = pool.reconstruct_action_sequence(0);
@@ -308,10 +311,10 @@ fn test_state_pool_reconstruct_variant_sequence() {
     let mut pool = StatePool::new(100, 20);
 
     // Build a chain: initial -> action(variant=2) -> action(variant=5) -> action(variant=1)
-    add_test_state(&mut pool, 1, 0, None, "initial", None);       // idx 0
+    add_test_state(&mut pool, 1, 0, None, "initial", None); // idx 0
     add_test_state(&mut pool, 2, 1, Some(0), "deposit", Some(2)); // idx 1
-    add_test_state(&mut pool, 3, 2, Some(1), "borrow", Some(5));  // idx 2
-    add_test_state(&mut pool, 4, 3, Some(2), "repay", Some(1));   // idx 3
+    add_test_state(&mut pool, 3, 2, Some(1), "borrow", Some(5)); // idx 2
+    add_test_state(&mut pool, 4, 3, Some(2), "repay", Some(1)); // idx 3
 
     let variants = pool.reconstruct_variant_sequence(3);
     assert_eq!(variants, vec![2, 5, 1]); // oldest first, initial has no variant
@@ -321,9 +324,9 @@ fn test_state_pool_reconstruct_variant_sequence() {
 fn test_state_pool_reconstruct_action_descriptions() {
     let mut pool = StatePool::new(100, 20);
 
-    add_test_state(&mut pool, 1, 0, None, "", None);               // idx 0 (empty desc)
-    add_test_state(&mut pool, 2, 1, Some(0), "deposit(100)", Some(0));  // idx 1
-    add_test_state(&mut pool, 3, 2, Some(1), "borrow(50)", Some(1));    // idx 2
+    add_test_state(&mut pool, 1, 0, None, "", None); // idx 0 (empty desc)
+    add_test_state(&mut pool, 2, 1, Some(0), "deposit(100)", Some(0)); // idx 1
+    add_test_state(&mut pool, 3, 2, Some(1), "borrow(50)", Some(1)); // idx 2
 
     let descs = pool.reconstruct_action_descriptions(2);
     assert_eq!(descs, vec!["deposit(100)", "borrow(50)"]);
@@ -348,7 +351,10 @@ fn test_state_pool_export_corpus_basic() {
         None,
         vec![],
         None,
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     // State with real action bytes — should be written (edge_novelty=1)
@@ -362,7 +368,10 @@ fn test_state_pool_export_corpus_basic() {
         Some(0),
         vec![],
         None,
-        1, 1, true, None,
+        1,
+        1,
+        true,
+        None,
     );
 
     // Another state with different action bytes (edge_novelty=1)
@@ -376,7 +385,10 @@ fn test_state_pool_export_corpus_basic() {
         Some(1),
         vec![],
         None,
-        1, 1, true, None,
+        1,
+        1,
+        true,
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -407,11 +419,16 @@ fn test_state_pool_export_corpus_empty() {
         None,
         vec![],
         None,
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
+    let count = pool
+        .export_corpus_no_seeds(dir.path().to_str().unwrap())
+        .unwrap();
     assert_eq!(count, 0);
 }
 
@@ -430,7 +447,10 @@ fn test_state_pool_export_corpus_content() {
         Some(0),
         vec![],
         None,
-        1, 1, true, None,
+        1,
+        1,
+        true,
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -460,7 +480,10 @@ fn test_state_pool_export_corpus_creates_dir() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     let base = tempfile::tempdir().unwrap();
@@ -486,14 +509,19 @@ fn test_state_pool_export_corpus_deterministic() {
         Some(0),
         vec![],
         None,
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     let dir1 = tempfile::tempdir().unwrap();
     let dir2 = tempfile::tempdir().unwrap();
 
-    pool.export_corpus_no_seeds(dir1.path().to_str().unwrap()).unwrap();
-    pool.export_corpus_no_seeds(dir2.path().to_str().unwrap()).unwrap();
+    pool.export_corpus_no_seeds(dir1.path().to_str().unwrap())
+        .unwrap();
+    pool.export_corpus_no_seeds(dir2.path().to_str().unwrap())
+        .unwrap();
 
     let files1: Vec<String> = std::fs::read_dir(dir1.path())
         .unwrap()
@@ -655,16 +683,36 @@ fn test_state_pool_coverage_novel_weight_boost() {
 
     // State 0: no novelty_bits
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        make_action_bytes(1, &[0xAA]), "".to_string(), None, vec![], None,
-        0, 0, true, None,
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        make_action_bytes(1, &[0xAA]),
+        "".to_string(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
     );
     // State 1: novelty_bits = 50 (gives rarity weight via coverage floor + novelty power)
     // With bifurcated formula: coverage_floor=10 * 2^(effective_bits/2) >> non-coverage path.
     pool.try_add(
-        2, CompactDelta::empty(make_test_clock(1)), 1, None,
-        make_action_bytes(1, &[0xBB]), "".to_string(), None, vec![], None,
-        50, 50, true, None
+        2,
+        CompactDelta::empty(make_test_clock(1)),
+        1,
+        None,
+        make_action_bytes(1, &[0xBB]),
+        "".to_string(),
+        None,
+        vec![],
+        None,
+        50,
+        50,
+        true,
+        None,
     );
 
     // Pick many times and count how often each is picked.
@@ -685,7 +733,8 @@ fn test_state_pool_coverage_novel_weight_boost() {
     assert!(
         ratio > 1.0,
         "novelty_bits state should be picked more often: counts={:?}, ratio={:.2}",
-        counts, ratio,
+        counts,
+        ratio,
     );
 }
 
@@ -728,8 +777,19 @@ fn test_state_pool_try_add_parent_idx_out_of_bounds() {
     // parent_idx points to nonexistent state — should still add,
     // but the parent credit silently fails (get_mut returns None)
     let added = pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 1, Some(99),
-        make_action_bytes(1, &[0xAA]), "test".to_string(), Some(0), vec![], None, 0, 0, true, None,
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        1,
+        Some(99),
+        make_action_bytes(1, &[0xAA]),
+        "test".to_string(),
+        Some(0),
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
     );
     assert!(added);
     assert_eq!(pool.len(), 1);
@@ -753,10 +813,19 @@ fn test_state_pool_fixture_state_round_trip() {
     let fixture: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42u64);
 
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        make_action_bytes(1, &[0xFF]), "".to_string(), Some(0), vec![],
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        make_action_bytes(1, &[0xFF]),
+        "".to_string(),
+        Some(0),
+        vec![],
         Some(fixture),
-        0, 0, true, None,
+        0,
+        0,
+        true,
+        None,
     );
 
     // Retrieve via get() and downcast
@@ -786,16 +855,40 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
     let bytes = make_action_bytes(1, &[0xDE, 0xAD]);
 
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        bytes.clone(), "a".to_string(), Some(0), vec![], None, 1, 1, true, None,
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        bytes.clone(),
+        "a".to_string(),
+        Some(0),
+        vec![],
+        None,
+        1,
+        1,
+        true,
+        None,
     );
     pool.try_add(
-        2, CompactDelta::empty(make_test_clock(1)), 1, None,
-        bytes.clone(), "b".to_string(), Some(1), vec![], None, 1, 1, true, None,
+        2,
+        CompactDelta::empty(make_test_clock(1)),
+        1,
+        None,
+        bytes.clone(),
+        "b".to_string(),
+        Some(1),
+        vec![],
+        None,
+        1,
+        1,
+        true,
+        None,
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let count = pool.export_corpus_no_seeds(dir.path().to_str().unwrap()).unwrap();
+    let count = pool
+        .export_corpus_no_seeds(dir.path().to_str().unwrap())
+        .unwrap();
     // export_corpus returns 2 (it writes twice), but the file is overwritten
     assert_eq!(count, 2);
     let files: Vec<_> = std::fs::read_dir(dir.path())
@@ -816,14 +909,38 @@ fn test_pool_capacity_enforced() {
     let pk = Pubkey::new_unique();
 
     // Fill to capacity with distinct fingerprints
-    assert!(add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None));
-    assert!(add_pool_entry(&mut pool, 2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0)));
-    assert!(add_pool_entry(&mut pool, 3, make_pool_snapshot(vec![(pk, 30)]), 2, Some(1)));
+    assert!(add_pool_entry(
+        &mut pool,
+        1,
+        make_pool_snapshot(vec![(pk, 10)]),
+        0,
+        None
+    ));
+    assert!(add_pool_entry(
+        &mut pool,
+        2,
+        make_pool_snapshot(vec![(pk, 20)]),
+        1,
+        Some(0)
+    ));
+    assert!(add_pool_entry(
+        &mut pool,
+        3,
+        make_pool_snapshot(vec![(pk, 30)]),
+        2,
+        Some(1)
+    ));
     assert_eq!(pool.len(), 3);
     assert!(pool.is_full());
 
     // 4th entry evicts weakest and succeeds
-    assert!(add_pool_entry(&mut pool, 4, make_pool_snapshot(vec![(pk, 40)]), 3, Some(2)));
+    assert!(add_pool_entry(
+        &mut pool,
+        4,
+        make_pool_snapshot(vec![(pk, 40)]),
+        3,
+        Some(2)
+    ));
     assert_eq!(pool.active_count(), 3); // one evicted, one added
 }
 
@@ -833,13 +950,43 @@ fn test_pool_max_depth_enforced() {
     let pk = Pubkey::new_unique();
 
     // Depth 0..3 accepted
-    assert!(add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None));
-    assert!(add_pool_entry(&mut pool, 2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0)));
-    assert!(add_pool_entry(&mut pool, 3, make_pool_snapshot(vec![(pk, 30)]), 2, Some(1)));
-    assert!(add_pool_entry(&mut pool, 4, make_pool_snapshot(vec![(pk, 40)]), 3, Some(2)));
+    assert!(add_pool_entry(
+        &mut pool,
+        1,
+        make_pool_snapshot(vec![(pk, 10)]),
+        0,
+        None
+    ));
+    assert!(add_pool_entry(
+        &mut pool,
+        2,
+        make_pool_snapshot(vec![(pk, 20)]),
+        1,
+        Some(0)
+    ));
+    assert!(add_pool_entry(
+        &mut pool,
+        3,
+        make_pool_snapshot(vec![(pk, 30)]),
+        2,
+        Some(1)
+    ));
+    assert!(add_pool_entry(
+        &mut pool,
+        4,
+        make_pool_snapshot(vec![(pk, 40)]),
+        3,
+        Some(2)
+    ));
 
     // Depth 4 > max_depth 3 → rejected
-    assert!(!add_pool_entry(&mut pool, 5, make_pool_snapshot(vec![(pk, 50)]), 4, Some(3)));
+    assert!(!add_pool_entry(
+        &mut pool,
+        5,
+        make_pool_snapshot(vec![(pk, 50)]),
+        4,
+        Some(3)
+    ));
     assert_eq!(pool.len(), 4);
 }
 
@@ -853,13 +1000,31 @@ fn test_pool_fingerprint_dedup_truncation() {
     let fp1 = 0xAAAA_0000_0001_1234u64;
     let fp2 = 0xBBBB_0000_0005_1234u64; // same bottom 18 bits
 
-    assert!(add_pool_entry(&mut pool, fp1, make_pool_snapshot(vec![(pk, 10)]), 0, None));
-    assert!(!add_pool_entry(&mut pool, fp2, make_pool_snapshot(vec![(pk, 20)]), 0, None));
+    assert!(add_pool_entry(
+        &mut pool,
+        fp1,
+        make_pool_snapshot(vec![(pk, 10)]),
+        0,
+        None
+    ));
+    assert!(!add_pool_entry(
+        &mut pool,
+        fp2,
+        make_pool_snapshot(vec![(pk, 20)]),
+        0,
+        None
+    ));
     assert_eq!(pool.len(), 1);
 
     // Different bottom 18 bits → accepted
     let fp3 = 0xAAAA_0000_0000_5678u64;
-    assert!(add_pool_entry(&mut pool, fp3, make_pool_snapshot(vec![(pk, 30)]), 0, None));
+    assert!(add_pool_entry(
+        &mut pool,
+        fp3,
+        make_pool_snapshot(vec![(pk, 30)]),
+        0,
+        None
+    ));
     assert_eq!(pool.len(), 2);
 
     // But full fingerprint is stored for state_class extraction
@@ -950,7 +1115,8 @@ fn test_pool_weighted_favors_unexplored() {
     assert!(
         counts[1] > counts[0] * 100,
         "unexplored state should be picked overwhelmingly more: state0={}, state1={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
 }
 
@@ -966,9 +1132,19 @@ fn test_pool_weighted_novelty_differentiates() {
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
     // State 1: high novelty (novelty_bits=40)
     pool.try_add(
-        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
-        vec![0u8; 8], "novel".into(), Some(0), vec![], None,
-        40, 40, true, None
+        2,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])),
+        1,
+        Some(0),
+        vec![0u8; 8],
+        "novel".into(),
+        Some(0),
+        vec![],
+        None,
+        40,
+        40,
+        true,
+        None,
     );
 
     // Both picked a few times (past never-picked threshold)
@@ -992,7 +1168,8 @@ fn test_pool_weighted_novelty_differentiates() {
     assert!(
         counts[1] > counts[0] * 10,
         "high-novelty state should dominate: state0={}, state1={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
 }
 
@@ -1005,9 +1182,19 @@ fn test_pool_weighted_coverage_bonus() {
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
     // State 1: novelty_bits=50 (gives novelty weight boost)
     pool.try_add(
-        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
-        vec![0u8; 8], "coverage_novel".into(), Some(0), vec![], None,
-        50, 50, true, None
+        2,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])),
+        1,
+        Some(0),
+        vec![0u8; 8],
+        "coverage_novel".into(),
+        Some(0),
+        vec![],
+        None,
+        50,
+        50,
+        true,
+        None,
     );
 
     // Give both states some picks so they're past never-picked threshold
@@ -1031,7 +1218,8 @@ fn test_pool_weighted_coverage_bonus() {
     assert!(
         counts[1] > counts[0],
         "coverage-novel state should be picked more: state0={}, state1={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
 }
 
@@ -1046,14 +1234,36 @@ fn test_pool_weighted_novelty_bits_rarity() {
 
     // State 0: 100 novelty_bits, picks=10 → coverage path with floor=10, novelty_power >> 1
     pool.try_add(
-        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
-        vec![0u8; 8], "state0".into(), Some(0), vec![], None, 100, 0, true, None,
+        1,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])),
+        0,
+        None,
+        vec![0u8; 8],
+        "state0".into(),
+        Some(0),
+        vec![],
+        None,
+        100,
+        0,
+        true,
+        None,
     );
 
     // State 1: 0 novelty_bits → non-coverage path with fast decay
     pool.try_add(
-        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 0, None,
-        vec![0u8; 8], "state1".into(), Some(1), vec![], None, 0, 0, true, None,
+        2,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])),
+        0,
+        None,
+        vec![0u8; 8],
+        "state1".into(),
+        Some(1),
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
     );
 
     // Give both states equal picks so we isolate the novelty factor.
@@ -1078,7 +1288,8 @@ fn test_pool_weighted_novelty_bits_rarity() {
     assert!(
         counts[0] > counts[1] * 2,
         "high-novelty state should be picked >2x more: state0={}, state1={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
 }
 
@@ -1090,13 +1301,35 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
 
     // State 0: 0 novelty_bits → novelty = 1.0
     pool.try_add(
-        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
-        vec![0u8; 8], "zero_novelty".into(), Some(0), vec![], None, 0, 0, true, None,
+        1,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])),
+        0,
+        None,
+        vec![0u8; 8],
+        "zero_novelty".into(),
+        Some(0),
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
     );
     // State 1: 50 novelty_bits, picks=5 → coverage path with floor=10 * novelty_power
     pool.try_add(
-        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 0, None,
-        vec![0u8; 8], "high_novelty".into(), Some(1), vec![], None, 50, 50, true, None,
+        2,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])),
+        0,
+        None,
+        vec![0u8; 8],
+        "high_novelty".into(),
+        Some(1),
+        vec![],
+        None,
+        50,
+        50,
+        true,
+        None,
     );
 
     // Give equal picks, use batch to avoid mutation
@@ -1119,7 +1352,8 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
     assert!(
         counts[1] > counts[0] * 2,
         "high-novelty (50 bits) should be picked >2x more than zero: zero={}, high={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
 }
 
@@ -1133,7 +1367,9 @@ fn test_pool_pick_weighted_batch_returns_arcs() {
     add_pool_entry(&mut pool, 1, make_pool_snapshot(vec![(pk, 10)]), 0, None);
     add_pool_entry(&mut pool, 2, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0));
 
-    let rng_vals: Vec<u64> = (0..5).map(|i: u64| (i as u128 * u64::MAX as u128 / 5) as u64).collect();
+    let rng_vals: Vec<u64> = (0..5)
+        .map(|i: u64| (i as u128 * u64::MAX as u128 / 5) as u64)
+        .collect();
     let mut batch = Vec::new();
     let count = pool.pick_weighted_batch(&rng_vals, &mut batch);
     assert_eq!(count, 5);
@@ -1144,13 +1380,21 @@ fn test_pool_pick_weighted_batch_returns_arcs() {
         assert!(state_idx < &pool.len());
         // The Arc should be the same object as in the pool
         let pool_arc = &pool.states[*state_idx].delta;
-        assert!(Arc::ptr_eq(delta_arc, pool_arc), "batch should share Arc with pool entry");
-        assert!(Arc::ptr_eq(action_bytes, &pool.states[*state_idx].action_bytes));
+        assert!(
+            Arc::ptr_eq(delta_arc, pool_arc),
+            "batch should share Arc with pool entry"
+        );
+        assert!(Arc::ptr_eq(
+            action_bytes,
+            &pool.states[*state_idx].action_bytes
+        ));
         assert!(*depth <= 1);
     }
 
     // pick_count should have been incremented
-    let total_picks: u32 = pool.states.iter()
+    let total_picks: u32 = pool
+        .states
+        .iter()
         .map(|s| s.pick_count.load(Ordering::Relaxed))
         .sum();
     assert_eq!(total_picks, 5);
@@ -1192,10 +1436,34 @@ fn test_pool_reconstruct_deep_chain() {
 
     // Build a chain: root → L1 → L2 → L3 → L4
     add_pool_entry(&mut pool, 0x10, make_pool_snapshot(vec![(pk, 0)]), 0, None);
-    add_pool_entry(&mut pool, 0x20, make_pool_snapshot(vec![(pk, 1)]), 1, Some(0));
-    add_pool_entry(&mut pool, 0x30, make_pool_snapshot(vec![(pk, 2)]), 2, Some(1));
-    add_pool_entry(&mut pool, 0x40, make_pool_snapshot(vec![(pk, 3)]), 3, Some(2));
-    add_pool_entry(&mut pool, 0x50, make_pool_snapshot(vec![(pk, 4)]), 4, Some(3));
+    add_pool_entry(
+        &mut pool,
+        0x20,
+        make_pool_snapshot(vec![(pk, 1)]),
+        1,
+        Some(0),
+    );
+    add_pool_entry(
+        &mut pool,
+        0x30,
+        make_pool_snapshot(vec![(pk, 2)]),
+        2,
+        Some(1),
+    );
+    add_pool_entry(
+        &mut pool,
+        0x40,
+        make_pool_snapshot(vec![(pk, 3)]),
+        3,
+        Some(2),
+    );
+    add_pool_entry(
+        &mut pool,
+        0x50,
+        make_pool_snapshot(vec![(pk, 4)]),
+        4,
+        Some(3),
+    );
 
     // Reconstruct from leaf (idx 4) to root
     let variants = pool.reconstruct_variant_sequence(4);
@@ -1206,8 +1474,16 @@ fn test_pool_reconstruct_deep_chain() {
 
     let descs = pool.reconstruct_action_descriptions(4);
     assert_eq!(descs.len(), 5);
-    assert!(descs[0].contains("10"), "first desc should be root: {}", descs[0]);
-    assert!(descs[4].contains("50"), "last desc should be leaf: {}", descs[4]);
+    assert!(
+        descs[0].contains("10"),
+        "first desc should be root: {}",
+        descs[0]
+    );
+    assert!(
+        descs[4].contains("50"),
+        "last desc should be leaf: {}",
+        descs[4]
+    );
 
     // Reconstruct action sequence returns the accumulated bytes from the entry
     let action_seq = pool.reconstruct_action_sequence(4);
@@ -1221,11 +1497,35 @@ fn test_pool_reconstruct_branching_chain() {
 
     // root → child_a → grandchild_a
     //      → child_b → grandchild_b
-    add_pool_entry(&mut pool, 0x100, make_pool_snapshot(vec![(pk, 0)]), 0, None);     // idx 0
-    add_pool_entry(&mut pool, 0x201, make_pool_snapshot(vec![(pk, 1)]), 1, Some(0));  // idx 1 (child_a)
-    add_pool_entry(&mut pool, 0x302, make_pool_snapshot(vec![(pk, 2)]), 1, Some(0));  // idx 2 (child_b)
-    add_pool_entry(&mut pool, 0x403, make_pool_snapshot(vec![(pk, 3)]), 2, Some(1));  // idx 3 (grandchild_a)
-    add_pool_entry(&mut pool, 0x504, make_pool_snapshot(vec![(pk, 4)]), 2, Some(2));  // idx 4 (grandchild_b)
+    add_pool_entry(&mut pool, 0x100, make_pool_snapshot(vec![(pk, 0)]), 0, None); // idx 0
+    add_pool_entry(
+        &mut pool,
+        0x201,
+        make_pool_snapshot(vec![(pk, 1)]),
+        1,
+        Some(0),
+    ); // idx 1 (child_a)
+    add_pool_entry(
+        &mut pool,
+        0x302,
+        make_pool_snapshot(vec![(pk, 2)]),
+        1,
+        Some(0),
+    ); // idx 2 (child_b)
+    add_pool_entry(
+        &mut pool,
+        0x403,
+        make_pool_snapshot(vec![(pk, 3)]),
+        2,
+        Some(1),
+    ); // idx 3 (grandchild_a)
+    add_pool_entry(
+        &mut pool,
+        0x504,
+        make_pool_snapshot(vec![(pk, 4)]),
+        2,
+        Some(2),
+    ); // idx 4 (grandchild_b)
 
     // grandchild_a chain: root → child_a → grandchild_a
     let descs_a = pool.reconstruct_action_descriptions(3);
@@ -1262,21 +1562,44 @@ fn test_pool_export_corpus_skips_shallow() {
 
     // Initial state with minimal action_bytes (≤4 bytes → skipped)
     pool.try_add(
-        1, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])), 0, None,
+        1,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 10)])),
+        0,
+        None,
         vec![0, 0, 0, 0], // 4-byte header with count=0
-        "".into(), None, vec![], None, 0, 0, true, None,
+        "".into(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
     );
     // State with real action bytes (edge_novelty=1 so it's exported)
     pool.try_add(
-        2, snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])), 1, Some(0),
+        2,
+        snapshot_to_compact_delta(make_pool_snapshot(vec![(pk, 20)])),
+        1,
+        Some(0),
         vec![1, 0, 0, 0, 0xAA, 0xBB],
-        "action".into(), Some(0), vec![], None, 1, 1, true, None,
+        "action".into(),
+        Some(0),
+        vec![],
+        None,
+        1,
+        1,
+        true,
+        None,
     );
 
     let dir = "/tmp/test_pool_export_corpus";
     let _ = std::fs::remove_dir_all(dir);
     let count = pool.export_corpus_no_seeds(dir).unwrap();
-    assert_eq!(count, 1, "should skip initial state with ≤4 byte action_bytes");
+    assert_eq!(
+        count, 1,
+        "should skip initial state with ≤4 byte action_bytes"
+    );
 
     // Cleanup
     let _ = std::fs::remove_dir_all(dir);
@@ -1294,8 +1617,10 @@ fn test_pool_arc_sharing_parent_child_deltas() {
     let pk_dirty = Pubkey::new_unique();
     let pk_new = Pubkey::new_unique();
 
-    svm.set_account(pk_shared, make_account(100, &[1, 2, 3])).unwrap();
-    svm.set_account(pk_dirty, make_account(200, &[4, 5, 6])).unwrap();
+    svm.set_account(pk_shared, make_account(100, &[1, 2, 3]))
+        .unwrap();
+    svm.set_account(pk_dirty, make_account(200, &[4, 5, 6]))
+        .unwrap();
 
     let tracked: HashSet<Pubkey> = [pk_shared, pk_dirty].into_iter().collect();
     let _initial = SvmSnapshot::take(&svm, &tracked);
@@ -1304,14 +1629,20 @@ fn test_pool_arc_sharing_parent_child_deltas() {
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_shared, Arc::new(make_account(150, &[7, 8, 9])));
     parent_accts.insert(pk_dirty, Arc::new(make_account(250, &[10, 11, 12])));
-    let parent_delta = SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(10) };
+    let parent_delta = SvmSnapshot {
+        accounts: parent_accts,
+        sysvars: make_test_sysvars(10),
+    };
 
     // Set SVM to match parent delta state
-    svm.set_account(pk_shared, make_account(150, &[7, 8, 9])).unwrap();
-    svm.set_account(pk_dirty, make_account(250, &[10, 11, 12])).unwrap();
+    svm.set_account(pk_shared, make_account(150, &[7, 8, 9]))
+        .unwrap();
+    svm.set_account(pk_dirty, make_account(250, &[10, 11, 12]))
+        .unwrap();
 
     // Now "execution" modifies only pk_dirty and creates pk_new
-    svm.set_account(pk_dirty, make_account(300, &[13, 14, 15])).unwrap();
+    svm.set_account(pk_dirty, make_account(300, &[13, 14, 15]))
+        .unwrap();
     svm.set_account(pk_new, make_account(50, &[16])).unwrap();
 
     let mut dirty = DirtyTracker::new();
@@ -1385,13 +1716,19 @@ fn test_multiworker_independent_divergent_keys() {
     let mut delta_a_accts = FastHashMap::default();
     delta_a_accts.insert(pk_a, Arc::new(make_account(200, &[0xAA])));
     delta_a_accts.insert(pk_common, Arc::new(make_account(300, &[0xCC])));
-    let delta_a = SvmSnapshot { accounts: delta_a_accts, sysvars: make_test_sysvars(1) };
+    let delta_a = SvmSnapshot {
+        accounts: delta_a_accts,
+        sysvars: make_test_sysvars(1),
+    };
 
     // Delta B modifies pk_b + pk_common (differently)
     let mut delta_b_accts = FastHashMap::default();
     delta_b_accts.insert(pk_b, Arc::new(make_account(400, &[0xBB])));
     delta_b_accts.insert(pk_common, Arc::new(make_account(500, &[0xDD])));
-    let delta_b = SvmSnapshot { accounts: delta_b_accts, sysvars: make_test_sysvars(2) };
+    let delta_b = SvmSnapshot {
+        accounts: delta_b_accts,
+        sysvars: make_test_sysvars(2),
+    };
 
     // Worker 1 restores delta A
     let mut divergent_w1: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1462,7 +1799,10 @@ fn test_multiworker_dual_svm_traced_divergent_isolation() {
     // Delta that modifies pk1
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[0xFF])));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: make_test_sysvars(1),
+    };
 
     // Fast SVM path (iterations 1-9): uses divergent_keys + delta-to-delta
     let mut divergent_keys: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1478,7 +1818,9 @@ fn test_multiworker_dual_svm_traced_divergent_isolation() {
     assert_eq!(fast_svm.get_account(&pk1).unwrap().lamports, 500);
 
     // Simulate execution on fast SVM that dirties pk2
-    fast_svm.set_account(pk2, make_account(999, &[0xAA])).unwrap();
+    fast_svm
+        .set_account(pk2, make_account(999, &[0xAA]))
+        .unwrap();
     prev_exec_dirty.clear();
     prev_exec_dirty.insert(pk2);
     divergent_keys.insert(pk2);
@@ -1510,7 +1852,13 @@ fn test_pending_novel_discard_correctness() {
     let pk = Pubkey::new_unique();
 
     // Add initial state
-    add_pool_entry(&mut pool, 0x1000, make_pool_snapshot(vec![(pk, 10)]), 0, None);
+    add_pool_entry(
+        &mut pool,
+        0x1000,
+        make_pool_snapshot(vec![(pk, 10)]),
+        0,
+        None,
+    );
 
     // Simulate "pending novel" that would have been added but was discarded
     let discarded_fp = 0x2000u64;
@@ -1519,7 +1867,13 @@ fn test_pending_novel_discard_correctness() {
     assert!(!pool.seen.contains(&(discarded_fp & ((1u64 << 16) - 1))));
 
     // Re-discovery: try_add with same fingerprint should succeed
-    assert!(add_pool_entry(&mut pool, discarded_fp, make_pool_snapshot(vec![(pk, 20)]), 1, Some(0)));
+    assert!(add_pool_entry(
+        &mut pool,
+        discarded_fp,
+        make_pool_snapshot(vec![(pk, 20)]),
+        1,
+        Some(0)
+    ));
     assert_eq!(pool.len(), 2);
 }
 
@@ -1559,11 +1913,13 @@ fn test_action_stats_weighted_selection() {
     assert!(
         counts[0] > counts[1],
         "high-success variant should beat low-success: v0={}, v1={}",
-        counts[0], counts[1]
+        counts[0],
+        counts[1]
     );
     assert!(
         samples > 5000,
-        "should have gotten guided picks for most samples: {}", samples
+        "should have gotten guided picks for most samples: {}",
+        samples
     );
 }
 
@@ -1580,7 +1936,7 @@ fn test_action_stats_epsilon_exploration() {
     stats.record(sc, 0, true);
     assert!(stats.pick_variant(sc, 42, 10).is_none()); // 10 % 100 < 20
     assert!(stats.pick_variant(sc, 42, 19).is_none()); // 19 % 100 < 20
-    assert!(stats.pick_variant(sc, 42, 20).is_some());  // 20 % 100 >= 20
+    assert!(stats.pick_variant(sc, 42, 20).is_some()); // 20 % 100 >= 20
 }
 
 #[test]
@@ -1613,14 +1969,19 @@ fn test_pool_arc_refcount_under_batch_picks() {
 
     // Each batch entry holds a clone of the Arc
     let during_batch = Arc::strong_count(&original_arc);
-    assert_eq!(during_batch, initial_refcount + 100,
-        "refcount should increase by batch size");
+    assert_eq!(
+        during_batch,
+        initial_refcount + 100,
+        "refcount should increase by batch size"
+    );
 
     // Drop batch
     batch.clear();
     let after_drop = Arc::strong_count(&original_arc);
-    assert_eq!(after_drop, initial_refcount,
-        "refcount should return to original after batch drop");
+    assert_eq!(
+        after_drop, initial_refcount,
+        "refcount should return to original after batch drop"
+    );
 }
 
 // ---- Adversarial: restore_selective_from with pool-picked deltas ----
@@ -1643,19 +2004,28 @@ fn test_pool_delta_to_delta_restore_with_shared_ancestry() {
     let parent_acct = Arc::new(make_account(200, &[1]));
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_parent, parent_acct.clone());
-    let _parent_delta = SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(1) };
+    let _parent_delta = SvmSnapshot {
+        accounts: parent_accts,
+        sysvars: make_test_sysvars(1),
+    };
 
     // Child A: inherits pk_parent from parent, adds pk_only_a
     let mut child_a_accts = FastHashMap::default();
     child_a_accts.insert(pk_parent, parent_acct.clone()); // SAME Arc
     child_a_accts.insert(pk_only_a, Arc::new(make_account(300, &[0xAA])));
-    let child_a = SvmSnapshot { accounts: child_a_accts, sysvars: make_test_sysvars(2) };
+    let child_a = SvmSnapshot {
+        accounts: child_a_accts,
+        sysvars: make_test_sysvars(2),
+    };
 
     // Child B: inherits pk_parent from parent, adds pk_only_b
     let mut child_b_accts = FastHashMap::default();
     child_b_accts.insert(pk_parent, parent_acct.clone()); // SAME Arc
     child_b_accts.insert(pk_only_b, Arc::new(make_account(400, &[0xBB])));
-    let child_b = SvmSnapshot { accounts: child_b_accts, sysvars: make_test_sysvars(3) };
+    let child_b = SvmSnapshot {
+        accounts: child_b_accts,
+        sysvars: make_test_sysvars(3),
+    };
 
     // Verify Arc sharing
     assert!(Arc::ptr_eq(
@@ -1675,7 +2045,8 @@ fn test_pool_delta_to_delta_restore_with_shared_ancestry() {
     let exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
 
     // Now restore_selective_from child_a → child_b
-    let count = initial.restore_selective_from(&mut svm, &divergent, &child_a, &child_b, &exec_dirty);
+    let count =
+        initial.restore_selective_from(&mut svm, &divergent, &child_a, &child_b, &exec_dirty);
 
     // pk_parent: same Arc → SKIPPED (count should not include it)
     // pk_only_b: in next only → written
@@ -1707,7 +2078,10 @@ fn test_worker_failure_clears_prev_delta_forces_full_restore() {
 
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[0xFF])));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: make_test_sysvars(1),
+    };
     let delta_arc = Arc::new(delta);
 
     // Iteration 1: success → prev_delta_arc = Some
@@ -1718,7 +2092,8 @@ fn test_worker_failure_clears_prev_delta_forces_full_restore() {
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
 
     // Simulate execution that modifies pk2
-    svm.set_account(pk2, make_account(999, &[0xDE, 0xAD])).unwrap();
+    svm.set_account(pk2, make_account(999, &[0xDE, 0xAD]))
+        .unwrap();
     prev_exec_dirty.insert(pk2);
     divergent.insert(pk2);
 
@@ -1728,7 +2103,10 @@ fn test_worker_failure_clears_prev_delta_forces_full_restore() {
     // Iteration 3: must use restore_selective (not _from) since prev_delta_arc is None
     let mut delta2_accts = FastHashMap::default();
     delta2_accts.insert(pk1, Arc::new(make_account(600, &[0xEE])));
-    let delta2 = SvmSnapshot { accounts: delta2_accts, sysvars: make_test_sysvars(2) };
+    let delta2 = SvmSnapshot {
+        accounts: delta2_accts,
+        sysvars: make_test_sysvars(2),
+    };
 
     // This is the correct path when prev_delta_arc is None:
     initial.restore_selective(&mut svm, &divergent, &delta2);
@@ -1767,9 +2145,18 @@ fn test_stress_rapid_state_switching_from_pool() {
         // Each delta modifies accounts [2*i, 2*i+1]
         let idx1 = (2 * i) % 10;
         let idx2 = (2 * i + 1) % 10;
-        accts.insert(pks[idx1], Arc::new(make_account((i as u64 + 1) * 1000, &[i as u8])));
-        accts.insert(pks[idx2], Arc::new(make_account((i as u64 + 1) * 2000, &[i as u8 + 10])));
-        let delta = SvmSnapshot { accounts: accts, sysvars: make_test_sysvars(i as u64) };
+        accts.insert(
+            pks[idx1],
+            Arc::new(make_account((i as u64 + 1) * 1000, &[i as u8])),
+        );
+        accts.insert(
+            pks[idx2],
+            Arc::new(make_account((i as u64 + 1) * 2000, &[i as u8 + 10])),
+        );
+        let delta = SvmSnapshot {
+            accounts: accts,
+            sysvars: make_test_sysvars(i as u64),
+        };
         deltas.push(Arc::new(delta));
     }
 
@@ -1778,9 +2165,10 @@ fn test_stress_rapid_state_switching_from_pool() {
     let mut prev_exec_dirty: FastHashSet<Pubkey> = FastHashSet::default();
 
     // 50 iterations switching between states
-    let state_sequence = [0, 1, 2, 3, 4, 0, 3, 1, 4, 2, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4,
-                         4, 3, 2, 1, 0, 2, 4, 1, 3, 0, 0, 1, 0, 2, 0, 3, 0, 4, 1, 2,
-                         3, 4, 0, 1, 2, 3, 4, 0, 1, 2];
+    let state_sequence = [
+        0, 1, 2, 3, 4, 0, 3, 1, 4, 2, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 3, 2, 1, 0, 2, 4, 1, 3, 0,
+        0, 1, 0, 2, 0, 3, 0, 4, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2,
+    ];
 
     for &state_idx in &state_sequence {
         let delta = &deltas[state_idx];
@@ -1803,17 +2191,30 @@ fn test_stress_rapid_state_switching_from_pool() {
 
             if pk_idx == expected_idx1 {
                 let acct = svm.get_account(pk).unwrap();
-                assert_eq!(acct.lamports, (state_idx as u64 + 1) * 1000,
-                    "state {}, pk {} (idx1)", state_idx, pk_idx);
+                assert_eq!(
+                    acct.lamports,
+                    (state_idx as u64 + 1) * 1000,
+                    "state {}, pk {} (idx1)",
+                    state_idx,
+                    pk_idx
+                );
             } else if pk_idx == expected_idx2 {
                 let acct = svm.get_account(pk).unwrap();
-                assert_eq!(acct.lamports, (state_idx as u64 + 1) * 2000,
-                    "state {}, pk {} (idx2)", state_idx, pk_idx);
+                assert_eq!(
+                    acct.lamports,
+                    (state_idx as u64 + 1) * 2000,
+                    "state {}, pk {} (idx2)",
+                    state_idx,
+                    pk_idx
+                );
             } else {
                 // Not in this delta → should be at initial value
                 let acct = svm.get_account(pk).unwrap();
-                assert_eq!(acct.lamports, 100,
-                    "state {}, pk {} should be initial", state_idx, pk_idx);
+                assert_eq!(
+                    acct.lamports, 100,
+                    "state {}, pk {} should be initial",
+                    state_idx, pk_idx
+                );
             }
         }
     }
@@ -1841,7 +2242,10 @@ fn test_traced_svm_stale_divergent_causes_leak() {
     // Delta modifying pk1
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[])));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) };
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: make_test_sysvars(1),
+    };
 
     // Traced iteration 1: restore delta, execution dirties pk2
     let mut traced_divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1859,10 +2263,16 @@ fn test_traced_svm_stale_divergent_causes_leak() {
     traced_divergent.clear();
 
     // If traced_divergent correctly included pk2, it should be restored to initial
-    assert_eq!(traced_svm.get_account(&pk2).unwrap().lamports, 100,
-        "pk2 must be restored to initial; if not, traced_divergent was stale");
-    assert_eq!(traced_svm.get_account(&pk1).unwrap().lamports, 100,
-        "pk1 must be restored to initial");
+    assert_eq!(
+        traced_svm.get_account(&pk2).unwrap().lamports,
+        100,
+        "pk2 must be restored to initial; if not, traced_divergent was stale"
+    );
+    assert_eq!(
+        traced_svm.get_account(&pk1).unwrap().lamports,
+        100,
+        "pk1 must be restored to initial"
+    );
 }
 
 // ---- Pool: total_picks atomic counter ----
@@ -1899,7 +2309,8 @@ fn test_restore_from_overlapping_delta_keys_different_values() {
     let pks: Vec<Pubkey> = (0..5).map(|_| Pubkey::new_unique()).collect();
 
     for (i, pk) in pks.iter().enumerate() {
-        svm.set_account(*pk, make_account((i as u64 + 1) * 10, &[])).unwrap();
+        svm.set_account(*pk, make_account((i as u64 + 1) * 10, &[]))
+            .unwrap();
     }
     let tracked: HashSet<Pubkey> = pks.iter().copied().collect();
     let initial = SvmSnapshot::take(&svm, &tracked);
@@ -1909,14 +2320,20 @@ fn test_restore_from_overlapping_delta_keys_different_values() {
     for (i, pk) in pks.iter().enumerate() {
         prev_accts.insert(*pk, Arc::new(make_account(1000 + i as u64, &[])));
     }
-    let prev = SvmSnapshot { accounts: prev_accts, sysvars: make_test_sysvars(1) };
+    let prev = SvmSnapshot {
+        accounts: prev_accts,
+        sysvars: make_test_sysvars(1),
+    };
 
     // next delta: all pks at 2000+i (DIFFERENT Arcs, different values)
     let mut next_accts = FastHashMap::default();
     for (i, pk) in pks.iter().enumerate() {
         next_accts.insert(*pk, Arc::new(make_account(2000 + i as u64, &[])));
     }
-    let next = SvmSnapshot { accounts: next_accts, sysvars: make_test_sysvars(2) };
+    let next = SvmSnapshot {
+        accounts: next_accts,
+        sysvars: make_test_sysvars(2),
+    };
 
     // Restore prev first
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
@@ -1928,7 +2345,10 @@ fn test_restore_from_overlapping_delta_keys_different_values() {
     let count = initial.restore_selective_from(&mut svm, &divergent, &prev, &next, &exec_dirty);
 
     // All 5 should be written (different Arcs)
-    assert_eq!(count, 5, "all 5 accounts have different Arcs → all should be written");
+    assert_eq!(
+        count, 5,
+        "all 5 accounts have different Arcs → all should be written"
+    );
     for (i, pk) in pks.iter().enumerate() {
         assert_eq!(svm.get_account(pk).unwrap().lamports, 2000 + i as u64);
     }
@@ -1952,7 +2372,10 @@ fn test_snapshot_empty_has_no_accounts() {
     // Modify via a delta
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk, Arc::new(make_account(500, &[])));
-    let delta = SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(10) };
+    let delta = SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: make_test_sysvars(10),
+    };
 
     let mut divergent: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective(&mut svm, &divergent, &delta);
@@ -1975,22 +2398,30 @@ fn test_take_delta_from_arc_wrapped_parent() {
     let pk_inherited = Pubkey::new_unique();
     let pk_modified = Pubkey::new_unique();
 
-    svm.set_account(pk_inherited, make_account(100, &[])).unwrap();
-    svm.set_account(pk_modified, make_account(100, &[])).unwrap();
+    svm.set_account(pk_inherited, make_account(100, &[]))
+        .unwrap();
+    svm.set_account(pk_modified, make_account(100, &[]))
+        .unwrap();
 
     // Parent delta (will be Arc-wrapped like in pool)
     let parent_arc_account = Arc::new(make_account(500, &[1, 2]));
     let mut parent_accts = FastHashMap::default();
     parent_accts.insert(pk_inherited, parent_arc_account.clone());
     parent_accts.insert(pk_modified, Arc::new(make_account(600, &[3, 4])));
-    let parent = Arc::new(SvmSnapshot { accounts: parent_accts, sysvars: make_test_sysvars(5) });
+    let parent = Arc::new(SvmSnapshot {
+        accounts: parent_accts,
+        sysvars: make_test_sysvars(5),
+    });
 
     // Set SVM to parent state
-    svm.set_account(pk_inherited, make_account(500, &[1, 2])).unwrap();
-    svm.set_account(pk_modified, make_account(600, &[3, 4])).unwrap();
+    svm.set_account(pk_inherited, make_account(500, &[1, 2]))
+        .unwrap();
+    svm.set_account(pk_modified, make_account(600, &[3, 4]))
+        .unwrap();
 
     // Execution modifies only pk_modified
-    svm.set_account(pk_modified, make_account(700, &[5, 6])).unwrap();
+    svm.set_account(pk_modified, make_account(700, &[5, 6]))
+        .unwrap();
 
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk_modified);
@@ -2054,7 +2485,10 @@ fn test_two_workers_same_state_different_execution() {
     // Shared delta (from pool, Arc)
     let mut delta_accts = FastHashMap::default();
     delta_accts.insert(pk1, Arc::new(make_account(500, &[])));
-    let delta = Arc::new(SvmSnapshot { accounts: delta_accts, sysvars: make_test_sysvars(1) });
+    let delta = Arc::new(SvmSnapshot {
+        accounts: delta_accts,
+        sysvars: make_test_sysvars(1),
+    });
 
     // Both workers restore same delta
     let mut divergent_a: FastHashSet<Pubkey> = FastHashSet::default();
@@ -2071,7 +2505,9 @@ fn test_two_workers_same_state_different_execution() {
     assert_eq!(svm_b.get_account(&pk1).unwrap().lamports, 500);
 
     // Worker A's execution creates pk_extra (CPI-created account)
-    svm_a.set_account(pk_extra, make_account(999, &[0xAA])).unwrap();
+    svm_a
+        .set_account(pk_extra, make_account(999, &[0xAA]))
+        .unwrap();
     let mut exec_dirty_a: FastHashSet<Pubkey> = FastHashSet::default();
     exec_dirty_a.insert(pk_extra);
     divergent_a.extend(exec_dirty_a.iter().copied());
@@ -2082,23 +2518,40 @@ fn test_two_workers_same_state_different_execution() {
     // Now workers pick different next states
     let mut next_delta_accts = FastHashMap::default();
     next_delta_accts.insert(pk1, Arc::new(make_account(600, &[])));
-    let next_delta = Arc::new(SvmSnapshot { accounts: next_delta_accts, sysvars: make_test_sysvars(2) });
+    let next_delta = Arc::new(SvmSnapshot {
+        accounts: next_delta_accts,
+        sysvars: make_test_sysvars(2),
+    });
 
     // Worker A uses _from (prev succeeded)
     let prev_a = delta.clone();
-    initial.restore_selective_from(&mut svm_a, &divergent_a, &prev_a, &next_delta, &exec_dirty_a);
+    initial.restore_selective_from(
+        &mut svm_a,
+        &divergent_a,
+        &prev_a,
+        &next_delta,
+        &exec_dirty_a,
+    );
 
     // Worker B uses _from (prev succeeded)
     let prev_b = delta.clone();
-    initial.restore_selective_from(&mut svm_b, &divergent_b, &prev_b, &next_delta, &exec_dirty_b);
+    initial.restore_selective_from(
+        &mut svm_b,
+        &divergent_b,
+        &prev_b,
+        &next_delta,
+        &exec_dirty_b,
+    );
 
     // Both should have pk1=600
     assert_eq!(svm_a.get_account(&pk1).unwrap().lamports, 600);
     assert_eq!(svm_b.get_account(&pk1).unwrap().lamports, 600);
 
     // Worker A: pk_extra was in divergent_a but not in next_delta → cleaned up
-    assert!(svm_a.get_account(&pk_extra).is_none(),
-        "pk_extra should be cleaned up for worker A");
+    assert!(
+        svm_a.get_account(&pk_extra).is_none(),
+        "pk_extra should be cleaned up for worker A"
+    );
 
     // Worker B: pk_extra was never in divergent_b, never existed in svm_b
     assert!(svm_b.get_account(&pk_extra).is_none());
@@ -2170,43 +2623,96 @@ fn test_pool_edge_rarity_scoring() {
 
     // State 0: positions [0,1,2] — all brand new (freq=0), max rarity
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        make_action_bytes(1, &[0x01]), "rare".to_string(), Some(0), vec![], None,
-        5, 5, true, Some(vec![0, 1, 2]),
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        make_action_bytes(1, &[0x01]),
+        "rare".to_string(),
+        Some(0),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![0, 1, 2]),
     );
     let s0_rarity = pool.get(0).unwrap().rarity_score;
     // All edges at freq=0 → score = mean(1/(0+1)) = 1.0
-    assert!((s0_rarity - 1.0).abs() < 0.001, "s0 rarity should be ~1.0, got {}", s0_rarity);
+    assert!(
+        (s0_rarity - 1.0).abs() < 0.001,
+        "s0 rarity should be ~1.0, got {}",
+        s0_rarity
+    );
     assert!(pool.get(0).unwrap().edge_positions.is_some());
 
     // State 1: positions [0,1,2,3,4] — shares 0,1,2 (now freq=1) + new 3,4 (freq=0)
     pool.try_add(
-        2, CompactDelta::empty(make_test_clock(1)), 1, None,
-        make_action_bytes(1, &[0x02]), "mixed".to_string(), Some(1), vec![], None,
-        5, 5, true, Some(vec![0, 1, 2, 3, 4]),
+        2,
+        CompactDelta::empty(make_test_clock(1)),
+        1,
+        None,
+        make_action_bytes(1, &[0x02]),
+        "mixed".to_string(),
+        Some(1),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![0, 1, 2, 3, 4]),
     );
     let s1_rarity = pool.get(1).unwrap().rarity_score;
     // Shared edges: 1/(1+1)=0.5 each (3 of them), new edges: 1/(0+1)=1.0 each (2 of them)
     // Mean = (0.5*3 + 1.0*2)/5 = 3.5/5 = 0.7
-    assert!((s1_rarity - 0.7).abs() < 0.001, "s1 rarity should be ~0.7, got {}", s1_rarity);
+    assert!(
+        (s1_rarity - 0.7).abs() < 0.001,
+        "s1 rarity should be ~0.7, got {}",
+        s1_rarity
+    );
 
     // State 0 has higher rarity (added when edges were brand new)
-    assert!(s0_rarity > s1_rarity, "s0 ({}) should have higher rarity than s1 ({})", s0_rarity, s1_rarity);
+    assert!(
+        s0_rarity > s1_rarity,
+        "s0 ({}) should have higher rarity than s1 ({})",
+        s0_rarity,
+        s1_rarity
+    );
 
     // Non-coverage state (novelty_bits=0): rarity should be 0.0 even with positions
     pool.try_add(
-        3, CompactDelta::empty(make_test_clock(2)), 0, None,
-        make_action_bytes(1, &[0x03]), "nocov".to_string(), Some(2), vec![], None,
-        0, 0, true, Some(vec![10, 11, 12]),
+        3,
+        CompactDelta::empty(make_test_clock(2)),
+        0,
+        None,
+        make_action_bytes(1, &[0x03]),
+        "nocov".to_string(),
+        Some(2),
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        Some(vec![10, 11, 12]),
     );
     assert_eq!(pool.get(2).unwrap().rarity_score, 0.0);
     assert!(pool.get(2).unwrap().edge_positions.is_none());
 
     // No positions provided: rarity should be 0.0
     pool.try_add(
-        4, CompactDelta::empty(make_test_clock(3)), 0, None,
-        make_action_bytes(1, &[0x04]), "nopos".to_string(), Some(3), vec![], None,
-        5, 5, true, None
+        4,
+        CompactDelta::empty(make_test_clock(3)),
+        0,
+        None,
+        make_action_bytes(1, &[0x04]),
+        "nopos".to_string(),
+        Some(3),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        None,
     );
     assert_eq!(pool.get(3).unwrap().rarity_score, 0.0);
     assert!(pool.get(3).unwrap().edge_positions.is_none());
@@ -2218,15 +2724,35 @@ fn test_pool_edge_freq_decrement_on_eviction() {
 
     // Add state 0 with positions [0,1]
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
-        5, 5, true, Some(vec![0, 1]),
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        make_action_bytes(1, &[0x01]),
+        "s0".to_string(),
+        Some(0),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![0, 1]),
     );
     // Add state 1 with positions [0,2]
     pool.try_add(
-        2, CompactDelta::empty(make_test_clock(1)), 0, None,
-        make_action_bytes(1, &[0x02]), "s1".to_string(), Some(1), vec![], None,
-        5, 5, true, Some(vec![0, 2]),
+        2,
+        CompactDelta::empty(make_test_clock(1)),
+        0,
+        None,
+        make_action_bytes(1, &[0x02]),
+        "s1".to_string(),
+        Some(1),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![0, 2]),
     );
 
     // Pool is full. edge_freq[0]=2, edge_freq[1]=1, edge_freq[2]=1
@@ -2236,9 +2762,19 @@ fn test_pool_edge_freq_decrement_on_eviction() {
 
     // Adding state 2 will evict the weakest → should decrement evicted state's freq
     pool.try_add(
-        3, CompactDelta::empty(make_test_clock(2)), 0, None,
-        make_action_bytes(1, &[0x03]), "s2".to_string(), Some(2), vec![], None,
-        5, 5, true, Some(vec![3]),
+        3,
+        CompactDelta::empty(make_test_clock(2)),
+        0,
+        None,
+        make_action_bytes(1, &[0x03]),
+        "s2".to_string(),
+        Some(2),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![3]),
     );
 
     // After eviction, one of states 0 or 1 was evicted.
@@ -2251,9 +2787,19 @@ fn test_pool_edge_freq_decrement_on_crash() {
     let mut pool = StatePool::new(100, 20);
 
     pool.try_add(
-        1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        make_action_bytes(1, &[0x01]), "s0".to_string(), Some(0), vec![], None,
-        5, 5, true, Some(vec![10, 20, 30]),
+        1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        make_action_bytes(1, &[0x01]),
+        "s0".to_string(),
+        Some(0),
+        vec![],
+        None,
+        5,
+        5,
+        true,
+        Some(vec![10, 20, 30]),
     );
     assert_eq!(pool.edge_freq[10], 1);
     assert_eq!(pool.edge_freq[20], 1);
@@ -2282,7 +2828,9 @@ fn test_extract_coverage_positions() {
 
     // All non-zero in one u64 chunk
     let mut map = vec![0u8; 16];
-    for i in 0..8 { map[i] = (i + 1) as u8; }
+    for i in 0..8 {
+        map[i] = (i + 1) as u8;
+    }
     let pos = extract_coverage_positions(&map);
     assert_eq!(pos, vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
@@ -2297,7 +2845,7 @@ fn test_extract_coverage_positions() {
 // StateRegistry — accounting and SCFuzz formula
 // =========================================================================
 
-use crate::snapshot::state_pool::{StateRegistry, FuzzPhase, state_class_from_fingerprint};
+use crate::snapshot::state_pool::{state_class_from_fingerprint, FuzzPhase, StateRegistry};
 
 #[test]
 fn test_state_registry_accounting() {
@@ -2305,8 +2853,21 @@ fn test_state_registry_accounting() {
 
     // Add initial state (no parent)
     let fp_initial = 0x0001_0000_0000_0001u64; // state_class = 0x0001
-    pool.try_add(fp_initial, CompactDelta::empty(make_test_clock(0)), 0, None,
-        vec![0u8; 8], "initial".into(), None, vec![], None, 0, 0, true, None);
+    pool.try_add(
+        fp_initial,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        vec![0u8; 8],
+        "initial".into(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
+    );
 
     // state_class 0x0001 should have trigger_count=1
     let sc_initial = state_class_from_fingerprint(fp_initial);
@@ -2317,8 +2878,21 @@ fn test_state_registry_accounting() {
 
     // Add child with coverage (novelty_bits > 0), different state_class
     let fp_child = 0x0002_0000_0000_0002u64; // state_class = 0x0002
-    pool.try_add(fp_child, CompactDelta::empty(make_test_clock(1)), 1, Some(0),
-        vec![0u8; 8], "action_deposit".into(), Some(0), vec![], None, 5, 0, true, None);
+    pool.try_add(
+        fp_child,
+        CompactDelta::empty(make_test_clock(1)),
+        1,
+        Some(0),
+        vec![0u8; 8],
+        "action_deposit".into(),
+        Some(0),
+        vec![],
+        None,
+        5,
+        0,
+        true,
+        None,
+    );
 
     // Child state_class 0x0002 should have trigger_count=1
     let sc_child = state_class_from_fingerprint(fp_child);
@@ -2335,8 +2909,21 @@ fn test_state_registry_accounting() {
 
     // Add another child from same parent, same state_class as parent
     let fp_same = 0x0001_0000_0000_0003u64; // state_class = 0x0001 (same as parent)
-    pool.try_add(fp_same, CompactDelta::empty(make_test_clock(2)), 1, Some(0),
-        vec![0u8; 8], "action_withdraw".into(), Some(1), vec![], None, 0, 0, true, None);
+    pool.try_add(
+        fp_same,
+        CompactDelta::empty(make_test_clock(2)),
+        1,
+        Some(0),
+        vec![0u8; 8],
+        "action_withdraw".into(),
+        Some(1),
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
+    );
 
     // Parent's trigger_count should now be 2 (initial + this child share state_class)
     let stats_parent = pool.registry.get(sc_initial).unwrap();
@@ -2377,7 +2964,12 @@ fn test_state_seed_weight_formula() {
     let w_b = registry.state_seed_weight(0x0002, 10.0, true);
 
     // Productive state A should have higher weight than saturated state B
-    assert!(w_a > w_b, "productive state A ({}) should be weighted higher than saturated B ({})", w_a, w_b);
+    assert!(
+        w_a > w_b,
+        "productive state A ({}) should be weighted higher than saturated B ({})",
+        w_a,
+        w_b
+    );
 
     // Unknown state should get fallback formula
     let w_unknown = registry.state_seed_weight(0xFFFF, 10.0, true);
@@ -2386,8 +2978,12 @@ fn test_state_seed_weight_formula() {
     // Success boost should double the weight
     let w_success = registry.state_seed_weight(0x0001, 10.0, true);
     let w_fail = registry.state_seed_weight(0x0001, 10.0, false);
-    assert!((w_success - w_fail * 2.0).abs() < 0.001,
-        "success boost should be 2x: success={}, fail={}", w_success, w_fail);
+    assert!(
+        (w_success - w_fail * 2.0).abs() < 0.001,
+        "success boost should be 2x: success={}, fail={}",
+        w_success,
+        w_fail
+    );
 }
 
 #[test]
@@ -2401,8 +2997,21 @@ fn test_phase_transition() {
     for i in 0..101u64 {
         let sc = (i % 60) as u16; // 60 unique state classes
         let fp = (sc as u64) << 48 | (i + 1);
-        pool.try_add(fp, CompactDelta::empty(make_test_clock(i)), 0, None,
-            vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
+        pool.try_add(
+            fp,
+            CompactDelta::empty(make_test_clock(i)),
+            0,
+            None,
+            vec![0u8; 8],
+            format!("action_{}", i),
+            None,
+            vec![],
+            None,
+            0,
+            0,
+            true,
+            None,
+        );
     }
 
     // Phase should still be Coverage until maybe_advance_phase is called
@@ -2425,10 +3034,36 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
     // Add two non-coverage states (novelty_bits=0)
     let fp1 = 0x0001_0000_0000_0001u64;
     let fp2 = 0x0002_0000_0000_0002u64;
-    pool.try_add(fp1, CompactDelta::empty(make_test_clock(0)), 0, None,
-        vec![0u8; 8], "a".into(), None, vec![], None, 0, 0, true, None);
-    pool.try_add(fp2, CompactDelta::empty(make_test_clock(1)), 1, None,
-        vec![0u8; 8], "b".into(), None, vec![], None, 0, 0, true, None);
+    pool.try_add(
+        fp1,
+        CompactDelta::empty(make_test_clock(0)),
+        0,
+        None,
+        vec![0u8; 8],
+        "a".into(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
+    );
+    pool.try_add(
+        fp2,
+        CompactDelta::empty(make_test_clock(1)),
+        1,
+        None,
+        vec![0u8; 8],
+        "b".into(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
+    );
 
     // Pick state 0 many times
     pool.states[0].pick_count.store(100, Ordering::Relaxed);
@@ -2443,8 +3078,12 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
     // Coverage-phase formula: explore_decay * success * depth
     // picks=100: 1/(1+100/50) = 1/3, success=2.0, depth_factor=1.0
     let expected = (1.0 / (1.0 + 100.0 / 50.0)) * 2.0 * 1.0; // ~0.667
-    assert!((w0 - expected).abs() < 0.01,
-        "Coverage phase should use original formula: got {}, expected {}", w0, expected);
+    assert!(
+        (w0 - expected).abs() < 0.01,
+        "Coverage phase should use original formula: got {}, expected {}",
+        w0,
+        expected
+    );
 }
 
 #[test]
@@ -2455,8 +3094,21 @@ fn test_blended_phase_uses_scfuzz_formula() {
     for i in 0..110u64 {
         let sc = (i % 60) as u16;
         let fp = (sc as u64) << 48 | (i + 1);
-        pool.try_add(fp, CompactDelta::empty(make_test_clock(i)), 0, None,
-            vec![0u8; 8], format!("action_{}", i), None, vec![], None, 0, 0, true, None);
+        pool.try_add(
+            fp,
+            CompactDelta::empty(make_test_clock(i)),
+            0,
+            None,
+            vec![0u8; 8],
+            format!("action_{}", i),
+            None,
+            vec![],
+            None,
+            0,
+            0,
+            true,
+            None,
+        );
     }
     pool.maybe_advance_phase();
     assert_eq!(pool.phase, FuzzPhase::Blended);
@@ -2470,11 +3122,26 @@ fn test_blended_phase_uses_scfuzz_formula() {
     // Compute weight for a non-coverage state in Blended phase
     // Should use SCFuzz formula (state_seed_weight) * depth_factor, not fast-decay
     let fp_test = (sc_good as u64) << 48 | 0xABCD;
-    pool.try_add(fp_test, CompactDelta::empty(make_test_clock(200)), 1, None,
-        vec![0u8; 8], "test".into(), None, vec![], None, 0, 0, true, None);
+    pool.try_add(
+        fp_test,
+        CompactDelta::empty(make_test_clock(200)),
+        1,
+        None,
+        vec![0u8; 8],
+        "test".into(),
+        None,
+        vec![],
+        None,
+        0,
+        0,
+        true,
+        None,
+    );
 
     let test_idx = pool.states.len() - 1;
-    pool.states[test_idx].pick_count.store(10, Ordering::Relaxed);
+    pool.states[test_idx]
+        .pick_count
+        .store(10, Ordering::Relaxed);
 
     let w = pool.compute_weight(&pool.states[test_idx], 20);
 
@@ -2482,6 +3149,9 @@ fn test_blended_phase_uses_scfuzz_formula() {
     // Fast-decay for picks=10: 1/(1+10/50) * 2.0 * depth ≈ 1.667
     let fast_decay_w = (1.0 / (1.0 + 10.0 / 50.0)) * 2.0 * (1.0 / (1.0 + 0.025));
     // SCFuzz weight should differ from fast-decay
-    assert!(w != fast_decay_w, "Blended phase should use SCFuzz formula, not fast-decay");
+    assert!(
+        w != fast_decay_w,
+        "Blended phase should use SCFuzz formula, not fast-decay"
+    );
     assert!(w > 0.0, "SCFuzz weight should be positive");
 }

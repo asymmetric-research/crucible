@@ -1,8 +1,8 @@
 #![cfg(feature = "rpc-clone")]
 
+use crucible_test_context::rpc_clone::{is_program, is_upgradeable_program, AccountCloner};
 use solana_account::Account;
 use solana_pubkey::Pubkey;
-use crucible_test_context::rpc_clone::{AccountCloner, is_upgradeable_program, is_program};
 use tempfile::TempDir;
 
 /// Helper: create a dummy Account with given data
@@ -18,7 +18,9 @@ fn make_account(data: &[u8], owner: Pubkey, lamports: u64, executable: bool) -> 
 
 /// Helper: build an AccountCloner with a temp cache dir (no RPC calls).
 /// Returns (cloner, temp_dir) - temp_dir must be held alive for the duration.
-fn make_cloner_with_cache(ctx: &mut crucible_test_context::TestContext) -> (AccountCloner<'_>, TempDir) {
+fn make_cloner_with_cache(
+    ctx: &mut crucible_test_context::TestContext,
+) -> (AccountCloner<'_>, TempDir) {
     let tmp = TempDir::new().unwrap();
     let cache_dir = tmp.path().join("cache");
     let cloner = AccountCloner::new(ctx, "http://localhost:0") // dummy URL
@@ -44,7 +46,9 @@ fn test_cache_round_trip() {
     cloner.write_cache(&pubkey, &account).unwrap();
 
     // Read back
-    let cached = cloner.read_cache(&pubkey).unwrap()
+    let cached = cloner
+        .read_cache(&pubkey)
+        .unwrap()
         .expect("should find cached account");
 
     assert_eq!(cached.lamports, 1_000_000);
@@ -66,7 +70,9 @@ fn test_cache_round_trip_large_data() {
     let account = make_account(&data, owner, 100_000_000, true);
 
     cloner.write_cache(&pubkey, &account).unwrap();
-    let cached = cloner.read_cache(&pubkey).unwrap()
+    let cached = cloner
+        .read_cache(&pubkey)
+        .unwrap()
         .expect("should find cached account");
 
     assert_eq!(cached.data.len(), 1_000_000);
@@ -122,7 +128,9 @@ fn test_clear_cache() {
 
 #[test]
 fn test_program_detection_upgradeable() {
-    let bpf_upgradeable: Pubkey = "BPFLoaderUpgradeab1e11111111111111111111111".parse().unwrap();
+    let bpf_upgradeable: Pubkey = "BPFLoaderUpgradeab1e11111111111111111111111"
+        .parse()
+        .unwrap();
     let account = make_account(&[0; 36], bpf_upgradeable, 1_000_000, true);
 
     assert!(is_upgradeable_program(&account));
@@ -154,8 +162,7 @@ fn test_cache_dir_created_on_write() {
     let tmp = TempDir::new().unwrap();
     let cache_dir = tmp.path().join("deeply").join("nested").join("cache");
 
-    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0")
-        .cache_dir(&cache_dir);
+    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0").cache_dir(&cache_dir);
 
     assert!(!cache_dir.exists());
 
@@ -174,8 +181,7 @@ fn test_force_refresh_flag() {
     let cache_dir = tmp.path().join("cache");
 
     // Create a cloner without force_refresh and cache an account
-    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0")
-        .cache_dir(&cache_dir);
+    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0").cache_dir(&cache_dir);
 
     let pubkey = Pubkey::new_unique();
     let account = make_account(&[1, 2, 3], Pubkey::new_unique(), 100, false);
@@ -194,7 +200,10 @@ fn test_force_refresh_flag() {
 
     // This should try RPC (skip cache) and fail since localhost:0 isn't listening
     let result = cloner_refresh.clone_account(&pubkey);
-    assert!(result.is_err(), "force_refresh should skip cache and hit RPC");
+    assert!(
+        result.is_err(),
+        "force_refresh should skip cache and hit RPC"
+    );
 }
 
 #[test]
@@ -213,8 +222,7 @@ fn test_clear_nonexistent_cache_is_ok() {
     let tmp = TempDir::new().unwrap();
     let cache_dir = tmp.path().join("nonexistent");
 
-    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0")
-        .cache_dir(cache_dir);
+    let cloner = AccountCloner::new(&mut ctx, "http://localhost:0").cache_dir(cache_dir);
 
     // Should not error when clearing a cache that doesn't exist
     cloner.clear_cache().unwrap();

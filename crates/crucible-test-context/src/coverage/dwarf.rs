@@ -70,9 +70,9 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
 
     // Infer workspace root from FUZZ_SYMBOLS for resolving relative DWARF paths.
     // e.g. "/home/user/project/target/sbpf-.../release/prog.so" → "/home/user/project"
-    let source_root: Option<String> = std::env::var("FUZZ_SYMBOLS").ok().and_then(|p| {
-        p.find("/target/").map(|idx| p[..idx].to_string())
-    });
+    let source_root: Option<String> = std::env::var("FUZZ_SYMBOLS")
+        .ok()
+        .and_then(|p| p.find("/target/").map(|idx| p[..idx].to_string()));
 
     // Resolve a DWARF file path to an absolute path.
     // Tries canonicalize first (works if CWD matches), then prepends source_root.
@@ -158,7 +158,9 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
             // Record function name using the outermost location (call site)
             if let Some(name) = first_function_name {
                 let outermost = locations.last().unwrap();
-                fn_map.entry(pc).or_insert_with(|| (name, outermost.clone()));
+                fn_map
+                    .entry(pc)
+                    .or_insert_with(|| (name, outermost.clone()));
             }
 
             pc_map.insert(pc, locations);
@@ -193,8 +195,14 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
                     .insert(line);
 
                 let locations = pc_map.entry(pc).or_default();
-                if !locations.iter().any(|l| l.file == file_path && l.line == line) {
-                    locations.push(SourceLocation { file: file_path, line });
+                if !locations
+                    .iter()
+                    .any(|l| l.file == file_path && l.line == line)
+                {
+                    locations.push(SourceLocation {
+                        file: file_path,
+                        line,
+                    });
                 }
             }
         }
@@ -216,5 +224,9 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
         }
     }
 
-    Some(DwarfSourceMap { pc_map, fn_map, executable_lines })
+    Some(DwarfSourceMap {
+        pc_map,
+        fn_map,
+        executable_lines,
+    })
 }

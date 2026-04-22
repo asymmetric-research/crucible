@@ -97,8 +97,14 @@ mod tests {
             returns: None,
         }]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("DISCRIMINATOR"), "should have DISCRIMINATOR const");
-        assert!(output.contains("0u8 , 0u8 , 0u8 , 0u8"), "should emit 4 bytes");
+        assert!(
+            output.contains("DISCRIMINATOR"),
+            "should have DISCRIMINATOR const"
+        );
+        assert!(
+            output.contains("0u8 , 0u8 , 0u8 , 0u8"),
+            "should emit 4 bytes"
+        );
     }
 
     #[test]
@@ -128,7 +134,10 @@ mod tests {
         }]);
         let output = generate(&idl).to_string();
         // Should generate a unit struct (no braces with fields)
-        assert!(output.contains("pub struct DoNothing ;"), "empty args should produce unit struct");
+        assert!(
+            output.contains("pub struct DoNothing ;"),
+            "empty args should produce unit struct"
+        );
     }
 
     #[test]
@@ -153,8 +162,14 @@ mod tests {
             returns: None,
         }]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("pub amount : u64"), "should have amount field");
-        assert!(output.contains("pub memo : String"), "should have memo field");
+        assert!(
+            output.contains("pub amount : u64"),
+            "should have amount field"
+        );
+        assert!(
+            output.contains("pub memo : String"),
+            "should have memo field"
+        );
     }
 
     #[test]
@@ -168,7 +183,10 @@ mod tests {
             returns: None,
         }]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("DelegateStake"), "should convert to UpperCamelCase");
+        assert!(
+            output.contains("DelegateStake"),
+            "should convert to UpperCamelCase"
+        );
     }
 
     #[test]
@@ -182,7 +200,13 @@ mod tests {
             returns: None,
         }]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("InstructionData"), "should impl InstructionData");
-        assert!(output.contains("Discriminator"), "should impl Discriminator");
+        assert!(
+            output.contains("InstructionData"),
+            "should impl InstructionData"
+        );
+        assert!(
+            output.contains("Discriminator"),
+            "should impl Discriminator"
+        );
     }
 }

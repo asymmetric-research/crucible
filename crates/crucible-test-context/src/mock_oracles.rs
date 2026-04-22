@@ -24,10 +24,8 @@ pub const PYTH_DISCRIMINATOR: [u8; 8] = [34, 241, 35, 99, 157, 126, 244, 205];
 /// Default Pyth Solana Receiver program ID
 /// rec5EKMGg6MxZYaMdyBps2bnnCNHi6KCYuQedA7GsAuW
 pub const DEFAULT_PYTH_RECEIVER_ID: Pubkey = Pubkey::new_from_array([
-    0x02, 0xe1, 0xae, 0xce, 0x70, 0xcc, 0x1b, 0xac,
-    0x7a, 0x72, 0xa9, 0x36, 0x74, 0xe4, 0x5a, 0x7b,
-    0xe1, 0xa8, 0xbd, 0x5a, 0x03, 0xbd, 0x7c, 0x50,
-    0xfd, 0x3f, 0xa2, 0xc5, 0xa4, 0x92, 0x88, 0x28,
+    0x02, 0xe1, 0xae, 0xce, 0x70, 0xcc, 0x1b, 0xac, 0x7a, 0x72, 0xa9, 0x36, 0x74, 0xe4, 0x5a, 0x7b,
+    0xe1, 0xa8, 0xbd, 0x5a, 0x03, 0xbd, 0x7c, 0x50, 0xfd, 0x3f, 0xa2, 0xc5, 0xa4, 0x92, 0x88, 0x28,
 ]);
 
 /// Pyth verification level for price updates
@@ -170,7 +168,8 @@ impl<'a> MockPythOracleBuilder<'a> {
         let mut data = PYTH_DISCRIMINATOR.to_vec();
         price_update.serialize(&mut data)?;
 
-        self.ctx.create_account()
+        self.ctx
+            .create_account()
             .pubkey(oracle_pubkey)
             .owner(self.program_id)
             .lamports(1_000_000_000)
@@ -209,7 +208,8 @@ impl TestContext {
         let account = self.read_account(oracle)?;
 
         // Skip discriminator (8 bytes), deserialize, update, reserialize
-        let mut price_update: PriceUpdateV2 = BorshDeserialize::deserialize(&mut &account.data[8..])?;
+        let mut price_update: PriceUpdateV2 =
+            BorshDeserialize::deserialize(&mut &account.data[8..])?;
 
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -227,10 +227,13 @@ impl TestContext {
         let mut new_data = PYTH_DISCRIMINATOR.to_vec();
         price_update.serialize(&mut new_data)?;
 
-        self.write_account(oracle, Account {
-            data: new_data,
-            ..account
-        })
+        self.write_account(
+            oracle,
+            Account {
+                data: new_data,
+                ..account
+            },
+        )
     }
 
     /// Refresh a Pyth oracle's timestamp and slot to make it "fresh"
@@ -238,7 +241,8 @@ impl TestContext {
     pub fn refresh_pyth_oracle(&mut self, oracle: &Pubkey) -> Result<()> {
         let account = self.read_account(oracle)?;
 
-        let mut price_update: PriceUpdateV2 = BorshDeserialize::deserialize(&mut &account.data[8..])?;
+        let mut price_update: PriceUpdateV2 =
+            BorshDeserialize::deserialize(&mut &account.data[8..])?;
 
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -252,9 +256,12 @@ impl TestContext {
         let mut new_data = PYTH_DISCRIMINATOR.to_vec();
         price_update.serialize(&mut new_data)?;
 
-        self.write_account(oracle, Account {
-            data: new_data,
-            ..account
-        })
+        self.write_account(
+            oracle,
+            Account {
+                data: new_data,
+                ..account
+            },
+        )
     }
 }

@@ -1,10 +1,10 @@
-use std::marker::PhantomData;
+use libafl::corpus::CorpusId;
 use libafl::inputs::BytesInput;
 use libafl::mutators::{MutationResult, Mutator};
 use libafl::state::HasRand;
 use libafl::Error;
 use libafl_bolts::Named;
-use libafl::corpus::CorpusId;
+use std::marker::PhantomData;
 
 use crate::action::FuzzAction;
 use crate::input::FuzzInput;

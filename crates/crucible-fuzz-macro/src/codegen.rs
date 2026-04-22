@@ -244,7 +244,9 @@ pub fn mutator_stages_setup() -> proc_macro2::TokenStream {
     }
 }
 
-pub fn structured_mutator_stages_setup(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+pub fn structured_mutator_stages_setup(
+    action_type: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     quote! {
         let __fuzz_max_actions: usize = match std::env::var("FUZZ_MAX_ACTIONS") {
             Ok(s) => s.parse().unwrap_or_else(|e| {
@@ -321,7 +323,9 @@ pub fn add_default_seed() -> proc_macro2::TokenStream {
     }
 }
 
-pub fn structured_add_default_seed(action_type: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+pub fn structured_add_default_seed(
+    action_type: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     quote! {
         {
             use libafl::generators::Generator;
@@ -629,11 +633,17 @@ mod tests {
     #[test]
     fn max_size_setup_scans_corpus_dir() {
         let output = ts(max_size_setup());
-        assert!(output.contains("corpus_in_dir"), "should reference corpus_in_dir env");
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should reference corpus_in_dir env"
+        );
         assert!(output.contains("read_dir"), "should scan directory");
         assert!(output.contains("metadata"), "should read file metadata");
         assert!(output.contains("1024"), "should default to 1024 bytes");
-        assert!(output.contains("set_max_size"), "should call state.set_max_size");
+        assert!(
+            output.contains("set_max_size"),
+            "should call state.set_max_size"
+        );
     }
 
     // ── mutator / seed setup ────────────────────────────────────────────
@@ -641,20 +651,41 @@ mod tests {
     #[test]
     fn mutator_stages_setup_uses_havoc() {
         let output = ts(mutator_stages_setup());
-        assert!(output.contains("havoc_mutations"), "arbitrary mode should use havoc_mutations");
+        assert!(
+            output.contains("havoc_mutations"),
+            "arbitrary mode should use havoc_mutations"
+        );
         assert!(output.contains("StdMOptMutator"), "should use MOpt mutator");
-        assert!(output.contains("StdPowerMutationalStage"), "should wrap in power stage");
+        assert!(
+            output.contains("StdPowerMutationalStage"),
+            "should wrap in power stage"
+        );
     }
 
     #[test]
     fn structured_mutator_stages_has_all_mutators() {
         let action_ty = quote! { TestAction };
         let output = ts(structured_mutator_stages_setup(&action_ty));
-        assert!(output.contains("SuccessTrimStage"), "should include trim stage");
-        assert!(output.contains("SequenceMutator"), "should include sequence mutator");
-        assert!(output.contains("ParamMutator"), "should include param mutator");
-        assert!(output.contains("CrossoverMutator"), "should include crossover mutator");
-        assert!(output.contains("FUZZ_MAX_ACTIONS"), "should respect max actions env");
+        assert!(
+            output.contains("SuccessTrimStage"),
+            "should include trim stage"
+        );
+        assert!(
+            output.contains("SequenceMutator"),
+            "should include sequence mutator"
+        );
+        assert!(
+            output.contains("ParamMutator"),
+            "should include param mutator"
+        );
+        assert!(
+            output.contains("CrossoverMutator"),
+            "should include crossover mutator"
+        );
+        assert!(
+            output.contains("FUZZ_MAX_ACTIONS"),
+            "should respect max actions env"
+        );
     }
 
     #[test]
@@ -669,11 +700,16 @@ mod tests {
     fn structured_add_default_seed_uses_generator() {
         let action_ty = quote! { TestAction };
         let output = ts(structured_add_default_seed(&action_ty));
-        assert!(output.contains("ActionGenerator"), "should use ActionGenerator");
+        assert!(
+            output.contains("ActionGenerator"),
+            "should use ActionGenerator"
+        );
         assert!(output.contains("generate"), "should call generate()");
         // Verify fallback seed when corpus is empty
-        assert!(output.contains("count") && output.contains("== 0"),
-            "should check if corpus is empty for fallback");
+        assert!(
+            output.contains("count") && output.contains("== 0"),
+            "should check if corpus is empty for fallback"
+        );
     }
 
     // ── observer / feedback ─────────────────────────────────────────────
@@ -682,10 +718,22 @@ mod tests {
     fn singlecore_observer_feedback_has_hitcounts() {
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(singlecore_observer_feedback(&mod_name));
-        assert!(output.contains("HitcountsMapObserver"), "should use HitcountsMapObserver for bucketing");
-        assert!(output.contains("MaxMapFeedback"), "should use MaxMapFeedback");
-        assert!(output.contains("TimeFeedback"), "should track execution time");
-        assert!(output.contains("SuccessPatternFeedback"), "should track action success patterns");
+        assert!(
+            output.contains("HitcountsMapObserver"),
+            "should use HitcountsMapObserver for bucketing"
+        );
+        assert!(
+            output.contains("MaxMapFeedback"),
+            "should use MaxMapFeedback"
+        );
+        assert!(
+            output.contains("TimeFeedback"),
+            "should track execution time"
+        );
+        assert!(
+            output.contains("SuccessPatternFeedback"),
+            "should track action success patterns"
+        );
         assert!(output.contains("CrashFeedback"), "should detect crashes");
     }
 
@@ -696,10 +744,19 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(template_setup(&fixture, &mod_name));
-        assert!(output.contains("ANCHOR_FUZZ_DEBUGGABLE"), "should enable tracing env var");
+        assert!(
+            output.contains("ANCHOR_FUZZ_DEBUGGABLE"),
+            "should enable tracing env var"
+        );
         assert!(output.contains("setup"), "should call Fixture::setup()");
-        assert!(output.contains("init_program_totals"), "should init coverage totals");
-        assert!(output.contains("init_program_binaries"), "should init binaries");
+        assert!(
+            output.contains("init_program_totals"),
+            "should init coverage totals"
+        );
+        assert!(
+            output.contains("init_program_binaries"),
+            "should init binaries"
+        );
     }
 
     #[test]
@@ -707,20 +764,41 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
         let output = ts(common_fuzz_setup(&mod_name, &fixture));
-        assert!(output.contains("FUZZ_TIMEOUT_SECS"), "should parse timeout env");
-        assert!(output.contains("AtomicU64"), "should create iteration counter");
-        assert!(output.contains("FUZZER_START_TIME"), "should record start time");
+        assert!(
+            output.contains("FUZZ_TIMEOUT_SECS"),
+            "should parse timeout env"
+        );
+        assert!(
+            output.contains("AtomicU64"),
+            "should create iteration counter"
+        );
+        assert!(
+            output.contains("FUZZER_START_TIME"),
+            "should record start time"
+        );
     }
 
     #[test]
     fn monitor_setup_suppresses_during_corpus_loading() {
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(monitor_setup(&mod_name));
-        assert!(output.contains("is_corpus_loading"), "should suppress during corpus loading");
-        assert!(output.contains("FUZZ_PULSE"), "should output [FUZZ_PULSE] prefix");
+        assert!(
+            output.contains("is_corpus_loading"),
+            "should suppress during corpus loading"
+        );
+        assert!(
+            output.contains("FUZZ_PULSE"),
+            "should output [FUZZ_PULSE] prefix"
+        );
         assert!(output.contains("edges"), "should display edge coverage");
-        assert!(output.contains("branches"), "should display branch coverage");
-        assert!(output.contains("actions/exec"), "should display actions per execution");
+        assert!(
+            output.contains("branches"),
+            "should display branch coverage"
+        );
+        assert!(
+            output.contains("actions/exec"),
+            "should display actions per execution"
+        );
         assert!(output.contains("memory_kib"), "should display memory usage");
     }
 
@@ -731,7 +809,10 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(exit_handlers_setup(&mod_name));
         assert!(output.contains("set_hook"), "should set panic hook");
-        assert!(output.contains("write_lcov_coverage"), "should write coverage on panic");
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should write coverage on panic"
+        );
         assert!(output.contains("ctrlc"), "should handle Ctrl+C");
     }
 
@@ -741,36 +822,72 @@ mod tests {
     fn contexts_take_snapshot_single() {
         let contexts = vec![format_ident!("ctx")];
         let output = ts(contexts_take_snapshot(&contexts));
-        assert!(output.contains("template_fixture . ctx . take_snapshot"), "should snapshot ctx");
+        assert!(
+            output.contains("template_fixture . ctx . take_snapshot"),
+            "should snapshot ctx"
+        );
     }
 
     #[test]
     fn contexts_take_snapshot_multi() {
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_take_snapshot(&contexts));
-        assert!(output.contains("template_fixture . ctx . take_snapshot"), "should snapshot ctx");
-        assert!(output.contains("template_fixture . ctx_b . take_snapshot"), "should snapshot ctx_b");
+        assert!(
+            output.contains("template_fixture . ctx . take_snapshot"),
+            "should snapshot ctx"
+        );
+        assert!(
+            output.contains("template_fixture . ctx_b . take_snapshot"),
+            "should snapshot ctx_b"
+        );
     }
 
     #[test]
     fn contexts_swap_out_creates_refcells() {
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_swap_out(&contexts));
-        assert!(output.contains("__pristine_svm_0"), "should create pristine for ctx");
-        assert!(output.contains("__saved_svm_0"), "should create saved for ctx");
-        assert!(output.contains("__pristine_svm_1"), "should create pristine for ctx_b");
-        assert!(output.contains("__saved_svm_1"), "should create saved for ctx_b");
-        assert!(output.contains("RefCell"), "should use RefCell for swap trick");
-        assert!(output.contains("LiteSVM :: new"), "should replace with empty SVM");
+        assert!(
+            output.contains("__pristine_svm_0"),
+            "should create pristine for ctx"
+        );
+        assert!(
+            output.contains("__saved_svm_0"),
+            "should create saved for ctx"
+        );
+        assert!(
+            output.contains("__pristine_svm_1"),
+            "should create pristine for ctx_b"
+        );
+        assert!(
+            output.contains("__saved_svm_1"),
+            "should create saved for ctx_b"
+        );
+        assert!(
+            output.contains("RefCell"),
+            "should use RefCell for swap trick"
+        );
+        assert!(
+            output.contains("LiteSVM :: new"),
+            "should replace with empty SVM"
+        );
     }
 
     #[test]
     fn contexts_reset_check_uses_interval() {
         let contexts = vec![format_ident!("ctx")];
         let output = ts(contexts_reset_check(&contexts));
-        assert!(output.contains("__svm_reset_interval"), "should check reset interval");
-        assert!(output.contains("current_iteration"), "should check iteration count");
-        assert!(output.contains("__pristine_svm_0"), "should clone from pristine");
+        assert!(
+            output.contains("__svm_reset_interval"),
+            "should check reset interval"
+        );
+        assert!(
+            output.contains("current_iteration"),
+            "should check iteration count"
+        );
+        assert!(
+            output.contains("__pristine_svm_0"),
+            "should clone from pristine"
+        );
         assert!(output.contains("__saved_svm_0"), "should replace saved");
     }
 
@@ -779,8 +896,14 @@ mod tests {
         let fixture = format_ident!("fixture");
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_swap_in(&fixture, &contexts));
-        assert!(output.contains("fixture . ctx . svm"), "should swap ctx SVM");
-        assert!(output.contains("fixture . ctx_b . svm"), "should swap ctx_b SVM");
+        assert!(
+            output.contains("fixture . ctx . svm"),
+            "should swap ctx SVM"
+        );
+        assert!(
+            output.contains("fixture . ctx_b . svm"),
+            "should swap ctx_b SVM"
+        );
         assert!(output.contains("__saved_svm_0"), "should use saved_svm_0");
         assert!(output.contains("__saved_svm_1"), "should use saved_svm_1");
     }
@@ -792,7 +915,10 @@ mod tests {
         let output = ts(contexts_restore_and_clear(&fixture, &contexts));
         assert!(output.contains("snapshot"), "should check snapshot exists");
         assert!(output.contains("restore"), "should call restore");
-        assert!(output.contains("dirty_tracker . clear"), "should clear dirty tracker");
+        assert!(
+            output.contains("dirty_tracker . clear"),
+            "should clear dirty tracker"
+        );
     }
 
     #[test]
@@ -800,8 +926,14 @@ mod tests {
         let fixture = format_ident!("fixture");
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_swap_back(&fixture, &contexts));
-        assert!(output.contains("fixture . ctx . svm"), "should swap back ctx");
-        assert!(output.contains("fixture . ctx_b . svm"), "should swap back ctx_b");
+        assert!(
+            output.contains("fixture . ctx . svm"),
+            "should swap back ctx"
+        );
+        assert!(
+            output.contains("fixture . ctx_b . svm"),
+            "should swap back ctx_b"
+        );
     }
 
     #[test]
@@ -809,12 +941,27 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_no_tracing_switch(&fixture, &contexts));
-        assert!(output.contains("FUZZ_NO_TRACING"), "should check no-tracing env");
-        assert!(output.contains("remove_var"), "should remove debuggable env var");
-        assert!(output.contains("TestFixture :: setup"), "should recreate fixture");
+        assert!(
+            output.contains("FUZZ_NO_TRACING"),
+            "should check no-tracing env"
+        );
+        assert!(
+            output.contains("remove_var"),
+            "should remove debuggable env var"
+        );
+        assert!(
+            output.contains("TestFixture :: setup"),
+            "should recreate fixture"
+        );
         assert!(output.contains("take_snapshot"), "should re-snapshot");
-        assert!(output.contains("__pristine_svm_0"), "should update pristine ctx");
-        assert!(output.contains("__pristine_svm_1"), "should update pristine ctx_b");
+        assert!(
+            output.contains("__pristine_svm_0"),
+            "should update pristine ctx"
+        );
+        assert!(
+            output.contains("__pristine_svm_1"),
+            "should update pristine ctx_b"
+        );
     }
 
     // ── stateful-mode extra context helpers ──────────────────────────────
@@ -824,26 +971,42 @@ mod tests {
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(stateful_extra_take_snapshot(&contexts));
         // Should NOT contain ctx (primary), only ctx_b
-        assert!(!output.contains("template_fixture . ctx . take_snapshot"),
-            "should skip primary context");
-        assert!(output.contains("template_fixture . ctx_b . take_snapshot"),
-            "should snapshot additional context");
+        assert!(
+            !output.contains("template_fixture . ctx . take_snapshot"),
+            "should skip primary context"
+        );
+        assert!(
+            output.contains("template_fixture . ctx_b . take_snapshot"),
+            "should snapshot additional context"
+        );
     }
 
     #[test]
     fn stateful_extra_take_snapshot_empty_for_single_context() {
         let contexts = vec![format_ident!("ctx")];
         let output = ts(stateful_extra_take_snapshot(&contexts));
-        assert!(output.is_empty(), "single context should produce no extra snapshot code");
+        assert!(
+            output.is_empty(),
+            "single context should produce no extra snapshot code"
+        );
     }
 
     #[test]
     fn stateful_extra_swap_out_creates_mut_vars() {
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(stateful_extra_swap_out(&contexts));
-        assert!(output.contains("__extra_svm_1"), "should create __extra_svm_1 for ctx_b");
-        assert!(!output.contains("__extra_svm_0"), "should not create __extra_svm_0 (primary handled separately)");
-        assert!(output.contains("LiteSVM :: new"), "should replace with empty SVM");
+        assert!(
+            output.contains("__extra_svm_1"),
+            "should create __extra_svm_1 for ctx_b"
+        );
+        assert!(
+            !output.contains("__extra_svm_0"),
+            "should not create __extra_svm_0 (primary handled separately)"
+        );
+        assert!(
+            output.contains("LiteSVM :: new"),
+            "should replace with empty SVM"
+        );
     }
 
     #[test]
@@ -851,7 +1014,10 @@ mod tests {
         let fixture = format_ident!("my_fixture");
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(stateful_extra_swap_in(&fixture, &contexts));
-        assert!(output.contains("my_fixture . ctx_b . svm"), "should swap ctx_b using fixture param");
+        assert!(
+            output.contains("my_fixture . ctx_b . svm"),
+            "should swap ctx_b using fixture param"
+        );
         assert!(output.contains("__extra_svm_1"), "should use __extra_svm_1");
     }
 
@@ -861,8 +1027,14 @@ mod tests {
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(stateful_extra_restore_and_swap_back(&fixture, &contexts));
         assert!(output.contains("restore"), "should call restore");
-        assert!(output.contains("dirty_tracker . clear"), "should clear dirty tracker");
-        assert!(output.contains("__extra_svm_1"), "should swap back using __extra_svm_1");
+        assert!(
+            output.contains("dirty_tracker . clear"),
+            "should clear dirty tracker"
+        );
+        assert!(
+            output.contains("__extra_svm_1"),
+            "should swap back using __extra_svm_1"
+        );
     }
 
     // ── is_corpus_input ─────────────────────────────────────────────────
@@ -870,9 +1042,15 @@ mod tests {
     #[test]
     fn is_corpus_input_fn_filters_metadata() {
         let output = ts(is_corpus_input_fn());
-        assert!(output.contains("starts_with ('.')"), "should skip hidden files");
+        assert!(
+            output.contains("starts_with ('.')"),
+            "should skip hidden files"
+        );
         assert!(output.contains(".metadata"), "should skip .metadata files");
-        assert!(output.contains(".meta.json"), "should skip .meta.json files");
+        assert!(
+            output.contains(".meta.json"),
+            "should skip .meta.json files"
+        );
         assert!(output.contains(".state"), "should skip .state file");
     }
 
@@ -885,13 +1063,30 @@ mod tests {
         let fn_name = format_ident!("test_fn");
         let param = format_ident!("fixture");
         let output = ts(crate::singlecore::singlecore_mode(
-            &mod_name, &fixture, &fn_name, &param, "test",
-            &[], &[], false, None, &[format_ident!("ctx")],
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
         ));
         // Singlecore removes only hidden files (metadata)
-        assert!(output.contains("starts_with ('.')"), "should filter hidden files");
-        assert!(output.contains("remove_file"), "should remove stale metadata files");
-        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+        assert!(
+            output.contains("starts_with ('.')"),
+            "should filter hidden files"
+        );
+        assert!(
+            output.contains("remove_file"),
+            "should remove stale metadata files"
+        );
+        assert!(
+            output.contains("loading_from_same_dir"),
+            "should check if loading from same dir"
+        );
     }
 
     #[test]
@@ -901,12 +1096,23 @@ mod tests {
         let fn_name = format_ident!("test_fn");
         let param = format_ident!("fixture");
         let output = ts(crate::multicore::multicore_mode(
-            &mod_name, &fixture, &fn_name, &param, "test",
-            &[], &[], false, None, &[format_ident!("ctx")],
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
         ));
         // Multicore removes all files (not just hidden)
         assert!(output.contains("remove_file"), "should remove stale files");
-        assert!(output.contains("loading_from_same_dir"), "should check if loading from same dir");
+        assert!(
+            output.contains("loading_from_same_dir"),
+            "should check if loading from same dir"
+        );
     }
 
     // ── C1: Multicore % 64 batch flush ─────────────────────────────────
@@ -918,14 +1124,34 @@ mod tests {
         let fn_name = format_ident!("test_fn");
         let param = format_ident!("fixture");
         let output = ts(crate::multicore::multicore_mode(
-            &mod_name, &fixture, &fn_name, &param, "test",
-            &[], &[], false, None, &[format_ident!("ctx")],
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
         ));
         // Should batch flush shared counters every 64 iterations
-        assert!(output.contains("% 64"), "should flush counters every 64 iterations");
-        assert!(output.contains("__local_actions_pending"), "should accumulate actions locally");
-        assert!(output.contains("__local_ok_pending"), "should accumulate ok count locally");
-        assert!(output.contains("__local_execs_pending"), "should accumulate exec count locally");
+        assert!(
+            output.contains("% 64"),
+            "should flush counters every 64 iterations"
+        );
+        assert!(
+            output.contains("__local_actions_pending"),
+            "should accumulate actions locally"
+        );
+        assert!(
+            output.contains("__local_ok_pending"),
+            "should accumulate ok count locally"
+        );
+        assert!(
+            output.contains("__local_execs_pending"),
+            "should accumulate exec count locally"
+        );
     }
 
     // ── D10: Deser block pattern (pre-extraction regression for modes.rs) ──
@@ -936,9 +1162,17 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(crate::modes::dry_run_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], true,
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            true,
         ));
-        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+        assert!(
+            output.contains("__raw_bytes"),
+            "structured deser should use __raw_bytes"
+        );
     }
 
     #[test]
@@ -947,9 +1181,17 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(crate::modes::dry_run_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], false,
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
         ));
-        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+        assert!(
+            output.contains("Unstructured"),
+            "arbitrary deser should use Unstructured"
+        );
     }
 
     #[test]
@@ -959,9 +1201,18 @@ mod tests {
         let fn_name = format_ident!("test_fn");
         let action_ty = quote! { TestAction };
         let output = ts(crate::modes::replay_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], true, Some(&action_ty),
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            true,
+            Some(&action_ty),
         ));
-        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+        assert!(
+            output.contains("__raw_bytes"),
+            "structured deser should use __raw_bytes"
+        );
     }
 
     #[test]
@@ -970,9 +1221,18 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(crate::modes::replay_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], false, None,
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+            None,
         ));
-        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+        assert!(
+            output.contains("Unstructured"),
+            "arbitrary deser should use Unstructured"
+        );
     }
 
     #[test]
@@ -981,9 +1241,17 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(crate::modes::coverage_only_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], true,
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            true,
         ));
-        assert!(output.contains("__raw_bytes"), "structured deser should use __raw_bytes");
+        assert!(
+            output.contains("__raw_bytes"),
+            "structured deser should use __raw_bytes"
+        );
     }
 
     #[test]
@@ -992,9 +1260,17 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(crate::modes::coverage_only_mode(
-            &mod_name, &fixture, &fn_name, &[], &[], false,
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
         ));
-        assert!(output.contains("Unstructured"), "arbitrary deser should use Unstructured");
+        assert!(
+            output.contains("Unstructured"),
+            "arbitrary deser should use Unstructured"
+        );
     }
 }
 
@@ -1021,7 +1297,10 @@ mod tests_new {
     fn fuzz_args_debug_impl() {
         let args = crate::FuzzArgs::default();
         let debug_str = format!("{:?}", args);
-        assert!(debug_str.contains("FuzzArgs"), "Debug impl should include struct name");
+        assert!(
+            debug_str.contains("FuzzArgs"),
+            "Debug impl should include struct name"
+        );
     }
 
     // ── extract_vec_inner_type ──────────────────────────────────────────
@@ -1054,23 +1333,38 @@ mod tests_new {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
         let output = ts(common_fuzz_setup(&mod_name, &fixture));
-        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
-        assert!(output.contains("FUZZ_TIMEOUT_SECS"), "should mention the env var name");
+        assert!(
+            output.contains("is not a valid number"),
+            "should panic with descriptive message"
+        );
+        assert!(
+            output.contains("FUZZ_TIMEOUT_SECS"),
+            "should mention the env var name"
+        );
     }
 
     #[test]
     fn structured_mutator_panics_on_bad_max_actions() {
         let action_ty = quote::quote! { TestAction };
         let output = ts(structured_mutator_stages_setup(&action_ty));
-        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
-        assert!(output.contains("FUZZ_MAX_ACTIONS"), "should mention FUZZ_MAX_ACTIONS");
+        assert!(
+            output.contains("is not a valid number"),
+            "should panic with descriptive message"
+        );
+        assert!(
+            output.contains("FUZZ_MAX_ACTIONS"),
+            "should mention FUZZ_MAX_ACTIONS"
+        );
     }
 
     #[test]
     fn structured_seed_panics_on_bad_max_actions() {
         let action_ty = quote::quote! { TestAction };
         let output = ts(structured_add_default_seed(&action_ty));
-        assert!(output.contains("is not a valid number"), "should panic with descriptive message");
+        assert!(
+            output.contains("is not a valid number"),
+            "should panic with descriptive message"
+        );
     }
 
     // ── ctrlc handler ──────────────────────────────────────────────────
@@ -1080,8 +1374,14 @@ mod tests_new {
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(exit_handlers_setup(&mod_name));
         assert!(output.contains("Warning"), "should warn on ctrlc failure");
-        assert!(output.contains("if let Err"), "should use if let Err pattern");
-        assert!(!output.contains(". ok ()"), "should not silently ignore ctrlc errors");
+        assert!(
+            output.contains("if let Err"),
+            "should use if let Err pattern"
+        );
+        assert!(
+            !output.contains(". ok ()"),
+            "should not silently ignore ctrlc errors"
+        );
     }
 
     // ── stateful mode entry ────────────────────────────────────────────
@@ -1093,10 +1393,19 @@ mod tests_new {
         let fn_name = format_ident!("test_fn");
         let param = format_ident!("fixture");
         let output = ts(crate::stateful::stateful_mode(
-            &mod_name, &fixture, &fn_name, &param, "test",
-            false, None, &[format_ident!("ctx")],
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            false,
+            None,
+            &[format_ident!("ctx")],
         ));
-        assert!(output.contains("only supports structured"), "should reject non-structured mode");
+        assert!(
+            output.contains("only supports structured"),
+            "should reject non-structured mode"
+        );
     }
 
     #[test]
@@ -1107,10 +1416,22 @@ mod tests_new {
         let param = format_ident!("fixture");
         let action_ty = quote::quote! { TestAction };
         let output = ts(crate::stateful::stateful_mode(
-            &mod_name, &fixture, &fn_name, &param, "test",
-            true, Some(&action_ty), &[format_ident!("ctx")],
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            true,
+            Some(&action_ty),
+            &[format_ident!("ctx")],
         ));
-        assert!(output.contains("pool_capacity"), "should have pool capacity setting");
-        assert!(output.contains("FUZZ_STATE_POOL_SIZE"), "should parse pool size from env");
+        assert!(
+            output.contains("pool_capacity"),
+            "should have pool capacity setting"
+        );
+        assert!(
+            output.contains("FUZZ_STATE_POOL_SIZE"),
+            "should parse pool size from env"
+        );
     }
 }

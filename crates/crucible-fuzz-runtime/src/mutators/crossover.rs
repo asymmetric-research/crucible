@@ -1,10 +1,10 @@
-use std::marker::PhantomData;
 use libafl::corpus::{Corpus, CorpusId};
 use libafl::inputs::BytesInput;
 use libafl::mutators::{MutationResult, Mutator};
 use libafl::state::{HasCorpus, HasRand};
 use libafl::Error;
 use libafl_bolts::Named;
+use std::marker::PhantomData;
 
 use crate::action::FuzzAction;
 use crate::input::FuzzInput;
@@ -30,7 +30,8 @@ impl<A: FuzzAction> CrossoverMutator<A> {
 
 impl<A: FuzzAction> Named for CrossoverMutator<A> {
     fn name(&self) -> &std::borrow::Cow<'static, str> {
-        static NAME: std::borrow::Cow<'static, str> = std::borrow::Cow::Borrowed("CrossoverMutator");
+        static NAME: std::borrow::Cow<'static, str> =
+            std::borrow::Cow::Borrowed("CrossoverMutator");
         &NAME
     }
 }
@@ -66,7 +67,8 @@ where
 
         let donor_len = donor_fuzz.actions.len();
         let splice_start = crate::mutators::primitives::rand_below(rng, donor_len);
-        let splice_len = 1 + crate::mutators::primitives::rand_below(rng, (donor_len - splice_start).min(4));
+        let splice_len =
+            1 + crate::mutators::primitives::rand_below(rng, (donor_len - splice_start).min(4));
         let splice_end = (splice_start + splice_len).min(donor_len);
 
         let insert_at = if fuzz_input.actions.is_empty() {
@@ -77,7 +79,11 @@ where
 
         let actual_splice = splice_end - splice_start;
         fuzz_input.actions.reserve(actual_splice);
-        for (i, action) in donor_fuzz.actions[splice_start..splice_end].iter().cloned().enumerate() {
+        for (i, action) in donor_fuzz.actions[splice_start..splice_end]
+            .iter()
+            .cloned()
+            .enumerate()
+        {
             fuzz_input.actions.insert(insert_at + i, action);
         }
 

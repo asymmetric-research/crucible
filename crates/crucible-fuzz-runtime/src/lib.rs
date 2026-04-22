@@ -1,21 +1,21 @@
 pub mod action;
 pub mod cmin;
 pub mod coverage_utils;
-pub mod input;
 pub mod generator;
+pub mod input;
 pub mod mutators;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
 pub use action::FuzzAction;
-pub use input::{FuzzInput, ParseInfo};
 pub use generator::ActionGenerator;
+pub use input::{FuzzInput, ParseInfo};
 pub use mutators::{
-    gen_range_u64, gen_range_u128, gen_range_usize, gen_u64, gen_u128, gen_i64, gen_i128, gen_usize,
-    mutate_u64, mutate_u128, mutate_i128, mutate_usize, mutate_bool, mutate_i64,
-    rand_below, SequenceMutator, ParamMutator, CrossoverMutator,
-    SuccessTrimStage, SuccessPatternMetadata,
+    gen_i128, gen_i64, gen_range_u128, gen_range_u64, gen_range_usize, gen_u128, gen_u64,
+    gen_usize, mutate_bool, mutate_i128, mutate_i64, mutate_u128, mutate_u64, mutate_usize,
+    rand_below, CrossoverMutator, ParamMutator, SequenceMutator, SuccessPatternMetadata,
+    SuccessTrimStage,
 };
 
 // Re-export Rand trait so generated code can reference it

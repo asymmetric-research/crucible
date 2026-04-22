@@ -1,4 +1,6 @@
-use anchor_lang_idl::types::{Idl, IdlTypeDef, IdlTypeDefTy, IdlDefinedFields, IdlAccount, IdlRepr};
+use anchor_lang_idl::types::{
+    Idl, IdlAccount, IdlDefinedFields, IdlRepr, IdlTypeDef, IdlTypeDefTy,
+};
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 
@@ -25,10 +27,7 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_account_struct(
-    acc: &IdlAccount,
-    type_def: &IdlTypeDef,
-) -> proc_macro2::TokenStream {
+fn generate_account_struct(acc: &IdlAccount, type_def: &IdlTypeDef) -> proc_macro2::TokenStream {
     let name = format_ident!("{}", type_def.name);
     let discriminator = &acc.discriminator;
 
@@ -201,9 +200,18 @@ mod tests {
         );
         let output = generate(&idl).to_string();
         assert!(output.contains("UserAccount"), "should have struct name");
-        assert!(output.contains("DISCRIMINATOR"), "should have DISCRIMINATOR const");
-        assert!(output.contains("AnchorSerialize"), "regular account should have borsh derives");
-        assert!(output.contains("AnchorDeserialize"), "regular account should have borsh derives");
+        assert!(
+            output.contains("DISCRIMINATOR"),
+            "should have DISCRIMINATOR const"
+        );
+        assert!(
+            output.contains("AnchorSerialize"),
+            "regular account should have borsh derives"
+        );
+        assert!(
+            output.contains("AnchorDeserialize"),
+            "regular account should have borsh derives"
+        );
         assert!(output.contains("pub owner : Pubkey"));
         assert!(output.contains("pub balance : u64"));
     }
@@ -235,10 +243,19 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("repr (C)"), "zero-copy account should have repr(C)");
+        assert!(
+            output.contains("repr (C)"),
+            "zero-copy account should have repr(C)"
+        );
         assert!(output.contains("bytemuck :: Pod"), "should have Pod");
-        assert!(output.contains("bytemuck :: Zeroable"), "should have Zeroable");
-        assert!(output.contains("DISCRIMINATOR"), "should have DISCRIMINATOR");
+        assert!(
+            output.contains("bytemuck :: Zeroable"),
+            "should have Zeroable"
+        );
+        assert!(
+            output.contains("DISCRIMINATOR"),
+            "should have DISCRIMINATOR"
+        );
     }
 
     #[test]
@@ -262,8 +279,10 @@ mod tests {
         let output = generate(&idl).to_string();
         // Should still generate the state module, just without MissingType
         assert!(output.contains("mod state"), "should have state module");
-        assert!(!output.contains("MissingType"),
-            "account with no matching type definition should be silently skipped");
+        assert!(
+            !output.contains("MissingType"),
+            "account with no matching type definition should be silently skipped"
+        );
     }
 
     #[test]
@@ -296,8 +315,14 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("ValidAccount"), "valid account should still be generated");
-        assert!(!output.contains("BrokenAccount"), "broken account should be silently skipped");
+        assert!(
+            output.contains("ValidAccount"),
+            "valid account should still be generated"
+        );
+        assert!(
+            !output.contains("BrokenAccount"),
+            "broken account should be silently skipped"
+        );
     }
 
     #[test]
@@ -324,7 +349,10 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("DISCRIMINATOR_LEN : usize = 4usize"), "should preserve 4-byte discriminator len");
+        assert!(
+            output.contains("DISCRIMINATOR_LEN : usize = 4usize"),
+            "should preserve 4-byte discriminator len"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -363,12 +391,27 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("pub enum StakeState"),
-            "should generate enum in state module, got: {}", output);
-        assert!(output.contains("Uninitialized"), "should have Uninitialized variant");
-        assert!(output.contains("Initialized"), "should have Initialized variant");
-        assert!(output.contains("authority : Pubkey"), "should have authority field");
-        assert!(output.contains("AnchorSerialize"), "enum account should have borsh derives");
+        assert!(
+            output.contains("pub enum StakeState"),
+            "should generate enum in state module, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Uninitialized"),
+            "should have Uninitialized variant"
+        );
+        assert!(
+            output.contains("Initialized"),
+            "should have Initialized variant"
+        );
+        assert!(
+            output.contains("authority : Pubkey"),
+            "should have authority field"
+        );
+        assert!(
+            output.contains("AnchorSerialize"),
+            "enum account should have borsh derives"
+        );
     }
 
     // #4: Type alias account type in state module
@@ -395,8 +438,11 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("pub type TokenAccount = Account"),
-            "should generate type alias in state module, got: {}", output);
+        assert!(
+            output.contains("pub type TokenAccount = Account"),
+            "should generate type alias in state module, got: {}",
+            output
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -422,10 +468,16 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("pub 0"),
-            "tuple struct fields should use indexed names, got: {}", output);
+        assert!(
+            output.contains("pub 0"),
+            "tuple struct fields should use indexed names, got: {}",
+            output
+        );
         assert!(output.contains("u64"), "should have u64 field");
         assert!(output.contains("Pubkey"), "should have Pubkey field");
-        assert!(output.contains("DISCRIMINATOR"), "should still have discriminator");
+        assert!(
+            output.contains("DISCRIMINATOR"),
+            "should still have discriminator"
+        );
     }
 }

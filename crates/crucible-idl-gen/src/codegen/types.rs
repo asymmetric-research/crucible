@@ -1,12 +1,15 @@
-use anchor_lang_idl::types::{Idl, IdlTypeDef, IdlTypeDefTy, IdlDefinedFields, IdlRepr};
+use anchor_lang_idl::types::{Idl, IdlDefinedFields, IdlRepr, IdlTypeDef, IdlTypeDefTy};
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 
-use super::{idl_type_to_tokens, array_len_to_usize};
+use super::{array_len_to_usize, idl_type_to_tokens};
 
 /// Generate custom type definitions from IDL types section
 pub fn generate(idl: &Idl, use_bincode: bool) -> proc_macro2::TokenStream {
-    let type_defs = idl.types.iter().map(|td| generate_type_def(td, &idl.types, use_bincode));
+    let type_defs = idl
+        .types
+        .iter()
+        .map(|td| generate_type_def(td, &idl.types, use_bincode));
 
     quote! {
         /// Custom type definitions
@@ -18,7 +21,11 @@ pub fn generate(idl: &Idl, use_bincode: bool) -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_type_def(typedef: &IdlTypeDef, all_types: &[IdlTypeDef], use_bincode: bool) -> proc_macro2::TokenStream {
+fn generate_type_def(
+    typedef: &IdlTypeDef,
+    all_types: &[IdlTypeDef],
+    use_bincode: bool,
+) -> proc_macro2::TokenStream {
     let name = format_ident!("{}", typedef.name);
 
     // Check if this is a zero-copy type (repr: C)
@@ -32,9 +39,7 @@ fn generate_type_def(typedef: &IdlTypeDef, all_types: &[IdlTypeDef], use_bincode
                 generate_struct(&name, fields, &typedef.name, all_types)
             }
         }
-        IdlTypeDefTy::Enum { variants } => {
-            generate_enum(&name, variants, all_types, use_bincode)
-        }
+        IdlTypeDefTy::Enum { variants } => generate_enum(&name, variants, all_types, use_bincode),
         IdlTypeDefTy::Type { alias } => {
             let alias_ty = idl_type_to_tokens(alias);
             quote! {
@@ -81,8 +86,12 @@ fn generate_struct(
 
     // Determine if we should add Copy and Eq based on field types
     let can_copy = should_derive_copy(fields, all_types);
-    let can_eq = fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types));
-    let can_derive_default = fields.as_ref().map_or(true, |f| can_derive_default_fields(f));
+    let can_eq = fields
+        .as_ref()
+        .map_or(true, |f| can_derive_eq_fields(f, all_types));
+    let can_derive_default = fields
+        .as_ref()
+        .map_or(true, |f| can_derive_default_fields(f));
 
     // Build derives without Default (we'll implement it manually if needed)
     let derives = match (can_copy, can_eq) {
@@ -169,7 +178,9 @@ fn generate_zero_copy_struct(
     let extra_impls = generate_extra_impls(type_name, fields);
 
     // Check if we can derive Default (arrays > 32 elements don't implement Default)
-    let can_derive_default = fields.as_ref().map_or(true, |f| can_derive_default_fields(f));
+    let can_derive_default = fields
+        .as_ref()
+        .map_or(true, |f| can_derive_default_fields(f));
 
     // Zero-copy structs need:
     // - repr(C) for memory layout
@@ -228,7 +239,9 @@ fn generate_enum(
 
     // Check if enum can derive Eq (no f32/f64 fields)
     let can_derive_eq = variants.iter().all(|v| {
-        v.fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
+        v.fields
+            .as_ref()
+            .map_or(true, |f| can_derive_eq_fields(f, all_types))
     });
 
     let variants_tokens = variants.iter().enumerate().map(|(i, v)| {
@@ -259,19 +272,37 @@ fn generate_enum(
 
     // Check if enum can derive Copy (all variant fields must be Copy)
     let can_derive_copy = variants.iter().all(|v| {
-        v.fields.as_ref().map_or(true, |f| should_derive_copy(&Some(f.clone()), all_types))
+        v.fields
+            .as_ref()
+            .map_or(true, |f| should_derive_copy(&Some(f.clone()), all_types))
     });
 
     // Build derives based on what's possible
     let derives = match (can_derive_copy, can_derive_default, can_derive_eq) {
-        (true, true, true) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (true, true, false) => quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] },
-        (true, false, true) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (true, false, false) => quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq)] },
-        (false, true, true) => quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (false, true, false) => quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] },
-        (false, false, true) => quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] },
-        (false, false, false) => quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq)] },
+        (true, true, true) => {
+            quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+        }
+        (true, true, false) => {
+            quote! { #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] }
+        }
+        (true, false, true) => {
+            quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+        }
+        (true, false, false) => {
+            quote! { #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq)] }
+        }
+        (false, true, true) => {
+            quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+        }
+        (false, true, false) => {
+            quote! { #[derive(Clone, Default, AnchorSerialize, AnchorDeserialize, PartialEq)] }
+        }
+        (false, false, true) => {
+            quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)] }
+        }
+        (false, false, false) => {
+            quote! { #[derive(Clone, AnchorSerialize, AnchorDeserialize, PartialEq)] }
+        }
     };
 
     // Generate manual Default impl for enums where first variant has fields
@@ -301,9 +332,10 @@ fn generate_bincode_unit_enum(
     name: &syn::Ident,
     variants: &[anchor_lang_idl::types::IdlEnumVariant],
 ) -> proc_macro2::TokenStream {
-    let variant_idents: Vec<_> = variants.iter().map(|v| {
-        format_ident!("{}", v.name.to_upper_camel_case())
-    }).collect();
+    let variant_idents: Vec<_> = variants
+        .iter()
+        .map(|v| format_ident!("{}", v.name.to_upper_camel_case()))
+        .collect();
 
     let variant_defs = variant_idents.iter().enumerate().map(|(i, ident)| {
         let idx = i as u32;
@@ -395,7 +427,7 @@ fn generate_enum_manual_default(
                 }
             }
         }
-        None => quote! {}
+        None => quote! {},
     }
 }
 
@@ -413,9 +445,19 @@ fn can_type_derive_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
 
     match ty {
         // Primitives with Default
-        IdlType::Bool | IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::F32 | IdlType::U64 | IdlType::I64
-        | IdlType::F64 | IdlType::U128 | IdlType::I128 => true,
+        IdlType::Bool
+        | IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::F32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::F64
+        | IdlType::U128
+        | IdlType::I128 => true,
         IdlType::Pubkey => true,
         IdlType::String => true,
         IdlType::Bytes => true,
@@ -436,7 +478,9 @@ fn can_type_derive_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
 /// Check if fields can derive Eq
 fn can_derive_eq_fields(fields: &IdlDefinedFields, all_types: &[IdlTypeDef]) -> bool {
     match fields {
-        IdlDefinedFields::Named(named) => named.iter().all(|f| can_type_derive_eq(&f.ty, all_types)),
+        IdlDefinedFields::Named(named) => {
+            named.iter().all(|f| can_type_derive_eq(&f.ty, all_types))
+        }
         IdlDefinedFields::Tuple(types) => types.iter().all(|t| can_type_derive_eq(t, all_types)),
     }
 }
@@ -449,9 +493,17 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlType
         // f32 and f64 don't implement Eq
         IdlType::F32 | IdlType::F64 => false,
         // Primitives with Eq
-        IdlType::Bool | IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::U64 | IdlType::I64
-        | IdlType::U128 | IdlType::I128 => true,
+        IdlType::Bool
+        | IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::U128
+        | IdlType::I128 => true,
         IdlType::Pubkey => true,
         IdlType::String => true,
         IdlType::Bytes => true,
@@ -462,14 +514,14 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlType
         IdlType::Defined { name, .. } => {
             if let Some(typedef) = all_types.iter().find(|t| &t.name == name) {
                 match &typedef.ty {
-                    IdlTypeDefTy::Struct { fields } => {
-                        fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
-                    }
-                    IdlTypeDefTy::Enum { variants } => {
-                        variants.iter().all(|v| {
-                            v.fields.as_ref().map_or(true, |f| can_derive_eq_fields(f, all_types))
-                        })
-                    }
+                    IdlTypeDefTy::Struct { fields } => fields
+                        .as_ref()
+                        .map_or(true, |f| can_derive_eq_fields(f, all_types)),
+                    IdlTypeDefTy::Enum { variants } => variants.iter().all(|v| {
+                        v.fields
+                            .as_ref()
+                            .map_or(true, |f| can_derive_eq_fields(f, all_types))
+                    }),
                     IdlTypeDefTy::Type { alias } => can_type_derive_eq(alias, all_types),
                 }
             } else {
@@ -496,9 +548,20 @@ fn is_copy_type(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) 
     use anchor_lang_idl::types::IdlType;
 
     match ty {
-        IdlType::Bool | IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::F32 | IdlType::U64 | IdlType::I64
-        | IdlType::F64 | IdlType::U128 | IdlType::I128 | IdlType::Pubkey => true,
+        IdlType::Bool
+        | IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::F32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::F64
+        | IdlType::U128
+        | IdlType::I128
+        | IdlType::Pubkey => true,
         IdlType::Array(inner, _) => is_copy_type(inner, all_types),
         IdlType::Option(inner) => is_copy_type(inner, all_types),
         // Defined types - look up in IDL and recursively check their fields
@@ -564,9 +627,16 @@ fn type_default_value(ty: &anchor_lang_idl::types::IdlType) -> proc_macro2::Toke
     match ty {
         // Primitives
         IdlType::Bool => quote! { false },
-        IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::U64 | IdlType::I64
-        | IdlType::U128 | IdlType::I128 => quote! { 0 },
+        IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::U128
+        | IdlType::I128 => quote! { 0 },
         IdlType::F32 | IdlType::F64 => quote! { 0.0 },
         IdlType::Pubkey => quote! { Pubkey::default() },
         IdlType::String => quote! { String::new() },
@@ -598,10 +668,18 @@ fn type_default_value(ty: &anchor_lang_idl::types::IdlType) -> proc_macro2::Toke
 /// Check if a type has a zero default (can use [0; N])
 fn is_zero_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
     use anchor_lang_idl::types::IdlType;
-    matches!(ty,
-        IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::U64 | IdlType::I64
-        | IdlType::U128 | IdlType::I128
+    matches!(
+        ty,
+        IdlType::U8
+            | IdlType::I8
+            | IdlType::U16
+            | IdlType::I16
+            | IdlType::U32
+            | IdlType::I32
+            | IdlType::U64
+            | IdlType::I64
+            | IdlType::U128
+            | IdlType::I128
     )
 }
 
@@ -693,11 +771,14 @@ mod tests {
     #[test]
     fn test_struct_with_primitives() {
         let output = gen(
-            vec![make_struct("MyStruct", vec![
-                make_field("x", IdlType::U64),
-                make_field("y", IdlType::I32),
-                make_field("flag", IdlType::Bool),
-            ])],
+            vec![make_struct(
+                "MyStruct",
+                vec![
+                    make_field("x", IdlType::U64),
+                    make_field("y", IdlType::I32),
+                    make_field("flag", IdlType::Bool),
+                ],
+            )],
             false,
         );
         assert!(output.contains("MyStruct"), "should have struct name");
@@ -714,76 +795,107 @@ mod tests {
     #[test]
     fn test_struct_with_string_no_copy() {
         let output = gen(
-            vec![make_struct("WithString", vec![
-                make_field("name", IdlType::String),
-                make_field("id", IdlType::U64),
-            ])],
+            vec![make_struct(
+                "WithString",
+                vec![
+                    make_field("name", IdlType::String),
+                    make_field("id", IdlType::U64),
+                ],
+            )],
             false,
         );
         assert!(output.contains("Clone"), "should derive Clone");
         // String is not Copy, so Copy should not be derived
         // Check that the derives don't include Copy
         // The output uses "Clone , Default" without Copy
-        assert!(!output.contains("Copy"), "should NOT derive Copy for String field");
+        assert!(
+            !output.contains("Copy"),
+            "should NOT derive Copy for String field"
+        );
     }
 
     #[test]
     fn test_struct_with_vec_no_copy() {
         let output = gen(
-            vec![make_struct("WithVec", vec![
-                make_field("items", IdlType::Vec(Box::new(IdlType::U8))),
-            ])],
+            vec![make_struct(
+                "WithVec",
+                vec![make_field("items", IdlType::Vec(Box::new(IdlType::U8)))],
+            )],
             false,
         );
-        assert!(!output.contains("Copy"), "should NOT derive Copy for Vec field");
+        assert!(
+            !output.contains("Copy"),
+            "should NOT derive Copy for Vec field"
+        );
     }
 
     #[test]
     fn test_struct_with_f64_no_eq() {
         let output = gen(
-            vec![make_struct("WithFloat", vec![
-                make_field("value", IdlType::F64),
-            ])],
+            vec![make_struct(
+                "WithFloat",
+                vec![make_field("value", IdlType::F64)],
+            )],
             false,
         );
         assert!(output.contains("PartialEq"), "should derive PartialEq");
         // Eq appears inside PartialEq, so check that ", Eq" or ", Eq)" does not appear
         // after PartialEq in the derive list
-        assert!(!output.contains("PartialEq , Eq"), "should NOT derive Eq for f64 field");
+        assert!(
+            !output.contains("PartialEq , Eq"),
+            "should NOT derive Eq for f64 field"
+        );
     }
 
     #[test]
     fn test_struct_with_large_array_manual_default() {
         let output = gen(
-            vec![make_struct("BigArray", vec![
-                make_field("data", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64))),
-            ])],
+            vec![make_struct(
+                "BigArray",
+                vec![make_field(
+                    "data",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64)),
+                )],
+            )],
             false,
         );
         // Arrays > 32 can't derive Default, should have manual impl
-        assert!(output.contains("impl Default for BigArray"), "should have manual Default impl");
-        assert!(output.contains("[0 ; 64usize]"), "should have [0; 64] default");
+        assert!(
+            output.contains("impl Default for BigArray"),
+            "should have manual Default impl"
+        );
+        assert!(
+            output.contains("[0 ; 64usize]"),
+            "should have [0; 64] default"
+        );
     }
 
     #[test]
     fn test_struct_with_small_array_derive_default() {
         let output = gen(
-            vec![make_struct("SmallArray", vec![
-                make_field("data", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            ])],
+            vec![make_struct(
+                "SmallArray",
+                vec![make_field(
+                    "data",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                )],
+            )],
             false,
         );
         // Arrays <= 32 can derive Default
-        assert!(output.contains("Default"), "should derive Default for small array");
-        assert!(!output.contains("impl Default for SmallArray"), "should NOT have manual Default");
+        assert!(
+            output.contains("Default"),
+            "should derive Default for small array"
+        );
+        assert!(
+            !output.contains("impl Default for SmallArray"),
+            "should NOT have manual Default"
+        );
     }
 
     #[test]
     fn test_empty_struct() {
-        let output = gen(
-            vec![make_struct("Empty", vec![])],
-            false,
-        );
+        let output = gen(vec![make_struct("Empty", vec![])], false);
         assert!(output.contains("Empty"), "should have struct name");
     }
 
@@ -797,14 +909,26 @@ mod tests {
             vec![make_unit_enum("MyEnum", &["Foo", "Bar", "Baz"])],
             false, // borsh mode
         );
-        assert!(output.contains("repr (u8)"), "borsh enum should use repr(u8)");
-        assert!(output.contains("AnchorSerialize"), "should derive AnchorSerialize");
-        assert!(output.contains("AnchorDeserialize"), "should derive AnchorDeserialize");
+        assert!(
+            output.contains("repr (u8)"),
+            "borsh enum should use repr(u8)"
+        );
+        assert!(
+            output.contains("AnchorSerialize"),
+            "should derive AnchorSerialize"
+        );
+        assert!(
+            output.contains("AnchorDeserialize"),
+            "should derive AnchorDeserialize"
+        );
         assert!(output.contains("Foo"), "should have Foo variant");
         assert!(output.contains("Bar"), "should have Bar variant");
         assert!(output.contains("Baz"), "should have Baz variant");
         // Should NOT have manual ser/deser
-        assert!(!output.contains("serialize_reader"), "borsh should use derived, not manual");
+        assert!(
+            !output.contains("serialize_reader"),
+            "borsh should use derived, not manual"
+        );
     }
 
     #[test]
@@ -813,7 +937,10 @@ mod tests {
             vec![make_unit_enum("WithDefault", &["First", "Second"])],
             false,
         );
-        assert!(output.contains("# [default]"), "first unit variant should have #[default]");
+        assert!(
+            output.contains("# [default]"),
+            "first unit variant should have #[default]"
+        );
         assert!(output.contains("Default"), "should derive Default");
     }
 
@@ -827,16 +954,32 @@ mod tests {
             vec![make_unit_enum("StakeAuthorize", &["Staker", "Withdrawer"])],
             true, // bincode mode
         );
-        assert!(output.contains("repr (u32)"), "bincode enum should use repr(u32)");
-        assert!(!output.contains("repr (u8)"), "bincode enum should NOT use repr(u8)");
+        assert!(
+            output.contains("repr (u32)"),
+            "bincode enum should use repr(u32)"
+        );
+        assert!(
+            !output.contains("repr (u8)"),
+            "bincode enum should NOT use repr(u8)"
+        );
         // Should have manual AnchorSerialize
-        assert!(output.contains("impl AnchorSerialize for StakeAuthorize"),
-            "should have manual AnchorSerialize impl");
-        assert!(output.contains("impl AnchorDeserialize for StakeAuthorize"),
-            "should have manual AnchorDeserialize impl");
+        assert!(
+            output.contains("impl AnchorSerialize for StakeAuthorize"),
+            "should have manual AnchorSerialize impl"
+        );
+        assert!(
+            output.contains("impl AnchorDeserialize for StakeAuthorize"),
+            "should have manual AnchorDeserialize impl"
+        );
         // Should write u32 LE
-        assert!(output.contains("to_le_bytes"), "should use to_le_bytes for u32 serialization");
-        assert!(output.contains("from_le_bytes"), "should use from_le_bytes for deserialization");
+        assert!(
+            output.contains("to_le_bytes"),
+            "should use to_le_bytes for u32 serialization"
+        );
+        assert!(
+            output.contains("from_le_bytes"),
+            "should use from_le_bytes for deserialization"
+        );
     }
 
     #[test]
@@ -865,8 +1008,14 @@ mod tests {
             true, // bincode mode
         );
         // Has data variants, so should fall through to borsh-style (repr(u8))
-        assert!(output.contains("repr (u8)"), "enum with data should use repr(u8) even in bincode mode");
-        assert!(!output.contains("repr (u32)"), "should not use repr(u32) for data enum");
+        assert!(
+            output.contains("repr (u8)"),
+            "enum with data should use repr(u8) even in bincode mode"
+        );
+        assert!(
+            !output.contains("repr (u32)"),
+            "should not use repr(u32) for data enum"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -902,7 +1051,10 @@ mod tests {
         );
         assert!(output.contains("Transfer"), "should have Transfer variant");
         assert!(output.contains("amount : u64"), "should have amount field");
-        assert!(output.contains("recipient : Pubkey"), "should have recipient field");
+        assert!(
+            output.contains("recipient : Pubkey"),
+            "should have recipient field"
+        );
         assert!(output.contains("Close"), "should have Close variant");
     }
 
@@ -931,7 +1083,10 @@ mod tests {
             false,
         );
         assert!(output.contains("Single (u64)"), "should have Single(u64)");
-        assert!(output.contains("Pair (u64 , u64)"), "should have Pair(u64, u64)");
+        assert!(
+            output.contains("Pair (u64 , u64)"),
+            "should have Pair(u64, u64)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -945,7 +1100,10 @@ mod tests {
                 name: "ZeroCopyData".to_string(),
                 docs: vec![],
                 serialization: Default::default(),
-                repr: Some(IdlRepr::C(IdlReprModifier { packed: false, align: None })),
+                repr: Some(IdlRepr::C(IdlReprModifier {
+                    packed: false,
+                    align: None,
+                })),
                 generics: vec![],
                 ty: IdlTypeDefTy::Struct {
                     fields: Some(IdlDefinedFields::Named(vec![
@@ -957,9 +1115,18 @@ mod tests {
             false,
         );
         assert!(output.contains("repr (C)"), "zero-copy should have repr(C)");
-        assert!(output.contains("bytemuck :: Pod"), "should have bytemuck::Pod");
-        assert!(output.contains("bytemuck :: Zeroable"), "should have bytemuck::Zeroable");
-        assert!(output.contains("pub value : u64"), "should have value field");
+        assert!(
+            output.contains("bytemuck :: Pod"),
+            "should have bytemuck::Pod"
+        );
+        assert!(
+            output.contains("bytemuck :: Zeroable"),
+            "should have bytemuck::Zeroable"
+        );
+        assert!(
+            output.contains("pub value : u64"),
+            "should have value field"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -984,7 +1151,10 @@ mod tests {
             }],
             false,
         );
-        assert!(output.contains("pub type MyAlias = OriginalType"), "should generate type alias");
+        assert!(
+            output.contains("pub type MyAlias = OriginalType"),
+            "should generate type alias"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -994,28 +1164,46 @@ mod tests {
     #[test]
     fn test_wrapped_i80f48_impls() {
         let output = gen(
-            vec![make_struct("WrappedI80F48", vec![
-                make_field("value", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            ])],
+            vec![make_struct(
+                "WrappedI80F48",
+                vec![make_field(
+                    "value",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                )],
+            )],
             false,
         );
-        assert!(output.contains("from_i80f48"), "should have from_i80f48 method");
+        assert!(
+            output.contains("from_i80f48"),
+            "should have from_i80f48 method"
+        );
         assert!(output.contains("to_i80f48"), "should have to_i80f48 method");
-        assert!(output.contains("impl From < fixed :: types :: I80F48 > for WrappedI80F48"),
-            "should have From<I80F48> impl");
-        assert!(output.contains("impl From < WrappedI80F48 > for fixed :: types :: I80F48"),
-            "should have From<WrappedI80F48> impl");
+        assert!(
+            output.contains("impl From < fixed :: types :: I80F48 > for WrappedI80F48"),
+            "should have From<I80F48> impl"
+        );
+        assert!(
+            output.contains("impl From < WrappedI80F48 > for fixed :: types :: I80F48"),
+            "should have From<WrappedI80F48> impl"
+        );
     }
 
     #[test]
     fn test_non_i80f48_no_extra_impls() {
         let output = gen(
-            vec![make_struct("NormalStruct", vec![
-                make_field("value", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            ])],
+            vec![make_struct(
+                "NormalStruct",
+                vec![make_field(
+                    "value",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                )],
+            )],
             false,
         );
-        assert!(!output.contains("from_i80f48"), "normal struct should not have I80F48 impls");
+        assert!(
+            !output.contains("from_i80f48"),
+            "normal struct should not have I80F48 impls"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1026,17 +1214,28 @@ mod tests {
     fn test_should_derive_copy() {
         let empty_types = vec![];
         // Primitives → Copy
-        assert!(should_derive_copy(&Some(IdlDefinedFields::Named(vec![
-            make_field("x", IdlType::U64),
-        ])), &empty_types));
+        assert!(should_derive_copy(
+            &Some(IdlDefinedFields::Named(
+                vec![make_field("x", IdlType::U64),]
+            )),
+            &empty_types
+        ));
         // String → no Copy
-        assert!(!should_derive_copy(&Some(IdlDefinedFields::Named(vec![
-            make_field("s", IdlType::String),
-        ])), &empty_types));
+        assert!(!should_derive_copy(
+            &Some(IdlDefinedFields::Named(vec![make_field(
+                "s",
+                IdlType::String
+            ),])),
+            &empty_types
+        ));
         // Vec → no Copy
-        assert!(!should_derive_copy(&Some(IdlDefinedFields::Named(vec![
-            make_field("v", IdlType::Vec(Box::new(IdlType::U8))),
-        ])), &empty_types));
+        assert!(!should_derive_copy(
+            &Some(IdlDefinedFields::Named(vec![make_field(
+                "v",
+                IdlType::Vec(Box::new(IdlType::U8))
+            ),])),
+            &empty_types
+        ));
         // None → Copy
         assert!(should_derive_copy(&None, &empty_types));
     }
@@ -1052,7 +1251,10 @@ mod tests {
         assert!(can_type_derive_eq(&IdlType::Bool, &empty_types));
         assert!(can_type_derive_eq(&IdlType::Pubkey, &empty_types));
         // Option<f64> → no Eq
-        assert!(!can_type_derive_eq(&IdlType::Option(Box::new(IdlType::F64)), &empty_types));
+        assert!(!can_type_derive_eq(
+            &IdlType::Option(Box::new(IdlType::F64)),
+            &empty_types
+        ));
     }
 
     #[test]
@@ -1093,10 +1295,19 @@ mod tests {
             }],
             false,
         );
-        assert!(output.contains("pub struct MyTuple (pub u64 , pub Pubkey)"),
-            "should generate tuple struct, got: {}", output);
-        assert!(output.contains("Copy"), "tuple struct with primitives should derive Copy");
-        assert!(output.contains("Default"), "tuple struct should derive Default");
+        assert!(
+            output.contains("pub struct MyTuple (pub u64 , pub Pubkey)"),
+            "should generate tuple struct, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Copy"),
+            "tuple struct with primitives should derive Copy"
+        );
+        assert!(
+            output.contains("Default"),
+            "tuple struct should derive Default"
+        );
     }
 
     #[test]
@@ -1117,8 +1328,11 @@ mod tests {
             }],
             false,
         );
-        assert!(output.contains("pub struct StringTuple (pub String , pub u64)"),
-            "should generate tuple struct, got: {}", output);
+        assert!(
+            output.contains("pub struct StringTuple (pub String , pub u64)"),
+            "should generate tuple struct, got: {}",
+            output
+        );
     }
 
     // #1: Tuple structs (zero-copy)
@@ -1130,7 +1344,10 @@ mod tests {
                 name: "ZcTuple".to_string(),
                 docs: vec![],
                 serialization: Default::default(),
-                repr: Some(IdlRepr::C(IdlReprModifier { packed: false, align: None })),
+                repr: Some(IdlRepr::C(IdlReprModifier {
+                    packed: false,
+                    align: None,
+                })),
                 generics: vec![],
                 ty: IdlTypeDefTy::Struct {
                     fields: Some(IdlDefinedFields::Tuple(vec![IdlType::U64, IdlType::U32])),
@@ -1138,11 +1355,17 @@ mod tests {
             }],
             false,
         );
-        assert!(output.contains("pub struct ZcTuple (pub u64 , pub u32)"),
-            "should generate zero-copy tuple struct, got: {}", output);
+        assert!(
+            output.contains("pub struct ZcTuple (pub u64 , pub u32)"),
+            "should generate zero-copy tuple struct, got: {}",
+            output
+        );
         assert!(output.contains("repr (C)"), "should have repr(C)");
         assert!(output.contains("bytemuck :: Pod"), "should have Pod");
-        assert!(output.contains("bytemuck :: Zeroable"), "should have Zeroable");
+        assert!(
+            output.contains("bytemuck :: Zeroable"),
+            "should have Zeroable"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1177,11 +1400,17 @@ mod tests {
             false,
         );
         // First variant has fields → can't use #[default], needs manual Default impl
-        assert!(output.contains("impl Default for Action"),
-            "should have manual Default impl when first variant has data, got: {}", output);
+        assert!(
+            output.contains("impl Default for Action"),
+            "should have manual Default impl when first variant has data, got: {}",
+            output
+        );
         assert!(output.contains("Transfer"), "should have Transfer variant");
-        assert!(output.contains("amount : Default :: default ()"),
-            "named fields should use Default::default(), got: {}", output);
+        assert!(
+            output.contains("amount : Default :: default ()"),
+            "named fields should use Default::default(), got: {}",
+            output
+        );
     }
 
     #[test]
@@ -1208,10 +1437,15 @@ mod tests {
             }],
             false,
         );
-        assert!(output.contains("impl Default for Value"),
-            "should have manual Default impl for tuple first variant, got: {}", output);
-        assert!(output.contains("Default :: default ()"),
-            "tuple fields should use Default::default()");
+        assert!(
+            output.contains("impl Default for Value"),
+            "should have manual Default impl for tuple first variant, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Default :: default ()"),
+            "tuple fields should use Default::default()"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1224,14 +1458,24 @@ mod tests {
         // Find "pub struct TypeName" or "pub enum TypeName"
         let struct_marker = format!("pub struct {}", type_name);
         let enum_marker = format!("pub enum {}", type_name);
-        let marker_pos = output.find(&struct_marker)
+        let marker_pos = output
+            .find(&struct_marker)
             .or_else(|| output.find(&enum_marker))
-            .unwrap_or_else(|| panic!("could not find '{}' or '{}' in output:\n{}", struct_marker, enum_marker, output));
+            .unwrap_or_else(|| {
+                panic!(
+                    "could not find '{}' or '{}' in output:\n{}",
+                    struct_marker, enum_marker, output
+                )
+            });
 
         // Find the last "derive" before this marker
         let before = &output[..marker_pos];
-        let derive_pos = before.rfind("derive")
-            .unwrap_or_else(|| panic!("could not find derive before '{}' in output:\n{}", type_name, output));
+        let derive_pos = before.rfind("derive").unwrap_or_else(|| {
+            panic!(
+                "could not find derive before '{}' in output:\n{}",
+                type_name, output
+            )
+        });
 
         output[derive_pos..marker_pos].to_string()
     }
@@ -1239,41 +1483,63 @@ mod tests {
     #[test]
     fn test_eq_not_derived_when_defined_type_has_f64() {
         // Struct "Outer" references "Inner" which has an f64 field → no Eq
-        let inner = make_struct("Inner", vec![
-            make_field("price", IdlType::F64),
-        ]);
-        let outer = make_struct("Outer", vec![
-            make_field("data", IdlType::Defined { name: "Inner".to_string(), generics: vec![] }),
-        ]);
+        let inner = make_struct("Inner", vec![make_field("price", IdlType::F64)]);
+        let outer = make_struct(
+            "Outer",
+            vec![make_field(
+                "data",
+                IdlType::Defined {
+                    name: "Inner".to_string(),
+                    generics: vec![],
+                },
+            )],
+        );
         let output = gen(vec![inner, outer], false);
 
         let outer_derive = extract_derive_for(&output, "Outer");
-        assert!(outer_derive.contains("PartialEq"),
-            "Outer should derive PartialEq, derive block: {}", outer_derive);
+        assert!(
+            outer_derive.contains("PartialEq"),
+            "Outer should derive PartialEq, derive block: {}",
+            outer_derive
+        );
         // "PartialEq" contains "Eq", so check for ", Eq" or "Eq ," as standalone
-        assert!(!outer_derive.contains(", Eq") && !outer_derive.contains("Eq ,"),
-            "Outer should NOT derive Eq when Inner has f64, derive block: {}", outer_derive);
+        assert!(
+            !outer_derive.contains(", Eq") && !outer_derive.contains("Eq ,"),
+            "Outer should NOT derive Eq when Inner has f64, derive block: {}",
+            outer_derive
+        );
 
         // Inner itself should also not have Eq (direct f64 field)
         let inner_derive = extract_derive_for(&output, "Inner");
-        assert!(!inner_derive.contains(", Eq") && !inner_derive.contains("Eq ,"),
-            "Inner should NOT derive Eq with f64 field, derive block: {}", inner_derive);
+        assert!(
+            !inner_derive.contains(", Eq") && !inner_derive.contains("Eq ,"),
+            "Inner should NOT derive Eq with f64 field, derive block: {}",
+            inner_derive
+        );
     }
 
     #[test]
     fn test_eq_derived_when_defined_type_is_clean() {
         // Struct "Outer" references "Inner" which only has u64 → Eq is fine
-        let inner = make_struct("Inner", vec![
-            make_field("count", IdlType::U64),
-        ]);
-        let outer = make_struct("Outer", vec![
-            make_field("data", IdlType::Defined { name: "Inner".to_string(), generics: vec![] }),
-        ]);
+        let inner = make_struct("Inner", vec![make_field("count", IdlType::U64)]);
+        let outer = make_struct(
+            "Outer",
+            vec![make_field(
+                "data",
+                IdlType::Defined {
+                    name: "Inner".to_string(),
+                    generics: vec![],
+                },
+            )],
+        );
         let output = gen(vec![inner, outer], false);
 
         let outer_derive = extract_derive_for(&output, "Outer");
-        assert!(outer_derive.contains(", Eq") || outer_derive.contains("Eq ,"),
-            "Outer should derive Eq when Inner only has u64, derive block: {}", outer_derive);
+        assert!(
+            outer_derive.contains(", Eq") || outer_derive.contains("Eq ,"),
+            "Outer should derive Eq when Inner only has u64, derive block: {}",
+            outer_derive
+        );
     }
 
     #[test]
@@ -1287,25 +1553,36 @@ mod tests {
                 repr: None,
                 generics: vec![],
                 ty: IdlTypeDefTy::Enum {
-                    variants: vec![
-                        IdlEnumVariant {
-                            name: "Val".to_string(),
-                            fields: Some(IdlDefinedFields::Tuple(vec![IdlType::F64])),
-                        },
-                    ],
+                    variants: vec![IdlEnumVariant {
+                        name: "Val".to_string(),
+                        fields: Some(IdlDefinedFields::Tuple(vec![IdlType::F64])),
+                    }],
                 },
             },
-            make_struct("Wrapper", vec![
-                make_field("inner", IdlType::Defined { name: "FloatEnum".to_string(), generics: vec![] }),
-            ]),
+            make_struct(
+                "Wrapper",
+                vec![make_field(
+                    "inner",
+                    IdlType::Defined {
+                        name: "FloatEnum".to_string(),
+                        generics: vec![],
+                    },
+                )],
+            ),
         ];
         let output = gen(types, false);
 
         let wrapper_derive = extract_derive_for(&output, "Wrapper");
-        assert!(wrapper_derive.contains("PartialEq"),
-            "Wrapper should derive PartialEq, derive block: {}", wrapper_derive);
-        assert!(!wrapper_derive.contains(", Eq") && !wrapper_derive.contains("Eq ,"),
-            "Wrapper should NOT derive Eq when FloatEnum has f64, derive block: {}", wrapper_derive);
+        assert!(
+            wrapper_derive.contains("PartialEq"),
+            "Wrapper should derive PartialEq, derive block: {}",
+            wrapper_derive
+        );
+        assert!(
+            !wrapper_derive.contains(", Eq") && !wrapper_derive.contains("Eq ,"),
+            "Wrapper should NOT derive Eq when FloatEnum has f64, derive block: {}",
+            wrapper_derive
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1315,25 +1592,35 @@ mod tests {
     #[test]
     fn test_option_string_no_copy() {
         let output = gen(
-            vec![make_struct("OptStr", vec![
-                make_field("maybe_name", IdlType::Option(Box::new(IdlType::String))),
-            ])],
+            vec![make_struct(
+                "OptStr",
+                vec![make_field(
+                    "maybe_name",
+                    IdlType::Option(Box::new(IdlType::String)),
+                )],
+            )],
             false,
         );
-        assert!(!output.contains("Copy"),
-            "Option<String> should NOT derive Copy, got: {}", output);
+        assert!(
+            !output.contains("Copy"),
+            "Option<String> should NOT derive Copy, got: {}",
+            output
+        );
     }
 
     #[test]
     fn test_option_u64_has_copy() {
         let output = gen(
-            vec![make_struct("OptNum", vec![
-                make_field("maybe_val", IdlType::Option(Box::new(IdlType::U64))),
-            ])],
+            vec![make_struct(
+                "OptNum",
+                vec![make_field(
+                    "maybe_val",
+                    IdlType::Option(Box::new(IdlType::U64)),
+                )],
+            )],
             false,
         );
-        assert!(output.contains("Copy"),
-            "Option<u64> should derive Copy");
+        assert!(output.contains("Copy"), "Option<u64> should derive Copy");
     }
 
     // -----------------------------------------------------------------------
@@ -1345,18 +1632,37 @@ mod tests {
         // Struct with a Defined field and a large array → forces manual Default
         // The Defined field should generate `Foo::default()` in the impl
         let output = gen(
-            vec![make_struct("HasDefined", vec![
-                make_field("inner", IdlType::Defined { name: "Foo".to_string(), generics: vec![] }),
-                make_field("big", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64))),
-            ])],
+            vec![make_struct(
+                "HasDefined",
+                vec![
+                    make_field(
+                        "inner",
+                        IdlType::Defined {
+                            name: "Foo".to_string(),
+                            generics: vec![],
+                        },
+                    ),
+                    make_field(
+                        "big",
+                        IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64)),
+                    ),
+                ],
+            )],
             false,
         );
-        assert!(output.contains("impl Default for HasDefined"),
-            "should have manual Default (Defined field blocks derive)");
-        assert!(output.contains("Foo :: default ()"),
-            "Defined field should use Foo::default() in manual impl, got: {}", output);
-        assert!(output.contains("[0 ; 64usize]"),
-            "large array should use [0; 64] default");
+        assert!(
+            output.contains("impl Default for HasDefined"),
+            "should have manual Default (Defined field blocks derive)"
+        );
+        assert!(
+            output.contains("Foo :: default ()"),
+            "Defined field should use Foo::default() in manual impl, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[0 ; 64usize]"),
+            "large array should use [0; 64] default"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1370,12 +1676,18 @@ mod tests {
                 name: "BigZc".to_string(),
                 docs: vec![],
                 serialization: Default::default(),
-                repr: Some(IdlRepr::C(IdlReprModifier { packed: false, align: None })),
+                repr: Some(IdlRepr::C(IdlReprModifier {
+                    packed: false,
+                    align: None,
+                })),
                 generics: vec![],
                 ty: IdlTypeDefTy::Struct {
                     fields: Some(IdlDefinedFields::Named(vec![
                         make_field("start", IdlType::I32),
-                        make_field("data", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(88))),
+                        make_field(
+                            "data",
+                            IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(88)),
+                        ),
                     ])),
                 },
             }],
@@ -1384,13 +1696,24 @@ mod tests {
         // Should have all three: repr(C), bytemuck, AND manual Default
         assert!(output.contains("repr (C)"), "should have repr(C)");
         assert!(output.contains("bytemuck :: Pod"), "should have Pod");
-        assert!(output.contains("bytemuck :: Zeroable"), "should have Zeroable");
-        assert!(output.contains("impl Default for BigZc"),
-            "large array in zero-copy should get manual Default, got: {}", output);
-        assert!(output.contains("[0 ; 88usize]"), "should have [0; 88] default");
+        assert!(
+            output.contains("bytemuck :: Zeroable"),
+            "should have Zeroable"
+        );
+        assert!(
+            output.contains("impl Default for BigZc"),
+            "large array in zero-copy should get manual Default, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[0 ; 88usize]"),
+            "should have [0; 88] default"
+        );
         // Should NOT have Default in derive list
-        assert!(!output.contains("derive (Clone , Copy , Default"),
-            "should NOT derive Default when manual impl exists");
+        assert!(
+            !output.contains("derive (Clone , Copy , Default"),
+            "should NOT derive Default when manual impl exists"
+        );
     }
 }
 
@@ -1407,34 +1730,34 @@ fn generate_extra_impls(
                 if let anchor_lang_idl::types::IdlType::Array(_, len) = &named_fields[0].ty {
                     let len_val = array_len_to_usize(len);
                     if len_val == 16 {
-                    let struct_name = format_ident!("{}", type_name);
-                    let field_name = format_ident!("{}", named_fields[0].name);
+                        let struct_name = format_ident!("{}", type_name);
+                        let field_name = format_ident!("{}", named_fields[0].name);
 
-                    return quote! {
-                        impl #struct_name {
-                            pub fn from_i80f48(value: fixed::types::I80F48) -> Self {
-                                Self {
-                                    #field_name: value.to_le_bytes(),
+                        return quote! {
+                            impl #struct_name {
+                                pub fn from_i80f48(value: fixed::types::I80F48) -> Self {
+                                    Self {
+                                        #field_name: value.to_le_bytes(),
+                                    }
+                                }
+
+                                pub fn to_i80f48(&self) -> fixed::types::I80F48 {
+                                    fixed::types::I80F48::from_le_bytes(self.#field_name)
                                 }
                             }
 
-                            pub fn to_i80f48(&self) -> fixed::types::I80F48 {
-                                fixed::types::I80F48::from_le_bytes(self.#field_name)
+                            impl From<fixed::types::I80F48> for #struct_name {
+                                fn from(value: fixed::types::I80F48) -> Self {
+                                    Self::from_i80f48(value)
+                                }
                             }
-                        }
 
-                        impl From<fixed::types::I80F48> for #struct_name {
-                            fn from(value: fixed::types::I80F48) -> Self {
-                                Self::from_i80f48(value)
+                            impl From<#struct_name> for fixed::types::I80F48 {
+                                fn from(value: #struct_name) -> Self {
+                                    value.to_i80f48()
+                                }
                             }
-                        }
-
-                        impl From<#struct_name> for fixed::types::I80F48 {
-                            fn from(value: #struct_name) -> Self {
-                                value.to_i80f48()
-                            }
-                        }
-                    };
+                        };
                     }
                 }
             }

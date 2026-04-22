@@ -43,7 +43,10 @@ fn parse_exec_sec(output: &str) -> Option<f64> {
         if line.contains("exec/sec") || line.contains("exec/s") {
             // Try to find a number before or after exec/sec
             for word in line.split_whitespace() {
-                if let Ok(val) = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.').parse::<f64>() {
+                if let Ok(val) = word
+                    .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                    .parse::<f64>()
+                {
                     if val > 0.0 && val < 1_000_000.0 {
                         return Some(val);
                     }
@@ -55,10 +58,7 @@ fn parse_exec_sec(output: &str) -> Option<f64> {
 }
 
 /// Run the fuzzer for a given duration and collect exec/sec samples
-fn run_fuzzer_with_samples(
-    duration_secs: u64,
-    cores: Option<usize>,
-) -> Vec<f64> {
+fn run_fuzzer_with_samples(duration_secs: u64, cores: Option<usize>) -> Vec<f64> {
     let fuzz_path = test_program_fuzz_path();
     let binary = fuzz_path.join("target/release/invariant_test");
 
@@ -201,19 +201,25 @@ fn test_parse_exec_sec() {
 #[test]
 fn test_common_utilities() {
     use common::{count_files_in_dir, file_exists_and_nonempty};
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     let temp = TempDir::new().unwrap();
 
     // Test file_exists_and_nonempty
     let empty_file = temp.path().join("empty.txt");
     fs::write(&empty_file, "").unwrap();
-    assert!(!file_exists_and_nonempty(&empty_file), "empty file should return false");
+    assert!(
+        !file_exists_and_nonempty(&empty_file),
+        "empty file should return false"
+    );
 
     let nonempty_file = temp.path().join("nonempty.txt");
     fs::write(&nonempty_file, "content").unwrap();
-    assert!(file_exists_and_nonempty(&nonempty_file), "nonempty file should return true");
+    assert!(
+        file_exists_and_nonempty(&nonempty_file),
+        "nonempty file should return true"
+    );
 
     // Test count_files_in_dir
     let subdir = temp.path().join("subdir");

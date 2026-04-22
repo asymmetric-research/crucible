@@ -113,7 +113,10 @@ mod tests {
     fn test_gen_program_id() {
         let idl = make_idl_with_address("11111111111111111111111111111111");
         let output = gen_program_id(&idl).to_string();
-        assert!(output.contains("Pubkey :: new_from_array"), "should use new_from_array");
+        assert!(
+            output.contains("Pubkey :: new_from_array"),
+            "should use new_from_array"
+        );
         assert!(output.contains("ID"), "should define ID constant");
     }
 
@@ -141,7 +144,10 @@ mod tests {
         assert_eq!(idl_type_to_tokens(&IdlType::I128).to_string(), "i128");
         assert_eq!(idl_type_to_tokens(&IdlType::Pubkey).to_string(), "Pubkey");
         assert_eq!(idl_type_to_tokens(&IdlType::String).to_string(), "String");
-        assert_eq!(idl_type_to_tokens(&IdlType::Bytes).to_string(), "Vec < u8 >");
+        assert_eq!(
+            idl_type_to_tokens(&IdlType::Bytes).to_string(),
+            "Vec < u8 >"
+        );
     }
 
     #[test]

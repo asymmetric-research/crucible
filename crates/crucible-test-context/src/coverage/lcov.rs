@@ -18,14 +18,17 @@ pub fn extract_functions(program_data: &[u8]) -> Option<Vec<FunctionInfo>> {
     struct DummyContext;
     impl ContextObject for DummyContext {
         fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 { 0 }
+        fn get_remaining(&self) -> u64 {
+            0
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
     let executable = Executable::from_elf(program_data, loader).ok()?;
     let analysis = Analysis::from_executable(&executable).ok()?;
 
-    let functions: Vec<FunctionInfo> = analysis.functions
+    let functions: Vec<FunctionInfo> = analysis
+        .functions
         .iter()
         .map(|(pc, (_key, name))| FunctionInfo {
             name: name.clone(),
@@ -53,7 +56,6 @@ where
     S1: BuildHasher,
     S2: BuildHasher,
 {
-
     writeln!(writer, "TN:fuzzer")?;
     writeln!(writer, "SF:{}.bpf", program_name)?;
 
@@ -115,16 +117,28 @@ where
         let not_taken = branch_outcomes.get(&(*pc, false)).copied().unwrap_or(0);
 
         // BRDA: line, block, branch, taken_count (- means not executed)
-        let taken_str = if taken > 0 { taken.to_string() } else { "-".to_string() };
-        let not_taken_str = if not_taken > 0 { not_taken.to_string() } else { "-".to_string() };
+        let taken_str = if taken > 0 {
+            taken.to_string()
+        } else {
+            "-".to_string()
+        };
+        let not_taken_str = if not_taken > 0 {
+            not_taken.to_string()
+        } else {
+            "-".to_string()
+        };
 
         writeln!(writer, "BRDA:{},{},0,{}", pc + 1, block_idx, taken_str)?;
         writeln!(writer, "BRDA:{},{},1,{}", pc + 1, block_idx, not_taken_str)?;
 
-        if taken > 0 { branches_hit += 1; }
-        if not_taken > 0 { branches_hit += 1; }
+        if taken > 0 {
+            branches_hit += 1;
+        }
+        if not_taken > 0 {
+            branches_hit += 1;
+        }
     }
-    writeln!(writer, "BRF:{}", total_branches * 2)?;  // Each branch has 2 outcomes
+    writeln!(writer, "BRF:{}", total_branches * 2)?; // Each branch has 2 outcomes
     writeln!(writer, "BRH:{}", branches_hit)?;
 
     writeln!(writer, "end_of_record")?;
@@ -201,10 +215,11 @@ where
         // Try fn_map first for DWARF-resolved function info
         if let Some((name, loc)) = source_map.fn_map.get(&func.entry_pc) {
             let hits = pc_hits.get(&func.entry_pc).copied().unwrap_or(0);
-            file_functions
-                .entry(loc.file.as_str())
-                .or_default()
-                .push((loc.line, name.clone(), hits));
+            file_functions.entry(loc.file.as_str()).or_default().push((
+                loc.line,
+                name.clone(),
+                hits,
+            ));
         } else if let Some(locations) = source_map.pc_map.get(&func.entry_pc) {
             // Fallback: use SBF function name with outermost DWARF source location
             if let Some(loc) = locations.last() {
@@ -240,9 +255,10 @@ where
                 return false;
             }
             // If we can infer workspace root from FUZZ_SYMBOLS, restrict to it
-            if let Some(root) = std::env::var("FUZZ_SYMBOLS").ok().and_then(|p| {
-                p.find("/target/").map(|idx| p[..idx].to_string())
-            }) {
+            if let Some(root) = std::env::var("FUZZ_SYMBOLS")
+                .ok()
+                .and_then(|p| p.find("/target/").map(|idx| p[..idx].to_string()))
+            {
                 return file.starts_with(&root);
             }
             // No workspace root available (e.g. bundled symbols.so) — keep all
@@ -257,7 +273,9 @@ where
         true
     };
 
-    let mut all_files: Vec<&str> = file_line_hits.keys().copied()
+    let mut all_files: Vec<&str> = file_line_hits
+        .keys()
+        .copied()
         .filter(|f| is_user_source(f))
         .collect();
     // Also include files that only have branches or functions
@@ -332,8 +350,8 @@ where
         //   - Comment-only lines (`//`) are SKIPPED (no DA record)
         //   - Code lines get min(hits_a, hits_b) of the surrounding DA records
         //   - Max gap size: 10 lines
-        let source_lines: Option<Vec<String>> = read_source_file(file)
-            .map(|content| content.lines().map(|l| l.to_string()).collect());
+        let source_lines: Option<Vec<String>> =
+            read_source_file(file).map(|content| content.lines().map(|l| l.to_string()).collect());
 
         let lines_snapshot: Vec<(u32, u64)> = merged_line_hits
             .iter()
@@ -383,7 +401,9 @@ where
         for &(da_line, da_hits) in &lines_snapshot2 {
             // Only backward-fill from nonzero DA records — filling with 0
             // would falsely mark lines as unreached when we don't know.
-            if da_line <= 1 || da_hits == 0 { continue; }
+            if da_line <= 1 || da_hits == 0 {
+                continue;
+            }
             let start = if da_line > 10 { da_line - 10 } else { 1 };
             for check_line in (start..da_line).rev() {
                 // Stop if this line already has a DA record
@@ -469,9 +489,9 @@ fn read_source_file(file: &str) -> Option<String> {
     // Cache the resolved source root (computed once from FUZZ_SYMBOLS)
     static SOURCE_ROOT: OnceLock<Option<String>> = OnceLock::new();
     let source_root = SOURCE_ROOT.get_or_init(|| {
-        std::env::var("FUZZ_SYMBOLS").ok().and_then(|p| {
-            p.find("/target/").map(|idx| p[..idx].to_string())
-        })
+        std::env::var("FUZZ_SYMBOLS")
+            .ok()
+            .and_then(|p| p.find("/target/").map(|idx| p[..idx].to_string()))
     });
 
     // Try the path as-is first (works for absolute paths)

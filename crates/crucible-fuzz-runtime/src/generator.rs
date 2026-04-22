@@ -1,9 +1,9 @@
-use std::marker::PhantomData;
+use crate::action::FuzzAction;
+use crate::input::FuzzInput;
 use libafl::generators::Generator;
 use libafl::inputs::BytesInput;
 use libafl::state::HasRand;
-use crate::action::FuzzAction;
-use crate::input::FuzzInput;
+use std::marker::PhantomData;
 
 /// Generates random action sequences, serialized as `BytesInput`.
 pub struct ActionGenerator<A: FuzzAction> {
@@ -26,7 +26,11 @@ impl<A: FuzzAction, S: HasRand> Generator<BytesInput, S> for ActionGenerator<A> 
     fn generate(&mut self, state: &mut S) -> Result<BytesInput, libafl::Error> {
         let rng = state.rand_mut();
         let count = if self.max_actions > self.min_actions {
-            self.min_actions + crate::mutators::primitives::rand_below(rng, self.max_actions - self.min_actions + 1)
+            self.min_actions
+                + crate::mutators::primitives::rand_below(
+                    rng,
+                    self.max_actions - self.min_actions + 1,
+                )
         } else {
             self.min_actions
         };

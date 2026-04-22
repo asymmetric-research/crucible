@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
-use super::types::{FunctionInfo, CoverageStats, CoverageWriteStats, CachedFunctionInfo, CachedProgramAnalysis};
+use super::types::{
+    CachedFunctionInfo, CachedProgramAnalysis, CoverageStats, CoverageWriteStats, FunctionInfo,
+};
 
 /// Generate an interactive HTML coverage visualization.
 ///
@@ -21,16 +23,18 @@ pub fn generate_coverage_html<W: Write>(
     pc_hits: &HashMap<usize, u64>,
     stats: Option<&CoverageWriteStats>,
 ) -> std::io::Result<()> {
+    use solana_sbpf::ebpf;
     use solana_sbpf::elf::Executable;
     use solana_sbpf::program::BuiltinProgram;
     use solana_sbpf::static_analysis::Analysis;
     use solana_sbpf::vm::ContextObject;
-    use solana_sbpf::ebpf;
 
     struct DummyContext;
     impl ContextObject for DummyContext {
         fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 { 0 }
+        fn get_remaining(&self) -> u64 {
+            0
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
@@ -53,7 +57,11 @@ pub fn generate_coverage_html<W: Write>(
     // Calculate stats per function
     for (pc, (_key, name)) in &analysis.functions {
         let func = FunctionInfo {
-            name: if name.is_empty() { format!("fn_{:x}", pc) } else { name.clone() },
+            name: if name.is_empty() {
+                format!("fn_{:x}", pc)
+            } else {
+                name.clone()
+            },
             entry_pc: *pc,
         };
 
@@ -81,8 +89,11 @@ pub fn generate_coverage_html<W: Write>(
 
                         // Count branches
                         let is_jmp = insn.opc & 7 == ebpf::BPF_JMP;
-                        let is_conditional = is_jmp && insn.opc != 0x05 && insn.opc != 0x85
-                            && insn.opc != 0x8d && insn.opc != 0x95;
+                        let is_conditional = is_jmp
+                            && insn.opc != 0x05
+                            && insn.opc != 0x85
+                            && insn.opc != 0x8d
+                            && insn.opc != 0x95;
                         if is_conditional {
                             stats.total_branches += 1;
                             if pc_hits.get(&insn.ptr).copied().unwrap_or(0) > 0 {
@@ -113,7 +124,11 @@ pub fn generate_coverage_html<W: Write>(
     // Calculate overall stats
     let overall_hit: usize = functions.iter().map(|(_, s)| s.hit_instructions).sum();
     let overall_total: usize = functions.iter().map(|(_, s)| s.total_instructions).sum();
-    let _overall_pct = if overall_total > 0 { 100.0 * overall_hit as f64 / overall_total as f64 } else { 0.0 };
+    let _overall_pct = if overall_total > 0 {
+        100.0 * overall_hit as f64 / overall_total as f64
+    } else {
+        0.0
+    };
     let blocks_hit: usize = functions.iter().map(|(_, s)| s.hit_blocks).sum();
     let blocks_total: usize = functions.iter().map(|(_, s)| s.total_blocks).sum();
 
@@ -153,25 +168,46 @@ pub fn generate_coverage_html<W: Write>(
 
     // Build stats header HTML
     let stats_html = if let Some(s) = stats {
-        let edges_pct = if s.edges_total > 0 { 100.0 * s.edges_hit as f64 / s.edges_total as f64 } else { 0.0 };
-        let branches_pct = if s.branches_total > 0 { 100.0 * s.branches_hit as f64 / s.branches_total as f64 } else { 0.0 };
-        let instr_pct = if s.instructions_total > 0 { 100.0 * s.instructions_hit as f64 / s.instructions_total as f64 } else { 0.0 };
+        let edges_pct = if s.edges_total > 0 {
+            100.0 * s.edges_hit as f64 / s.edges_total as f64
+        } else {
+            0.0
+        };
+        let branches_pct = if s.branches_total > 0 {
+            100.0 * s.branches_hit as f64 / s.branches_total as f64
+        } else {
+            0.0
+        };
+        let instr_pct = if s.instructions_total > 0 {
+            100.0 * s.instructions_hit as f64 / s.instructions_total as f64
+        } else {
+            0.0
+        };
         format!(
             r#"<div id="stats-header">
             <div class="stat-row"><button id="refresh-btn" onclick="location.reload()">Refresh</button><div class="theme-selector"><button class="theme-btn" data-theme="neon" onclick="setTheme('neon')">Neon</button><button class="theme-btn" data-theme="cyber" onclick="setTheme('cyber')">Cyber</button><button class="theme-btn" data-theme="ocean" onclick="setTheme('ocean')">Ocean</button></div><span class="stat">Runtime: <b>{}s</b></span><span class="stat">Execs: <b>{}</b></span></div>
             <div class="stat-row"><span class="stat">Edges: <b>{}/{}</b> ({:.1}%)</span><span class="stat">Branches: <b>{}/{}</b> ({:.1}%)</span><span class="stat">Blocks: <b>{}/{}</b> ({:.1}%)</span></div>
         </div>"#,
-            s.run_time_secs, s.executions,
-            s.edges_hit, s.edges_total, edges_pct,
-            s.branches_hit, s.branches_total, branches_pct,
-            s.instructions_hit, s.instructions_total, instr_pct
+            s.run_time_secs,
+            s.executions,
+            s.edges_hit,
+            s.edges_total,
+            edges_pct,
+            s.branches_hit,
+            s.branches_total,
+            branches_pct,
+            s.instructions_hit,
+            s.instructions_total,
+            instr_pct
         )
     } else {
         String::new()
     };
 
     // Write HTML
-    write!(writer, r##"<!DOCTYPE html>
+    write!(
+        writer,
+        r##"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -660,7 +696,6 @@ fn generate_function_cfg_json(
     entry_node: usize,
     pc_hits: &HashMap<usize, u64>,
 ) -> String {
-
     // BFS to get reachable nodes
     let mut visited = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
@@ -710,14 +745,18 @@ fn generate_function_cfg_json(
                 insn_strs.push(format!("{} {:05x}: {}", marker, insn.ptr, opc_name));
             }
 
-            let insns_json: Vec<String> = insn_strs.iter()
+            let insns_json: Vec<String> = insn_strs
+                .iter()
                 .take(6)
                 .map(|s| format!(r#""{}""#, escape_json(s)))
                 .collect();
 
             nodes_data.push(format!(
                 r#"{{"id":{},"hit":{},"total":{},"insns":[{}]}}"#,
-                node_idx, hit_count, total, insns_json.join(",")
+                node_idx,
+                hit_count,
+                total,
+                insns_json.join(",")
             ));
 
             // Add edges
@@ -727,10 +766,13 @@ fn generate_function_cfg_json(
                 }
 
                 // Check if edge was taken (any instruction in destination node was hit)
-                let dest_hit = analysis.cfg_nodes.get(&dest)
+                let dest_hit = analysis
+                    .cfg_nodes
+                    .get(&dest)
                     .map(|n| {
                         n.instructions.clone().any(|insn_idx| {
-                            pc_hits.get(&analysis.instructions[insn_idx].ptr)
+                            pc_hits
+                                .get(&analysis.instructions[insn_idx].ptr)
                                 .map(|&h| h > 0)
                                 .unwrap_or(false)
                         })
@@ -762,7 +804,10 @@ fn escape_json(s: &str) -> String {
 }
 
 /// Build cached program analysis from binary (called once at startup)
-pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<CachedProgramAnalysis> {
+pub fn build_cached_analysis(
+    program_name: &str,
+    program_data: &[u8],
+) -> Option<CachedProgramAnalysis> {
     use solana_sbpf::elf::Executable;
     use solana_sbpf::program::BuiltinProgram;
     use solana_sbpf::static_analysis::Analysis;
@@ -771,7 +816,9 @@ pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<
     struct DummyContext;
     impl ContextObject for DummyContext {
         fn consume(&mut self, _amount: u64) {}
-        fn get_remaining(&self) -> u64 { 0 }
+        fn get_remaining(&self) -> u64 {
+            0
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
@@ -792,7 +839,11 @@ pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<
 
     // Process each function
     for (pc, (_key, name)) in &analysis.functions {
-        let func_name = if name.is_empty() { format!("fn_{:x}", pc) } else { name.clone() };
+        let func_name = if name.is_empty() {
+            format!("fn_{:x}", pc)
+        } else {
+            name.clone()
+        };
 
         let mut instruction_pcs: Vec<usize> = Vec::new();
         let mut blocks: Vec<(usize, Vec<usize>)> = Vec::new();
@@ -849,13 +900,16 @@ pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<
 
                     // Build CFG node JSON (without hit counts - those are added at render time)
                     let total = cfg_node.instructions.end - cfg_node.instructions.start;
-                    let insns_json: Vec<String> = insn_strs.iter()
+                    let insns_json: Vec<String> = insn_strs
+                        .iter()
                         .take(6)
                         .map(|s| format!(r#""{}""#, escape_json(s)))
                         .collect();
                     nodes_data.push(format!(
                         r#"{{"id":{},"total":{},"insns":[{}]}}"#,
-                        node_idx, total, insns_json.join(",")
+                        node_idx,
+                        total,
+                        insns_json.join(",")
                     ));
 
                     // Add edges
@@ -863,10 +917,7 @@ pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<
                         if visited.insert(dest) {
                             queue.push_back(dest);
                         }
-                        edges_data.push(format!(
-                            r#"{{"from":{},"to":{}}}"#,
-                            node_idx, dest
-                        ));
+                        edges_data.push(format!(r#"{{"from":{},"to":{}}}"#, node_idx, dest));
                     }
                 }
             }
@@ -874,7 +925,11 @@ pub fn build_cached_analysis(program_name: &str, program_data: &[u8]) -> Option<
             // Store CFG JSON for this function
             cfg_json.insert(
                 func_name.clone(),
-                format!(r#"{{"nodes":[{}],"edges":[{}]}}"#, nodes_data.join(","), edges_data.join(","))
+                format!(
+                    r#"{{"nodes":[{}],"edges":[{}]}}"#,
+                    nodes_data.join(","),
+                    edges_data.join(",")
+                ),
             );
         }
 
@@ -909,32 +964,54 @@ pub fn generate_coverage_html_cached<W: Write>(
     let mut functions_with_stats: Vec<(&CachedFunctionInfo, CoverageStats)> = Vec::new();
 
     for func in &cached.functions {
-        let hit_instructions = func.instruction_pcs.iter()
+        let hit_instructions = func
+            .instruction_pcs
+            .iter()
             .filter(|pc| pc_hits.get(pc).map(|&h| h > 0).unwrap_or(false))
             .count();
 
-        let hit_blocks = func.blocks.iter()
+        let hit_blocks = func
+            .blocks
+            .iter()
             .filter(|(_, block_pcs)| {
-                block_pcs.iter().any(|pc| pc_hits.get(pc).map(|&h| h > 0).unwrap_or(false))
+                block_pcs
+                    .iter()
+                    .any(|pc| pc_hits.get(pc).map(|&h| h > 0).unwrap_or(false))
             })
             .count();
 
-        functions_with_stats.push((func, CoverageStats {
-            total_instructions: func.total_instructions,
-            hit_instructions,
-            total_branches: 0, // Not tracked in cached version
-            hit_branches: 0,
-            total_blocks: func.total_blocks,
-            hit_blocks,
-        }));
+        functions_with_stats.push((
+            func,
+            CoverageStats {
+                total_instructions: func.total_instructions,
+                hit_instructions,
+                total_branches: 0, // Not tracked in cached version
+                hit_branches: 0,
+                total_blocks: func.total_blocks,
+                hit_blocks,
+            },
+        ));
     }
 
     // Calculate overall stats
-    let overall_hit: usize = functions_with_stats.iter().map(|(_, s)| s.hit_instructions).sum();
-    let overall_total: usize = functions_with_stats.iter().map(|(_, s)| s.total_instructions).sum();
-    let _overall_pct = if overall_total > 0 { 100.0 * overall_hit as f64 / overall_total as f64 } else { 0.0 };
+    let overall_hit: usize = functions_with_stats
+        .iter()
+        .map(|(_, s)| s.hit_instructions)
+        .sum();
+    let overall_total: usize = functions_with_stats
+        .iter()
+        .map(|(_, s)| s.total_instructions)
+        .sum();
+    let _overall_pct = if overall_total > 0 {
+        100.0 * overall_hit as f64 / overall_total as f64
+    } else {
+        0.0
+    };
     let blocks_hit: usize = functions_with_stats.iter().map(|(_, s)| s.hit_blocks).sum();
-    let blocks_total: usize = functions_with_stats.iter().map(|(_, s)| s.total_blocks).sum();
+    let blocks_total: usize = functions_with_stats
+        .iter()
+        .map(|(_, s)| s.total_blocks)
+        .sum();
 
     // Generate function list JSON with block counts
     let functions_json: Vec<String> = functions_with_stats.iter().map(|(f, s)| {
@@ -967,31 +1044,56 @@ pub fn generate_coverage_html_cached<W: Write>(
         if let Some(cached_cfg) = cached.cfg_json.get(&func.name) {
             // Parse cached CFG and add hit counts
             let cfg_with_hits = add_hit_counts_to_cfg(cached_cfg, &func.blocks, pc_hits);
-            cfg_json_parts.push(format!(r#""{}": {}"#, escape_json(&func.name), cfg_with_hits));
+            cfg_json_parts.push(format!(
+                r#""{}": {}"#,
+                escape_json(&func.name),
+                cfg_with_hits
+            ));
         }
     }
 
     // Build stats header HTML
     let stats_html = if let Some(s) = stats {
-        let edges_pct = if s.edges_total > 0 { 100.0 * s.edges_hit as f64 / s.edges_total as f64 } else { 0.0 };
-        let branches_pct = if s.branches_total > 0 { 100.0 * s.branches_hit as f64 / s.branches_total as f64 } else { 0.0 };
-        let instr_pct = if s.instructions_total > 0 { 100.0 * s.instructions_hit as f64 / s.instructions_total as f64 } else { 0.0 };
+        let edges_pct = if s.edges_total > 0 {
+            100.0 * s.edges_hit as f64 / s.edges_total as f64
+        } else {
+            0.0
+        };
+        let branches_pct = if s.branches_total > 0 {
+            100.0 * s.branches_hit as f64 / s.branches_total as f64
+        } else {
+            0.0
+        };
+        let instr_pct = if s.instructions_total > 0 {
+            100.0 * s.instructions_hit as f64 / s.instructions_total as f64
+        } else {
+            0.0
+        };
         format!(
             r#"<div id="stats-header">
             <div class="stat-row"><button id="refresh-btn" onclick="location.reload()">Refresh</button><div class="theme-selector"><button class="theme-btn" data-theme="neon" onclick="setTheme('neon')">Neon</button><button class="theme-btn" data-theme="cyber" onclick="setTheme('cyber')">Cyber</button><button class="theme-btn" data-theme="ocean" onclick="setTheme('ocean')">Ocean</button></div><span class="stat">Runtime: <b>{}s</b></span><span class="stat">Execs: <b>{}</b></span></div>
             <div class="stat-row"><span class="stat">Edges: <b>{}/{}</b> ({:.1}%)</span><span class="stat">Branches: <b>{}/{}</b> ({:.1}%)</span><span class="stat">Blocks: <b>{}/{}</b> ({:.1}%)</span></div>
         </div>"#,
-            s.run_time_secs, s.executions,
-            s.edges_hit, s.edges_total, edges_pct,
-            s.branches_hit, s.branches_total, branches_pct,
-            s.instructions_hit, s.instructions_total, instr_pct
+            s.run_time_secs,
+            s.executions,
+            s.edges_hit,
+            s.edges_total,
+            edges_pct,
+            s.branches_hit,
+            s.branches_total,
+            branches_pct,
+            s.instructions_hit,
+            s.instructions_total,
+            instr_pct
         )
     } else {
         String::new()
     };
 
     // Write HTML (same template as non-cached version but with block counts in function list)
-    write!(writer, r##"<!DOCTYPE html>
+    write!(
+        writer,
+        r##"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -1482,7 +1584,8 @@ fn add_hit_counts_to_cfg(
     // Create a map of node_id -> hit count
     let mut node_hits: HashMap<usize, usize> = HashMap::new();
     for (node_id, block_pcs) in blocks {
-        let hit_count = block_pcs.iter()
+        let hit_count = block_pcs
+            .iter()
             .filter(|pc| pc_hits.get(pc).map(|&h| h > 0).unwrap_or(false))
             .count();
         node_hits.insert(*node_id, hit_count);

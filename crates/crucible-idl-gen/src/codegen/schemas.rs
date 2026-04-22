@@ -1,5 +1,5 @@
 use anchor_lang_idl::types::{
-    IdlArrayLen, IdlDefinedFields, IdlField, IdlRepr, IdlType, IdlTypeDefTy, Idl,
+    Idl, IdlArrayLen, IdlDefinedFields, IdlField, IdlRepr, IdlType, IdlTypeDefTy,
 };
 use quote::{format_ident, quote};
 
@@ -94,7 +94,11 @@ fn generate_field_comparisons(fields: &[IdlField]) -> Vec<proc_macro2::TokenStre
             let field_name = format_ident!("{}", field.name);
             let field_name_str = &field.name;
 
-            let format_expr = field_format_expr(&field.ty, &quote! { pre.#field_name }, &quote! { post.#field_name })?;
+            let format_expr = field_format_expr(
+                &field.ty,
+                &quote! { pre.#field_name },
+                &quote! { post.#field_name },
+            )?;
 
             Some(format_expr.wrap_comparison(field_name_str))
         })
@@ -137,15 +141,23 @@ fn field_format_expr(
 ) -> Option<FieldFormatting> {
     match ty {
         // Numeric primitives and bool — use Display
-        IdlType::Bool | IdlType::U8 | IdlType::I8 | IdlType::U16 | IdlType::I16
-        | IdlType::U32 | IdlType::I32 | IdlType::U64 | IdlType::I64
-        | IdlType::U128 | IdlType::I128 | IdlType::F32 | IdlType::F64 => {
-            Some(FieldFormatting {
-                eq_expr: quote! { #pre == #post },
-                pre_fmt: quote! { format!("{}", #pre) },
-                post_fmt: quote! { format!("{}", #post) },
-            })
-        }
+        IdlType::Bool
+        | IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::U128
+        | IdlType::I128
+        | IdlType::F32
+        | IdlType::F64 => Some(FieldFormatting {
+            eq_expr: quote! { #pre == #post },
+            pre_fmt: quote! { format!("{}", #pre) },
+            post_fmt: quote! { format!("{}", #post) },
+        }),
 
         // Pubkey — in zero-copy structs, Pubkey is [u8; 32] represented as Pubkey type
         IdlType::Pubkey => Some(FieldFormatting {
@@ -176,49 +188,47 @@ fn field_format_expr(
         // We use unsafe ptr cast instead of bytemuck::bytes_of because inner enum
         // types (e.g., RiskTier) may not implement Pod/NoUninit.
         // Safety: the parent struct is repr(C) + Pod, so fields are at fixed offsets.
-        IdlType::Defined { .. } => {
-            Some(FieldFormatting {
-                eq_expr: quote! {
-                    {
-                        let pre_bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &#pre as *const _ as *const u8,
-                                std::mem::size_of_val(&#pre),
-                            )
-                        };
-                        let post_bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &#post as *const _ as *const u8,
-                                std::mem::size_of_val(&#post),
-                            )
-                        };
-                        pre_bytes == post_bytes
-                    }
-                },
-                pre_fmt: quote! {
-                    {
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &#pre as *const _ as *const u8,
-                                std::mem::size_of_val(&#pre).min(32),
-                            )
-                        };
-                        format!("{:02x?}", bytes)
-                    }
-                },
-                post_fmt: quote! {
-                    {
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &#post as *const _ as *const u8,
-                                std::mem::size_of_val(&#post).min(32),
-                            )
-                        };
-                        format!("{:02x?}", bytes)
-                    }
-                },
-            })
-        }
+        IdlType::Defined { .. } => Some(FieldFormatting {
+            eq_expr: quote! {
+                {
+                    let pre_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &#pre as *const _ as *const u8,
+                            std::mem::size_of_val(&#pre),
+                        )
+                    };
+                    let post_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &#post as *const _ as *const u8,
+                            std::mem::size_of_val(&#post),
+                        )
+                    };
+                    pre_bytes == post_bytes
+                }
+            },
+            pre_fmt: quote! {
+                {
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &#pre as *const _ as *const u8,
+                            std::mem::size_of_val(&#pre).min(32),
+                        )
+                    };
+                    format!("{:02x?}", bytes)
+                }
+            },
+            post_fmt: quote! {
+                {
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            &#post as *const _ as *const u8,
+                            std::mem::size_of_val(&#post).min(32),
+                        )
+                    };
+                    format!("{:02x?}", bytes)
+                }
+            },
+        }),
 
         // Skip types that don't make sense in zero-copy (Option, Vec, String, etc.)
         _ => None,
@@ -273,7 +283,10 @@ mod tests {
     /// Helper: build a zero-copy account with the given fields
     fn zc_account(name: &str, disc: Vec<u8>, fields: Vec<IdlField>) -> (IdlAccount, IdlTypeDef) {
         (
-            IdlAccount { name: name.to_string(), discriminator: disc },
+            IdlAccount {
+                name: name.to_string(),
+                discriminator: disc,
+            },
             IdlTypeDef {
                 name: name.to_string(),
                 docs: vec![],
@@ -289,13 +302,20 @@ mod tests {
 
     /// Helper: build a single named field
     fn field(name: &str, ty: IdlType) -> IdlField {
-        IdlField { name: name.to_string(), docs: vec![], ty }
+        IdlField {
+            name: name.to_string(),
+            docs: vec![],
+            ty,
+        }
     }
 
     /// Parse generated TokenStream through syn to verify valid Rust syntax.
     /// The `state_stubs` parameter provides stub state structs so `state::Foo`
     /// references resolve.
-    fn assert_valid_syntax(tokens: proc_macro2::TokenStream, state_stubs: proc_macro2::TokenStream) {
+    fn assert_valid_syntax(
+        tokens: proc_macro2::TokenStream,
+        state_stubs: proc_macro2::TokenStream,
+    ) {
         let wrapped = quote! {
             mod test_wrapper {
                 mod state {
@@ -336,14 +356,29 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("register_schemas"), "should generate register_schemas function");
+        assert!(
+            output.contains("register_schemas"),
+            "should generate register_schemas function"
+        );
         assert!(output.contains("\"Bank\""), "should have type name");
-        assert!(output.contains("register_account_schemas"), "should call register_account_schemas");
-        assert!(output.contains("bytemuck :: try_from_bytes"), "should use bytemuck for zero-copy");
-        assert!(output.contains("total_deposits"), "should compare total_deposits field");
+        assert!(
+            output.contains("register_account_schemas"),
+            "should call register_account_schemas"
+        );
+        assert!(
+            output.contains("bytemuck :: try_from_bytes"),
+            "should use bytemuck for zero-copy"
+        );
+        assert!(
+            output.contains("total_deposits"),
+            "should compare total_deposits field"
+        );
         assert!(output.contains("mint"), "should compare mint field");
         // Discriminator bytes should be present
-        assert!(output.contains("17u8"), "should have discriminator byte 0x11");
+        assert!(
+            output.contains("17u8"),
+            "should have discriminator byte 0x11"
+        );
     }
 
     #[test]
@@ -360,40 +395,61 @@ mod tests {
                 repr: None, // no repr(C) → borsh
                 generics: vec![],
                 ty: IdlTypeDefTy::Struct {
-                    fields: Some(IdlDefinedFields::Named(vec![
-                        field("value", IdlType::U64),
-                    ])),
+                    fields: Some(IdlDefinedFields::Named(vec![field("value", IdlType::U64)])),
                 },
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("register_schemas"), "should still generate function");
-        assert!(!output.contains("register_account_schemas"), "should NOT register borsh accounts");
-        assert!(!output.contains("BorshAccount"), "should NOT contain borsh account name");
+        assert!(
+            output.contains("register_schemas"),
+            "should still generate function"
+        );
+        assert!(
+            !output.contains("register_account_schemas"),
+            "should NOT register borsh accounts"
+        );
+        assert!(
+            !output.contains("BorshAccount"),
+            "should NOT contain borsh account name"
+        );
     }
 
     #[test]
     fn test_multiple_accounts() {
-        let (acc1, ty1) = zc_account("Bank", vec![1, 2, 3, 4, 5, 6, 7, 8], vec![
-            field("total", IdlType::U64),
-        ]);
-        let (acc2, ty2) = zc_account("Group", vec![9, 10, 11, 12, 13, 14, 15, 16], vec![
-            field("admin", IdlType::Pubkey),
-        ]);
+        let (acc1, ty1) = zc_account(
+            "Bank",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("total", IdlType::U64)],
+        );
+        let (acc2, ty2) = zc_account(
+            "Group",
+            vec![9, 10, 11, 12, 13, 14, 15, 16],
+            vec![field("admin", IdlType::Pubkey)],
+        );
         let idl = make_idl(vec![acc1, acc2], vec![ty1, ty2]);
         let output = generate(&idl).to_string();
         assert!(output.contains("\"Bank\""), "should have Bank entry");
         assert!(output.contains("\"Group\""), "should have Group entry");
         let schema_count = output.matches("AccountSchema").count();
-        assert!(schema_count >= 2, "should have at least 2 AccountSchema entries, got {}", schema_count);
+        assert!(
+            schema_count >= 2,
+            "should have at least 2 AccountSchema entries, got {}",
+            schema_count
+        );
     }
 
     #[test]
     fn test_empty_accounts_generates_noop() {
         let idl = make_idl(vec![], vec![]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("register_schemas"), "should still generate function");
-        assert!(!output.contains("register_account_schemas"), "empty IDL should not register anything");
+        assert!(
+            output.contains("register_schemas"),
+            "should still generate function"
+        );
+        assert!(
+            !output.contains("register_account_schemas"),
+            "empty IDL should not register anything"
+        );
     }
 
     #[test]
@@ -413,7 +469,10 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(!output.contains("\"EnumAccount\""), "enum accounts should be skipped");
+        assert!(
+            !output.contains("\"EnumAccount\""),
+            "enum accounts should be skipped"
+        );
     }
 
     #[test]
@@ -429,11 +488,16 @@ mod tests {
                 serialization: Default::default(),
                 repr: zero_copy_repr(),
                 generics: vec![],
-                ty: IdlTypeDefTy::Type { alias: IdlType::U64 },
+                ty: IdlTypeDefTy::Type {
+                    alias: IdlType::U64,
+                },
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(!output.contains("\"AliasAccount\""), "type alias accounts should be skipped");
+        assert!(
+            !output.contains("\"AliasAccount\""),
+            "type alias accounts should be skipped"
+        );
     }
 
     #[test]
@@ -446,7 +510,10 @@ mod tests {
             vec![], // no type definition
         );
         let output = generate(&idl).to_string();
-        assert!(!output.contains("\"Ghost\""), "account with no matching type should be skipped");
+        assert!(
+            !output.contains("\"Ghost\""),
+            "account with no matching type should be skipped"
+        );
     }
 
     #[test]
@@ -468,7 +535,10 @@ mod tests {
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(!output.contains("\"TupleAccount\""), "tuple struct accounts should be skipped (no named fields)");
+        assert!(
+            !output.contains("\"TupleAccount\""),
+            "tuple struct accounts should be skipped (no named fields)"
+        );
     }
 
     #[test]
@@ -486,14 +556,15 @@ mod tests {
                 repr: rust_repr(),
                 generics: vec![],
                 ty: IdlTypeDefTy::Struct {
-                    fields: Some(IdlDefinedFields::Named(vec![
-                        field("value", IdlType::U64),
-                    ])),
+                    fields: Some(IdlDefinedFields::Named(vec![field("value", IdlType::U64)])),
                 },
             }],
         );
         let output = generate(&idl).to_string();
-        assert!(!output.contains("\"RustReprAccount\""), "repr(Rust) accounts should be skipped");
+        assert!(
+            !output.contains("\"RustReprAccount\""),
+            "repr(Rust) accounts should be skipped"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -502,20 +573,39 @@ mod tests {
 
     #[test]
     fn test_padding_fields_skipped() {
-        let (acc, ty) = zc_account("WithPadding", vec![1, 2, 3, 4, 5, 6, 7, 8], vec![
-            field("value", IdlType::U64),
-            field("_pad0", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7))),
-            field("_padding_0", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32))),
-            field("_pad1", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(4))),
-            field("_padding_extra", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-        ]);
+        let (acc, ty) = zc_account(
+            "WithPadding",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("value", IdlType::U64),
+                field(
+                    "_pad0",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7)),
+                ),
+                field(
+                    "_padding_0",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32)),
+                ),
+                field(
+                    "_pad1",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(4)),
+                ),
+                field(
+                    "_padding_extra",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                ),
+            ],
+        );
         let idl = make_idl(vec![acc], vec![ty]);
         let output = generate(&idl).to_string();
         assert!(output.contains("\"value\""), "should include value field");
         assert!(!output.contains("\"_pad0\""), "should skip _pad0");
         assert!(!output.contains("\"_pad1\""), "should skip _pad1");
         assert!(!output.contains("\"_padding_0\""), "should skip _padding_0");
-        assert!(!output.contains("\"_padding_extra\""), "should skip _padding_extra");
+        assert!(
+            !output.contains("\"_padding_extra\""),
+            "should skip _padding_extra"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -524,162 +614,307 @@ mod tests {
 
     #[test]
     fn test_format_bool() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("active", IdlType::Bool),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("active", IdlType::Bool)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(output.contains("\"active\""), "bool field should be included");
+        assert!(
+            output.contains("\"active\""),
+            "bool field should be included"
+        );
         // Bool uses Display: format!("{}", ...)
-        assert!(output.contains("pre . active == post . active"), "bool should use == comparison");
+        assert!(
+            output.contains("pre . active == post . active"),
+            "bool should use == comparison"
+        );
     }
 
     #[test]
     fn test_format_unsigned_integers() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("a_u8", IdlType::U8),
-            field("a_u16", IdlType::U16),
-            field("a_u32", IdlType::U32),
-            field("a_u64", IdlType::U64),
-            field("a_u128", IdlType::U128),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("a_u8", IdlType::U8),
+                field("a_u16", IdlType::U16),
+                field("a_u32", IdlType::U32),
+                field("a_u64", IdlType::U64),
+                field("a_u128", IdlType::U128),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         for name in &["a_u8", "a_u16", "a_u32", "a_u64", "a_u128"] {
-            assert!(output.contains(&format!("\"{}\"", name)),
-                "unsigned integer field {} should be included", name);
+            assert!(
+                output.contains(&format!("\"{}\"", name)),
+                "unsigned integer field {} should be included",
+                name
+            );
         }
     }
 
     #[test]
     fn test_format_signed_integers() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("a_i8", IdlType::I8),
-            field("a_i16", IdlType::I16),
-            field("a_i32", IdlType::I32),
-            field("a_i64", IdlType::I64),
-            field("a_i128", IdlType::I128),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("a_i8", IdlType::I8),
+                field("a_i16", IdlType::I16),
+                field("a_i32", IdlType::I32),
+                field("a_i64", IdlType::I64),
+                field("a_i128", IdlType::I128),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         for name in &["a_i8", "a_i16", "a_i32", "a_i64", "a_i128"] {
-            assert!(output.contains(&format!("\"{}\"", name)),
-                "signed integer field {} should be included", name);
+            assert!(
+                output.contains(&format!("\"{}\"", name)),
+                "signed integer field {} should be included",
+                name
+            );
         }
     }
 
     #[test]
     fn test_format_floats() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("rate_f32", IdlType::F32),
-            field("rate_f64", IdlType::F64),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("rate_f32", IdlType::F32),
+                field("rate_f64", IdlType::F64),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(output.contains("\"rate_f32\""), "f32 field should be included");
-        assert!(output.contains("\"rate_f64\""), "f64 field should be included");
+        assert!(
+            output.contains("\"rate_f32\""),
+            "f32 field should be included"
+        );
+        assert!(
+            output.contains("\"rate_f64\""),
+            "f64 field should be included"
+        );
     }
 
     #[test]
     fn test_format_pubkey() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("owner", IdlType::Pubkey),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("owner", IdlType::Pubkey)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(output.contains("\"owner\""), "pubkey field should be included");
+        assert!(
+            output.contains("\"owner\""),
+            "pubkey field should be included"
+        );
         // Pubkey uses .to_string()
-        assert!(output.contains("to_string"), "pubkey should use to_string()");
+        assert!(
+            output.contains("to_string"),
+            "pubkey should use to_string()"
+        );
     }
 
     #[test]
     fn test_format_small_byte_array() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("hash", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            field("sig", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32))),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field(
+                    "hash",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                ),
+                field(
+                    "sig",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32)),
+                ),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         assert!(output.contains("\"hash\""), "[u8; 16] should be included");
-        assert!(output.contains("\"sig\""), "[u8; 32] should be included (boundary)");
+        assert!(
+            output.contains("\"sig\""),
+            "[u8; 32] should be included (boundary)"
+        );
         // Hex format: {:02x?}
-        assert!(output.contains("02x"), "small byte arrays should use hex format");
+        assert!(
+            output.contains("02x"),
+            "small byte arrays should use hex format"
+        );
     }
 
     #[test]
     fn test_format_large_byte_array_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("small", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            field("large_33", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(33))),
-            field("large_64", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64))),
-            field("large_128", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128))),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field(
+                    "small",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                ),
+                field(
+                    "large_33",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(33)),
+                ),
+                field(
+                    "large_64",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64)),
+                ),
+                field(
+                    "large_128",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128)),
+                ),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         assert!(output.contains("\"small\""), "[u8; 16] should be included");
-        assert!(!output.contains("\"large_33\""), "[u8; 33] should be skipped");
-        assert!(!output.contains("\"large_64\""), "[u8; 64] should be skipped");
-        assert!(!output.contains("\"large_128\""), "[u8; 128] should be skipped");
+        assert!(
+            !output.contains("\"large_33\""),
+            "[u8; 33] should be skipped"
+        );
+        assert!(
+            !output.contains("\"large_64\""),
+            "[u8; 64] should be skipped"
+        );
+        assert!(
+            !output.contains("\"large_128\""),
+            "[u8; 128] should be skipped"
+        );
     }
 
     #[test]
     fn test_format_non_u8_array_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("values", IdlType::Array(Box::new(IdlType::U64), IdlArrayLen::Value(4))),
-            field("ticks", IdlType::Array(
-                Box::new(IdlType::Defined { name: "Tick".into(), generics: vec![] }),
-                IdlArrayLen::Value(88),
-            )),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field(
+                    "values",
+                    IdlType::Array(Box::new(IdlType::U64), IdlArrayLen::Value(4)),
+                ),
+                field(
+                    "ticks",
+                    IdlType::Array(
+                        Box::new(IdlType::Defined {
+                            name: "Tick".into(),
+                            generics: vec![],
+                        }),
+                        IdlArrayLen::Value(88),
+                    ),
+                ),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         assert!(!output.contains("\"values\""), "[u64; 4] should be skipped");
-        assert!(!output.contains("\"ticks\""), "[Tick; 88] should be skipped");
+        assert!(
+            !output.contains("\"ticks\""),
+            "[Tick; 88] should be skipped"
+        );
     }
 
     #[test]
     fn test_format_defined_type() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("config", IdlType::Defined { name: "BankConfig".into(), generics: vec![] }),
-            field("wrapped", IdlType::Defined { name: "WrappedI80F48".into(), generics: vec![] }),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field(
+                    "config",
+                    IdlType::Defined {
+                        name: "BankConfig".into(),
+                        generics: vec![],
+                    },
+                ),
+                field(
+                    "wrapped",
+                    IdlType::Defined {
+                        name: "WrappedI80F48".into(),
+                        generics: vec![],
+                    },
+                ),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(output.contains("\"config\""), "defined type field should be included");
-        assert!(output.contains("\"wrapped\""), "defined type field should be included");
+        assert!(
+            output.contains("\"config\""),
+            "defined type field should be included"
+        );
+        assert!(
+            output.contains("\"wrapped\""),
+            "defined type field should be included"
+        );
         // Defined types use raw ptr byte comparison
-        assert!(output.contains("from_raw_parts"), "defined types should use raw ptr cast");
-        assert!(output.contains("size_of_val"), "defined types should use size_of_val");
+        assert!(
+            output.contains("from_raw_parts"),
+            "defined types should use raw ptr cast"
+        );
+        assert!(
+            output.contains("size_of_val"),
+            "defined types should use size_of_val"
+        );
     }
 
     #[test]
     fn test_format_option_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("maybe", IdlType::Option(Box::new(IdlType::U64))),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("maybe", IdlType::Option(Box::new(IdlType::U64)))],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(!output.contains("\"maybe\""), "Option fields should be skipped in zero-copy");
+        assert!(
+            !output.contains("\"maybe\""),
+            "Option fields should be skipped in zero-copy"
+        );
     }
 
     #[test]
     fn test_format_vec_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("items", IdlType::Vec(Box::new(IdlType::U64))),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("items", IdlType::Vec(Box::new(IdlType::U64)))],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(!output.contains("\"items\""), "Vec fields should be skipped in zero-copy");
+        assert!(
+            !output.contains("\"items\""),
+            "Vec fields should be skipped in zero-copy"
+        );
     }
 
     #[test]
     fn test_format_string_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("name", IdlType::String),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("name", IdlType::String)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(!output.contains("\"name\""), "String fields should be skipped in zero-copy");
+        assert!(
+            !output.contains("\"name\""),
+            "String fields should be skipped in zero-copy"
+        );
     }
 
     #[test]
     fn test_format_generic_array_len_skipped() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("data", IdlType::Array(
-                Box::new(IdlType::U8),
-                IdlArrayLen::Generic("N".into()),
-            )),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field(
+                "data",
+                IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Generic("N".into())),
+            )],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(!output.contains("\"data\""), "generic array length should be skipped");
+        assert!(
+            !output.contains("\"data\""),
+            "generic array length should be skipped"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -688,15 +923,17 @@ mod tests {
 
     #[test]
     fn test_mixed_zero_copy_and_borsh_accounts() {
-        let (zc_acc, zc_ty) = zc_account("ZcAccount", vec![1,2,3,4,5,6,7,8], vec![
-            field("value", IdlType::U64),
-        ]);
+        let (zc_acc, zc_ty) = zc_account(
+            "ZcAccount",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("value", IdlType::U64)],
+        );
         let idl = make_idl(
             vec![
                 zc_acc,
                 IdlAccount {
                     name: "BorshAccount".to_string(),
-                    discriminator: vec![9,10,11,12,13,14,15,16],
+                    discriminator: vec![9, 10, 11, 12, 13, 14, 15, 16],
                 },
             ],
             vec![
@@ -708,38 +945,57 @@ mod tests {
                     repr: None,
                     generics: vec![],
                     ty: IdlTypeDefTy::Struct {
-                        fields: Some(IdlDefinedFields::Named(vec![
-                            field("data", IdlType::U64),
-                        ])),
+                        fields: Some(IdlDefinedFields::Named(vec![field("data", IdlType::U64)])),
                     },
                 },
             ],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("\"ZcAccount\""), "zero-copy account should be registered");
-        assert!(!output.contains("\"BorshAccount\""), "borsh account should NOT be registered");
+        assert!(
+            output.contains("\"ZcAccount\""),
+            "zero-copy account should be registered"
+        );
+        assert!(
+            !output.contains("\"BorshAccount\""),
+            "borsh account should NOT be registered"
+        );
         // Should still produce the register_account_schemas call
-        assert!(output.contains("register_account_schemas"), "should register the zero-copy one");
+        assert!(
+            output.contains("register_account_schemas"),
+            "should register the zero-copy one"
+        );
     }
 
     #[test]
     fn test_all_borsh_accounts_generates_noop() {
         let idl = make_idl(
             vec![
-                IdlAccount { name: "A".into(), discriminator: vec![1,2,3,4,5,6,7,8] },
-                IdlAccount { name: "B".into(), discriminator: vec![9,10,11,12,13,14,15,16] },
+                IdlAccount {
+                    name: "A".into(),
+                    discriminator: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+                IdlAccount {
+                    name: "B".into(),
+                    discriminator: vec![9, 10, 11, 12, 13, 14, 15, 16],
+                },
             ],
             vec![
                 IdlTypeDef {
-                    name: "A".to_string(), docs: vec![], serialization: Default::default(),
-                    repr: None, generics: vec![],
+                    name: "A".to_string(),
+                    docs: vec![],
+                    serialization: Default::default(),
+                    repr: None,
+                    generics: vec![],
                     ty: IdlTypeDefTy::Struct {
                         fields: Some(IdlDefinedFields::Named(vec![field("x", IdlType::U64)])),
                     },
                 },
                 IdlTypeDef {
-                    name: "B".to_string(), docs: vec![], serialization: Default::default(),
-                    repr: None, generics: vec![],
+                    name: "B".to_string(),
+                    docs: vec![],
+                    serialization: Default::default(),
+                    repr: None,
+                    generics: vec![],
                     ty: IdlTypeDefTy::Struct {
                         fields: Some(IdlDefinedFields::Named(vec![field("y", IdlType::U64)])),
                     },
@@ -747,8 +1003,14 @@ mod tests {
             ],
         );
         let output = generate(&idl).to_string();
-        assert!(output.contains("register_schemas"), "should still generate function");
-        assert!(!output.contains("register_account_schemas"), "all-borsh should be noop");
+        assert!(
+            output.contains("register_schemas"),
+            "should still generate function"
+        );
+        assert!(
+            !output.contains("register_account_schemas"),
+            "all-borsh should be noop"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -757,11 +1019,16 @@ mod tests {
 
     #[test]
     fn test_4_byte_discriminator_preserved() {
-        let (acc, ty) = zc_account("Native", vec![1, 0, 0, 0], vec![
-            field("value", IdlType::U64),
-        ]);
+        let (acc, ty) = zc_account(
+            "Native",
+            vec![1, 0, 0, 0],
+            vec![field("value", IdlType::U64)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
-        assert!(output.contains("\"Native\""), "should register native account");
+        assert!(
+            output.contains("\"Native\""),
+            "should register native account"
+        );
         assert!(output.contains("1u8"), "should have discriminator byte 1");
         // Should use 4-byte discriminator length from state::Native::DISCRIMINATOR_LEN
         assert!(output.contains("state :: Native :: DISCRIMINATOR_LEN"));
@@ -770,15 +1037,16 @@ mod tests {
     #[test]
     fn test_8_byte_discriminator_preserved() {
         let disc = vec![0xAB, 0xCD, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
-        let (acc, ty) = zc_account("Anchor", disc.clone(), vec![
-            field("value", IdlType::U64),
-        ]);
+        let (acc, ty) = zc_account("Anchor", disc.clone(), vec![field("value", IdlType::U64)]);
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // All 8 discriminator bytes should appear
         for byte in &disc {
             let byte_str = format!("{}u8", byte);
-            assert!(output.contains(&byte_str),
-                "discriminator byte {} should appear in output", byte_str);
+            assert!(
+                output.contains(&byte_str),
+                "discriminator byte {} should appear in output",
+                byte_str
+            );
         }
     }
 
@@ -789,98 +1057,178 @@ mod tests {
     #[test]
     fn test_syntax_all_primitive_types() {
         // Account with every primitive type — verify generated code parses
-        let (acc, ty) = zc_account("AllPrimitives", vec![1,2,3,4,5,6,7,8], vec![
-            field("f_bool", IdlType::Bool),
-            field("f_u8", IdlType::U8),
-            field("f_i8", IdlType::I8),
-            field("f_u16", IdlType::U16),
-            field("f_i16", IdlType::I16),
-            field("f_u32", IdlType::U32),
-            field("f_i32", IdlType::I32),
-            field("f_u64", IdlType::U64),
-            field("f_i64", IdlType::I64),
-            field("f_u128", IdlType::U128),
-            field("f_i128", IdlType::I128),
-            field("f_f32", IdlType::F32),
-            field("f_f64", IdlType::F64),
-        ]);
+        let (acc, ty) = zc_account(
+            "AllPrimitives",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("f_bool", IdlType::Bool),
+                field("f_u8", IdlType::U8),
+                field("f_i8", IdlType::I8),
+                field("f_u16", IdlType::U16),
+                field("f_i16", IdlType::I16),
+                field("f_u32", IdlType::U32),
+                field("f_i32", IdlType::I32),
+                field("f_u64", IdlType::U64),
+                field("f_i64", IdlType::I64),
+                field("f_u128", IdlType::U128),
+                field("f_i128", IdlType::I128),
+                field("f_f32", IdlType::F32),
+                field("f_f64", IdlType::F64),
+            ],
+        );
         let tokens = generate(&make_idl(vec![acc], vec![ty]));
-        assert_valid_syntax(tokens, quote! {
-            pub struct AllPrimitives;
-            impl AllPrimitives { pub const DISCRIMINATOR_LEN: usize = 8; }
-        });
+        assert_valid_syntax(
+            tokens,
+            quote! {
+                pub struct AllPrimitives;
+                impl AllPrimitives { pub const DISCRIMINATOR_LEN: usize = 8; }
+            },
+        );
     }
 
     #[test]
     fn test_syntax_mixed_field_types() {
         // Account mixing primitives, pubkey, arrays, defined types, and padding
-        let (acc, ty) = zc_account("MixedAccount", vec![0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x11,0x22], vec![
-            field("balance", IdlType::U64),
-            field("owner", IdlType::Pubkey),
-            field("active", IdlType::Bool),
-            field("data", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-            field("config", IdlType::Defined { name: "Config".into(), generics: vec![] }),
-            field("_pad0", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7))),
-            field("rate", IdlType::F64),
-            field("count", IdlType::I32),
-            field("big", IdlType::U128),
-            field("sig", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32))),
-            field("large_skip", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128))),
-            field("items_skip", IdlType::Vec(Box::new(IdlType::U64))),
-            field("maybe_skip", IdlType::Option(Box::new(IdlType::U64))),
-        ]);
+        let (acc, ty) = zc_account(
+            "MixedAccount",
+            vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22],
+            vec![
+                field("balance", IdlType::U64),
+                field("owner", IdlType::Pubkey),
+                field("active", IdlType::Bool),
+                field(
+                    "data",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+                ),
+                field(
+                    "config",
+                    IdlType::Defined {
+                        name: "Config".into(),
+                        generics: vec![],
+                    },
+                ),
+                field(
+                    "_pad0",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7)),
+                ),
+                field("rate", IdlType::F64),
+                field("count", IdlType::I32),
+                field("big", IdlType::U128),
+                field(
+                    "sig",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(32)),
+                ),
+                field(
+                    "large_skip",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128)),
+                ),
+                field("items_skip", IdlType::Vec(Box::new(IdlType::U64))),
+                field("maybe_skip", IdlType::Option(Box::new(IdlType::U64))),
+            ],
+        );
         let tokens = generate(&make_idl(vec![acc], vec![ty]));
-        assert_valid_syntax(tokens, quote! {
-            pub struct MixedAccount;
-            impl MixedAccount { pub const DISCRIMINATOR_LEN: usize = 8; }
-        });
+        assert_valid_syntax(
+            tokens,
+            quote! {
+                pub struct MixedAccount;
+                impl MixedAccount { pub const DISCRIMINATOR_LEN: usize = 8; }
+            },
+        );
     }
 
     #[test]
     fn test_syntax_multiple_zero_copy_accounts() {
         // Multiple accounts, each with different field patterns
-        let (acc1, ty1) = zc_account("Bank", vec![1,2,3,4,5,6,7,8], vec![
-            field("mint", IdlType::Pubkey),
-            field("total_deposits", IdlType::U64),
-            field("total_borrows", IdlType::U64),
-            field("config", IdlType::Defined { name: "BankConfig".into(), generics: vec![] }),
-            field("_pad0", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7))),
-        ]);
-        let (acc2, ty2) = zc_account("Account", vec![9,10,11,12,13,14,15,16], vec![
-            field("authority", IdlType::Pubkey),
-            field("group", IdlType::Pubkey),
-            field("flags", IdlType::U64),
-            field("lending_account", IdlType::Defined { name: "LendingAccount".into(), generics: vec![] }),
-        ]);
+        let (acc1, ty1) = zc_account(
+            "Bank",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("mint", IdlType::Pubkey),
+                field("total_deposits", IdlType::U64),
+                field("total_borrows", IdlType::U64),
+                field(
+                    "config",
+                    IdlType::Defined {
+                        name: "BankConfig".into(),
+                        generics: vec![],
+                    },
+                ),
+                field(
+                    "_pad0",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7)),
+                ),
+            ],
+        );
+        let (acc2, ty2) = zc_account(
+            "Account",
+            vec![9, 10, 11, 12, 13, 14, 15, 16],
+            vec![
+                field("authority", IdlType::Pubkey),
+                field("group", IdlType::Pubkey),
+                field("flags", IdlType::U64),
+                field(
+                    "lending_account",
+                    IdlType::Defined {
+                        name: "LendingAccount".into(),
+                        generics: vec![],
+                    },
+                ),
+            ],
+        );
         let tokens = generate(&make_idl(vec![acc1, acc2], vec![ty1, ty2]));
-        assert_valid_syntax(tokens, quote! {
-            pub struct Bank;
-            impl Bank { pub const DISCRIMINATOR_LEN: usize = 8; }
-            pub struct Account;
-            impl Account { pub const DISCRIMINATOR_LEN: usize = 8; }
-        });
+        assert_valid_syntax(
+            tokens,
+            quote! {
+                pub struct Bank;
+                impl Bank { pub const DISCRIMINATOR_LEN: usize = 8; }
+                pub struct Account;
+                impl Account { pub const DISCRIMINATOR_LEN: usize = 8; }
+            },
+        );
     }
 
     #[test]
     fn test_syntax_only_skippable_fields() {
         // Account where ALL fields are skippable — should still generate valid code
-        let (acc, ty) = zc_account("AllSkipped", vec![1,2,3,4,5,6,7,8], vec![
-            field("_pad0", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7))),
-            field("large", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128))),
-            field("ticks", IdlType::Array(
-                Box::new(IdlType::Defined { name: "Tick".into(), generics: vec![] }),
-                IdlArrayLen::Value(88),
-            )),
-        ]);
+        let (acc, ty) = zc_account(
+            "AllSkipped",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field(
+                    "_pad0",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(7)),
+                ),
+                field(
+                    "large",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(128)),
+                ),
+                field(
+                    "ticks",
+                    IdlType::Array(
+                        Box::new(IdlType::Defined {
+                            name: "Tick".into(),
+                            generics: vec![],
+                        }),
+                        IdlArrayLen::Value(88),
+                    ),
+                ),
+            ],
+        );
         let tokens = generate(&make_idl(vec![acc], vec![ty]));
         // Even with no comparable fields, the schema should still be registered
         // (it just produces an empty deltas vec)
         let output = tokens.to_string();
-        assert!(output.contains("\"AllSkipped\""), "account with only skippable fields should still be registered");
-        assert_valid_syntax(tokens.clone(), quote! {
-            pub struct AllSkipped;
-            impl AllSkipped { pub const DISCRIMINATOR_LEN: usize = 8; }
-        });
+        assert!(
+            output.contains("\"AllSkipped\""),
+            "account with only skippable fields should still be registered"
+        );
+        assert_valid_syntax(
+            tokens.clone(),
+            quote! {
+                pub struct AllSkipped;
+                impl AllSkipped { pub const DISCRIMINATOR_LEN: usize = 8; }
+            },
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -889,48 +1237,80 @@ mod tests {
 
     #[test]
     fn test_primitive_uses_eq_operator() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("count", IdlType::U64),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("count", IdlType::U64)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Primitives compare with ==
-        assert!(output.contains("pre . count == post . count"),
-            "primitive should use direct == comparison, got: {}", output);
+        assert!(
+            output.contains("pre . count == post . count"),
+            "primitive should use direct == comparison, got: {}",
+            output
+        );
     }
 
     #[test]
     fn test_pubkey_uses_to_string() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("owner", IdlType::Pubkey),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("owner", IdlType::Pubkey)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Pubkey formats with .to_string()
-        assert!(output.contains("pre . owner . to_string"),
-            "pubkey should use .to_string(), got: {}", output);
+        assert!(
+            output.contains("pre . owner . to_string"),
+            "pubkey should use .to_string(), got: {}",
+            output
+        );
     }
 
     #[test]
     fn test_byte_array_uses_slice_comparison() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("hash", IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16))),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field(
+                "hash",
+                IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(16)),
+            )],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Byte arrays compare with [..] == [..]
-        assert!(output.contains("pre . hash [..] == post . hash [..]"),
-            "byte array should use slice comparison, got: {}", output);
+        assert!(
+            output.contains("pre . hash [..] == post . hash [..]"),
+            "byte array should use slice comparison, got: {}",
+            output
+        );
     }
 
     #[test]
     fn test_defined_uses_unsafe_ptr_cast() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("config", IdlType::Defined { name: "C".into(), generics: vec![] }),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field(
+                "config",
+                IdlType::Defined {
+                    name: "C".into(),
+                    generics: vec![],
+                },
+            )],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Defined types use unsafe raw pointer cast for byte comparison
-        assert!(output.contains("from_raw_parts"),
-            "defined should use from_raw_parts, got: {}", output);
-        assert!(output.contains("as * const _ as * const u8"),
-            "defined should cast to *const u8, got: {}", output);
+        assert!(
+            output.contains("from_raw_parts"),
+            "defined should use from_raw_parts, got: {}",
+            output
+        );
+        assert!(
+            output.contains("as * const _ as * const u8"),
+            "defined should cast to *const u8, got: {}",
+            output
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -939,42 +1319,75 @@ mod tests {
 
     #[test]
     fn test_deltas_push_has_field_name() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("balance", IdlType::U64),
-            field("mint", IdlType::Pubkey),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![
+                field("balance", IdlType::U64),
+                field("mint", IdlType::Pubkey),
+            ],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Each field produces a FieldDelta push with the field name
-        assert!(output.contains("\"balance\" . to_string ()"), "should push field name 'balance'");
-        assert!(output.contains("\"mint\" . to_string ()"), "should push field name 'mint'");
+        assert!(
+            output.contains("\"balance\" . to_string ()"),
+            "should push field name 'balance'"
+        );
+        assert!(
+            output.contains("\"mint\" . to_string ()"),
+            "should push field name 'mint'"
+        );
         // old_value and new_value should be present
-        assert!(output.contains("old_value"), "should have old_value in FieldDelta");
-        assert!(output.contains("new_value"), "should have new_value in FieldDelta");
+        assert!(
+            output.contains("old_value"),
+            "should have old_value in FieldDelta"
+        );
+        assert!(
+            output.contains("new_value"),
+            "should have new_value in FieldDelta"
+        );
     }
 
     #[test]
     fn test_diff_closure_signature() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("x", IdlType::U64),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("x", IdlType::U64)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Diff closure takes (pre_data: &[u8], post_data: &[u8])
-        assert!(output.contains("pre_data : & [u8]"), "diff closure should take pre_data: &[u8]");
-        assert!(output.contains("post_data : & [u8]"), "diff closure should take post_data: &[u8]");
+        assert!(
+            output.contains("pre_data : & [u8]"),
+            "diff closure should take pre_data: &[u8]"
+        );
+        assert!(
+            output.contains("post_data : & [u8]"),
+            "diff closure should take post_data: &[u8]"
+        );
         // Returns vec of deltas
-        assert!(output.contains("let mut deltas = vec ! []"), "should initialize deltas vec");
+        assert!(
+            output.contains("let mut deltas = vec ! []"),
+            "should initialize deltas vec"
+        );
     }
 
     #[test]
     fn test_data_length_guard() {
-        let (acc, ty) = zc_account("A", vec![1,2,3,4,5,6,7,8], vec![
-            field("x", IdlType::U64),
-        ]);
+        let (acc, ty) = zc_account(
+            "A",
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            vec![field("x", IdlType::U64)],
+        );
         let output = generate(&make_idl(vec![acc], vec![ty])).to_string();
         // Should check data length before casting
-        assert!(output.contains("pre_data . len () < disc_len + size"),
-            "should guard against undersized pre_data");
-        assert!(output.contains("post_data . len () < disc_len + size"),
-            "should guard against undersized post_data");
+        assert!(
+            output.contains("pre_data . len () < disc_len + size"),
+            "should guard against undersized pre_data"
+        );
+        assert!(
+            output.contains("post_data . len () < disc_len + size"),
+            "should guard against undersized post_data"
+        );
     }
 }

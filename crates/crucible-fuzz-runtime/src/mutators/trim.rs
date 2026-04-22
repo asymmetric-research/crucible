@@ -1,10 +1,10 @@
-use std::marker::PhantomData;
 use libafl::corpus::{Corpus, HasCurrentCorpusId};
 use libafl::inputs::BytesInput;
+use libafl::stages::{Restartable, Stage};
 use libafl::state::HasCorpus;
-use libafl::stages::{Stage, Restartable};
-use libafl::HasMetadata;
 use libafl::Error;
+use libafl::HasMetadata;
+use std::marker::PhantomData;
 
 use crate::action::FuzzAction;
 use crate::input::FuzzInput;

@@ -28,7 +28,9 @@ impl InstructionBuilder<'_> {
     pub fn send(self) -> Result<TxOutcome> {
         let ixs = std::slice::from_ref(&self.instruction);
 
-        let fee_payer_pubkey = self.fee_payer.as_ref()
+        let fee_payer_pubkey = self
+            .fee_payer
+            .as_ref()
             .map(|kp| kp.pubkey())
             .or_else(|| self.signers.first().map(|kp| kp.pubkey()))
             .unwrap_or_default();
@@ -39,7 +41,8 @@ impl InstructionBuilder<'_> {
                 all_signers.insert(0, fp.insecure_clone());
             }
         }
-        let fee_payer = all_signers.first()
+        let fee_payer = all_signers
+            .first()
             .context("At least one signer required")?
             .insecure_clone();
 

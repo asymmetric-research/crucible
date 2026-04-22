@@ -77,9 +77,18 @@ mod tests {
             },
         ]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("\"initialize\""), "should have instruction name");
-        assert!(output.contains("\"transfer\""), "should have instruction name");
-        assert!(output.contains("register_instruction_discriminators"), "should register");
+        assert!(
+            output.contains("\"initialize\""),
+            "should have instruction name"
+        );
+        assert!(
+            output.contains("\"transfer\""),
+            "should have instruction name"
+        );
+        assert!(
+            output.contains("register_instruction_discriminators"),
+            "should register"
+        );
     }
 
     #[test]
@@ -102,7 +111,10 @@ mod tests {
     fn test_empty_instructions() {
         let idl = make_idl(vec![]);
         let output = generate(&idl).to_string();
-        assert!(output.contains("register_discriminators"), "should still generate function");
+        assert!(
+            output.contains("register_discriminators"),
+            "should still generate function"
+        );
     }
 
     #[test]
@@ -123,16 +135,21 @@ mod tests {
         // Every byte must appear as `Xu8` in the output
         for byte in &disc {
             let byte_str = format!("{}u8", byte);
-            assert!(output.contains(&byte_str),
-                "discriminator byte {} missing from output: {}", byte_str, output);
+            assert!(
+                output.contains(&byte_str),
+                "discriminator byte {} missing from output: {}",
+                byte_str,
+                output
+            );
         }
 
         // Verify they appear in order by finding positions
         let mut last_pos = 0;
         for byte in &disc {
             let byte_str = format!("{}u8", byte);
-            let pos = output[last_pos..].find(&byte_str)
-                .unwrap_or_else(|| panic!("byte {} not found after position {}", byte_str, last_pos));
+            let pos = output[last_pos..].find(&byte_str).unwrap_or_else(|| {
+                panic!("byte {} not found after position {}", byte_str, last_pos)
+            });
             last_pos += pos + byte_str.len();
         }
     }
@@ -152,8 +169,11 @@ mod tests {
 
         for byte in &disc {
             let byte_str = format!("{}u8", byte);
-            assert!(output.contains(&byte_str),
-                "4-byte discriminator byte {} missing from output", byte_str);
+            assert!(
+                output.contains(&byte_str),
+                "4-byte discriminator byte {} missing from output",
+                byte_str
+            );
         }
     }
 
@@ -188,14 +208,23 @@ mod tests {
         let output = generate(&idl).to_string();
 
         // All instruction names should appear as string literals in the registration array
-        assert!(output.contains("\"initialize\""), "should have initialize entry");
+        assert!(
+            output.contains("\"initialize\""),
+            "should have initialize entry"
+        );
         assert!(output.contains("\"deposit\""), "should have deposit entry");
-        assert!(output.contains("\"withdraw\""), "should have withdraw entry");
+        assert!(
+            output.contains("\"withdraw\""),
+            "should have withdraw entry"
+        );
 
         // Count tuples in the registration array — each instruction produces a (name, vec![...]) entry
         // The pattern `("name"` appears once per instruction
         let entry_count = output.matches("(\"").count();
-        assert_eq!(entry_count, 3,
-            "should have 3 registration entries, got {}", entry_count);
+        assert_eq!(
+            entry_count, 3,
+            "should have 3 registration entries, got {}",
+            entry_count
+        );
     }
 }

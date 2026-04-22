@@ -46,7 +46,10 @@ pub fn parse_exec_sec(output: &str) -> Option<f64> {
     if let Some(pos) = output.find("exec/sec:") {
         let after = &output[pos + 9..];
         if let Some(num_str) = after.split_whitespace().next() {
-            if let Ok(val) = num_str.trim_matches(|c: char| !c.is_ascii_digit() && c != '.').parse() {
+            if let Ok(val) = num_str
+                .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                .parse()
+            {
                 return Some(val);
             }
         }
@@ -76,11 +79,9 @@ pub fn marginfi_example_path() -> PathBuf {
         .join("examples/marginfi-v2-fuzz")
 }
 
-
 /// Get the test-program path for performance tests
 pub fn test_program_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("test-program")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-program")
 }
 
 /// Create a temporary directory with a basic fuzz harness structure
@@ -131,14 +132,12 @@ where
 
 /// Get the test-program fuzz harness path
 pub fn test_program_fuzz_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("test-program/fuzz/test-program-fuzz")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-program/fuzz/test-program-fuzz")
 }
 
 /// Check if the test-program fuzz binary is built
 pub fn test_program_fuzz_binary_exists() -> bool {
-    let binary = test_program_fuzz_path()
-        .join("target/release/invariant_test");
+    let binary = test_program_fuzz_path().join("target/release/invariant_test");
     binary.exists()
 }
 
@@ -200,18 +199,33 @@ pub fn run_test_program_fuzz_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => {
                 // Process finished
-                let stdout = child.stdout.take()
-                    .map(|mut o| { let mut s = String::new(); o.read_to_string(&mut s).ok(); s })
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut o| {
+                        let mut s = String::new();
+                        o.read_to_string(&mut s).ok();
+                        s
+                    })
                     .unwrap_or_default();
-                let stderr = child.stderr.take()
-                    .map(|mut o| { let mut s = String::new(); o.read_to_string(&mut s).ok(); s })
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut o| {
+                        let mut s = String::new();
+                        o.read_to_string(&mut s).ok();
+                        s
+                    })
                     .unwrap_or_default();
                 return (stdout, stderr, status.success());
             }
             Ok(None) => {
                 // Still running
                 if start.elapsed() > timeout {
-                    eprintln!("[TEST] Hard timeout reached ({}s), killing process", hard_timeout_secs);
+                    eprintln!(
+                        "[TEST] Hard timeout reached ({}s), killing process",
+                        hard_timeout_secs
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     // Also try to kill any zombie workers (multicore leaves child processes)
@@ -244,9 +258,9 @@ pub fn count_corpus_files(dir: &Path) -> usize {
                         return false;
                     }
                     let name = e.file_name().to_string_lossy().to_string();
-                    !name.starts_with('.') &&
-                    !name.ends_with(".metadata") &&
-                    !name.ends_with(".meta.json")
+                    !name.starts_with('.')
+                        && !name.ends_with(".metadata")
+                        && !name.ends_with(".meta.json")
                 })
                 .count()
         })
@@ -321,8 +335,12 @@ pub fn parse_all_exec_sec(output: &str) -> Vec<f64> {
         if line.contains("exec/sec") {
             // Try to extract the number before or after "exec/sec"
             for word in line.split_whitespace() {
-                if let Ok(val) = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.').parse::<f64>() {
-                    if val > 0.0 && val < 100000.0 {  // Sanity check
+                if let Ok(val) = word
+                    .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                    .parse::<f64>()
+                {
+                    if val > 0.0 && val < 100000.0 {
+                        // Sanity check
                         results.push(val);
                         break;
                     }
@@ -357,7 +375,10 @@ pub fn parse_total_executions(output: &str) -> Option<u64> {
     for line in output.lines() {
         if line.to_lowercase().contains("total") && line.contains("exec") {
             for word in line.split_whitespace() {
-                if let Ok(val) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+                if let Ok(val) = word
+                    .trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u64>()
+                {
                     if val > 0 {
                         return Some(val);
                     }
@@ -371,10 +392,10 @@ pub fn parse_total_executions(output: &str) -> Option<u64> {
 /// Check if crash was detected in output
 pub fn crash_detected(output: &str) -> bool {
     let lower = output.to_lowercase();
-    lower.contains("crash") ||
-    lower.contains("violation") ||
-    lower.contains("invariant") && lower.contains("failed") ||
-    lower.contains("assertion") && lower.contains("failed")
+    lower.contains("crash")
+        || lower.contains("violation")
+        || lower.contains("invariant") && lower.contains("failed")
+        || lower.contains("assertion") && lower.contains("failed")
 }
 
 /// Count crash files in a directory

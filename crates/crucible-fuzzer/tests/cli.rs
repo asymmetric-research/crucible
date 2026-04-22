@@ -2375,6 +2375,31 @@ fn test_run_crashes_out_custom_path() {
 }
 
 #[test]
+fn test_run_meta_out_custom_path() {
+    ensure_cli_built();
+    let temp = TempDir::new().unwrap();
+    create_stub_fuzz_dir(temp.path(), "test_prog", &["test_feature"]);
+
+    let output = run_crucible_in(
+        temp.path(),
+        &[
+            "run",
+            "test_prog",
+            "test_feature",
+            "--crashes-meta-out",
+            "./my_meta",
+            "--dry-run",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Meta directory:") && stdout.contains("my_meta"),
+        "expected custom meta path in output, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_run_max_actions_custom() {
     ensure_cli_built();
     let temp = TempDir::new().unwrap();

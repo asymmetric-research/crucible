@@ -27,8 +27,7 @@ fn read_macro_src(filename: &str) -> String {
     let path = project_root()
         .join("crates/crucible-fuzz-macro/src")
         .join(filename);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
 }
 
 // =============================================================================
@@ -266,7 +265,8 @@ fn test_no_tracing_switch_handles_all_contexts() {
 /// Extract the body of a function by finding its signature and counting braces.
 /// Returns a rough substring from the function start to its closing brace.
 fn extract_fn_body(src: &str, fn_sig: &str) -> String {
-    let start = src.find(fn_sig)
+    let start = src
+        .find(fn_sig)
         .unwrap_or_else(|| panic!("function not found: {}", fn_sig));
 
     let rest = &src[start..];

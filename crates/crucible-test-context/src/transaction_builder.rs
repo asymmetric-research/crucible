@@ -4,12 +4,12 @@ use solana_keypair::Keypair;
 
 pub struct TransactionBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,
-    pub(crate) instructions: Vec<Instruction>,  
+    pub(crate) instructions: Vec<Instruction>,
     pub(crate) signers: Vec<Keypair>,
 }
 
 impl TransactionBuilder<'_> {
-    pub fn add_instruction<F>(mut self, builder: F) -> Self 
+    pub fn add_instruction<F>(mut self, builder: F) -> Self
     where
         F: FnOnce() -> Instruction,
     {

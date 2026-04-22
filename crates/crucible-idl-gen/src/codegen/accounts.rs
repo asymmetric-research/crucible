@@ -395,16 +395,22 @@ mod tests {
         let output = generate(&idl).to_string();
 
         // Should generate Option<Pubkey> field for optional account
-        assert!(output.contains("Option < Pubkey >"),
-            "optional account should generate Option<Pubkey> field");
+        assert!(
+            output.contains("Option < Pubkey >"),
+            "optional account should generate Option<Pubkey> field"
+        );
 
         // Should generate conditional if-let push in to_account_metas
-        assert!(output.contains("if let Some"),
-            "optional account should generate conditional account push");
+        assert!(
+            output.contains("if let Some"),
+            "optional account should generate conditional account push"
+        );
 
         // Non-optional accounts should be plain Pubkey
-        assert!(output.contains("pub stake : Pubkey"),
-            "non-optional account should be plain Pubkey");
+        assert!(
+            output.contains("pub stake : Pubkey"),
+            "non-optional account should be plain Pubkey"
+        );
     }
 
     #[test]
@@ -415,10 +421,7 @@ mod tests {
                 name: "Initialize".to_string(),
                 docs: vec![],
                 discriminator: vec![],
-                accounts: vec![
-                    make_account("stake"),
-                    make_fixed_account("rent", rent_addr),
-                ],
+                accounts: vec![make_account("stake"), make_fixed_account("rent", rent_addr)],
                 args: vec![],
                 returns: None,
             },
@@ -426,10 +429,7 @@ mod tests {
                 name: "Authorize".to_string(),
                 docs: vec![],
                 discriminator: vec![],
-                accounts: vec![
-                    make_account("stake"),
-                    make_fixed_account("rent", rent_addr),
-                ],
+                accounts: vec![make_account("stake"), make_fixed_account("rent", rent_addr)],
                 args: vec![],
                 returns: None,
             },
@@ -438,11 +438,17 @@ mod tests {
         let output = generate(&idl).to_string();
 
         // Should have addresses module
-        assert!(output.contains("mod addresses"), "should have addresses module");
+        assert!(
+            output.contains("mod addresses"),
+            "should have addresses module"
+        );
         // Should have exactly one RENT constant (dedup'd across instructions)
         let rent_const_count = output.matches("pub static RENT").count();
-        assert_eq!(rent_const_count, 1,
-            "same address across instructions should produce one constant, got {}", rent_const_count);
+        assert_eq!(
+            rent_const_count, 1,
+            "same address across instructions should produce one constant, got {}",
+            rent_const_count
+        );
     }
 
     #[test]
@@ -451,12 +457,10 @@ mod tests {
             name: "SpecialOp".to_string(),
             docs: vec![],
             discriminator: vec![],
-            accounts: vec![
-                make_writable_signer_fixed_account(
-                    "specialSysvar",
-                    "SysvarRent111111111111111111111111111111111",
-                ),
-            ],
+            accounts: vec![make_writable_signer_fixed_account(
+                "specialSysvar",
+                "SysvarRent111111111111111111111111111111111",
+            )],
             args: vec![],
             returns: None,
         }]);
@@ -464,10 +468,14 @@ mod tests {
         let output = generate(&idl).to_string();
 
         // Fixed-address account should have is_writable: true and is_signer: true preserved
-        assert!(output.contains("is_signer : true"),
-            "signer flag should be preserved for fixed-address account");
-        assert!(output.contains("is_writable : true"),
-            "writable flag should be preserved for fixed-address account");
+        assert!(
+            output.contains("is_signer : true"),
+            "signer flag should be preserved for fixed-address account"
+        );
+        assert!(
+            output.contains("is_writable : true"),
+            "writable flag should be preserved for fixed-address account"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -490,10 +498,16 @@ mod tests {
 
         let output = generate(&idl).to_string();
         // Should fall back to runtime parse instead of compile-time byte array
-        assert!(output.contains("parse"),
-            "invalid base58 should fall back to runtime parse, got: {}", output);
+        assert!(
+            output.contains("parse"),
+            "invalid base58 should fall back to runtime parse, got: {}",
+            output
+        );
         // User account should still be generated normally
-        assert!(output.contains("pub user : Pubkey"), "user field should still exist");
+        assert!(
+            output.contains("pub user : Pubkey"),
+            "user field should still exist"
+        );
     }
 
     #[test]
@@ -504,16 +518,17 @@ mod tests {
             name: "ShortAddr".to_string(),
             docs: vec![],
             discriminator: vec![],
-            accounts: vec![
-                make_fixed_account("tooShort", "1"),
-            ],
+            accounts: vec![make_fixed_account("tooShort", "1")],
             args: vec![],
             returns: None,
         }]);
 
         let output = generate(&idl).to_string();
-        assert!(output.contains("parse"),
-            "wrong-length base58 should fall back to runtime parse, got: {}", output);
+        assert!(
+            output.contains("parse"),
+            "wrong-length base58 should fall back to runtime parse, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -524,10 +539,7 @@ mod tests {
             discriminator: vec![],
             accounts: vec![
                 make_account("stake"),
-                make_fixed_account(
-                    "rentSysvar",
-                    "SysvarRent111111111111111111111111111111111",
-                ),
+                make_fixed_account("rentSysvar", "SysvarRent111111111111111111111111111111111"),
             ],
             args: vec![],
             returns: None,
@@ -582,7 +594,8 @@ mod tests {
                     }
                 }
                 let after = &search[abs_pos + self_marker.len()..];
-                let name: String = after.chars()
+                let name: String = after
+                    .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
                 if !name.is_empty() {
@@ -617,8 +630,11 @@ mod tests {
         let generated = generate(&idl).to_string();
         let order = extract_account_order(&generated);
 
-        assert_eq!(order, vec!["source", "destination", "authority"],
-            "accounts should be in IDL order: source, destination, authority");
+        assert_eq!(
+            order,
+            vec!["source", "destination", "authority"],
+            "accounts should be in IDL order: source, destination, authority"
+        );
     }
 
     #[test]
@@ -641,8 +657,12 @@ mod tests {
         let order = extract_account_order(&generated);
 
         // stake (user), rent (fixed), stakeHistory (user)
-        assert_eq!(order.len(), 3,
-            "should have 3 accounts in to_account_metas, got {:?}", order);
+        assert_eq!(
+            order.len(),
+            3,
+            "should have 3 accounts in to_account_metas, got {:?}",
+            order
+        );
         assert_eq!(order[0], "stake", "first should be stake");
         assert_eq!(order[1], "__fixed__", "second should be fixed-address rent");
         assert_eq!(order[2], "stake_history", "third should be stakeHistory");
@@ -667,21 +687,30 @@ mod tests {
 
         // Find the to_account_metas function and verify the order of pushes
         // stake should come before authority which comes before newAuthority (optional)
-        let stake_pos = generated.find("pubkey : self . stake")
+        let stake_pos = generated
+            .find("pubkey : self . stake")
             .expect("should have stake");
-        let authority_pos = generated.find("pubkey : self . authority")
+        let authority_pos = generated
+            .find("pubkey : self . authority")
             .expect("should have authority");
         // Optional accounts use `if let Some(key)` → `pubkey : * key`
-        let optional_pos = generated.find("if let Some (key)")
+        let optional_pos = generated
+            .find("if let Some (key)")
             .or_else(|| generated.find("if let Some(key)"))
             .expect("should have optional if-let for newAuthority");
 
-        assert!(stake_pos < authority_pos,
+        assert!(
+            stake_pos < authority_pos,
             "stake ({}) should appear before authority ({}) in to_account_metas",
-            stake_pos, authority_pos);
-        assert!(authority_pos < optional_pos,
+            stake_pos,
+            authority_pos
+        );
+        assert!(
+            authority_pos < optional_pos,
             "authority ({}) should appear before optional newAuthority ({}) in to_account_metas",
-            authority_pos, optional_pos);
+            authority_pos,
+            optional_pos
+        );
     }
 
     #[test]
@@ -705,8 +734,11 @@ mod tests {
         let generated = generate(&idl).to_string();
         let order = extract_account_order(&generated);
 
-        assert_eq!(order, vec!["payer", "vault", "mint", "token_program", "system_program"],
-            "5 accounts should maintain exact IDL order");
+        assert_eq!(
+            order,
+            vec!["payer", "vault", "mint", "token_program", "system_program"],
+            "5 accounts should maintain exact IDL order"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -763,26 +795,52 @@ mod tests {
         // authority: writable=false, signer=true
 
         // Extract the to_account_metas body to inspect individual account pushes
-        let meta_fn_start = generated.find("fn to_account_metas").expect("should have to_account_metas");
+        let meta_fn_start = generated
+            .find("fn to_account_metas")
+            .expect("should have to_account_metas");
         let meta_body = &generated[meta_fn_start..];
 
         // Find the three account_metas.push blocks in order
-        let pushes: Vec<&str> = meta_body.split("account_metas . push")
+        let pushes: Vec<&str> = meta_body
+            .split("account_metas . push")
             .skip(1) // first part is before any push
             .collect();
 
-        assert_eq!(pushes.len(), 3, "should have 3 account pushes, got {}", pushes.len());
+        assert_eq!(
+            pushes.len(),
+            3,
+            "should have 3 account pushes, got {}",
+            pushes.len()
+        );
 
         // source: writable, not signer
-        assert!(pushes[0].contains("is_writable : true"), "source should be writable");
-        assert!(pushes[0].contains("is_signer : false"), "source should not be signer");
+        assert!(
+            pushes[0].contains("is_writable : true"),
+            "source should be writable"
+        );
+        assert!(
+            pushes[0].contains("is_signer : false"),
+            "source should not be signer"
+        );
 
         // destination: writable, not signer
-        assert!(pushes[1].contains("is_writable : true"), "destination should be writable");
-        assert!(pushes[1].contains("is_signer : false"), "destination should not be signer");
+        assert!(
+            pushes[1].contains("is_writable : true"),
+            "destination should be writable"
+        );
+        assert!(
+            pushes[1].contains("is_signer : false"),
+            "destination should not be signer"
+        );
 
         // authority: not writable, signer
-        assert!(pushes[2].contains("is_writable : false"), "authority should not be writable");
-        assert!(pushes[2].contains("is_signer : true"), "authority should be signer");
+        assert!(
+            pushes[2].contains("is_writable : false"),
+            "authority should not be writable"
+        );
+        assert!(
+            pushes[2].contains("is_signer : true"),
+            "authority should be signer"
+        );
     }
 }

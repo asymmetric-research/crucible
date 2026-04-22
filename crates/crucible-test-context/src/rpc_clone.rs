@@ -1,12 +1,12 @@
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::rpc_client::RpcClient;
 use solana_rpc_client_api::filter::RpcFilterType;
-use serde::{Serialize, Deserialize};
 
 use crate::TestContext;
 
@@ -50,7 +50,10 @@ impl CachedAccountMeta {
         Ok(Account {
             lamports: self.lamports,
             data,
-            owner: self.owner.parse().context("invalid owner pubkey in cache")?,
+            owner: self
+                .owner
+                .parse()
+                .context("invalid owner pubkey in cache")?,
             executable: self.executable,
             rent_epoch: self.rent_epoch,
         })
@@ -138,7 +141,9 @@ impl<'a> AccountCloner<'a> {
         // Batch-fetch uncached accounts
         for chunk in to_fetch.chunks(BATCH_CHUNK_SIZE) {
             let keys: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
-            let fetched = self.rpc.get_multiple_accounts(&keys)
+            let fetched = self
+                .rpc
+                .get_multiple_accounts(&keys)
                 .context("RPC getMultipleAccounts failed")?;
 
             for ((idx, pk), maybe_account) in chunk.iter().zip(fetched.into_iter()) {
@@ -151,7 +156,8 @@ impl<'a> AccountCloner<'a> {
 
         // Load all into SVM
         for (i, pk) in pubkeys.iter().enumerate() {
-            let account = accounts[i].take()
+            let account = accounts[i]
+                .take()
                 .ok_or_else(|| anyhow::anyhow!("Account {} missing after fetch", pk))?;
             self.load_account(pk, &account)?;
         }
@@ -187,7 +193,8 @@ impl<'a> AccountCloner<'a> {
         };
 
         #[allow(deprecated)] // new API returns UI types, we need Account
-        let keyed_accounts = self.rpc
+        let keyed_accounts = self
+            .rpc
             .get_program_accounts_with_config(program_id, config)
             .context("RPC getProgramAccounts failed")?;
 
@@ -235,8 +242,9 @@ impl<'a> AccountCloner<'a> {
     /// Remove all cached accounts.
     pub fn clear_cache(&self) -> Result<()> {
         if self.cache_dir.exists() {
-            fs::remove_dir_all(&self.cache_dir)
-                .with_context(|| format!("failed to clear cache at {}", self.cache_dir.display()))?;
+            fs::remove_dir_all(&self.cache_dir).with_context(|| {
+                format!("failed to clear cache at {}", self.cache_dir.display())
+            })?;
         }
         Ok(())
     }
@@ -298,7 +306,9 @@ impl<'a> AccountCloner<'a> {
             }
         }
 
-        let account = self.rpc.get_account(pubkey)
+        let account = self
+            .rpc
+            .get_account(pubkey)
             .with_context(|| format!("RPC getAccount failed for {}", pubkey))?;
         self.write_cache(pubkey, &account)?;
         Ok(account)
@@ -395,8 +405,7 @@ mod tests {
     /// Helper: build an AccountCloner pointing at a temp cache dir.
     /// RPC URL is bogus — only use for cache/invalidate/clear_cache tests.
     fn make_cloner<'a>(ctx: &'a mut TestContext, cache_dir: &Path) -> AccountCloner<'a> {
-        AccountCloner::new(ctx, "http://localhost:0")
-            .cache_dir(cache_dir)
+        AccountCloner::new(ctx, "http://localhost:0").cache_dir(cache_dir)
     }
 
     // ====================================================================

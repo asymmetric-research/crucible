@@ -69,7 +69,10 @@ pub fn lookup_type_name(data: &[u8]) -> Option<&str> {
 
 /// Check whether any schemas have been registered.
 pub fn has_schemas() -> bool {
-    SCHEMA_REGISTRY.get().map(|r| !r.is_empty()).unwrap_or(false)
+    SCHEMA_REGISTRY
+        .get()
+        .map(|r| !r.is_empty())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

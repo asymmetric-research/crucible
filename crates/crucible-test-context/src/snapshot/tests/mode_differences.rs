@@ -196,12 +196,8 @@ fn test_both_modes_produce_same_state_after_same_modifications() {
     // Apply same modifications to both
     let mod1 = make_account(999, &[0xAA; 8]);
     let mod2 = make_account(888, &[0xBB; 8]);
-    svm_stateless
-        .set_account(pk1, mod1.clone())
-        .unwrap();
-    svm_stateless
-        .set_account(pk2, mod2.clone())
-        .unwrap();
+    svm_stateless.set_account(pk1, mod1.clone()).unwrap();
+    svm_stateless.set_account(pk2, mod2.clone()).unwrap();
     svm_stateful.set_account(pk1, mod1).unwrap();
     svm_stateful.set_account(pk2, mod2).unwrap();
 
@@ -290,7 +286,9 @@ fn test_stateless_3_iteration_cycle_no_leakage() {
 
     let verify_initial = |svm: &LiteSVM, label: &str| {
         for (pk, acct) in &init {
-            let got = svm.get_account(pk).unwrap_or_else(|| panic!("{}: missing {:?}", label, pk));
+            let got = svm
+                .get_account(pk)
+                .unwrap_or_else(|| panic!("{}: missing {:?}", label, pk));
             assert_eq!(got.lamports, acct.lamports, "{}: {:?} lamports", label, pk);
             assert_eq!(got.data, acct.data, "{}: {:?} data", label, pk);
         }
@@ -298,8 +296,10 @@ fn test_stateless_3_iteration_cycle_no_leakage() {
 
     // Iteration 1: modify A, B
     dirty.clear();
-    svm.set_account(pk_a, make_account(9999, &[0xFF; 4])).unwrap();
-    svm.set_account(pk_b, make_account(8888, &[0xFE; 4])).unwrap();
+    svm.set_account(pk_a, make_account(9999, &[0xFF; 4]))
+        .unwrap();
+    svm.set_account(pk_b, make_account(8888, &[0xFE; 4]))
+        .unwrap();
     dirty.mark_account_dirty(&pk_a);
     dirty.mark_account_dirty(&pk_b);
     snap.restore(&mut svm, &dirty);
@@ -308,9 +308,12 @@ fn test_stateless_3_iteration_cycle_no_leakage() {
     // Iteration 2: modify C, D + create new account
     dirty.clear();
     let pk_new = Pubkey::new_unique();
-    svm.set_account(pk_c, make_account(7777, &[0xFD; 4])).unwrap();
-    svm.set_account(pk_d, make_account(6666, &[0xFC; 4])).unwrap();
-    svm.set_account(pk_new, make_account(5555, &[0xFB; 4])).unwrap();
+    svm.set_account(pk_c, make_account(7777, &[0xFD; 4]))
+        .unwrap();
+    svm.set_account(pk_d, make_account(6666, &[0xFC; 4]))
+        .unwrap();
+    svm.set_account(pk_new, make_account(5555, &[0xFB; 4]))
+        .unwrap();
     dirty.mark_account_dirty(&pk_c);
     dirty.mark_account_dirty(&pk_d);
     dirty.mark_account_dirty(&pk_new);
@@ -325,8 +328,10 @@ fn test_stateless_3_iteration_cycle_no_leakage() {
 
     // Iteration 3: modify A, C
     dirty.clear();
-    svm.set_account(pk_a, make_account(4444, &[0xFA; 4])).unwrap();
-    svm.set_account(pk_c, make_account(3333, &[0xF9; 4])).unwrap();
+    svm.set_account(pk_a, make_account(4444, &[0xFA; 4]))
+        .unwrap();
+    svm.set_account(pk_c, make_account(3333, &[0xF9; 4]))
+        .unwrap();
     dirty.mark_account_dirty(&pk_a);
     dirty.mark_account_dirty(&pk_c);
     snap.restore(&mut svm, &dirty);
@@ -387,9 +392,21 @@ fn test_stateful_3_iteration_cycle_state_switching() {
         prev_delta,
         &prev_exec_dirty,
     );
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000, "iter1: pk1 should be delta_A");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "iter1: pk2 should be initial");
-    assert_eq!(svm.get_account(&pk3).unwrap().lamports, 300, "iter1: pk3 should be initial");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        1000,
+        "iter1: pk1 should be delta_A"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        200,
+        "iter1: pk2 should be initial"
+    );
+    assert_eq!(
+        svm.get_account(&pk3).unwrap().lamports,
+        300,
+        "iter1: pk3 should be initial"
+    );
 
     divergent_keys.clear();
     divergent_keys.extend(delta_a.accounts.keys().copied());
@@ -404,9 +421,21 @@ fn test_stateful_3_iteration_cycle_state_switching() {
         prev_delta,
         &prev_exec_dirty,
     );
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "iter2: pk1 should be initial");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 2000, "iter2: pk2 should be delta_B");
-    assert_eq!(svm.get_account(&pk3).unwrap().lamports, 3000, "iter2: pk3 should be delta_B");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        100,
+        "iter2: pk1 should be initial"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        2000,
+        "iter2: pk2 should be delta_B"
+    );
+    assert_eq!(
+        svm.get_account(&pk3).unwrap().lamports,
+        3000,
+        "iter2: pk3 should be delta_B"
+    );
 
     divergent_keys.clear();
     divergent_keys.extend(delta_b.accounts.keys().copied());
@@ -421,9 +450,21 @@ fn test_stateful_3_iteration_cycle_state_switching() {
         prev_delta,
         &prev_exec_dirty,
     );
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000, "iter3: pk1 should be delta_A");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "iter3: pk2 should be initial");
-    assert_eq!(svm.get_account(&pk3).unwrap().lamports, 300, "iter3: pk3 should be initial");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        1000,
+        "iter3: pk1 should be delta_A"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        200,
+        "iter3: pk2 should be initial"
+    );
+    assert_eq!(
+        svm.get_account(&pk3).unwrap().lamports,
+        300,
+        "iter3: pk3 should be initial"
+    );
 }
 
 #[test]
@@ -471,7 +512,8 @@ fn test_stateful_iteration_with_failed_action_clears_prev_delta() {
         &prev_exec_dirty,
     );
     // Simulate execution that modifies pk1
-    svm.set_account(pk1, make_account(1111, &[0xEE; 8])).unwrap();
+    svm.set_account(pk1, make_account(1111, &[0xEE; 8]))
+        .unwrap();
     divergent_keys.clear();
     divergent_keys.extend(delta_a.accounts.keys());
     divergent_keys.insert(pk1); // dirty from execution
@@ -489,7 +531,8 @@ fn test_stateful_iteration_with_failed_action_clears_prev_delta() {
         &prev_exec_dirty,
     );
     // Simulate failed execution (still modifies accounts though)
-    svm.set_account(pk2, make_account(2222, &[0xDD; 8])).unwrap();
+    svm.set_account(pk2, make_account(2222, &[0xDD; 8]))
+        .unwrap();
     divergent_keys.clear();
     divergent_keys.extend(delta_a.accounts.keys());
     divergent_keys.insert(pk2);
@@ -508,8 +551,16 @@ fn test_stateful_iteration_with_failed_action_clears_prev_delta() {
     );
 
     // Verify correct state: pk1 at initial, pk2 at delta_B
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "pk1 should be initial");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 2000, "pk2 should be delta_B");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        100,
+        "pk1 should be initial"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        2000,
+        "pk2 should be delta_B"
+    );
 }
 
 #[test]
@@ -543,8 +594,10 @@ fn test_stateful_failed_action_dirty_accounts_in_divergent_keys() {
     initial.restore_selective(&mut svm, &divergent_keys, &delta_empty);
 
     // Failed action partially executes, modifying accounts
-    svm.set_account(pk2, make_account(9999, &[0xFF; 8])).unwrap();
-    svm.set_account(pk3, make_account(8888, &[0xFE; 8])).unwrap();
+    svm.set_account(pk2, make_account(9999, &[0xFF; 8]))
+        .unwrap();
+    svm.set_account(pk3, make_account(8888, &[0xFE; 8]))
+        .unwrap();
 
     // Update divergent_keys to include dirty accounts from failed action
     let mut exec_dirty = FastHashSet::default();
@@ -556,28 +609,58 @@ fn test_stateful_failed_action_dirty_accounts_in_divergent_keys() {
     // they'd remain at the stale values from the failed action.
     initial.restore_selective(&mut svm, &divergent_keys, &delta_target);
 
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000, "pk1 should be delta_target");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "pk2 should be restored to initial");
-    assert_eq!(svm.get_account(&pk3).unwrap().lamports, 300, "pk3 should be restored to initial");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        1000,
+        "pk1 should be delta_target"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        200,
+        "pk2 should be restored to initial"
+    );
+    assert_eq!(
+        svm.get_account(&pk3).unwrap().lamports,
+        300,
+        "pk3 should be restored to initial"
+    );
 
     // Extra: verify that without the dirty accounts in divergent_keys, state leaks.
     // Reset SVM and try without tracking dirty accounts.
     let mut svm_bad = LiteSVM::new();
-    svm_bad.set_account(pk1, make_account(100, &[1; 8])).unwrap();
-    svm_bad.set_account(pk2, make_account(200, &[2; 8])).unwrap();
-    svm_bad.set_account(pk3, make_account(300, &[3; 8])).unwrap();
+    svm_bad
+        .set_account(pk1, make_account(100, &[1; 8]))
+        .unwrap();
+    svm_bad
+        .set_account(pk2, make_account(200, &[2; 8]))
+        .unwrap();
+    svm_bad
+        .set_account(pk3, make_account(300, &[3; 8]))
+        .unwrap();
 
     initial.restore_selective(&mut svm_bad, &FastHashSet::default(), &delta_empty);
-    svm_bad.set_account(pk2, make_account(9999, &[0xFF; 8])).unwrap();
-    svm_bad.set_account(pk3, make_account(8888, &[0xFE; 8])).unwrap();
+    svm_bad
+        .set_account(pk2, make_account(9999, &[0xFF; 8]))
+        .unwrap();
+    svm_bad
+        .set_account(pk3, make_account(8888, &[0xFE; 8]))
+        .unwrap();
 
     // Restore without including dirty accounts in divergent → stale state!
     let no_dirty_divergent: FastHashSet<Pubkey> = FastHashSet::default();
     initial.restore_selective(&mut svm_bad, &no_dirty_divergent, &delta_target);
 
     // pk2 and pk3 should still have stale values (demonstrating the bug)
-    assert_eq!(svm_bad.get_account(&pk2).unwrap().lamports, 9999, "pk2 stale without divergent tracking");
-    assert_eq!(svm_bad.get_account(&pk3).unwrap().lamports, 8888, "pk3 stale without divergent tracking");
+    assert_eq!(
+        svm_bad.get_account(&pk2).unwrap().lamports,
+        9999,
+        "pk2 stale without divergent tracking"
+    );
+    assert_eq!(
+        svm_bad.get_account(&pk3).unwrap().lamports,
+        8888,
+        "pk3 stale without divergent tracking"
+    );
 }
 
 // =========================================================================
@@ -597,7 +680,8 @@ fn test_stateless_dirty_clear_makes_second_restore_noop() {
     let snap = SvmSnapshot::take(&svm, &tracked);
 
     // Modify and restore
-    svm.set_account(pk1, make_account(9999, &[0xFF; 4])).unwrap();
+    svm.set_account(pk1, make_account(9999, &[0xFF; 4]))
+        .unwrap();
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk1);
     let count1 = snap.restore(&mut svm, &dirty);
@@ -632,8 +716,10 @@ fn test_stateful_dirty_not_cleared_feeds_delta_and_divergent() {
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Simulate action: modify pk1 and pk2
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
-    svm.set_account(pk2, make_account(2000, &[0xA2; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
+    svm.set_account(pk2, make_account(2000, &[0xA2; 8]))
+        .unwrap();
 
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk1);
@@ -645,7 +731,11 @@ fn test_stateful_dirty_not_cleared_feeds_delta_and_divergent() {
 
     // (b) take_delta uses the same dirty set
     let delta = SvmSnapshot::take_delta(&svm, &delta_root, &dirty);
-    assert_eq!(delta.account_count(), 2, "delta should have exactly the dirty accounts");
+    assert_eq!(
+        delta.account_count(),
+        2,
+        "delta should have exactly the dirty accounts"
+    );
     assert!(delta.accounts().contains_key(&pk1));
     assert!(delta.accounts().contains_key(&pk2));
     assert!(!delta.accounts().contains_key(&pk3));
@@ -708,15 +798,38 @@ fn test_dirty_tracker_used_for_restore_vs_delta_capture() {
 
     // Stateless use: restore — reset dirty accounts back to initial
     snap_sl.restore(&mut svm_sl, &dirty);
-    assert_eq!(svm_sl.get_account(&pk1).unwrap().lamports, 100, "stateless: pk1 restored");
-    assert_eq!(svm_sl.get_account(&pk2).unwrap().lamports, 200, "stateless: pk2 restored");
-    assert_eq!(svm_sl.get_account(&pk3).unwrap().lamports, 300, "stateless: pk3 unchanged");
+    assert_eq!(
+        svm_sl.get_account(&pk1).unwrap().lamports,
+        100,
+        "stateless: pk1 restored"
+    );
+    assert_eq!(
+        svm_sl.get_account(&pk2).unwrap().lamports,
+        200,
+        "stateless: pk2 restored"
+    );
+    assert_eq!(
+        svm_sl.get_account(&pk3).unwrap().lamports,
+        300,
+        "stateless: pk3 unchanged"
+    );
 
     // Stateful use: take_delta — capture dirty accounts' current values
     let delta = SvmSnapshot::take_delta(&svm_sf, &delta_root, &dirty);
-    assert_eq!(delta.accounts().get(&pk1).unwrap().lamports, 999, "stateful: delta captured pk1");
-    assert_eq!(delta.accounts().get(&pk2).unwrap().lamports, 888, "stateful: delta captured pk2");
-    assert!(!delta.accounts().contains_key(&pk3), "stateful: pk3 not in delta");
+    assert_eq!(
+        delta.accounts().get(&pk1).unwrap().lamports,
+        999,
+        "stateful: delta captured pk1"
+    );
+    assert_eq!(
+        delta.accounts().get(&pk2).unwrap().lamports,
+        888,
+        "stateful: delta captured pk2"
+    );
+    assert!(
+        !delta.accounts().contains_key(&pk3),
+        "stateful: pk3 not in delta"
+    );
 }
 
 // =========================================================================
@@ -733,7 +846,8 @@ fn test_take_delta_only_includes_accounts_in_dirty_set() {
 
     let mut svm = LiteSVM::new();
     for (pk, lamports) in [(pk1, 100), (pk2, 200), (pk3, 300), (pk4, 400), (pk5, 500)] {
-        svm.set_account(pk, make_account(lamports, &[lamports as u8])).unwrap();
+        svm.set_account(pk, make_account(lamports, &[lamports as u8]))
+            .unwrap();
     }
 
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
@@ -754,9 +868,15 @@ fn test_take_delta_only_includes_accounts_in_dirty_set() {
     // Delta should only contain the 3 dirty accounts
     assert_eq!(delta.account_count(), 3);
     assert!(delta.accounts().contains_key(&pk1));
-    assert!(!delta.accounts().contains_key(&pk2), "pk2 should not be in delta");
+    assert!(
+        !delta.accounts().contains_key(&pk2),
+        "pk2 should not be in delta"
+    );
     assert!(delta.accounts().contains_key(&pk3));
-    assert!(!delta.accounts().contains_key(&pk4), "pk4 should not be in delta");
+    assert!(
+        !delta.accounts().contains_key(&pk4),
+        "pk4 should not be in delta"
+    );
     assert!(delta.accounts().contains_key(&pk5));
 
     // Values should match current SVM state
@@ -888,7 +1008,10 @@ fn test_dual_svm_traced_and_fast_same_state_after_restore() {
         let mut map = FastHashMap::default();
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 16])));
         map.insert(pk2, Arc::new(make_account(2000, &[0xA2; 16])));
-        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
+        SvmSnapshot {
+            accounts: map,
+            sysvars: clock_to_sysvars(&clock),
+        }
     };
 
     let delta_next = {
@@ -897,7 +1020,10 @@ fn test_dual_svm_traced_and_fast_same_state_after_restore() {
         map.insert(pk1, delta_prev.accounts.get(&pk1).unwrap().clone());
         // pk3 is new in this delta
         map.insert(pk3, Arc::new(make_account(3000, &[0xB3; 16])));
-        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
+        SvmSnapshot {
+            accounts: map,
+            sysvars: clock_to_sysvars(&clock),
+        }
     };
 
     // Apply delta_prev to both SVMs first
@@ -932,9 +1058,12 @@ fn test_dual_svm_traced_and_fast_same_state_after_restore() {
                 assert_eq!(t.data, f.data, "{:?} data", pk);
             }
             (None, None) => {}
-            _ => panic!("{:?}: traced has={}, fast has={}", pk,
+            _ => panic!(
+                "{:?}: traced has={}, fast has={}",
+                pk,
                 svm_traced.get_account(pk).is_some(),
-                svm_fast.get_account(pk).is_some()),
+                svm_fast.get_account(pk).is_some()
+            ),
         }
     }
 }
@@ -970,17 +1099,28 @@ fn test_dual_svm_separate_divergent_keys() {
     let target_delta = {
         let mut map = FastHashMap::default();
         map.insert(pk1, Arc::new(make_account(1000, &[0xA1; 8])));
-        SvmSnapshot { accounts: map, sysvars: clock_to_sysvars(&clock) }
+        SvmSnapshot {
+            accounts: map,
+            sysvars: clock_to_sysvars(&clock),
+        }
     };
 
     // Traced SVM: execution modifies pk2, pk3
-    svm_traced.set_account(pk2, make_account(9999, &[0xFF; 8])).unwrap();
-    svm_traced.set_account(pk3, make_account(8888, &[0xFE; 8])).unwrap();
+    svm_traced
+        .set_account(pk2, make_account(9999, &[0xFF; 8]))
+        .unwrap();
+    svm_traced
+        .set_account(pk3, make_account(8888, &[0xFE; 8]))
+        .unwrap();
     let traced_divergent: FastHashSet<Pubkey> = [pk2, pk3].into_iter().collect();
 
     // Fast SVM: execution modifies pk3, pk4 (different set!)
-    svm_fast.set_account(pk3, make_account(7777, &[0xFD; 8])).unwrap();
-    svm_fast.set_account(pk4, make_account(6666, &[0xFC; 8])).unwrap();
+    svm_fast
+        .set_account(pk3, make_account(7777, &[0xFD; 8]))
+        .unwrap();
+    svm_fast
+        .set_account(pk4, make_account(6666, &[0xFC; 8]))
+        .unwrap();
     let fast_divergent: FastHashSet<Pubkey> = [pk3, pk4].into_iter().collect();
 
     // Restore both to same target_delta
@@ -996,10 +1136,26 @@ fn test_dual_svm_separate_divergent_keys() {
     }
 
     // Specifically:
-    assert_eq!(svm_traced.get_account(&pk1).unwrap().lamports, 1000, "pk1 from delta");
-    assert_eq!(svm_traced.get_account(&pk2).unwrap().lamports, 200, "pk2 restored to initial");
-    assert_eq!(svm_traced.get_account(&pk3).unwrap().lamports, 300, "pk3 restored to initial");
-    assert_eq!(svm_traced.get_account(&pk4).unwrap().lamports, 400, "pk4 initial (fast restored)");
+    assert_eq!(
+        svm_traced.get_account(&pk1).unwrap().lamports,
+        1000,
+        "pk1 from delta"
+    );
+    assert_eq!(
+        svm_traced.get_account(&pk2).unwrap().lamports,
+        200,
+        "pk2 restored to initial"
+    );
+    assert_eq!(
+        svm_traced.get_account(&pk3).unwrap().lamports,
+        300,
+        "pk3 restored to initial"
+    );
+    assert_eq!(
+        svm_traced.get_account(&pk4).unwrap().lamports,
+        400,
+        "pk4 initial (fast restored)"
+    );
 }
 
 // =========================================================================
@@ -1025,15 +1181,29 @@ fn test_svm_swap_roundtrip_preserves_accounts() {
 
     // svm is now the empty one (might still have system accounts)
     // Our test accounts should not be in the empty SVM
-    assert!(svm.get_account(&pk1).is_none(), "swapped-out SVM should not have pk1");
-    assert!(svm.get_account(&pk2).is_none(), "swapped-out SVM should not have pk2");
+    assert!(
+        svm.get_account(&pk1).is_none(),
+        "swapped-out SVM should not have pk1"
+    );
+    assert!(
+        svm.get_account(&pk2).is_none(),
+        "swapped-out SVM should not have pk2"
+    );
 
     // Swap back
     std::mem::swap(&mut svm, &mut holder);
 
     // svm has accounts again
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "pk1 restored after swap back");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "pk2 restored after swap back");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        100,
+        "pk1 restored after swap back"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        200,
+        "pk2 restored after swap back"
+    );
 }
 
 #[test]
@@ -1089,7 +1259,10 @@ fn test_stateless_crash_dedup_by_input_bytes() {
     let hash_b = hash_bytes(&input_b);
     let hash_c = hash_bytes(&input_c);
 
-    assert_ne!(hash_a, hash_b, "different inputs should produce different hashes");
+    assert_ne!(
+        hash_a, hash_b,
+        "different inputs should produce different hashes"
+    );
     assert_eq!(hash_a, hash_c, "same inputs should produce same hash");
 
     // Different lengths
@@ -1150,7 +1323,11 @@ fn test_stateful_crash_dedup_by_variant_sequence() {
     add_test_state(&mut pool, 4, 3, Some(2), "withdraw", Some(2));
 
     let variants = pool.reconstruct_variant_sequence(3);
-    assert_eq!(variants, vec![0, 1, 2], "variant sequence should be oldest-first");
+    assert_eq!(
+        variants,
+        vec![0, 1, 2],
+        "variant sequence should be oldest-first"
+    );
 
     // A different chain with reversed order
     add_test_state(&mut pool, 10, 1, Some(0), "borrow", Some(1));
@@ -1158,7 +1335,11 @@ fn test_stateful_crash_dedup_by_variant_sequence() {
     add_test_state(&mut pool, 12, 3, Some(5), "withdraw", Some(2));
 
     let variants2 = pool.reconstruct_variant_sequence(6);
-    assert_eq!(variants2, vec![1, 0, 2], "reversed chain should give different sequence");
+    assert_eq!(
+        variants2,
+        vec![1, 0, 2],
+        "reversed chain should give different sequence"
+    );
 
     assert_ne!(
         hash_variant_seq(&variants),
@@ -1285,17 +1466,24 @@ fn test_arc_skip_overridden_by_exec_dirty() {
     assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000);
 
     // Simulate execution modifying pk1 (SVM now has wrong value)
-    svm.set_account(pk1, make_account(9999, &[0xFF; 8])).unwrap();
+    svm.set_account(pk1, make_account(9999, &[0xFF; 8]))
+        .unwrap();
 
     // Now restore from same delta → same delta (delta stays the same)
     // WITHOUT exec_dirty: pk1 has same Arc, would be SKIPPED → wrong state!
     let _divergent: FastHashSet<Pubkey> = [pk1].into_iter().collect();
     let mut svm_no_dirty = LiteSVM::new();
-    svm_no_dirty.set_account(pk1, make_account(100, &[1; 8])).unwrap();
-    svm_no_dirty.set_account(pk2, make_account(200, &[2; 8])).unwrap();
+    svm_no_dirty
+        .set_account(pk1, make_account(100, &[1; 8]))
+        .unwrap();
+    svm_no_dirty
+        .set_account(pk2, make_account(200, &[2; 8]))
+        .unwrap();
     let initial_nd = SvmSnapshot::take_all(&svm_no_dirty);
     initial_nd.restore_selective(&mut svm_no_dirty, &FastHashSet::default(), &delta);
-    svm_no_dirty.set_account(pk1, make_account(9999, &[0xFF; 8])).unwrap();
+    svm_no_dirty
+        .set_account(pk1, make_account(9999, &[0xFF; 8]))
+        .unwrap();
     let divergent_nd: FastHashSet<Pubkey> = [pk1].into_iter().collect();
     initial_nd.restore_selective_from(
         &mut svm_no_dirty,
@@ -1314,13 +1502,7 @@ fn test_arc_skip_overridden_by_exec_dirty() {
     // WITH exec_dirty: pk1 is forced to be written
     let exec_dirty: FastHashSet<Pubkey> = [pk1].into_iter().collect();
     let divergent2: FastHashSet<Pubkey> = [pk1].into_iter().collect();
-    initial.restore_selective_from(
-        &mut svm,
-        &divergent2,
-        &delta,
-        &delta,
-        &exec_dirty,
-    );
+    initial.restore_selective_from(&mut svm, &divergent2, &delta, &delta, &exec_dirty);
     assert_eq!(
         svm.get_account(&pk1).unwrap().lamports,
         1000,
@@ -1427,12 +1609,20 @@ fn test_stateless_divergent_cleared_every_iteration() {
     assert_eq!(dirty.dirty_count(), 1);
     snap.restore(&mut svm, &dirty);
     dirty.clear();
-    assert_eq!(dirty.dirty_count(), 0, "dirty tracker cleared after iteration");
+    assert_eq!(
+        dirty.dirty_count(),
+        0,
+        "dirty tracker cleared after iteration"
+    );
 
     // Iteration 2: modify pk2 only
     svm.set_account(pk2, make_account(888, &[0xFE; 4])).unwrap();
     dirty.mark_account_dirty(&pk2);
-    assert_eq!(dirty.dirty_count(), 1, "only pk2 dirty, no carryover from iter1");
+    assert_eq!(
+        dirty.dirty_count(),
+        1,
+        "only pk2 dirty, no carryover from iter1"
+    );
 
     // Restore — only pk2 needs restoring, pk1 is already at initial
     let count = snap.restore(&mut svm, &dirty);
@@ -1483,10 +1673,15 @@ fn test_stateful_divergent_accumulates_across_iterations() {
     divergent_keys.extend(delta_a.accounts.keys()); // {pk1}
 
     // Execution dirtied pk3
-    svm.set_account(pk3, make_account(9999, &[0xFF; 8])).unwrap();
+    svm.set_account(pk3, make_account(9999, &[0xFF; 8]))
+        .unwrap();
     divergent_keys.insert(pk3); // {pk1, pk3}
 
-    assert_eq!(divergent_keys.len(), 2, "divergent = delta keys + exec dirty");
+    assert_eq!(
+        divergent_keys.len(),
+        2,
+        "divergent = delta keys + exec dirty"
+    );
 
     // Iteration 2: pick delta_b
     // divergent_keys = {pk1, pk3} — both need to be considered
@@ -1554,7 +1749,8 @@ fn test_divergent_keys_cleared_then_rebuilt_each_iteration() {
     divergent_keys.extend(delta_1.accounts.keys()); // {pk1, pk2}
 
     // Execution modifies pk4
-    svm.set_account(pk4, make_account(9999, &[0xFF; 8])).unwrap();
+    svm.set_account(pk4, make_account(9999, &[0xFF; 8]))
+        .unwrap();
     prev_exec_dirty.clear();
     prev_exec_dirty.insert(pk4);
     divergent_keys.extend(prev_exec_dirty.iter()); // {pk1, pk2, pk4}
@@ -1606,8 +1802,10 @@ fn test_take_full_captures_all_accounts() {
     let base = SvmSnapshot::take(&svm, &tracked);
 
     // Modify pk1 and pk2
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
-    svm.set_account(pk2, make_account(2000, &[0xA2; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
+    svm.set_account(pk2, make_account(2000, &[0xA2; 8]))
+        .unwrap();
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk1);
     dirty.mark_account_dirty(&pk2);
@@ -1640,7 +1838,8 @@ fn test_take_delta_only_captures_dirty() {
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Modify only pk1
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk1);
 
@@ -1679,7 +1878,8 @@ fn test_take_full_then_restore_full_roundtrip() {
     let base = SvmSnapshot::take(&svm, &tracked);
 
     // Modify
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk1);
     let full_snap = SvmSnapshot::take_full(&svm, &base, &dirty);
@@ -1714,13 +1914,15 @@ fn test_delta_chain_inherits_parent_arcs() {
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Action A: modify pk1
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
     let mut dirty_a = DirtyTracker::new();
     dirty_a.mark_account_dirty(&pk1);
     let delta_a = SvmSnapshot::take_delta(&svm, &delta_root, &dirty_a);
 
     // Action B: modify pk2 (pk1 inherited from A)
-    svm.set_account(pk2, make_account(2000, &[0xB2; 8])).unwrap();
+    svm.set_account(pk2, make_account(2000, &[0xB2; 8]))
+        .unwrap();
     let mut dirty_b = DirtyTracker::new();
     dirty_b.mark_account_dirty(&pk2);
     let delta_b = SvmSnapshot::take_delta(&svm, &delta_a, &dirty_b);
@@ -1738,12 +1940,10 @@ fn test_delta_chain_inherits_parent_arcs() {
     );
 
     // pk2 in delta_b should be a NEW Arc (different data)
-    assert!(
-        !Arc::ptr_eq(
-            &Arc::new(make_account(200, &[2; 8])), // dummy for comparison
-            delta_b.accounts.get(&pk2).unwrap()
-        )
-    );
+    assert!(!Arc::ptr_eq(
+        &Arc::new(make_account(200, &[2; 8])), // dummy for comparison
+        delta_b.accounts.get(&pk2).unwrap()
+    ));
     assert_eq!(delta_b.accounts.get(&pk2).unwrap().lamports, 2000);
 }
 
@@ -1763,19 +1963,22 @@ fn test_delta_chain_3_levels_correct_values() {
     let delta_root = SvmSnapshot::empty(svm.get_sysvar::<Clock>());
 
     // Level 1: modify pk1
-    svm.set_account(pk1, make_account(1000, &[0xA1; 8])).unwrap();
+    svm.set_account(pk1, make_account(1000, &[0xA1; 8]))
+        .unwrap();
     let mut dirty1 = DirtyTracker::new();
     dirty1.mark_account_dirty(&pk1);
     let delta_1 = SvmSnapshot::take_delta(&svm, &delta_root, &dirty1);
 
     // Level 2: modify pk2
-    svm.set_account(pk2, make_account(2000, &[0xB2; 8])).unwrap();
+    svm.set_account(pk2, make_account(2000, &[0xB2; 8]))
+        .unwrap();
     let mut dirty2 = DirtyTracker::new();
     dirty2.mark_account_dirty(&pk2);
     let delta_2 = SvmSnapshot::take_delta(&svm, &delta_1, &dirty2);
 
     // Level 3: modify pk3
-    svm.set_account(pk3, make_account(3000, &[0xC3; 8])).unwrap();
+    svm.set_account(pk3, make_account(3000, &[0xC3; 8]))
+        .unwrap();
     let mut dirty3 = DirtyTracker::new();
     dirty3.mark_account_dirty(&pk3);
     let delta_3 = SvmSnapshot::take_delta(&svm, &delta_2, &dirty3);
@@ -1792,9 +1995,15 @@ fn test_delta_chain_3_levels_correct_values() {
         ("level3", &delta_3, [1000, 2000, 3000]),
     ] {
         let mut svm_test = LiteSVM::new();
-        svm_test.set_account(pk1, make_account(100, &[1; 8])).unwrap();
-        svm_test.set_account(pk2, make_account(200, &[2; 8])).unwrap();
-        svm_test.set_account(pk3, make_account(300, &[3; 8])).unwrap();
+        svm_test
+            .set_account(pk1, make_account(100, &[1; 8]))
+            .unwrap();
+        svm_test
+            .set_account(pk2, make_account(200, &[2; 8]))
+            .unwrap();
+        svm_test
+            .set_account(pk3, make_account(300, &[3; 8]))
+            .unwrap();
         let init_test = SvmSnapshot::take_all(&svm_test);
         let all_divergent: FastHashSet<Pubkey> = [pk1, pk2, pk3].into_iter().collect();
         init_test.restore_selective(&mut svm_test, &all_divergent, delta);
@@ -1842,7 +2051,12 @@ fn test_action_stats_laplace_smoothing_never_zero() {
 
     // ALL weights should be positive
     for (i, &w) in weights.iter().enumerate() {
-        assert!(w > 0.0, "variant {} weight should be positive, got {}", i, w);
+        assert!(
+            w > 0.0,
+            "variant {} weight should be positive, got {}",
+            i,
+            w
+        );
     }
 
     // Untried variant (2) should have highest weight (exploration bonus dominates)
@@ -1883,7 +2097,10 @@ fn test_action_stats_map_per_state_class() {
     let pick_b = stats_map.pick_variant(class_b, u64::MAX / 2, 50);
 
     // Both should return Some (non-epsilon path)
-    assert!(pick_a.is_some() || pick_b.is_some(), "at least one pick should be non-epsilon");
+    assert!(
+        pick_a.is_some() || pick_b.is_some(),
+        "at least one pick should be non-epsilon"
+    );
 }
 
 #[test]
@@ -1973,7 +2190,10 @@ fn test_pool_coverage_novel_3x_boost() {
         Some(0),
         vec![],
         None,
-        10, 10, true, None
+        10,
+        10,
+        true,
+        None,
     );
 
     // Sample picks
@@ -2049,11 +2269,26 @@ fn test_fingerprint_truncation_causes_collisions() {
     let pk1 = Pubkey::new_unique();
     let pk2 = Pubkey::new_unique();
 
-    let added1 = add_pool_entry(&mut pool, fp1, make_pool_snapshot(vec![(pk1, 1000)]), 1, None);
-    let added2 = add_pool_entry(&mut pool, fp2, make_pool_snapshot(vec![(pk2, 2000)]), 1, None);
+    let added1 = add_pool_entry(
+        &mut pool,
+        fp1,
+        make_pool_snapshot(vec![(pk1, 1000)]),
+        1,
+        None,
+    );
+    let added2 = add_pool_entry(
+        &mut pool,
+        fp2,
+        make_pool_snapshot(vec![(pk2, 2000)]),
+        1,
+        None,
+    );
 
     assert!(added1, "first fingerprint should be added");
-    assert!(!added2, "second fingerprint should collide (same lower 17 bits)");
+    assert!(
+        !added2,
+        "second fingerprint should collide (same lower 17 bits)"
+    );
     assert_eq!(pool.len(), 1, "only one state in pool due to collision");
 }
 
@@ -2140,7 +2375,11 @@ fn test_crashed_state_removed_from_active_but_kept_for_reconstruction() {
     // Note: reconstruct_variant_sequence walks the full chain including root.
     // Root has variant=None (skipped), deposit has variant=Some(0), borrow has variant=Some(1).
     let variants = pool.reconstruct_variant_sequence(2);
-    assert_eq!(variants, vec![0, 1], "chain through crashed state still works");
+    assert_eq!(
+        variants,
+        vec![0, 1],
+        "chain through crashed state still works"
+    );
 
     let descs = pool.reconstruct_action_descriptions(2);
     // Root desc is "root" (non-empty), deposit is "deposit", borrow is "borrow"
@@ -2159,9 +2398,18 @@ fn test_is_novel_crash_dedup() {
     let hash_a = 0x1234567890ABCDEFu64;
     let hash_b = 0xFEDCBA0987654321u64;
 
-    assert!(pool.is_novel_crash(hash_a), "first occurrence should be novel");
-    assert!(!pool.is_novel_crash(hash_a), "duplicate should not be novel");
-    assert!(pool.is_novel_crash(hash_b), "different hash should be novel");
+    assert!(
+        pool.is_novel_crash(hash_a),
+        "first occurrence should be novel"
+    );
+    assert!(
+        !pool.is_novel_crash(hash_a),
+        "duplicate should not be novel"
+    );
+    assert!(
+        pool.is_novel_crash(hash_b),
+        "different hash should be novel"
+    );
     assert_eq!(pool.unique_crash_count(), 2);
 }
 
@@ -2208,10 +2456,22 @@ fn test_simulate_fuzzer_iteration_5_rounds_no_stale_state() {
     let mut prev_exec_dirty = FastHashSet::default();
 
     let schedule = [
-        (&delta_a, vec![(pk3, Some(make_account(999, &[0xFF; 8])))], true),
-        (&delta_b, vec![(pk1, Some(make_account(888, &[0xFE; 8])))], true),
+        (
+            &delta_a,
+            vec![(pk3, Some(make_account(999, &[0xFF; 8])))],
+            true,
+        ),
+        (
+            &delta_b,
+            vec![(pk1, Some(make_account(888, &[0xFE; 8])))],
+            true,
+        ),
         (&delta_a, vec![], true), // no exec modifications
-        (&empty_delta, vec![(pk2, Some(make_account(777, &[0xFD; 8])))], false), // action fails
+        (
+            &empty_delta,
+            vec![(pk2, Some(make_account(777, &[0xFD; 8])))],
+            false,
+        ), // action fails
         (&delta_b, vec![], true),
     ];
 
@@ -2232,29 +2492,73 @@ fn test_simulate_fuzzer_iteration_5_rounds_no_stale_state() {
         match i {
             0 => {
                 // delta_a applied, then pk3 modified by exec
-                assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000, "iter0: pk1 from delta_a");
-                assert_eq!(svm.get_account(&pk3).unwrap().lamports, 999, "iter0: pk3 exec modified");
+                assert_eq!(
+                    svm.get_account(&pk1).unwrap().lamports,
+                    1000,
+                    "iter0: pk1 from delta_a"
+                );
+                assert_eq!(
+                    svm.get_account(&pk3).unwrap().lamports,
+                    999,
+                    "iter0: pk3 exec modified"
+                );
             }
             1 => {
                 // delta_b applied, then pk1 modified by exec
-                assert_eq!(svm.get_account(&pk2).unwrap().lamports, 2000, "iter1: pk2 from delta_b");
-                assert_eq!(svm.get_account(&pk1).unwrap().lamports, 888, "iter1: pk1 exec modified");
+                assert_eq!(
+                    svm.get_account(&pk2).unwrap().lamports,
+                    2000,
+                    "iter1: pk2 from delta_b"
+                );
+                assert_eq!(
+                    svm.get_account(&pk1).unwrap().lamports,
+                    888,
+                    "iter1: pk1 exec modified"
+                );
             }
             2 => {
                 // delta_a applied, no exec mods
-                assert_eq!(svm.get_account(&pk1).unwrap().lamports, 1000, "iter2: pk1 from delta_a");
-                assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "iter2: pk2 initial");
-                assert_eq!(svm.get_account(&pk3).unwrap().lamports, 300, "iter2: pk3 initial");
+                assert_eq!(
+                    svm.get_account(&pk1).unwrap().lamports,
+                    1000,
+                    "iter2: pk1 from delta_a"
+                );
+                assert_eq!(
+                    svm.get_account(&pk2).unwrap().lamports,
+                    200,
+                    "iter2: pk2 initial"
+                );
+                assert_eq!(
+                    svm.get_account(&pk3).unwrap().lamports,
+                    300,
+                    "iter2: pk3 initial"
+                );
             }
             3 => {
                 // empty delta, pk2 modified by exec, action fails
-                assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "iter3: pk1 initial");
-                assert_eq!(svm.get_account(&pk2).unwrap().lamports, 777, "iter3: pk2 exec modified");
+                assert_eq!(
+                    svm.get_account(&pk1).unwrap().lamports,
+                    100,
+                    "iter3: pk1 initial"
+                );
+                assert_eq!(
+                    svm.get_account(&pk2).unwrap().lamports,
+                    777,
+                    "iter3: pk2 exec modified"
+                );
             }
             4 => {
                 // delta_b applied, no exec mods. prev_delta was None (failed action)
-                assert_eq!(svm.get_account(&pk2).unwrap().lamports, 2000, "iter4: pk2 from delta_b");
-                assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "iter4: pk1 initial");
+                assert_eq!(
+                    svm.get_account(&pk2).unwrap().lamports,
+                    2000,
+                    "iter4: pk2 from delta_b"
+                );
+                assert_eq!(
+                    svm.get_account(&pk1).unwrap().lamports,
+                    100,
+                    "iter4: pk1 initial"
+                );
             }
             _ => unreachable!(),
         }
@@ -2296,7 +2600,10 @@ fn test_simulate_fuzzer_iteration_cpi_account_cleanup() {
         true,
     );
     assert_eq!(cpi_created, vec![pk_cpi]);
-    assert!(svm.get_account(&pk_cpi).is_some(), "CPI account exists after iter1");
+    assert!(
+        svm.get_account(&pk_cpi).is_some(),
+        "CPI account exists after iter1"
+    );
 
     // Iteration 2: empty delta, no mods. CPI account should be cleaned up.
     simulate_fuzzer_iteration(
@@ -2349,7 +2656,8 @@ fn test_periodic_svm_reset_restores_pristine_state() {
             .unwrap();
         dirty.mark_account_dirty(&pk_ephemeral);
         // Also modify pk1
-        svm.set_account(pk1, make_account(i * 1000, &[i as u8; 8])).unwrap();
+        svm.set_account(pk1, make_account(i * 1000, &[i as u8; 8]))
+            .unwrap();
         dirty.mark_account_dirty(&pk1);
         snap.restore(&mut svm, &dirty);
     }
@@ -2358,8 +2666,16 @@ fn test_periodic_svm_reset_restores_pristine_state() {
     // Simulate periodic reset: restore pristine state.
     pristine.restore_full(&mut svm);
 
-    assert_eq!(svm.get_account(&pk1).unwrap().lamports, 100, "pk1 at pristine value");
-    assert_eq!(svm.get_account(&pk2).unwrap().lamports, 200, "pk2 at pristine value");
+    assert_eq!(
+        svm.get_account(&pk1).unwrap().lamports,
+        100,
+        "pk1 at pristine value"
+    );
+    assert_eq!(
+        svm.get_account(&pk2).unwrap().lamports,
+        200,
+        "pk2 at pristine value"
+    );
 }
 
 // =========================================================================
@@ -2466,5 +2782,9 @@ fn test_restore_selective_from_uses_next_delta_clock() {
         &FastHashSet::default(),
     );
 
-    assert_eq!(svm.get_sysvar::<Clock>().slot, 99, "clock should come from next_delta");
+    assert_eq!(
+        svm.get_sysvar::<Clock>().slot,
+        99,
+        "clock should come from next_delta"
+    );
 }

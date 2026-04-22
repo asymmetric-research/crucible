@@ -61,10 +61,22 @@ pub fn stateful_mode(
     let extra_swap_out = codegen::stateful_extra_swap_out(contexts);
 
     let singlecore_body = stateful_singlecore_body(
-        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty, contexts,
+        mod_name,
+        fixture_name,
+        fn_name,
+        fixture_param_name,
+        feature_name,
+        action_ty,
+        contexts,
     );
     let multicore_body = stateful_multicore_body(
-        mod_name, fixture_name, fn_name, fixture_param_name, feature_name, action_ty, contexts,
+        mod_name,
+        fixture_name,
+        fn_name,
+        fixture_param_name,
+        feature_name,
+        action_ty,
+        contexts,
     );
 
     quote! {
@@ -635,14 +647,17 @@ fn stateful_singlecore_body(
 ) -> proc_macro2::TokenStream {
     // Extra context helpers (for contexts[1..])
     let extra_swap_in_fixture = codegen::stateful_extra_swap_in(fixture_param_name, contexts);
-    let extra_restore_swap_back_fixture = codegen::stateful_extra_restore_and_swap_back(fixture_param_name, contexts);
+    let extra_restore_swap_back_fixture =
+        codegen::stateful_extra_restore_and_swap_back(fixture_param_name, contexts);
     // For seed phase, we use __seed_fixture as the param name
     let seed_ident = quote::format_ident!("__seed_fixture");
     let extra_swap_in_seed = codegen::stateful_extra_swap_in(&seed_ident, contexts);
     let extra_swap_back_seed = codegen::stateful_extra_swap_back(&seed_ident, contexts);
 
     let seed_code = gen_corpus_seeding(
-        mod_name, fn_name, action_ty,
+        mod_name,
+        fn_name,
+        action_ty,
         &quote! { state_pool },
         &extra_swap_in_seed,
         &extra_swap_back_seed,
@@ -1547,14 +1562,17 @@ fn stateful_multicore_body(
     // For multicore, the iteration fixture is __iter_fixture
     let iter_ident = quote::format_ident!("__iter_fixture");
     let extra_swap_in_iter = codegen::stateful_extra_swap_in(&iter_ident, contexts);
-    let extra_restore_swap_back_iter = codegen::stateful_extra_restore_and_swap_back(&iter_ident, contexts);
+    let extra_restore_swap_back_iter =
+        codegen::stateful_extra_restore_and_swap_back(&iter_ident, contexts);
     // Seed phase uses __seed_fixture
     let seed_ident_mc = quote::format_ident!("__seed_fixture");
     let extra_swap_in_seed_mc = codegen::stateful_extra_swap_in(&seed_ident_mc, contexts);
     let extra_swap_back_seed_mc = codegen::stateful_extra_swap_back(&seed_ident_mc, contexts);
 
     let mc_seed_code = gen_corpus_seeding(
-        mod_name, fn_name, action_ty,
+        mod_name,
+        fn_name,
+        action_ty,
         &quote! { pool },
         &extra_swap_in_seed_mc,
         &extra_swap_back_seed_mc,
@@ -3199,8 +3217,13 @@ mod tests {
         let action_ty = quote::quote! { Actions };
         let contexts = vec![format_ident!("ctx")];
         ts(stateful_singlecore_body(
-            &mod_name, &fixture_name, &fn_name, &fixture_param,
-            "test_feature", &action_ty, &contexts,
+            &mod_name,
+            &fixture_name,
+            &fn_name,
+            &fixture_param,
+            "test_feature",
+            &action_ty,
+            &contexts,
         ))
     }
 
@@ -3213,8 +3236,13 @@ mod tests {
         let action_ty = quote::quote! { Actions };
         let contexts = vec![format_ident!("ctx")];
         ts(stateful_multicore_body(
-            &mod_name, &fixture_name, &fn_name, &fixture_param,
-            "test_feature", &action_ty, &contexts,
+            &mod_name,
+            &fixture_name,
+            &fn_name,
+            &fixture_param,
+            "test_feature",
+            &action_ty,
+            &contexts,
         ))
     }
 
@@ -3224,18 +3252,36 @@ mod tests {
     fn singlecore_has_adaptive_chain_length() {
         let output = gen_singlecore();
         // Adaptive chain length based on pool fill ratio
-        assert!(output.contains("pool_fill"), "should compute pool fill ratio");
-        assert!(output.contains("0.05"), "should have bootstrap threshold (<5%)");
-        assert!(output.contains("0.25"), "should have early threshold (<25%)");
+        assert!(
+            output.contains("pool_fill"),
+            "should compute pool fill ratio"
+        );
+        assert!(
+            output.contains("0.05"),
+            "should have bootstrap threshold (<5%)"
+        );
+        assert!(
+            output.contains("0.25"),
+            "should have early threshold (<25%)"
+        );
         assert!(output.contains("0.6"), "should have mid threshold (<60%)");
     }
 
     #[test]
     fn multicore_has_adaptive_chain_length() {
         let output = gen_multicore();
-        assert!(output.contains("pool_fill"), "should compute pool fill ratio");
-        assert!(output.contains("0.05"), "should have bootstrap threshold (<5%)");
-        assert!(output.contains("0.25"), "should have early threshold (<25%)");
+        assert!(
+            output.contains("pool_fill"),
+            "should compute pool fill ratio"
+        );
+        assert!(
+            output.contains("0.05"),
+            "should have bootstrap threshold (<5%)"
+        );
+        assert!(
+            output.contains("0.25"),
+            "should have early threshold (<25%)"
+        );
         assert!(output.contains("0.6"), "should have mid threshold (<60%)");
     }
 
@@ -3243,28 +3289,49 @@ mod tests {
     fn singlecore_has_crossover_replay() {
         let output = gen_singlecore();
         // 35% crossover exact replay
-        assert!(output.contains("crossover_buf"), "should use crossover buffer");
-        assert!(output.contains("deserialize_fields"), "should deserialize crossover fields");
-        assert!(output.contains("random_variant"), "should have random variant fallback");
+        assert!(
+            output.contains("crossover_buf"),
+            "should use crossover buffer"
+        );
+        assert!(
+            output.contains("deserialize_fields"),
+            "should deserialize crossover fields"
+        );
+        assert!(
+            output.contains("random_variant"),
+            "should have random variant fallback"
+        );
     }
 
     #[test]
     fn multicore_has_crossover_replay() {
         let output = gen_multicore();
-        assert!(output.contains("crossover_buf"), "should use crossover buffer");
-        assert!(output.contains("deserialize_fields"), "should deserialize crossover fields");
+        assert!(
+            output.contains("crossover_buf"),
+            "should use crossover buffer"
+        );
+        assert!(
+            output.contains("deserialize_fields"),
+            "should deserialize crossover fields"
+        );
     }
 
     #[test]
     fn singlecore_has_guided_variant_selection() {
         let output = gen_singlecore();
-        assert!(output.contains("action_stats . pick_variant"), "should use epsilon-greedy action stats");
+        assert!(
+            output.contains("action_stats . pick_variant"),
+            "should use epsilon-greedy action stats"
+        );
     }
 
     #[test]
     fn multicore_has_guided_variant_selection() {
         let output = gen_multicore();
-        assert!(output.contains("action_stats . pick_variant"), "should use epsilon-greedy action stats");
+        assert!(
+            output.contains("action_stats . pick_variant"),
+            "should use epsilon-greedy action stats"
+        );
     }
 
     // ── Post-execution truncation ───────────────────────────────────────
@@ -3272,17 +3339,35 @@ mod tests {
     #[test]
     fn singlecore_truncates_unexecuted_actions() {
         let output = gen_singlecore();
-        assert!(output.contains("__actually_executed"), "should track actually executed count");
-        assert!(output.contains("__action_byte_offsets"), "should track byte offsets per action");
-        assert!(output.contains("truncate"), "should truncate __single_action_buf");
+        assert!(
+            output.contains("__actually_executed"),
+            "should track actually executed count"
+        );
+        assert!(
+            output.contains("__action_byte_offsets"),
+            "should track byte offsets per action"
+        );
+        assert!(
+            output.contains("truncate"),
+            "should truncate __single_action_buf"
+        );
     }
 
     #[test]
     fn multicore_truncates_unexecuted_actions() {
         let output = gen_multicore();
-        assert!(output.contains("__actually_executed"), "should track actually executed count");
-        assert!(output.contains("__action_byte_offsets"), "should track byte offsets per action");
-        assert!(output.contains("truncate"), "should truncate __single_action_buf");
+        assert!(
+            output.contains("__actually_executed"),
+            "should track actually executed count"
+        );
+        assert!(
+            output.contains("__action_byte_offsets"),
+            "should track byte offsets per action"
+        );
+        assert!(
+            output.contains("truncate"),
+            "should truncate __single_action_buf"
+        );
     }
 
     // ── Coverage check (virgin map scan + field novelty) ────────────────
@@ -3290,30 +3375,54 @@ mod tests {
     #[test]
     fn singlecore_has_virgin_map_scan() {
         let output = gen_singlecore();
-        assert!(output.contains("__virgin_map"), "should maintain virgin map");
-        assert!(output.contains("to_bucket"), "should use hitcount bucketing");
-        assert!(output.contains("__edge_novel_bits"), "should track edge novelty bits");
+        assert!(
+            output.contains("__virgin_map"),
+            "should maintain virgin map"
+        );
+        assert!(
+            output.contains("to_bucket"),
+            "should use hitcount bucketing"
+        );
+        assert!(
+            output.contains("__edge_novel_bits"),
+            "should track edge novelty bits"
+        );
     }
 
     #[test]
     fn multicore_has_coverage_tracking() {
         let output = gen_multicore();
         // Multicore uses shared bitmap flush instead of virgin map
-        assert!(output.contains("flush_local_bitmap_buffers"), "should flush to shared bitmaps");
-        assert!(output.contains("new_coverage_count"), "should check new coverage count");
+        assert!(
+            output.contains("flush_local_bitmap_buffers"),
+            "should flush to shared bitmaps"
+        );
+        assert!(
+            output.contains("new_coverage_count"),
+            "should check new coverage count"
+        );
     }
 
     #[test]
     fn singlecore_has_field_novelty() {
         let output = gen_singlecore();
-        assert!(output.contains("fingerprint_and_collect_changed"), "should use combined fingerprint+novelty pass");
-        assert!(output.contains("__field_novel_bits"), "should track field novelty bits");
+        assert!(
+            output.contains("fingerprint_and_collect_changed"),
+            "should use combined fingerprint+novelty pass"
+        );
+        assert!(
+            output.contains("__field_novel_bits"),
+            "should track field novelty bits"
+        );
     }
 
     #[test]
     fn multicore_has_field_novelty() {
         let output = gen_multicore();
-        assert!(output.contains("fingerprint_and_collect_changed"), "should use combined fingerprint+novelty pass");
+        assert!(
+            output.contains("fingerprint_and_collect_changed"),
+            "should use combined fingerprint+novelty pass"
+        );
     }
 
     // ── Fingerprint + dedup ─────────────────────────────────────────────
@@ -3321,36 +3430,50 @@ mod tests {
     #[test]
     fn singlecore_has_fingerprint_computation() {
         let output = gen_singlecore();
-        assert!(output.contains("compute_state_fingerprint_from_snapshot"),
-            "should compute fingerprint from SVM state");
-        assert!(output.contains("dirty_tracker . dirty_accounts () . is_empty"),
-            "should detect clock-only changes");
-        assert!(output.contains("0x517cc1b727220a95"),
-            "should XOR with parent fingerprint for clock-only");
+        assert!(
+            output.contains("compute_state_fingerprint_from_snapshot"),
+            "should compute fingerprint from SVM state"
+        );
+        assert!(
+            output.contains("dirty_tracker . dirty_accounts () . is_empty"),
+            "should detect clock-only changes"
+        );
+        assert!(
+            output.contains("0x517cc1b727220a95"),
+            "should XOR with parent fingerprint for clock-only"
+        );
     }
 
     #[test]
     fn multicore_has_fingerprint_computation() {
         let output = gen_multicore();
-        assert!(output.contains("compute_state_fingerprint_from_snapshot"),
-            "should compute fingerprint from SVM state");
-        assert!(output.contains("0x517cc1b727220a95"),
-            "should XOR with parent fingerprint for clock-only");
+        assert!(
+            output.contains("compute_state_fingerprint_from_snapshot"),
+            "should compute fingerprint from SVM state"
+        );
+        assert!(
+            output.contains("0x517cc1b727220a95"),
+            "should XOR with parent fingerprint for clock-only"
+        );
     }
 
     #[test]
     fn singlecore_has_edge_novel_dedup_bypass() {
         let output = gen_singlecore();
         // When edge_novel_bits > 0, fingerprint is made unique to bypass dedup
-        assert!(output.contains("0x9e3779b97f4a7c15"),
-            "should use golden ratio constant for dedup bypass");
+        assert!(
+            output.contains("0x9e3779b97f4a7c15"),
+            "should use golden ratio constant for dedup bypass"
+        );
     }
 
     #[test]
     fn multicore_has_edge_novel_dedup_bypass() {
         let output = gen_multicore();
-        assert!(output.contains("0x9e3779b97f4a7c15"),
-            "should use golden ratio constant for dedup bypass");
+        assert!(
+            output.contains("0x9e3779b97f4a7c15"),
+            "should use golden ratio constant for dedup bypass"
+        );
     }
 
     // ── Delta + pool save ───────────────────────────────────────────────
@@ -3358,34 +3481,56 @@ mod tests {
     #[test]
     fn singlecore_saves_to_pool() {
         let output = gen_singlecore();
-        assert!(output.contains("child_delta"), "should create child delta inheriting parent patches");
+        assert!(
+            output.contains("child_delta"),
+            "should create child delta inheriting parent patches"
+        );
         assert!(output.contains("try_add"), "should call pool.try_add()");
-        assert!(output.contains("accumulated_bytes"), "should build accumulated action bytes");
-        assert!(output.contains("write_corpus_entry"), "should write corpus incrementally");
+        assert!(
+            output.contains("accumulated_bytes"),
+            "should build accumulated action bytes"
+        );
+        assert!(
+            output.contains("write_corpus_entry"),
+            "should write corpus incrementally"
+        );
     }
 
     #[test]
     fn multicore_saves_to_pool() {
         let output = gen_multicore();
-        assert!(output.contains("child_delta"), "should create child delta inheriting parent patches");
+        assert!(
+            output.contains("child_delta"),
+            "should create child delta inheriting parent patches"
+        );
         // Multicore uses pending_novel vector, flushed via try_add in batch
-        assert!(output.contains("pending_novel"), "should defer saves to batch");
+        assert!(
+            output.contains("pending_novel"),
+            "should defer saves to batch"
+        );
         assert!(output.contains("try_add"), "should flush via try_add");
-        assert!(output.contains("write_corpus_entry"), "should write corpus incrementally");
+        assert!(
+            output.contains("write_corpus_entry"),
+            "should write corpus incrementally"
+        );
     }
 
     #[test]
     fn singlecore_validates_ghost_actions() {
         let output = gen_singlecore();
-        assert!(output.contains("rebuild_action_bytes_clean"),
-            "should strip ghost actions from inherited parent bytes");
+        assert!(
+            output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions from inherited parent bytes"
+        );
     }
 
     #[test]
     fn multicore_validates_ghost_actions() {
         let output = gen_multicore();
-        assert!(output.contains("rebuild_action_bytes_clean"),
-            "should strip ghost actions from inherited parent bytes");
+        assert!(
+            output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions from inherited parent bytes"
+        );
     }
 
     // ── Crash handling ──────────────────────────────────────────────────
@@ -3393,21 +3538,48 @@ mod tests {
     #[test]
     fn singlecore_writes_crash_metadata() {
         let output = gen_singlecore();
-        assert!(output.contains("take_violation"), "should check for violations");
-        assert!(output.contains("FUZZ_FINDING"), "should print finding marker");
-        assert!(output.contains("write_crash_metadata_with_actions"), "should write crash metadata");
-        assert!(output.contains("record_violation"), "should record violation against state");
+        assert!(
+            output.contains("take_violation"),
+            "should check for violations"
+        );
+        assert!(
+            output.contains("FUZZ_FINDING"),
+            "should print finding marker"
+        );
+        assert!(
+            output.contains("write_crash_metadata_with_actions"),
+            "should write crash metadata"
+        );
+        assert!(
+            output.contains("record_violation"),
+            "should record violation against state"
+        );
     }
 
     #[test]
     fn multicore_writes_crash_metadata() {
         let output = gen_multicore();
-        assert!(output.contains("take_violation"), "should check for violations");
-        assert!(output.contains("FUZZ_FINDING"), "should print finding marker");
-        assert!(output.contains("write_crash_metadata_with_actions"), "should write crash metadata");
+        assert!(
+            output.contains("take_violation"),
+            "should check for violations"
+        );
+        assert!(
+            output.contains("FUZZ_FINDING"),
+            "should print finding marker"
+        );
+        assert!(
+            output.contains("write_crash_metadata_with_actions"),
+            "should write crash metadata"
+        );
         // Multicore uses pending_violations + pending_crashes
-        assert!(output.contains("pending_violations"), "should defer violations to batch");
-        assert!(output.contains("pending_crashes"), "should defer crashes to batch");
+        assert!(
+            output.contains("pending_violations"),
+            "should defer violations to batch"
+        );
+        assert!(
+            output.contains("pending_crashes"),
+            "should defer crashes to batch"
+        );
     }
 
     // ── Divergent tracking ──────────────────────────────────────────────
@@ -3415,17 +3587,35 @@ mod tests {
     #[test]
     fn singlecore_tracks_divergent_keys() {
         let output = gen_singlecore();
-        assert!(output.contains("divergent_keys"), "should track divergent accounts");
-        assert!(output.contains("prev_delta_arc"), "should track previous delta for optimization");
-        assert!(output.contains("prev_exec_dirty"), "should track previous execution's dirty accounts");
+        assert!(
+            output.contains("divergent_keys"),
+            "should track divergent accounts"
+        );
+        assert!(
+            output.contains("prev_delta_arc"),
+            "should track previous delta for optimization"
+        );
+        assert!(
+            output.contains("prev_exec_dirty"),
+            "should track previous execution's dirty accounts"
+        );
     }
 
     #[test]
     fn multicore_tracks_divergent_keys() {
         let output = gen_multicore();
-        assert!(output.contains("divergent_keys"), "should track divergent accounts");
-        assert!(output.contains("prev_delta_arc"), "should track previous delta");
-        assert!(output.contains("prev_exec_dirty"), "should track previous execution's dirty accounts");
+        assert!(
+            output.contains("divergent_keys"),
+            "should track divergent accounts"
+        );
+        assert!(
+            output.contains("prev_delta_arc"),
+            "should track previous delta"
+        );
+        assert!(
+            output.contains("prev_exec_dirty"),
+            "should track previous execution's dirty accounts"
+        );
     }
 
     // ── Selective restore (dual-SVM) ────────────────────────────────────
@@ -3433,18 +3623,39 @@ mod tests {
     #[test]
     fn singlecore_has_dual_svm_restore() {
         let output = gen_singlecore();
-        assert!(output.contains("is_traced_iter"), "should detect traced iterations");
-        assert!(output.contains("restore_selective"), "should use selective restore");
-        assert!(output.contains("restore_selective_from"), "should use delta-to-delta restore");
-        assert!(output.contains("traced_divergent"), "should track traced SVM divergent keys");
+        assert!(
+            output.contains("is_traced_iter"),
+            "should detect traced iterations"
+        );
+        assert!(
+            output.contains("restore_selective"),
+            "should use selective restore"
+        );
+        assert!(
+            output.contains("restore_selective_from"),
+            "should use delta-to-delta restore"
+        );
+        assert!(
+            output.contains("traced_divergent"),
+            "should track traced SVM divergent keys"
+        );
     }
 
     #[test]
     fn multicore_has_dual_svm_restore() {
         let output = gen_multicore();
-        assert!(output.contains("is_traced_iter"), "should detect traced iterations");
-        assert!(output.contains("restore_selective"), "should use selective restore");
-        assert!(output.contains("restore_selective_from"), "should use delta-to-delta restore");
+        assert!(
+            output.contains("is_traced_iter"),
+            "should detect traced iterations"
+        );
+        assert!(
+            output.contains("restore_selective"),
+            "should use selective restore"
+        );
+        assert!(
+            output.contains("restore_selective_from"),
+            "should use delta-to-delta restore"
+        );
     }
 
     // ── Splice ──────────────────────────────────────────────────────────
@@ -3452,17 +3663,31 @@ mod tests {
     #[test]
     fn singlecore_has_subsequence_splice() {
         let output = gen_singlecore();
-        assert!(output.contains("splice_chain"), "should support splice chains");
-        assert!(output.contains("splice_roll"), "should roll for splice probability");
-        assert!(output.contains("reconstruct_variant_field_sequence"),
-            "should reconstruct donor sequence for splice");
+        assert!(
+            output.contains("splice_chain"),
+            "should support splice chains"
+        );
+        assert!(
+            output.contains("splice_roll"),
+            "should roll for splice probability"
+        );
+        assert!(
+            output.contains("reconstruct_variant_field_sequence"),
+            "should reconstruct donor sequence for splice"
+        );
     }
 
     #[test]
     fn multicore_has_subsequence_splice() {
         let output = gen_multicore();
-        assert!(output.contains("splice_chain"), "should support splice chains");
-        assert!(output.contains("splice_roll"), "should roll for splice probability");
+        assert!(
+            output.contains("splice_chain"),
+            "should support splice chains"
+        );
+        assert!(
+            output.contains("splice_roll"),
+            "should roll for splice probability"
+        );
     }
 
     // ── Corpus seeding ──────────────────────────────────────────────────
@@ -3470,19 +3695,31 @@ mod tests {
     #[test]
     fn singlecore_has_corpus_seeding() {
         let output = gen_singlecore();
-        assert!(output.contains("corpus_in_dir"), "should check for corpus-in");
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should check for corpus-in"
+        );
         assert!(output.contains("seed_files"), "should collect seed files");
         assert!(output.contains("FuzzInput"), "should parse seed inputs");
-        assert!(output.contains("mark_seed_boundary"), "should mark seed boundary");
+        assert!(
+            output.contains("mark_seed_boundary"),
+            "should mark seed boundary"
+        );
     }
 
     #[test]
     fn multicore_has_corpus_seeding() {
         let output = gen_multicore();
-        assert!(output.contains("corpus_in_dir"), "should check for corpus-in");
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should check for corpus-in"
+        );
         assert!(output.contains("seed_files"), "should collect seed files");
         assert!(output.contains("FuzzInput"), "should parse seed inputs");
-        assert!(output.contains("mark_seed_boundary"), "should mark seed boundary");
+        assert!(
+            output.contains("mark_seed_boundary"),
+            "should mark seed boundary"
+        );
     }
 
     // ── Batch picking ───────────────────────────────────────────────────
@@ -3491,16 +3728,31 @@ mod tests {
     fn singlecore_has_batched_picks() {
         let output = gen_singlecore();
         assert!(output.contains("pick_batch"), "should use batched picking");
-        assert!(output.contains("build_weight_distribution"), "should build weight distribution");
-        assert!(output.contains("pick_weighted_batch"), "should use weighted batch picking");
+        assert!(
+            output.contains("build_weight_distribution"),
+            "should build weight distribution"
+        );
+        assert!(
+            output.contains("pick_weighted_batch"),
+            "should use weighted batch picking"
+        );
     }
 
     #[test]
     fn multicore_has_batched_picks() {
         let output = gen_multicore();
-        assert!(output.contains("local_batch"), "should use local batch for workers");
-        assert!(output.contains("build_weight_distribution"), "should build weight distribution");
-        assert!(output.contains("pick_weighted_batch"), "should use weighted batch picking");
+        assert!(
+            output.contains("local_batch"),
+            "should use local batch for workers"
+        );
+        assert!(
+            output.contains("build_weight_distribution"),
+            "should build weight distribution"
+        );
+        assert!(
+            output.contains("pick_weighted_batch"),
+            "should use weighted batch picking"
+        );
     }
 
     // ── D1: Crash bytes reconstruction (3 copies) ────────────────────────
@@ -3511,13 +3763,19 @@ mod tests {
     fn singlecore_crash_bytes_has_reconstruct_and_extend() {
         let output = gen_singlecore();
         assert!(output.contains("crash_bytes"), "should build crash_bytes");
-        assert!(output.contains("reconstruct_action_sequence"),
-            "singlecore should reconstruct full sequence from pool");
-        assert!(output.contains("rebuild_action_bytes_clean"),
-            "should strip ghost actions via rebuild");
-        assert!(output.contains("extend_from_slice (& __single_action_buf)") ||
-                output.contains("extend_from_slice"),
-            "should extend crash_bytes with current chain");
+        assert!(
+            output.contains("reconstruct_action_sequence"),
+            "singlecore should reconstruct full sequence from pool"
+        );
+        assert!(
+            output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions via rebuild"
+        );
+        assert!(
+            output.contains("extend_from_slice (& __single_action_buf)")
+                || output.contains("extend_from_slice"),
+            "should extend crash_bytes with current chain"
+        );
     }
 
     #[test]
@@ -3525,10 +3783,15 @@ mod tests {
         let output = gen_multicore();
         // Worker uses parent_action_bytes clone + try_read fallback
         assert!(output.contains("crash_bytes"), "should build crash_bytes");
-        assert!(output.contains("rebuild_action_bytes_clean"),
-            "should strip ghost actions via rebuild");
+        assert!(
+            output.contains("rebuild_action_bytes_clean"),
+            "should strip ghost actions via rebuild"
+        );
         // Worker should have graceful lock handling
-        assert!(output.contains("pending_crashes"), "worker defers crashes to pending list");
+        assert!(
+            output.contains("pending_crashes"),
+            "worker defers crashes to pending list"
+        );
     }
 
     #[test]
@@ -3537,8 +3800,11 @@ mod tests {
         // W0 also builds crash_bytes
         // Count occurrences of rebuild_action_bytes_clean — should appear in both worker and W0
         let rebuild_count = output.matches("rebuild_action_bytes_clean").count();
-        assert!(rebuild_count >= 2,
-            "should have rebuild_action_bytes_clean in both worker and W0, found {}", rebuild_count);
+        assert!(
+            rebuild_count >= 2,
+            "should have rebuild_action_bytes_clean in both worker and W0, found {}",
+            rebuild_count
+        );
     }
 
     // ── D2: Accumulated bytes for pool save (3 copies) ─────────────────
@@ -3547,22 +3813,35 @@ mod tests {
     #[test]
     fn singlecore_accumulated_bytes_validates_count() {
         let output = gen_singlecore();
-        assert!(output.contains("accumulated_bytes"), "should build accumulated_bytes");
+        assert!(
+            output.contains("accumulated_bytes"),
+            "should build accumulated_bytes"
+        );
         // Should validate stored count matches parent depth
-        assert!(output.contains("stored_count") && output.contains("parent_depth"),
-            "should validate stored count vs parent depth");
-        assert!(output.contains("from_le_bytes") && output.contains("accumulated_bytes"),
-            "should parse count from accumulated bytes header");
+        assert!(
+            output.contains("stored_count") && output.contains("parent_depth"),
+            "should validate stored count vs parent depth"
+        );
+        assert!(
+            output.contains("from_le_bytes") && output.contains("accumulated_bytes"),
+            "should parse count from accumulated bytes header"
+        );
     }
 
     #[test]
     fn multicore_worker_accumulated_bytes_validates_count() {
         let output = gen_multicore();
-        assert!(output.contains("accumulated_bytes"), "should build accumulated_bytes");
+        assert!(
+            output.contains("accumulated_bytes"),
+            "should build accumulated_bytes"
+        );
         // Worker path should also validate
         let stored_count_refs = output.matches("stored_count").count();
-        assert!(stored_count_refs >= 2,
-            "should reference stored_count in both crash and save paths, found {}", stored_count_refs);
+        assert!(
+            stored_count_refs >= 2,
+            "should reference stored_count in both crash and save paths, found {}",
+            stored_count_refs
+        );
     }
 
     // ── D3: current_descs construction (5 copies) ──────────────────────
@@ -3570,20 +3849,36 @@ mod tests {
     #[test]
     fn singlecore_builds_current_descs_from_chain() {
         let output = gen_singlecore();
-        assert!(output.contains("current_descs"), "should build current_descs");
-        assert!(output.contains("chain_descs"), "should iterate over __chain_descs");
+        assert!(
+            output.contains("current_descs"),
+            "should build current_descs"
+        );
+        assert!(
+            output.contains("chain_descs"),
+            "should iterate over __chain_descs"
+        );
         // Pattern: map chain descs with history status
-        assert!(output.contains("OK") && output.contains("FAIL"),
-            "should annotate with OK/FAIL status");
+        assert!(
+            output.contains("OK") && output.contains("FAIL"),
+            "should annotate with OK/FAIL status"
+        );
     }
 
     #[test]
     fn multicore_builds_current_descs_from_chain() {
         let output = gen_multicore();
-        assert!(output.contains("current_descs"), "should build current_descs");
-        assert!(output.contains("chain_descs"), "should iterate over __chain_descs");
-        assert!(output.contains("OK") && output.contains("FAIL"),
-            "should annotate with OK/FAIL status");
+        assert!(
+            output.contains("current_descs"),
+            "should build current_descs"
+        );
+        assert!(
+            output.contains("chain_descs"),
+            "should iterate over __chain_descs"
+        );
+        assert!(
+            output.contains("OK") && output.contains("FAIL"),
+            "should annotate with OK/FAIL status"
+        );
     }
 
     // ── D4: Field bytes extraction (3 copies) ──────────────────────────
@@ -3591,21 +3886,38 @@ mod tests {
     #[test]
     fn singlecore_extracts_field_bytes() {
         let output = gen_singlecore();
-        assert!(output.contains("field_byte_count"), "should call field_byte_count");
-        assert!(output.contains("__last_action_start"), "should compute last action start offset");
-        assert!(output.contains("__field_bytes") || output.contains("__fbc"),
-            "should extract field bytes for crossover");
+        assert!(
+            output.contains("field_byte_count"),
+            "should call field_byte_count"
+        );
+        assert!(
+            output.contains("__last_action_start"),
+            "should compute last action start offset"
+        );
+        assert!(
+            output.contains("__field_bytes") || output.contains("__fbc"),
+            "should extract field bytes for crossover"
+        );
     }
 
     #[test]
     fn multicore_extracts_field_bytes() {
         let output = gen_multicore();
-        assert!(output.contains("field_byte_count"), "should call field_byte_count");
-        assert!(output.contains("__last_action_start"), "should compute last action start offset");
+        assert!(
+            output.contains("field_byte_count"),
+            "should call field_byte_count"
+        );
+        assert!(
+            output.contains("__last_action_start"),
+            "should compute last action start offset"
+        );
         // Should appear in both worker and W0
         let fbc_count = output.matches("field_byte_count").count();
-        assert!(fbc_count >= 2,
-            "should call field_byte_count in both worker and W0, found {}", fbc_count);
+        assert!(
+            fbc_count >= 2,
+            "should call field_byte_count in both worker and W0, found {}",
+            fbc_count
+        );
     }
 
     // ── D5: Action desc string for pool save (3 copies) ────────────────
@@ -3614,18 +3926,30 @@ mod tests {
     fn singlecore_builds_action_desc_with_status() {
         let output = gen_singlecore();
         // Action desc for pool save joins with \n
-        assert!(output.contains("action_desc"), "should build action_desc for pool save");
-        assert!(output.contains("get_action_history"), "should read action history for status");
+        assert!(
+            output.contains("action_desc"),
+            "should build action_desc for pool save"
+        );
+        assert!(
+            output.contains("get_action_history"),
+            "should read action history for status"
+        );
     }
 
     #[test]
     fn multicore_builds_action_desc_with_status() {
         let output = gen_multicore();
-        assert!(output.contains("action_desc"), "should build action_desc for pool save");
+        assert!(
+            output.contains("action_desc"),
+            "should build action_desc for pool save"
+        );
         // Should appear in both worker and W0 pool save paths
         let desc_count = output.matches("action_desc").count();
-        assert!(desc_count >= 2,
-            "should build action_desc in both worker and W0, found {}", desc_count);
+        assert!(
+            desc_count >= 2,
+            "should build action_desc in both worker and W0, found {}",
+            desc_count
+        );
     }
 
     // ── B1: W0 lock safety ─────────────────────────────────────────────
@@ -3636,8 +3960,10 @@ mod tests {
         let output = gen_multicore();
         // Worker crash path uses try_read or read() gracefully
         // (verifying the pattern exists — after B1 fix, W0 will match)
-        assert!(output.contains("rebuild_action_bytes_clean"),
-            "should have crash byte rebuild in worker path");
+        assert!(
+            output.contains("rebuild_action_bytes_clean"),
+            "should have crash byte rebuild in worker path"
+        );
     }
 
     // ── B2: Redundant cast ─────────────────────────────────────────────
@@ -3646,8 +3972,14 @@ mod tests {
     fn multicore_worker_has_stored_count_comparison() {
         let output = gen_multicore();
         // Worker compares stored_count to parent_depth
-        assert!(output.contains("stored_count"), "should have stored_count variable");
-        assert!(output.contains("parent_depth"), "should compare with parent_depth");
+        assert!(
+            output.contains("stored_count"),
+            "should have stored_count variable"
+        );
+        assert!(
+            output.contains("parent_depth"),
+            "should compare with parent_depth"
+        );
     }
 
     // ── Crash output printing (3 copies) ───────────────────────────────
@@ -3655,17 +3987,29 @@ mod tests {
     #[test]
     fn singlecore_prints_crash_sequence() {
         let output = gen_singlecore();
-        assert!(output.contains("CRASH SEQUENCE"), "should print crash sequence header");
+        assert!(
+            output.contains("CRASH SEQUENCE"),
+            "should print crash sequence header"
+        );
         assert!(output.contains("VIOLATION"), "should mark violation action");
-        assert!(output.contains("parse_action_desc"), "should parse action descs for metadata");
+        assert!(
+            output.contains("parse_action_desc"),
+            "should parse action descs for metadata"
+        );
     }
 
     #[test]
     fn multicore_prints_crash_sequence() {
         let output = gen_multicore();
-        assert!(output.contains("CRASH SEQUENCE"), "should print crash sequence header");
+        assert!(
+            output.contains("CRASH SEQUENCE"),
+            "should print crash sequence header"
+        );
         assert!(output.contains("VIOLATION"), "should mark violation action");
-        assert!(output.contains("parse_action_desc"), "should parse action descs for metadata");
+        assert!(
+            output.contains("parse_action_desc"),
+            "should parse action descs for metadata"
+        );
     }
 
     // ── Variant hash for crash dedup ───────────────────────────────────
@@ -3673,17 +4017,27 @@ mod tests {
     #[test]
     fn singlecore_dedup_crashes_by_variant_hash() {
         let output = gen_singlecore();
-        assert!(output.contains("is_novel_crash"), "should check crash novelty by variant hash");
-        assert!(output.contains("reconstruct_variant_sequence"),
-            "should reconstruct variant sequence for hashing");
+        assert!(
+            output.contains("is_novel_crash"),
+            "should check crash novelty by variant hash"
+        );
+        assert!(
+            output.contains("reconstruct_variant_sequence"),
+            "should reconstruct variant sequence for hashing"
+        );
     }
 
     #[test]
     fn multicore_dedup_crashes_by_variant_hash() {
         let output = gen_multicore();
-        assert!(output.contains("is_novel_crash"), "should check crash novelty by variant hash");
-        assert!(output.contains("reconstruct_variant_sequence"),
-            "should reconstruct variant sequence for hashing");
+        assert!(
+            output.contains("is_novel_crash"),
+            "should check crash novelty by variant hash"
+        );
+        assert!(
+            output.contains("reconstruct_variant_sequence"),
+            "should reconstruct variant sequence for hashing"
+        );
     }
 
     // ── No burst mode (removed in cleanup) ──────────────────────────────
@@ -3691,13 +4045,19 @@ mod tests {
     #[test]
     fn singlecore_no_burst_mode() {
         let output = gen_singlecore();
-        assert!(!output.contains("burst_mode"), "burst mode should be removed");
+        assert!(
+            !output.contains("burst_mode"),
+            "burst mode should be removed"
+        );
     }
 
     #[test]
     fn multicore_no_burst_mode() {
         let output = gen_multicore();
-        assert!(!output.contains("burst_mode"), "burst mode should be removed");
+        assert!(
+            !output.contains("burst_mode"),
+            "burst mode should be removed"
+        );
     }
 
     // ── Barren pick tracking ────────────────────────────────────────────
@@ -3705,14 +4065,19 @@ mod tests {
     #[test]
     fn singlecore_records_barren_picks() {
         let output = gen_singlecore();
-        assert!(output.contains("record_barren_pick"), "should record barren picks for weight decay");
+        assert!(
+            output.contains("record_barren_pick"),
+            "should record barren picks for weight decay"
+        );
     }
 
     #[test]
     fn multicore_records_barren_picks() {
         let output = gen_multicore();
-        assert!(output.contains("pending_barren") || output.contains("record_barren_pick"),
-            "should track barren picks");
+        assert!(
+            output.contains("pending_barren") || output.contains("record_barren_pick"),
+            "should track barren picks"
+        );
     }
 
     // ── Action stats ────────────────────────────────────────────────────
@@ -3720,14 +4085,26 @@ mod tests {
     #[test]
     fn singlecore_has_action_stats() {
         let output = gen_singlecore();
-        assert!(output.contains("ActionStatsMap"), "should create action stats tracker");
-        assert!(output.contains("action_stats . record"), "should record action outcomes");
+        assert!(
+            output.contains("ActionStatsMap"),
+            "should create action stats tracker"
+        );
+        assert!(
+            output.contains("action_stats . record"),
+            "should record action outcomes"
+        );
     }
 
     #[test]
     fn multicore_has_action_stats() {
         let output = gen_multicore();
-        assert!(output.contains("ActionStatsMap"), "should create per-worker action stats");
-        assert!(output.contains("action_stats . record"), "should record action outcomes");
+        assert!(
+            output.contains("ActionStatsMap"),
+            "should create per-worker action stats"
+        );
+        assert!(
+            output.contains("action_stats . record"),
+            "should record action outcomes"
+        );
     }
 }

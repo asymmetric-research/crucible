@@ -13,10 +13,10 @@ pub type FastHashSet<T> = FxHashSet<T>;
 pub type FastHashMap<K, V> = FxHashMap<K, V>;
 use solana_account::Account;
 use solana_keypair::Keypair;
-use solana_pubkey::Pubkey;
-use solana_signer::Signer;
 use solana_message::inner_instruction::InnerInstructionsList;
+use solana_pubkey::Pubkey;
 use solana_signature::Signature;
+use solana_signer::Signer;
 use solana_transaction_context::TransactionReturnData;
 use solana_transaction_error::TransactionError;
 
@@ -187,10 +187,13 @@ pub fn is_debug_replay() -> bool {
 
 /// Hash SVM state for tracked accounts. Returns (hash, clock_slot).
 /// Accounts sorted by (lamports, data_len, data_hash) for cross-run stability.
-pub fn compute_svm_debug_hash(svm: &litesvm::LiteSVM, tracked_accounts: &[solana_pubkey::Pubkey]) -> (u64, u64) {
-    use std::hash::{Hash, Hasher};
-    use rustc_hash::FxHasher;
+pub fn compute_svm_debug_hash(
+    svm: &litesvm::LiteSVM,
+    tracked_accounts: &[solana_pubkey::Pubkey],
+) -> (u64, u64) {
     use anchor_lang::prelude::Clock;
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
     let mut hasher = FxHasher::default();
     let clock: Clock = svm.get_sysvar();
     let slot = clock.slot;
@@ -223,7 +226,6 @@ pub fn set_corpus_loading(v: bool) {
 pub fn is_corpus_loading() -> bool {
     CORPUS_LOADING.with(|f| f.get())
 }
-
 
 #[doc(hidden)]
 /// Set the current Anchor instruction name (for coverage tracking)
@@ -520,9 +522,17 @@ pub fn parse_action_desc(desc: &str) -> ActionRecord {
         }
         (name.to_string(), serde_json::Value::Object(map))
     } else {
-        (body.to_string(), serde_json::Value::Object(serde_json::Map::new()))
+        (
+            body.to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        )
     };
-    ActionRecord { name, params, success, error_code: None }
+    ActionRecord {
+        name,
+        params,
+        success,
+        error_code: None,
+    }
 }
 
 /// Build crash metadata from current state
@@ -1166,8 +1176,12 @@ impl TxOutcome {
 
     pub fn inner_instructions(&self) -> &InnerInstructionsList {
         match self {
-            TxOutcome::Success { inner_instructions, .. } => inner_instructions,
-            TxOutcome::ProgramError { inner_instructions, .. } => inner_instructions,
+            TxOutcome::Success {
+                inner_instructions, ..
+            } => inner_instructions,
+            TxOutcome::ProgramError {
+                inner_instructions, ..
+            } => inner_instructions,
         }
     }
 
@@ -1403,7 +1417,8 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            sigverify: false,        }
+            sigverify: false,
+        }
     }
 
     pub fn with_invocation_callback<C: InvocationInspectCallback + 'static>(callback: C) -> Self {
@@ -1421,7 +1436,8 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            sigverify: false,        }
+            sigverify: false,
+        }
     }
 
     pub fn with_compute_budget(mut self, compute_unit_limit: u64) -> Self {
@@ -1446,7 +1462,9 @@ impl TestContext {
         struct DummyContext;
         impl ContextObject for DummyContext {
             fn consume(&mut self, _amount: u64) {}
-            fn get_remaining(&self) -> u64 { 0 }
+            fn get_remaining(&self) -> u64 {
+                0
+            }
         }
 
         let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
@@ -1574,7 +1592,8 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            sigverify: false,        }
+            sigverify: false,
+        }
     }
 
     pub fn into_svm(self) -> LiteSVM {
@@ -1610,7 +1629,8 @@ impl TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            sigverify: false,        }
+            sigverify: false,
+        }
     }
 
     /// Set an invocation callback for coverage tracking on this context.
@@ -4108,11 +4128,7 @@ mod tests {
             serde_json::json!({"authority": null, "stake_account": 1340788527u64, "vote_account": 640494879u64}),
             true,
         );
-        push_action_record(
-            "advance_slots",
-            serde_json::json!({"slots": 54177}),
-            true,
-        );
+        push_action_record("advance_slots", serde_json::json!({"slots": 54177}), true);
         push_action_record(
             "withdraw",
             serde_json::json!({"stake_account": 3, "lamports": 1000, "leave_reserve": true}),
@@ -4238,7 +4254,8 @@ mod tests {
     fn parse_instruction_index_with_non_custom_error() {
         use solana_instruction::error::InstructionError;
         // InstructionError that's not Custom — index should still be extracted
-        let err = TransactionError::InstructionError(4, InstructionError::ComputationalBudgetExceeded);
+        let err =
+            TransactionError::InstructionError(4, InstructionError::ComputationalBudgetExceeded);
         assert_eq!(parse_error_code(&err), None);
         assert_eq!(parse_instruction_index(&err), Some(4));
     }
@@ -4276,8 +4293,8 @@ mod tests {
 
     #[test]
     fn tx_result_to_outcome_error_sets_tls() {
-        use solana_instruction::error::InstructionError;
         use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+        use solana_instruction::error::InstructionError;
         let failed = FailedTransactionMetadata {
             err: TransactionError::InstructionError(1, InstructionError::Custom(6051)),
             meta: TransactionMetadata {
@@ -4518,8 +4535,8 @@ mod tests {
     #[test]
     fn tx_result_to_outcome_success_preserves_all_metadata() {
         use litesvm::types::TransactionMetadata;
-        use solana_message::inner_instruction::InnerInstruction;
         use solana_message::compiled_instruction::CompiledInstruction;
+        use solana_message::inner_instruction::InnerInstruction;
 
         let sig = Signature::from([1u8; 64]);
         let return_program = Pubkey::new_unique();
@@ -4557,13 +4574,16 @@ mod tests {
         assert_eq!(outcome.inner_instructions().len(), 1);
         assert_eq!(outcome.inner_instructions()[0].len(), 1);
         assert_eq!(outcome.inner_instructions()[0][0].stack_height, 2);
-        assert_eq!(outcome.inner_instructions()[0][0].instruction.data, vec![0xAB, 0xCD]);
+        assert_eq!(
+            outcome.inner_instructions()[0][0].instruction.data,
+            vec![0xAB, 0xCD]
+        );
     }
 
     #[test]
     fn tx_result_to_outcome_error_preserves_all_metadata() {
-        use solana_instruction::error::InstructionError;
         use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+        use solana_instruction::error::InstructionError;
 
         let sig = Signature::from([1u8; 64]);
         let failed = FailedTransactionMetadata {
@@ -4656,7 +4676,10 @@ mod tests {
         assert_eq!(*success.signature(), *error.signature());
         assert_eq!(success.fee(), error.fee());
         assert_eq!(success.return_data().data, error.return_data().data);
-        assert_eq!(success.inner_instructions().len(), error.inner_instructions().len());
+        assert_eq!(
+            success.inner_instructions().len(),
+            error.inner_instructions().len()
+        );
     }
 
     // =========================================================================
@@ -4676,7 +4699,10 @@ mod tests {
 
         // Verify totals were populated
         let totals = ctx.get_program_coverage_totals();
-        assert!(totals.contains_key(&program_id), "program should have coverage totals");
+        assert!(
+            totals.contains_key(&program_id),
+            "program should have coverage totals"
+        );
         let (edges, instrs) = totals[&program_id];
         assert!(edges > 0, "should have edges: {}", edges);
         assert!(instrs > 0, "should have instructions: {}", instrs);
@@ -4684,8 +4710,11 @@ mod tests {
         // Clone and verify it's the same Arc (cheap pointer clone, not deep copy)
         let cloned = ctx.clone();
         let cloned_totals = cloned.get_program_coverage_totals();
-        assert_eq!(cloned_totals[&program_id], (edges, instrs),
-            "clone must have identical coverage totals");
+        assert_eq!(
+            cloned_totals[&program_id],
+            (edges, instrs),
+            "clone must have identical coverage totals"
+        );
 
         // Arc::ptr_eq would be ideal but we only have &HashMap. Verify via
         // the value equality at minimum — the type is Arc<HashMap> so clone
@@ -4695,12 +4724,16 @@ mod tests {
     #[test]
     fn program_coverage_totals_empty_without_program() {
         let ctx = TestContext::new();
-        assert!(ctx.get_program_coverage_totals().is_empty(),
-            "fresh context should have no coverage totals");
+        assert!(
+            ctx.get_program_coverage_totals().is_empty(),
+            "fresh context should have no coverage totals"
+        );
 
         let cloned = ctx.clone();
-        assert!(cloned.get_program_coverage_totals().is_empty(),
-            "clone of fresh context should also be empty");
+        assert!(
+            cloned.get_program_coverage_totals().is_empty(),
+            "clone of fresh context should also be empty"
+        );
     }
 
     // =========================================================================
@@ -4717,16 +4750,27 @@ mod tests {
         let program_data = std::fs::read(&so_path).unwrap();
 
         let result = TestContext::analyze_program_coverage(&program_data);
-        assert!(result.is_some(), "valid SBF binary should produce coverage data");
+        assert!(
+            result.is_some(),
+            "valid SBF binary should produce coverage data"
+        );
 
         let (edges, instructions) = result.unwrap();
         assert!(edges > 0, "should have conditional edges: {}", edges);
-        assert!(instructions > 0, "should have instructions: {}", instructions);
+        assert!(
+            instructions > 0,
+            "should have instructions: {}",
+            instructions
+        );
 
         // Sanity: edges should be less than instructions (not every instruction
         // is a conditional branch — conditional branches produce 2 edges each)
-        assert!(edges < instructions * 2,
-            "edges ({}) should be < 2*instructions ({})", edges, instructions);
+        assert!(
+            edges < instructions * 2,
+            "edges ({}) should be < 2*instructions ({})",
+            edges,
+            instructions
+        );
     }
 
     #[test]
@@ -4753,7 +4797,9 @@ mod tests {
         struct DummyContext;
         impl ContextObject for DummyContext {
             fn consume(&mut self, _amount: u64) {}
-            fn get_remaining(&self) -> u64 { 0 }
+            fn get_remaining(&self) -> u64 {
+                0
+            }
         }
         let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
         let executable = Executable::from_elf(&program_data, loader).unwrap();
@@ -4761,9 +4807,12 @@ mod tests {
         let total_all_instructions = analysis.instructions.len();
 
         // BFS count should be <= total (strictly less if any dead code exists)
-        assert!(bfs_instructions <= total_all_instructions,
+        assert!(
+            bfs_instructions <= total_all_instructions,
             "BFS instructions ({}) should be <= total instructions ({})",
-            bfs_instructions, total_all_instructions);
+            bfs_instructions,
+            total_all_instructions
+        );
 
         // For a real program binary there should be at least some unreachable
         // code (linker stubs, panic handlers, etc.)
@@ -4771,23 +4820,30 @@ mod tests {
         eprintln!(
             "[TEST] BFS reachable: {} instructions, {} edges. Total in binary: {} instructions. \
              Excluded: {} instructions ({:.1}%)",
-            bfs_instructions, bfs_edges, total_all_instructions,
+            bfs_instructions,
+            bfs_edges,
+            total_all_instructions,
             total_all_instructions - bfs_instructions,
-            ((total_all_instructions - bfs_instructions) as f64 / total_all_instructions as f64) * 100.0
+            ((total_all_instructions - bfs_instructions) as f64 / total_all_instructions as f64)
+                * 100.0
         );
     }
 
     #[test]
     fn analyze_program_coverage_returns_none_for_garbage() {
         let garbage = vec![0u8; 64];
-        assert!(TestContext::analyze_program_coverage(&garbage).is_none(),
-            "garbage bytes should not parse as valid SBF");
+        assert!(
+            TestContext::analyze_program_coverage(&garbage).is_none(),
+            "garbage bytes should not parse as valid SBF"
+        );
     }
 
     #[test]
     fn analyze_program_coverage_returns_none_for_empty() {
-        assert!(TestContext::analyze_program_coverage(&[]).is_none(),
-            "empty bytes should not parse as valid SBF");
+        assert!(
+            TestContext::analyze_program_coverage(&[]).is_none(),
+            "empty bytes should not parse as valid SBF"
+        );
     }
 
     #[test]
@@ -4802,8 +4858,12 @@ mod tests {
 
         // Edges come from conditional jumps, each producing 2 edges (taken/not-taken).
         // So edge count should always be even.
-        assert_eq!(edges % 2, 0,
-            "edge count ({}) should be even (each conditional branch = 2 edges)", edges);
+        assert_eq!(
+            edges % 2,
+            0,
+            "edge count ({}) should be even (each conditional branch = 2 edges)",
+            edges
+        );
     }
 
     // =========================================================================
@@ -4825,10 +4885,16 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
         let result = ctx.raw_call(ix).signers(&[&payer]).send();
-        assert!(result.is_ok(), "raw_call with signers should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "raw_call with signers should succeed: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().is_success());
     }
 
@@ -4840,10 +4906,16 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
         let result = ctx.raw_call(ix).fee_payer(&payer).send();
-        assert!(result.is_ok(), "raw_call with fee_payer should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "raw_call with fee_payer should succeed: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().is_success());
     }
 
@@ -4856,13 +4928,20 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
-        let result = ctx.raw_call(ix)
+        let result = ctx
+            .raw_call(ix)
             .fee_payer(&payer)
             .signers(&[&other_signer])
             .send();
-        assert!(result.is_ok(), "fee_payer + signers should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "fee_payer + signers should succeed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -4870,7 +4949,9 @@ mod tests {
         // No signers and no fee payer should error
         let mut ctx = TestContext::new();
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &Pubkey::new_unique(), &Pubkey::new_unique(), 1000,
+            &Pubkey::new_unique(),
+            &Pubkey::new_unique(),
+            1000,
         );
         let result = ctx.raw_call(ix).send();
         assert!(result.is_err(), "should error with no signers");
@@ -4884,13 +4965,16 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
-        let result = ctx.raw_call(ix)
-            .fee_payer(&payer)
-            .signers(&[&payer])
-            .send();
-        assert!(result.is_ok(), "duplicate fee_payer/signer should not cause double-sign error: {:?}", result.err());
+        let result = ctx.raw_call(ix).fee_payer(&payer).signers(&[&payer]).send();
+        assert!(
+            result.is_ok(),
+            "duplicate fee_payer/signer should not cause double-sign error: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().is_success());
     }
 
@@ -4902,12 +4986,18 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 2000,
+            &payer.pubkey(),
+            &recipient,
+            2000,
         );
         ctx.pending_instructions.push(ix);
         ctx.pending_signers.push(payer.insecure_clone());
         let result = ctx.send_batch();
-        assert!(result.is_ok(), "send_batch should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "send_batch should succeed: {:?}",
+            result.err()
+        );
         let outcome = result.unwrap();
         assert!(outcome.is_some());
         assert!(outcome.unwrap().is_success());
@@ -4927,7 +5017,9 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
         let result = ctx.raw_call(ix).signers(&[&payer]).send();
         assert!(result.is_ok());
@@ -4944,10 +5036,16 @@ mod tests {
         let recipient = Pubkey::new_unique();
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(), &recipient, 1000,
+            &payer.pubkey(),
+            &recipient,
+            1000,
         );
         let result = ctx.raw_call(ix).signers(&[&payer]).send();
-        assert!(result.is_ok(), "real signing should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "real signing should work: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().is_success());
     }
 
@@ -4960,16 +5058,30 @@ mod tests {
 
         for i in 0..5 {
             let ix = anchor_lang::solana_program::system_instruction::transfer(
-                &payer.pubkey(), &recipient, 1000,
+                &payer.pubkey(),
+                &recipient,
+                1000,
             );
             let result = ctx.raw_call(ix).signers(&[&payer]).send();
-            assert!(result.is_ok(), "tx {} should succeed: {:?}", i, result.err());
-            assert!(result.unwrap().is_success(), "tx {} should be successful", i);
+            assert!(
+                result.is_ok(),
+                "tx {} should succeed: {:?}",
+                i,
+                result.err()
+            );
+            assert!(
+                result.unwrap().is_success(),
+                "tx {} should be successful",
+                i
+            );
         }
 
         // Verify lamports moved
         let balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
-        assert_eq!(balance, 5000, "recipient should have 5000 lamports after 5 transfers");
+        assert_eq!(
+            balance, 5000,
+            "recipient should have 5000 lamports after 5 transfers"
+        );
     }
 
     // =========================================================================
@@ -4988,19 +5100,24 @@ mod tests {
         let sysvar_pubkeys: Vec<_> = snapshot.sysvars.iter().map(|(pk, _)| *pk).collect();
 
         // Clock should be present
-        assert!(sysvar_pubkeys.contains(&Clock::id()), "Clock should be in snapshot");
+        assert!(
+            sysvar_pubkeys.contains(&Clock::id()),
+            "Clock should be in snapshot"
+        );
 
         // SlotHistory and SlotHashes should NOT be present
-        let slot_history_id = solana_pubkey::Pubkey::from_str_const(
-            "SysvarS1otHistory11111111111111111111111111"
+        let slot_history_id =
+            solana_pubkey::Pubkey::from_str_const("SysvarS1otHistory11111111111111111111111111");
+        let slot_hashes_id =
+            solana_pubkey::Pubkey::from_str_const("SysvarS1otHashes111111111111111111111111111");
+        assert!(
+            !sysvar_pubkeys.contains(&slot_history_id),
+            "SlotHistory (131KB) should be excluded from snapshots"
         );
-        let slot_hashes_id = solana_pubkey::Pubkey::from_str_const(
-            "SysvarS1otHashes111111111111111111111111111"
+        assert!(
+            !sysvar_pubkeys.contains(&slot_hashes_id),
+            "SlotHashes (20KB) should be excluded from snapshots"
         );
-        assert!(!sysvar_pubkeys.contains(&slot_history_id),
-            "SlotHistory (131KB) should be excluded from snapshots");
-        assert!(!sysvar_pubkeys.contains(&slot_hashes_id),
-            "SlotHashes (20KB) should be excluded from snapshots");
     }
 
     // =========================================================================
@@ -5011,7 +5128,10 @@ mod tests {
     fn advance_slots_records_target_slot() {
         let mut ctx = TestContext::new();
         ctx.advance_slots(500);
-        assert_eq!(ctx.dirty_tracker.clock_target_slot, Some(500 + ctx.slot() - 500));
+        assert_eq!(
+            ctx.dirty_tracker.clock_target_slot,
+            Some(500 + ctx.slot() - 500)
+        );
         assert!(ctx.dirty_tracker.is_clock_dirty());
     }
 

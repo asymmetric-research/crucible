@@ -1,9 +1,9 @@
 use crate::TestContext;
+use anchor_lang::solana_program::program_pack::Pack;
+use anyhow::Result;
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 use spl_token::solana_program::program_option::COption;
-use anchor_lang::solana_program::program_pack::Pack;
-use anyhow::Result;
 
 pub struct GenericAccountBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,
@@ -34,12 +34,12 @@ pub trait AccountBuilderBase: Sized {
         self.account_state_mut().rent_epoch = val;
         self
     }
-    
+
     fn lamports(mut self, amount: u64) -> Self {
         self.account_state_mut().lamports = amount;
         self
     }
-    
+
     fn size(mut self, length: usize) -> Self {
         self.account_state_mut().data = vec![0; length];
         self
@@ -52,8 +52,12 @@ pub trait AccountBuilderBase: Sized {
 }
 
 impl AccountBuilderBase for GenericAccountBuilder<'_> {
-    fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
-    fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
+    fn account_state_mut(&mut self) -> &mut Account {
+        &mut self.account_state
+    }
+    fn address_mut(&mut self) -> &mut Pubkey {
+        &mut self.address
+    }
 }
 
 impl GenericAccountBuilder<'_> {
@@ -76,8 +80,12 @@ pub struct MintAccountBuilder<'a> {
 }
 
 impl AccountBuilderBase for MintAccountBuilder<'_> {
-    fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
-    fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
+    fn account_state_mut(&mut self) -> &mut Account {
+        &mut self.account_state
+    }
+    fn address_mut(&mut self) -> &mut Pubkey {
+        &mut self.address
+    }
 }
 
 impl MintAccountBuilder<'_> {
@@ -97,22 +105,22 @@ impl MintAccountBuilder<'_> {
         self.mint.mint_authority = COption::Some(authority);
         self
     }
-    
+
     pub fn supply(mut self, supply: u64) -> Self {
         self.mint.supply = supply;
         self
     }
-    
+
     pub fn decimals(mut self, decimals: u8) -> Self {
         self.mint.decimals = decimals;
         self
     }
-    
+
     pub fn is_initialized(mut self, initialized: bool) -> Self {
         self.mint.is_initialized = initialized;
         self
     }
-    
+
     pub fn freeze_authority(mut self, authority: Option<Pubkey>) -> Self {
         self.mint.freeze_authority = match authority {
             Some(pk) => COption::Some(pk),
@@ -130,8 +138,12 @@ pub struct TokenAccountBuilder<'a> {
 }
 
 impl AccountBuilderBase for TokenAccountBuilder<'_> {
-    fn account_state_mut(&mut self) -> &mut Account { &mut self.account_state }
-    fn address_mut(&mut self) -> &mut Pubkey { &mut self.address }
+    fn account_state_mut(&mut self) -> &mut Account {
+        &mut self.account_state
+    }
+    fn address_mut(&mut self) -> &mut Pubkey {
+        &mut self.address
+    }
 }
 
 impl TokenAccountBuilder<'_> {
@@ -159,17 +171,17 @@ impl TokenAccountBuilder<'_> {
         self.token_state.mint = mint;
         self
     }
-    
+
     pub fn token_owner(mut self, owner: Pubkey) -> Self {
         self.token_state.owner = owner;
         self
     }
-    
+
     pub fn amount(mut self, amount: u64) -> Self {
         self.token_state.amount = amount;
         self
     }
-    
+
     pub fn delegate(mut self, delegate: Option<Pubkey>) -> Self {
         self.token_state.delegate = match delegate {
             Some(pk) => COption::Some(pk),
@@ -177,12 +189,12 @@ impl TokenAccountBuilder<'_> {
         };
         self
     }
-    
+
     pub fn state(mut self, state: spl_token::state::AccountState) -> Self {
         self.token_state.state = state;
         self
     }
-    
+
     pub fn is_native(mut self, native_amount: Option<u64>) -> Self {
         self.token_state.is_native = match native_amount {
             Some(amount) => COption::Some(amount),
@@ -195,7 +207,7 @@ impl TokenAccountBuilder<'_> {
         self.token_state.delegated_amount = amount;
         self
     }
-    
+
     pub fn close_authority(mut self, authority: Option<Pubkey>) -> Self {
         self.token_state.close_authority = match authority {
             Some(pk) => COption::Some(pk),

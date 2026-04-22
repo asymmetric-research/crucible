@@ -445,8 +445,10 @@ pub fn tmin_mode(
             let crash_files: Vec<(String, std::path::PathBuf)> = if let Ok(all_dir) = std::env::var("FUZZ_TMIN_ALL_DIR") {
                 // --all mode: iterate all crash binaries with .meta.json in the directory
                 let dir = std::path::Path::new(&all_dir);
+                let meta_scan_dir_str = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| all_dir.clone());
+                let meta_scan_dir = std::path::Path::new(&meta_scan_dir_str);
                 let mut files = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(dir) {
+                if let Ok(entries) = std::fs::read_dir(meta_scan_dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -471,6 +473,7 @@ pub fn tmin_mode(
             };
 
             let crashes_dir = std::env::var("FUZZ_CRASHES_DIR").unwrap_or_else(|_| "crashes".into());
+            let meta_dir = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| crashes_dir.clone());
 
             // Setup fixture once — reused across all crash files.
             // No tracing needed: tmin only checks for violation, not coverage.
@@ -584,7 +587,7 @@ pub fn tmin_mode(
                         with_stderr_suppressed(|| #fn_name(&mut fixture, actions));
                     }
                     if !crash_id.is_empty() {
-                        crucible_test_context::write_crash_metadata_for_id(&crashes_dir, crash_id, None);
+                        crucible_test_context::write_crash_metadata_for_id(&meta_dir, crash_id, None);
                     }
                 }
             }
@@ -612,8 +615,14 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(dry_run_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
-        assert!(output.contains("dry_run_mode"), "should check dry_run_mode flag");
-        assert!(output.contains("DRY-RUN"), "should use DRY-RUN prefix in output");
+        assert!(
+            output.contains("dry_run_mode"),
+            "should check dry_run_mode flag"
+        );
+        assert!(
+            output.contains("DRY-RUN"),
+            "should use DRY-RUN prefix in output"
+        );
         assert!(output.contains("setup"), "should call setup()");
     }
 
@@ -623,8 +632,14 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(dry_run_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
-        assert!(output.contains("coverage_enabled"), "should check coverage flag");
-        assert!(output.contains("write_lcov_coverage"), "should write coverage on exit");
+        assert!(
+            output.contains("coverage_enabled"),
+            "should check coverage flag"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should write coverage on exit"
+        );
     }
 
     #[test]
@@ -632,10 +647,21 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
-        let output = ts(replay_mode(&mod_name, &fixture, &fn_name, &[], &[], false, None));
+        let output = ts(replay_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+            None,
+        ));
         assert!(output.contains("input_file"), "should check input_file");
         assert!(output.contains("REPLAY"), "should use REPLAY prefix");
-        assert!(output.contains("reproduces"), "should report reproduction status");
+        assert!(
+            output.contains("reproduces"),
+            "should report reproduction status"
+        );
     }
 
     #[test]
@@ -644,9 +670,23 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let action_ty = quote::quote! { TestAction };
-        let output = ts(replay_mode(&mod_name, &fixture, &fn_name, &[], &[], true, Some(&action_ty)));
-        assert!(output.contains("meta.json"), "should attempt .meta.json reconstruction");
-        assert!(output.contains("from_name_and_params"), "should reconstruct from name+params");
+        let output = ts(replay_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("meta.json"),
+            "should attempt .meta.json reconstruction"
+        );
+        assert!(
+            output.contains("from_name_and_params"),
+            "should reconstruct from name+params"
+        );
     }
 
     #[test]
@@ -654,10 +694,26 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
-        let output = ts(coverage_only_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
-        assert!(output.contains("corpus_in_dir"), "should check for corpus_in_dir");
-        assert!(output.contains("COVERAGE-ONLY"), "should use COVERAGE-ONLY prefix");
-        assert!(output.contains("write_lcov_coverage"), "should write coverage output");
+        let output = ts(coverage_only_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+        ));
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should check for corpus_in_dir"
+        );
+        assert!(
+            output.contains("COVERAGE-ONLY"),
+            "should use COVERAGE-ONLY prefix"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should write coverage output"
+        );
     }
 
     #[test]
@@ -666,7 +722,10 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let output = ts(tmin_mode(&mod_name, &fixture, &fn_name, false, None));
-        assert!(output.contains("only supports structured"), "should reject non-structured");
+        assert!(
+            output.contains("only supports structured"),
+            "should reject non-structured"
+        );
     }
 
     #[test]
@@ -675,12 +734,29 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let action_ty = quote::quote! { TestAction };
-        let output = ts(tmin_mode(&mod_name, &fixture, &fn_name, true, Some(&action_ty)));
-        assert!(output.contains("FUZZ_TMIN_FILE"), "should check FUZZ_TMIN_FILE env");
-        assert!(output.contains("truncate"), "should truncate post-violation actions");
-        assert!(output.contains("remove"), "should try removing individual actions");
-        assert!(output.contains("convergence") || output.contains("len_before_pass"),
-            "should loop until convergence");
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("FUZZ_TMIN_FILE"),
+            "should check FUZZ_TMIN_FILE env"
+        );
+        assert!(
+            output.contains("truncate"),
+            "should truncate post-violation actions"
+        );
+        assert!(
+            output.contains("remove"),
+            "should try removing individual actions"
+        );
+        assert!(
+            output.contains("convergence") || output.contains("len_before_pass"),
+            "should loop until convergence"
+        );
     }
 
     #[test]
@@ -689,9 +765,21 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let action_ty = quote::quote! { TestAction };
-        let output = ts(tmin_mode(&mod_name, &fixture, &fn_name, true, Some(&action_ty)));
-        assert!(output.contains("FUZZ_TMIN_ALL_DIR"), "should support --all mode");
-        assert!(output.contains("meta.json"), "should iterate .meta.json files");
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("FUZZ_TMIN_ALL_DIR"),
+            "should support --all mode"
+        );
+        assert!(
+            output.contains("meta.json"),
+            "should iterate .meta.json files"
+        );
     }
 
     #[test]
@@ -700,8 +788,17 @@ mod tests {
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
         let action_ty = quote::quote! { TestAction };
-        let output = ts(tmin_mode(&mod_name, &fixture, &fn_name, true, Some(&action_ty)));
-        assert!(output.contains("with_stderr_suppressed"), "should suppress stderr during trials");
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("with_stderr_suppressed"),
+            "should suppress stderr during trials"
+        );
         assert!(output.contains("dev/null"), "should redirect to /dev/null");
     }
 
@@ -710,9 +807,25 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
         let fn_name = format_ident!("test_fn");
-        let output = ts(coverage_only_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
-        assert!(output.contains("is_corpus_input"), "should filter using is_corpus_input");
-        assert!(output.contains("catch_unwind"), "should catch panics from deserialization");
-        assert!(output.contains("take_violation"), "should clear violation flag");
+        let output = ts(coverage_only_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+        ));
+        assert!(
+            output.contains("is_corpus_input"),
+            "should filter using is_corpus_input"
+        );
+        assert!(
+            output.contains("catch_unwind"),
+            "should catch panics from deserialization"
+        );
+        assert!(
+            output.contains("take_violation"),
+            "should clear violation flag"
+        );
     }
 }
