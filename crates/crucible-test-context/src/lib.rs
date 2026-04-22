@@ -724,7 +724,8 @@ pub fn write_crash_metadata_with_actions(
     if let Some(actions) = full_actions {
         metadata.actions = actions;
     }
-    let meta_filename = format!("{}/{}.meta.json", crash_dir, crash_id);
+    let meta_dir = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| crash_dir.to_string());
+    let meta_filename = format!("{}/{}.meta.json", meta_dir, crash_id);
     let input_filename = format!("{}/{}", crash_dir, crash_id);
 
     // Save the input bytes for replay

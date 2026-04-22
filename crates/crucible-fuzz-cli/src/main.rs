@@ -886,7 +886,7 @@ fn fuzz_show(
     };
 
     match crash_file {
-        None if replay && regen => regen_crashes(&fuzz_dir, custom_crashes_dir),
+        None if replay && regen => regen_crashes(&fuzz_dir, custom_crashes_dir, custom_meta_dir),
         None => list_crashes(
             &fuzz_dir,
             &display_name,
@@ -1753,8 +1753,15 @@ fn fuzz_tmin(
     Ok(())
 }
 
-fn regen_crashes(fuzz_dir: &Path, custom_crashes_dir: Option<&Path>) -> Result<()> {
+fn regen_crashes(
+    fuzz_dir: &Path,
+    custom_crashes_dir: Option<&Path>,
+    custom_meta_dir: Option<&Path>,
+) -> Result<()> {
     let crashes_dir = resolve_crashes_dir(fuzz_dir, custom_crashes_dir);
+    let meta_dir = custom_meta_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| crashes_dir.clone());
     if !crashes_dir.exists() {
         bail!(
             "No crashes directory found at: {}\nRun the fuzzer first to generate crashes.",
@@ -1813,10 +1820,12 @@ fn regen_crashes(fuzz_dir: &Path, custom_crashes_dir: Option<&Path>) -> Result<(
             total_count += 1;
             print!("[REGEN] {}/{} {}... ", idx + 1, crash_files.len(), crash_id);
 
+            let meta_test_dir = meta_dir.join(test_name);
             let status = Command::new(&binary_path)
                 .current_dir(fuzz_dir)
                 .env("FUZZ_INPUT_FILE", crash_path)
                 .env("FUZZ_CRASHES_DIR", &test_dir)
+                .env("FUZZ_META_DIR", &meta_test_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
