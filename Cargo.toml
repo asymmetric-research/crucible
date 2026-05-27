@@ -22,7 +22,7 @@ litesvm = { version = "0.9.0", features = ["register-tracing"] }
 anchor-lang = "1.0.1"
 anchor-spl = { version = "1.0.1", features = ["token_2022"] }
 # Solana crates pinned to match anchor master and litesvm 0.9.0
-solana-pubkey = "3.0"
+solana-pubkey = { version = "3.0", features = ["curve25519"] }
 solana-keypair = "3.0"
 solana-signer = "3.0"
 solana-signature = "3.0"

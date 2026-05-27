@@ -9,6 +9,7 @@ pub struct GenericAccountBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
+    pub(crate) owner_unverified: bool,
 }
 
 pub trait AccountBuilderBase: Sized {
@@ -61,12 +62,20 @@ impl AccountBuilderBase for GenericAccountBuilder<'_> {
 }
 
 impl GenericAccountBuilder<'_> {
+    pub fn owner_unverified(mut self) -> Self {
+        self.owner_unverified = true;
+        self
+    }
+
     pub fn create(self) -> Result<Pubkey> {
         // Ensure address has been set
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
         self.ctx.track_account(self.address);
+        if self.owner_unverified {
+            self.ctx.mark_owner_unverified(self.address);
+        }
         let _ = self.ctx.svm.set_account(self.address, self.account_state);
         Ok(self.address)
     }
@@ -77,6 +86,7 @@ pub struct MintAccountBuilder<'a> {
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
     pub(crate) mint: spl_token::state::Mint,
+    pub(crate) owner_unverified: bool,
 }
 
 impl AccountBuilderBase for MintAccountBuilder<'_> {
@@ -89,6 +99,11 @@ impl AccountBuilderBase for MintAccountBuilder<'_> {
 }
 
 impl MintAccountBuilder<'_> {
+    pub fn owner_unverified(mut self) -> Self {
+        self.owner_unverified = true;
+        self
+    }
+
     pub fn create(self) -> Result<Pubkey> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
@@ -97,6 +112,9 @@ impl MintAccountBuilder<'_> {
         let mut account = self.account_state;
         spl_token::state::Mint::pack(self.mint, &mut account.data)?;
         self.ctx.track_account(self.address);
+        if self.owner_unverified {
+            self.ctx.mark_owner_unverified(self.address);
+        }
         let _ = self.ctx.svm.set_account(self.address, account);
         Ok(self.address)
     }
@@ -135,6 +153,7 @@ pub struct TokenAccountBuilder<'a> {
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
     pub(crate) token_state: spl_token::state::Account,
+    pub(crate) owner_unverified: bool,
 }
 
 impl AccountBuilderBase for TokenAccountBuilder<'_> {
@@ -147,6 +166,11 @@ impl AccountBuilderBase for TokenAccountBuilder<'_> {
 }
 
 impl TokenAccountBuilder<'_> {
+    pub fn owner_unverified(mut self) -> Self {
+        self.owner_unverified = true;
+        self
+    }
+
     pub fn create(self) -> Result<Pubkey> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
@@ -163,6 +187,9 @@ impl TokenAccountBuilder<'_> {
         let mut account = self.account_state;
         spl_token::state::Account::pack(self.token_state, &mut account.data)?;
         self.ctx.track_account(self.address);
+        if self.owner_unverified {
+            self.ctx.mark_owner_unverified(self.address);
+        }
         let _ = self.ctx.svm.set_account(self.address, account);
         Ok(self.address)
     }

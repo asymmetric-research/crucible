@@ -64,15 +64,6 @@ impl ProgramBuilder<'_> {
             .or_else(|| self.signers.first().map(|kp| kp.pubkey()))
             .unwrap_or_default();
 
-        let ixs = std::slice::from_ref(&self.instruction);
-
-        // Pre-tx: dirty tracking
-        let __t_pre = std::time::Instant::now();
-        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
-        crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
-
-        // SVM execution — pass all signers, including fee payer
-        let __t_svm = std::time::Instant::now();
         let mut all_signers = self.signers;
         if let Some(ref fp) = self.fee_payer {
             if !all_signers.iter().any(|k| k.pubkey() == fp.pubkey()) {
@@ -88,10 +79,24 @@ impl ProgramBuilder<'_> {
                     .context("At least one signer required")?,
             )
             .insecure_clone();
-        let result = instruction_builder::send_instruction(
+        let signer_refs: Vec<&Keypair> = all_signers.iter().collect();
+        let ixs = std::slice::from_ref(&self.instruction);
+
+        // Pre-tx: dirty tracking
+        let __t_pre = std::time::Instant::now();
+        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
+        crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
+
+        // Owner-mutation probe runs on a cloned SVM and never replaces the real outcome.
+        self.ctx
+            .maybe_probe_owner_mutation(ixs, &signer_refs, &payer);
+
+        // SVM execution — pass all signers, including fee payer
+        let __t_svm = std::time::Instant::now();
+        let result = instruction_builder::send_transaction(
             &mut self.ctx.svm,
-            self.instruction,
-            &all_signers,
+            vec![self.instruction],
+            &signer_refs,
             &payer,
             self.ctx.sigverify,
         )?;

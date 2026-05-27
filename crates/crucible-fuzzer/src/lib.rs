@@ -4,7 +4,9 @@ pub use crucible_fuzz_macro::crucible_fuzz;
 pub use crucible_invariant_macro::fuzz_fixture;
 pub use crucible_invariant_macro::invariant_test;
 pub use crucible_test_context::AccountBuilderBase;
+pub use crucible_test_context::OwnerMutationConfig;
 pub use crucible_test_context::TestContext;
+pub use crucible_test_context::DEFAULT_OWNER_MUTATION_SAMPLE_RATE;
 
 // Re-export fuzz assertion macros
 pub use crucible_test_context::fuzz_assert;
