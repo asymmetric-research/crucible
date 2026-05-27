@@ -150,6 +150,7 @@ impl OwnerMutationAirdropFixture {
 fn owner_mutation_airdrop_invariant(_fixture: &mut OwnerMutationAirdropFixture) {}
 
 #[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn owner_mutation_harness_finds_missing_airdrop_owner_check() {
     let mut fixture = OwnerMutationAirdropFixture::setup();
 
