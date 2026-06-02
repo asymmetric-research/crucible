@@ -29,7 +29,7 @@ pub use crate::mock_oracles::{
     MockPythOracleBuilder, PriceFeedMessage, PriceUpdateV2, VerificationLevel,
     DEFAULT_PYTH_RECEIVER_ID, PYTH_DISCRIMINATOR,
 };
-pub use crate::owner_mutation::{OwnerMutationConfig, DEFAULT_OWNER_MUTATION_SAMPLE_RATE};
+pub use crate::account_mutation::{AccountMutationConfig, DEFAULT_OWNER_MUTATION_SAMPLE_RATE};
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 use anchor_lang::prelude::{Clock, Rent};
@@ -42,7 +42,7 @@ use spl_token::solana_program::program_option::COption;
 
 mod account_builders;
 mod instruction_builder;
-mod owner_mutation;
+mod account_mutation;
 mod program_builder;
 pub mod schema;
 pub mod snapshot;
@@ -1342,7 +1342,7 @@ pub struct TestContext {
     /// Tracks dirty accounts across all transactions in an iteration
     pub dirty_tracker: snapshot::DirtyTracker,
     /// Optional preflight engine that mutates account owners to detect missing owner checks.
-    owner_mutation: owner_mutation::OwnerMutationConfig,
+    account_mutation: account_mutation::AccountMutationConfig,
     /// Whether signature verification is enabled on the SVM.
     /// When false (default for fuzzing), transactions use dummy signatures
     /// to skip ed25519 computation (~77µs per tx).
@@ -1366,7 +1366,7 @@ impl Clone for TestContext {
             snapshot: None,
             // Fresh tracker for each clone
             dirty_tracker: self.dirty_tracker.clone(),
-            owner_mutation: self.owner_mutation.clone(),
+            account_mutation: self.account_mutation.clone(),
             sigverify: self.sigverify,
         }
     }
@@ -1422,7 +1422,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            owner_mutation: owner_mutation::OwnerMutationConfig::default(),
+            account_mutation: account_mutation::AccountMutationConfig::default(),
             sigverify: false,
         }
     }
@@ -1442,7 +1442,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            owner_mutation: owner_mutation::OwnerMutationConfig::default(),
+            account_mutation: account_mutation::AccountMutationConfig::default(),
             sigverify: false,
         }
     }
@@ -1618,7 +1618,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            owner_mutation: owner_mutation::OwnerMutationConfig::default(),
+            account_mutation: account_mutation::AccountMutationConfig::default(),
             sigverify: false,
         }
     }
@@ -1656,7 +1656,7 @@ impl TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            owner_mutation: self.owner_mutation.clone(),
+            account_mutation: self.account_mutation.clone(),
             sigverify: false,
         }
     }
@@ -1689,14 +1689,14 @@ impl TestContext {
     /// [`DEFAULT_OWNER_MUTATION_SAMPLE_RATE`] transactions, with one mutated-owner
     /// probe for each sampled transaction. The original transaction always runs
     /// after the probe and still determines the returned outcome.
-    pub fn enable_owner_mutation(&mut self) -> &mut Self {
-        self.owner_mutation.enable();
+    pub fn enable_account_mutation(&mut self) -> &mut Self {
+        self.account_mutation.enable();
         self
     }
 
     /// Disable owner mutation checks.
-    pub fn disable_owner_mutation(&mut self) -> &mut Self {
-        self.owner_mutation.disable();
+    pub fn disable_account_mutation(&mut self) -> &mut Self {
+        self.account_mutation.disable();
         self
     }
 
@@ -1705,7 +1705,7 @@ impl TestContext {
     /// `1` probes every transaction, `10` probes roughly one in ten transaction
     /// fingerprints. `0` is treated as `1`.
     pub fn set_owner_mutation_sample_rate(&mut self, sample_rate: u64) -> &mut Self {
-        self.owner_mutation.set_sample_rate(sample_rate);
+        self.account_mutation.set_sample_rate(sample_rate);
         self
     }
 
@@ -1715,7 +1715,7 @@ impl TestContext {
     /// be reassigned by an external private key. Set this to `false` when a
     /// harness intentionally wants owner probes against PDA-like addresses.
     pub fn set_owner_mutation_skip_pdas(&mut self, skip_pdas: bool) -> &mut Self {
-        self.owner_mutation.set_skip_pda_candidates(skip_pdas);
+        self.account_mutation.set_skip_pda_candidates(skip_pdas);
         self
     }
 
@@ -1724,7 +1724,7 @@ impl TestContext {
     /// Unverified accounts are skipped by owner mutation probes because their
     /// owner is not security-relevant for the harness.
     pub fn mark_owner_unverified(&mut self, pubkey: Pubkey) -> &mut Self {
-        self.owner_mutation.mark_unverified(pubkey);
+        self.account_mutation.mark_unverified(pubkey);
         self
     }
 
@@ -1735,20 +1735,20 @@ impl TestContext {
         P: std::borrow::Borrow<Pubkey>,
     {
         for pubkey in pubkeys {
-            self.owner_mutation.mark_unverified(*pubkey.borrow());
+            self.account_mutation.mark_unverified(*pubkey.borrow());
         }
         self
     }
 
-    pub(crate) fn maybe_probe_owner_mutation(
+    pub(crate) fn maybe_probe_account_mutation(
         &self,
         instructions: &[Instruction],
         signers: &[&Keypair],
         payer: &Keypair,
     ) {
-        owner_mutation::maybe_probe_owner_mutation(
+        account_mutation::maybe_probe_account_mutation(
             &self.svm,
-            &self.owner_mutation,
+            &self.account_mutation,
             instructions,
             signers,
             payer,
@@ -2300,7 +2300,7 @@ impl TestContext {
         SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
         // Owner-mutation probe runs on a cloned SVM and never replaces the real outcome.
-        self.maybe_probe_owner_mutation(&self.pending_instructions, &unique_signers, fee_payer);
+        self.maybe_probe_account_mutation(&self.pending_instructions, &unique_signers, fee_payer);
 
         // SVM execution: send transaction
         let __t_svm = std::time::Instant::now();
@@ -4978,7 +4978,7 @@ mod tests {
         let recipient = Keypair::new().pubkey();
         ctx.svm.airdrop(&recipient, 1).unwrap();
 
-        ctx.enable_owner_mutation();
+        ctx.enable_account_mutation();
         ctx.set_owner_mutation_sample_rate(1);
         ctx.mark_owner_unverified(payer.pubkey());
 
@@ -5021,7 +5021,7 @@ mod tests {
             .create()
             .unwrap();
 
-        ctx.enable_owner_mutation();
+        ctx.enable_account_mutation();
         ctx.set_owner_mutation_sample_rate(1);
         ctx.mark_owner_unverified(payer.pubkey());
 
@@ -5045,7 +5045,7 @@ mod tests {
         let recipient = Keypair::new().pubkey();
         ctx.svm.airdrop(&recipient, 1).unwrap();
 
-        ctx.enable_owner_mutation();
+        ctx.enable_account_mutation();
         ctx.set_owner_mutation_sample_rate(1);
         ctx.mark_owner_unverified(payer.pubkey());
 

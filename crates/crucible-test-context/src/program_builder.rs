@@ -87,9 +87,9 @@ impl ProgramBuilder<'_> {
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
-        // Owner-mutation probe runs on a cloned SVM and never replaces the real outcome.
+        // Account-mutation probe runs on a cloned SVM and never replaces the real outcome.
         self.ctx
-            .maybe_probe_owner_mutation(ixs, &signer_refs, &payer);
+            .maybe_probe_account_mutation(ixs, &signer_refs, &payer);
 
         // SVM execution — pass all signers, including fee payer
         let __t_svm = std::time::Instant::now();

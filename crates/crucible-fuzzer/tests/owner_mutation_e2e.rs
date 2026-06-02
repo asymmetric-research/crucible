@@ -85,7 +85,7 @@ impl OwnerMutationAirdropFixture {
         let vault = Keypair::new().pubkey();
 
         ctx.add_program(&program_id, path_str(&program_so)).unwrap();
-        ctx.enable_owner_mutation();
+        ctx.enable_account_mutation();
         ctx.set_owner_mutation_sample_rate(1);
 
         ctx.create_account()

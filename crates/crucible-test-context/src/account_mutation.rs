@@ -22,7 +22,7 @@ const DEFAULT_PROBES_PER_SAMPLED_TX: usize = 1;
 const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
 
 #[derive(Clone, Debug)]
-pub struct OwnerMutationConfig {
+pub struct AccountMutationConfig {
     enabled: bool,
     sample_rate: u64,
     probes_per_sampled_tx: usize,
@@ -30,7 +30,7 @@ pub struct OwnerMutationConfig {
     unverified_accounts: FastHashSet<Pubkey>,
 }
 
-impl Default for OwnerMutationConfig {
+impl Default for AccountMutationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -42,7 +42,7 @@ impl Default for OwnerMutationConfig {
     }
 }
 
-impl OwnerMutationConfig {
+impl AccountMutationConfig {
     pub fn enable(&mut self) {
         self.enabled = true;
     }
@@ -82,9 +82,9 @@ struct OwnerMutationCandidate {
     original_owner: Pubkey,
 }
 
-pub(crate) fn maybe_probe_owner_mutation(
+pub(crate) fn maybe_probe_account_mutation(
     svm: &LiteSVM,
-    config: &OwnerMutationConfig,
+    config: &AccountMutationConfig,
     instructions: &[Instruction],
     signers: &[&Keypair],
     payer: &Keypair,
@@ -163,7 +163,7 @@ pub(crate) fn maybe_probe_owner_mutation(
 fn collect_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
-    config: &OwnerMutationConfig,
+    config: &AccountMutationConfig,
 ) -> Vec<OwnerMutationCandidate> {
     let mut seen = FastHashSet::default();
     let mut candidates = Vec::new();
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn owner_mutation_candidate_selection_filters_unverified_and_system_accounts() {
         let mut svm = LiteSVM::new();
-        let mut config = OwnerMutationConfig::default();
+        let mut config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
         let keep = on_curve_pubkey();
         let unverified = on_curve_pubkey();
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn owner_mutation_candidate_selection_skips_pdas_by_default() {
         let mut svm = LiteSVM::new();
-        let config = OwnerMutationConfig::default();
+        let config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
         let program_id = Pubkey::new_unique();
         let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn owner_mutation_candidate_selection_can_include_pdas() {
         let mut svm = LiteSVM::new();
-        let mut config = OwnerMutationConfig::default();
+        let mut config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
         let program_id = Pubkey::new_unique();
         let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
