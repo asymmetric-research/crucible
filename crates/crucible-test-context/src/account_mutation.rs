@@ -17,7 +17,7 @@ use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
 use std::cell::RefCell;
 
-const DEFAULT_SKIP_PDA_CANDIDATES: bool = false;
+const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
 
 /// Wrong owner written by the owner-mutation strategy. A recognizable, non-executable key
 /// that no legitimate program could own, so a surviving mutation means the owner was never
@@ -26,6 +26,64 @@ const CRUCIBLE_ATTACKER: Pubkey = Pubkey::new_from_array([0xCC; 32]);
 /// Fallback used in the unlikely case an account is already owned by [`CRUCIBLE_ATTACKER`],
 /// so the mutation is always a real change.
 const CRUCIBLE_ATTACKER_ALT: Pubkey = Pubkey::new_from_array([0xCD; 32]);
+
+/// Replacement address used by the substitution strategies (CC-2 sysvar, CC-3 PDA). A clone of the
+/// target account is planted here and the instruction's account meta is repointed to it, so only the
+/// address differs — a surviving success means the account's identity was never verified.
+const CRUCIBLE_DECOY: Pubkey = Pubkey::new_from_array([0xDD; 32]);
+const CRUCIBLE_DECOY_ALT: Pubkey = Pubkey::new_from_array([0xDE; 32]);
+
+fn decoy_for(target: Pubkey) -> Pubkey {
+    if target == CRUCIBLE_DECOY {
+        CRUCIBLE_DECOY_ALT
+    } else {
+        CRUCIBLE_DECOY
+    }
+}
+
+/// Clone the instructions, repointing every `AccountMeta` for `target` at `decoy`.
+fn rewrite_account(
+    instructions: &[Instruction],
+    target: Pubkey,
+    decoy: Pubkey,
+) -> Vec<Instruction> {
+    instructions
+        .iter()
+        .map(|ix| {
+            let mut ix = ix.clone();
+            for meta in &mut ix.accounts {
+                if meta.pubkey == target {
+                    meta.pubkey = decoy;
+                }
+            }
+            ix
+        })
+        .collect()
+}
+
+/// Plant a clone of `target`'s account at `decoy`, repoint the metas, and replay. Returns true iff the
+/// substituted transaction still succeeds (identity not verified). `target` must not be a signer
+/// (PDAs and sysvars never are), so signers/payer are unaffected.
+fn substitute_probe(ctx: &ProbeCtx, target: Pubkey, decoy: Pubkey) -> bool {
+    let mut probe = ctx.svm.clone();
+    let Some(account) = probe.get_account(&target) else {
+        return false;
+    };
+    if probe.set_account(decoy, account).is_err() {
+        return false;
+    }
+    let rewritten = rewrite_account(ctx.instructions, target, decoy);
+    matches!(
+        send_probe_transaction(
+            &mut probe,
+            &rewritten,
+            ctx.signers,
+            ctx.payer,
+            ctx.sigverify
+        ),
+        Ok(Ok(_))
+    )
+}
 
 thread_local! {
     /// Instruction types whose mutation battery already ran this run (per worker). The key is
@@ -126,6 +184,7 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(OwnerStrategy),
         Box::new(SignerStrategy),
         Box::new(TypeTagStrategy),
+        Box::new(PdaSubstitutionStrategy),
     ]
 }
 
@@ -440,10 +499,68 @@ fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction
         .collect()
 }
 
-/// Owner-mutation targets: non-executable, non-sysvar accounts that carry data. Writable accounts
-/// and PDA-like addresses are included by default: if mutating the owner triggers a runtime
-/// ownership failure the probe simply does not report, while a surviving mutation is still useful
-/// for Anchor, Pinocchio, native, and closed-source harnesses.
+/// CC-3: an account expected to be a specific PDA whose derivation the program never verifies.
+/// Substituting a clone at a different address and still succeeding means the address went unchecked.
+struct PdaSubstitutionStrategy;
+
+impl MutationStrategy for PdaSubstitutionStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for target in collect_pda_candidates(ctx.svm, ctx.instructions) {
+            // Relevance gate: a PDA the program never reads is not exploitable.
+            if !account_is_load_bearing(ctx, &target) {
+                continue;
+            }
+            let decoy = decoy_for(target);
+            if substitute_probe(ctx, target, decoy) {
+                findings.push(Finding {
+                    message: format!(
+                        "[CC-3 pda] account {} substituted with decoy {} instr {}:{} still succeeded (missing PDA derivation check)",
+                        target,
+                        decoy,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+/// CC-3 targets: off-curve (PDA-like), data-bearing, non-executable, non-sysvar accounts. These are
+/// exactly the addresses the owner strategy skips by default — PDA identity is the derivation check,
+/// which the owner check subsumes once present.
+fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut candidates = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if !seen.insert(meta.pubkey) {
+                continue;
+            }
+            if meta.pubkey == ix.program_id
+                || is_known_sysvar(&meta.pubkey)
+                || !is_off_curve(&meta.pubkey)
+            {
+                continue;
+            }
+            let Some(account) = svm.get_account(&meta.pubkey) else {
+                continue;
+            };
+            if account.executable || account.data.is_empty() {
+                continue;
+            }
+            candidates.push(meta.pubkey);
+        }
+    }
+    candidates
+}
+
+/// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. Writable accounts are
+/// included (a probe that triggers a runtime ownership failure simply does not report). PDA-like
+/// (off-curve) addresses are skipped by default — they are covered by the CC-3 derivation check;
+/// set `skip_pda_candidates=false` to also owner-probe them.
 fn collect_owner_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
@@ -714,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_owner_candidates_includes_pdas_by_default_and_can_skip() {
+    fn collect_owner_candidates_skips_pdas_by_default_and_can_include() {
         let mut svm = LiteSVM::new();
         let program_id = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -728,17 +845,70 @@ mod tests {
             data: vec![],
         };
 
+        // Default: PDAs are skipped by the owner strategy (CC-3 owns PDA identity).
         let mut config = AccountMutationConfig::default();
+        assert!(collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config).is_empty());
+
+        // Opt-in: also owner-probe PDAs.
+        config.set_skip_pda_candidates(false);
         assert_eq!(
-            collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config),
+            collect_owner_candidates(&svm, &[ix], &config),
             vec![OwnerCandidate {
                 pubkey: pda,
                 original_owner: owner,
             }]
         );
+    }
 
-        config.set_skip_pda_candidates(true);
-        assert!(collect_owner_candidates(&svm, &[ix], &config).is_empty());
+    #[test]
+    fn collect_pda_candidates_keeps_offcurve_data_accounts_only() {
+        let mut svm = LiteSVM::new();
+        let program_id = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
+        let on_curve = Keypair::new().pubkey();
+        svm.set_account(pda, make_account(owner, vec![7; 16]))
+            .unwrap();
+        svm.set_account(on_curve, make_account(owner, vec![7; 16]))
+            .unwrap();
+
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(pda, false),
+                AccountMeta::new_readonly(on_curve, false), // on-curve -> dropped
+                AccountMeta::new_readonly(Clock::id(), false), // sysvar -> dropped
+            ],
+            data: vec![],
+        };
+        assert_eq!(collect_pda_candidates(&svm, &[ix]), vec![pda]);
+    }
+
+    #[test]
+    fn rewrite_account_repoints_only_target() {
+        let program_id = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        let decoy = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(target, false),
+                AccountMeta::new_readonly(other, true),
+            ],
+            data: vec![],
+        };
+        let out = rewrite_account(std::slice::from_ref(&ix), target, decoy);
+        assert_eq!(out[0].accounts[0].pubkey, decoy);
+        assert!(out[0].accounts[0].is_writable); // flags preserved
+        assert_eq!(out[0].accounts[1].pubkey, other);
+        assert!(out[0].accounts[1].is_signer);
+    }
+
+    #[test]
+    fn decoy_for_uses_alt_when_equal() {
+        assert_eq!(decoy_for(Pubkey::new_unique()), CRUCIBLE_DECOY);
+        assert_eq!(decoy_for(CRUCIBLE_DECOY), CRUCIBLE_DECOY_ALT);
     }
 
     #[test]

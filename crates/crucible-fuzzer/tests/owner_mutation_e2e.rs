@@ -335,10 +335,9 @@ fn no_finding_for_inert_account() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_missing_owner_check_on_pda_config() {
+fn flags_pda_substitution_when_no_derivation_check() {
     let mut h = harness();
-    // PDAs are off-curve, but the detector includes them by default so PDA-heavy and
-    // closed-source targets do not silently miss this owner-check class.
+    // The owner strategy skips PDAs; the CC-3 strategy substitutes a clone at a different address.
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
         &mut h.ctx,
@@ -359,7 +358,34 @@ fn flags_missing_owner_check_on_pda_config() {
         .send()
         .unwrap();
 
-    expect_owner_finding(config);
+    expect_finding("[CC-3 pda]", config);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_pda_derivation_checked() {
+    let mut h = harness();
+    let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
+    create_data_account(
+        &mut h.ctx,
+        config,
+        h.program_id,
+        &CLAIM_AMOUNT.to_le_bytes(),
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPda {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
 }
 
 #[test]

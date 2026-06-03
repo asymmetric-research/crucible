@@ -101,9 +101,24 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Reads a PDA config without an owner check. The detector includes PDA-like addresses by
-    /// default so closed-source and PDA-heavy programs do not silently miss this owner-check class.
+    /// Reads a PDA config without verifying its derivation (missing PDA check) — the CC-3 detector
+    /// substitutes a clone at a different address and the program accepts it.
     pub fn read_pda_config_no_check(ctx: Context<ReadPda>) -> Result<()> {
+        let amount = read_u64(&ctx.accounts.config)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same read, but verifies the config account is the expected `[b"config"]` PDA.
+    pub fn read_pda_config_with_check(ctx: Context<ReadPda>) -> Result<()> {
+        let (expected, _) = Pubkey::find_program_address(&[b"config"], &crate::ID);
+        require!(
+            ctx.accounts.config.key() == expected,
+            AirdropError::WrongPda
+        );
         let amount = read_u64(&ctx.accounts.config)?;
         payout(
             &ctx.accounts.vault.to_account_info(),
@@ -363,4 +378,6 @@ pub enum AirdropError {
     WrongOwner,
     #[msg("Missing required signer")]
     MissingSigner,
+    #[msg("Wrong PDA")]
+    WrongPda,
 }

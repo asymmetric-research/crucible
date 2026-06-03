@@ -264,6 +264,21 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
+    pub fn action_read_pda_config_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPdaConfigWithCheck {})
+            .accounts(accounts::ReadPdaConfigWithCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.pda_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     pub fn action_read_writable_config_no_check(&mut self) -> bool {
         self.ctx
             .program(self.program_id)

@@ -134,8 +134,8 @@
     {
       "name": "read_pda_config_no_check",
       "docs": [
-        "Reads a PDA config without an owner check. The detector includes PDA-like addresses by",
-        "default so closed-source and PDA-heavy programs do not silently miss this owner-check class."
+        "Reads a PDA config without verifying its derivation (missing PDA check) — the CC-3 detector",
+        "substitutes a clone at a different address and the program accepts it."
       ],
       "discriminator": [
         199,
@@ -146,6 +146,37 @@
         124,
         82,
         27
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_with_check",
+      "docs": [
+        "Same read, but verifies the config account is the expected `[b\"config\"]` PDA."
+      ],
+      "discriminator": [
+        240,
+        221,
+        73,
+        97,
+        151,
+        1,
+        173,
+        26
       ],
       "accounts": [
         {
@@ -490,6 +521,11 @@
       "code": 6004,
       "name": "MissingSigner",
       "msg": "Missing required signer"
+    },
+    {
+      "code": 6005,
+      "name": "WrongPda",
+      "msg": "Wrong PDA"
     }
   ],
   "types": [
