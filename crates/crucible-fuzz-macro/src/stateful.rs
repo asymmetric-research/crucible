@@ -1087,11 +1087,13 @@ fn stateful_singlecore_body(
             let violation = crucible_test_context::take_violation();
 
             if let Some(ref msg) = violation {
-                let __violation_action_idx = crucible_test_context::get_violation_action_index();
-                let __history_len = crucible_test_context::get_action_history().len();
-                eprintln!("[CRASH_DIAG] violation at chain action {}/{} (parent depth={}, total={}), history_len={}",
-                    __violation_action_idx.map(|i| i + 1).unwrap_or(0), __chain_len,
-                    parent_depth, parent_depth + __chain_len as u32, __history_len);
+                if std::env::var("FUZZ_DEBUG").is_ok() {
+                    let __violation_action_idx = crucible_test_context::get_violation_action_index();
+                    let __history_len = crucible_test_context::get_action_history().len();
+                    eprintln!("[CRASH_DIAG] violation at chain action {}/{} (parent depth={}, total={}), history_len={}",
+                        __violation_action_idx.map(|i| i + 1).unwrap_or(0), __chain_len,
+                        parent_depth, parent_depth + __chain_len as u32, __history_len);
+                }
                 // Reconstruct full action sequence for crash file (strip inherited ghosts)
                 let mut crash_bytes = {
                     let raw = state_pool.reconstruct_action_sequence(state_idx);
@@ -1107,10 +1109,12 @@ fn stateful_singlecore_body(
                     crash_bytes.extend_from_slice(&__single_action_buf);
                 }
                 // Debug: verify binary matches description chain
-                let __desc_chain = state_pool.reconstruct_action_descriptions(state_idx);
-                eprintln!("[CRASH_DEBUG] parent state_idx={}, parent depth={}, parent action_bytes count={}, desc chain len={}, chain_len={}, total binary count={}",
-                    state_idx, parent_depth, __parent_count, __desc_chain.len(), __chain_len,
-                    __parent_count + __chain_len as u32);
+                if std::env::var("FUZZ_DEBUG").is_ok() {
+                    let __desc_chain = state_pool.reconstruct_action_descriptions(state_idx);
+                    eprintln!("[CRASH_DEBUG] parent state_idx={}, parent depth={}, parent action_bytes count={}, desc chain len={}, chain_len={}, total binary count={}",
+                        state_idx, parent_depth, __parent_count, __desc_chain.len(), __chain_len,
+                        __parent_count + __chain_len as u32);
+                }
 
                 // Dedup by action variant sequence (coarse: same action types = same crash class)
                 let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
