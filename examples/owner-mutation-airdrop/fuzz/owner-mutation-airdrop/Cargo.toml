@@ -1,0 +1,32 @@
+[package]
+name = "owner_mutation_airdrop_fuzz"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+# Standalone workspace - isolated from parent project to avoid Solana version conflicts
+
+[dependencies]
+crucible-fuzzer = { path = "../../../../crates/crucible-fuzzer" }
+crucible-test-context = { path = "../../../../crates/crucible-test-context" }
+# Types are generated from the IDL (no dependency on the program crate).
+crucible-idl-gen = { path = "../../../../crates/crucible-idl-gen" }
+
+anchor-lang = "1.0.1"
+
+solana-keypair = "3.0"
+solana-pubkey = "3.0"
+solana-signer = "3.0"
+
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+arbitrary = { version = "1", features = ["derive"] }
+ctor = "0.6"
+ctrlc = "3.4"
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+invariant_test = []

@@ -1,0 +1,5 @@
+/target/
+/crashes/
+corpus_*/
+.fuzz-cache/
+Cargo.lock

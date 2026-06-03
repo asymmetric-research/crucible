@@ -1,0 +1,417 @@
+{
+  "address": "2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b",
+  "metadata": {
+    "name": "owner_mutation_airdrop",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Minimal airdrop program with a seeded missing-owner-check bug"
+  },
+  "instructions": [
+    {
+      "name": "claim_airdrop",
+      "docs": [
+        "Program-owned config, missing owner check (the canonical bug)."
+      ],
+      "discriminator": [
+        137,
+        50,
+        122,
+        111,
+        89,
+        254,
+        8,
+        20
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claim_with_owner_check",
+      "docs": [
+        "Program-owned config *with* the owner check present."
+      ],
+      "discriminator": [
+        196,
+        120,
+        14,
+        124,
+        101,
+        203,
+        107,
+        165
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_foreign_owned_no_check",
+      "docs": [
+        "Account expected to be owned by a *foreign* program (token/oracle flavor), missing check."
+      ],
+      "discriminator": [
+        221,
+        244,
+        35,
+        187,
+        246,
+        48,
+        200,
+        140
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_foreign_owned_with_check",
+      "docs": [
+        "Foreign-owned config *with* the owner check present."
+      ],
+      "discriminator": [
+        203,
+        221,
+        177,
+        40,
+        83,
+        122,
+        89,
+        137
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_no_check",
+      "docs": [
+        "Reads a PDA config without an owner check. A PDA cannot be reassigned by an external",
+        "signer, so the engine skips off-curve addresses by default and must not flag this."
+      ],
+      "discriminator": [
+        199,
+        151,
+        149,
+        130,
+        183,
+        124,
+        82,
+        27
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_state_no_check",
+      "docs": [
+        "A second program-owned account in a different role, same missing-owner-check class."
+      ],
+      "discriminator": [
+        145,
+        63,
+        188,
+        59,
+        227,
+        237,
+        67,
+        58
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_tiny_config_no_check",
+      "docs": [
+        "Tiny (<= 8 byte) config read without an owner check (exercises the relevance-gate",
+        "small-account path)."
+      ],
+      "discriminator": [
+        170,
+        88,
+        204,
+        120,
+        9,
+        59,
+        92,
+        27
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_writable_config_no_check",
+      "docs": [
+        "Reads a *writable* config without an owner check. The runtime's write-ownership rule makes",
+        "the result inconclusive, so the engine excludes writable accounts and must not flag this."
+      ],
+      "discriminator": [
+        78,
+        184,
+        4,
+        171,
+        15,
+        242,
+        187,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "with_inert_account",
+      "docs": [
+        "Pays a fixed amount and never reads the `inert` account passed alongside. The inert",
+        "account is a data account with no influence on execution, so the relevance gate must skip",
+        "it instead of reporting a (non-exploitable) missing owner check."
+      ],
+      "discriminator": [
+        183,
+        159,
+        114,
+        6,
+        148,
+        120,
+        138,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inert"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_multisig_one_unchecked",
+      "docs": [
+        "Two declared signers, but only `admin` is checked — `cosigner`'s signature is never",
+        "enforced, so the engine must flag the co-signer (and not the admin)."
+      ],
+      "discriminator": [
+        234,
+        58,
+        197,
+        123,
+        44,
+        124,
+        80,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "admin"
+        },
+        {
+          "name": "cosigner"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_no_signer_check",
+      "docs": [
+        "Pays out without verifying that the `authority` actually signed (missing signer check)."
+      ],
+      "discriminator": [
+        40,
+        248,
+        218,
+        135,
+        90,
+        169,
+        20,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_with_signer_check",
+      "docs": [
+        "Same payout, but with the signer check present."
+      ],
+      "discriminator": [
+        124,
+        188,
+        33,
+        211,
+        25,
+        158,
+        75,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidConfig",
+      "msg": "Invalid config"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidAmount",
+      "msg": "Invalid amount"
+    },
+    {
+      "code": 6002,
+      "name": "InsufficientVault",
+      "msg": "Insufficient vault balance"
+    },
+    {
+      "code": 6003,
+      "name": "WrongOwner",
+      "msg": "Wrong owner"
+    },
+    {
+      "code": 6004,
+      "name": "MissingSigner",
+      "msg": "Missing required signer"
+    }
+  ]
+}
