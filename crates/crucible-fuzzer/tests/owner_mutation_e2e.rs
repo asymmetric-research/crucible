@@ -7,7 +7,9 @@
 
 #![allow(unexpected_cfgs)]
 
+use crucible_fuzzer::anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use crucible_fuzzer::anchor_lang::solana_program::system_program;
+use crucible_fuzzer::anchor_lang::InstructionData;
 use crucible_fuzzer::*;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -383,6 +385,162 @@ fn no_finding_for_writable_config() {
         .signers(&[&h.fee_payer, &h.recipient])
         .send()
         .unwrap();
+
+    expect_no_finding();
+}
+
+// ---- CC-4 signer checks ----
+
+fn create_system_account(ctx: &mut TestContext, pubkey: Pubkey) {
+    ctx.create_account()
+        .pubkey(pubkey)
+        .lamports(INITIAL_RECIPIENT_BALANCE)
+        .owner(system_program::id())
+        .owner_unverified()
+        .create()
+        .unwrap();
+}
+
+fn raw_send(
+    ctx: &mut TestContext,
+    program_id: Pubkey,
+    data: Vec<u8>,
+    accounts: Vec<AccountMeta>,
+    signers: &[&Keypair],
+) {
+    ctx.raw_call(Instruction {
+        program_id,
+        accounts,
+        data,
+    })
+    .signers(signers)
+    .send()
+    .unwrap();
+}
+
+fn expect_signer_finding(account: Pubkey) {
+    let violation =
+        crucible_test_context::take_violation().expect("expected a CC-4 signer finding");
+    assert!(
+        violation.contains("[CC-4 signer]"),
+        "unexpected violation: {violation}"
+    );
+    assert!(
+        violation.contains(&account.to_string()),
+        "finding should name account {account}: {violation}"
+    );
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_missing_signer_check() {
+    let mut h = harness();
+    let authority = Keypair::new();
+    let dest = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, authority.pubkey());
+    create_system_account(&mut h.ctx, dest);
+
+    let data = owner_mutation_airdrop::instruction::WithdrawNoSignerCheck {}.data();
+    let accounts = vec![
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(authority.pubkey(), true),
+        AccountMeta::new(h.vault, false),
+    ];
+    raw_send(
+        &mut h.ctx,
+        h.program_id,
+        data,
+        accounts,
+        &[&h.fee_payer, &authority],
+    );
+
+    expect_signer_finding(authority.pubkey());
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_signer_check_present() {
+    let mut h = harness();
+    let authority = Keypair::new();
+    let dest = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, authority.pubkey());
+    create_system_account(&mut h.ctx, dest);
+
+    let data = owner_mutation_airdrop::instruction::WithdrawWithSignerCheck {}.data();
+    let accounts = vec![
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(authority.pubkey(), true),
+        AccountMeta::new(h.vault, false),
+    ];
+    raw_send(
+        &mut h.ctx,
+        h.program_id,
+        data,
+        accounts,
+        &[&h.fee_payer, &authority],
+    );
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_unchecked_cosigner_in_multisig() {
+    let mut h = harness();
+    let admin = Keypair::new();
+    let cosigner = Keypair::new();
+    let dest = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, admin.pubkey());
+    create_system_account(&mut h.ctx, cosigner.pubkey());
+    create_system_account(&mut h.ctx, dest);
+
+    let data = owner_mutation_airdrop::instruction::WithdrawMultisigOneUnchecked {}.data();
+    let accounts = vec![
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(admin.pubkey(), true),
+        AccountMeta::new_readonly(cosigner.pubkey(), true),
+        AccountMeta::new(h.vault, false),
+    ];
+    raw_send(
+        &mut h.ctx,
+        h.program_id,
+        data,
+        accounts,
+        &[&h.fee_payer, &admin, &cosigner],
+    );
+
+    // The unchecked co-signer is flagged; the checked admin is not.
+    let violation =
+        crucible_test_context::take_violation().expect("expected a CC-4 signer finding");
+    assert!(
+        violation.contains("[CC-4 signer]"),
+        "violation: {violation}"
+    );
+    assert!(
+        violation.contains(&cosigner.pubkey().to_string()),
+        "violation: {violation}"
+    );
+    assert!(
+        !violation.contains(&admin.pubkey().to_string()),
+        "violation: {violation}"
+    );
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_signer_is_fee_payer() {
+    let mut h = harness();
+    let dest = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, dest);
+
+    // The only signer in the instruction is the fee payer; the engine must skip it.
+    let data = owner_mutation_airdrop::instruction::WithdrawNoSignerCheck {}.data();
+    let accounts = vec![
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(h.fee_payer.pubkey(), true),
+        AccountMeta::new(h.vault, false),
+    ];
+    raw_send(&mut h.ctx, h.program_id, data, accounts, &[&h.fee_payer]);
 
     expect_no_finding();
 }

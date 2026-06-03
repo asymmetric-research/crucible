@@ -122,6 +122,45 @@ pub mod owner_mutation_airdrop {
             amount,
         )
     }
+
+    // ---- CC-4 true positives / negatives: signer authorization ----
+
+    /// Pays out without verifying that the `authority` actually signed (missing signer check).
+    pub fn withdraw_no_signer_check(ctx: Context<Withdraw>) -> Result<()> {
+        // BUG: never checks `ctx.accounts.authority.is_signer`.
+        let _ = &ctx.accounts.authority;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
+    /// Same payout, but with the signer check present.
+    pub fn withdraw_with_signer_check(ctx: Context<Withdraw>) -> Result<()> {
+        require!(
+            ctx.accounts.authority.is_signer,
+            AirdropError::MissingSigner
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
+    /// Two declared signers, but only `admin` is checked — `cosigner`'s signature is never
+    /// enforced, so the engine must flag the co-signer (and not the admin).
+    pub fn withdraw_multisig_one_unchecked(ctx: Context<WithdrawMultisig>) -> Result<()> {
+        require!(ctx.accounts.admin.is_signer, AirdropError::MissingSigner);
+        // BUG: never checks `ctx.accounts.cosigner.is_signer`.
+        let _ = &ctx.accounts.cosigner;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -226,6 +265,32 @@ pub struct ReadWritable<'info> {
     pub vault: UncheckedAccount<'info>,
 }
 
+#[derive(Accounts)]
+pub struct Withdraw<'info> {
+    /// CHECK: payout destination.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+    /// CHECK: intended signing authority; its `is_signer` is unchecked in the no-check variant.
+    pub authority: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawMultisig<'info> {
+    /// CHECK: payout destination.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+    /// CHECK: admin signer (its signature is checked).
+    pub admin: UncheckedAccount<'info>,
+    /// CHECK: co-signer whose signature is never checked (the bug).
+    pub cosigner: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
 #[error_code]
 pub enum AirdropError {
     #[msg("Invalid config")]
@@ -236,4 +301,6 @@ pub enum AirdropError {
     InsufficientVault,
     #[msg("Wrong owner")]
     WrongOwner,
+    #[msg("Missing required signer")]
+    MissingSigner,
 }

@@ -111,7 +111,7 @@ trait MutationStrategy {
 }
 
 fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationStrategy>> {
-    vec![Box::new(OwnerStrategy)]
+    vec![Box::new(OwnerStrategy), Box::new(SignerStrategy)]
 }
 
 /// `(program_id, first 8 bytes of instruction data)` — the identity used to probe each
@@ -243,6 +243,69 @@ fn wrong_owner(original_owner: Pubkey) -> Pubkey {
     } else {
         CRUCIBLE_ATTACKER
     }
+}
+
+/// CC-4: an account whose signature is meant to authorize the action but whose `is_signer` flag is
+/// never enforced by the program. Clearing the flag and still succeeding means the signer check is
+/// missing. The fee payer is skipped — it must sign for the transaction to pay fees, so clearing it
+/// would fail for a runtime reason rather than a program one.
+struct SignerStrategy;
+
+impl MutationStrategy for SignerStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let payer = ctx.payer.pubkey();
+        for signer in distinct_signers(ctx.instructions) {
+            if signer == payer {
+                continue;
+            }
+            let flipped = clear_signer(ctx.instructions, signer);
+            let mut probe = ctx.svm.clone();
+            if let Ok(Ok(_)) =
+                send_probe_transaction(&mut probe, &flipped, ctx.signers, ctx.payer, ctx.sigverify)
+            {
+                findings.push(Finding {
+                    message: format!(
+                        "[CC-4 signer] account {} is_signer cleared, instr {}:{} still succeeded (missing signer check)",
+                        signer,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+/// Distinct signer pubkeys across all instructions, in first-seen order.
+fn distinct_signers(instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut signers = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if meta.is_signer && seen.insert(meta.pubkey) {
+                signers.push(meta.pubkey);
+            }
+        }
+    }
+    signers
+}
+
+/// Clone the instructions, clearing `is_signer` for every occurrence of `target`.
+fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction> {
+    instructions
+        .iter()
+        .map(|ix| {
+            let mut ix = ix.clone();
+            for meta in &mut ix.accounts {
+                if meta.pubkey == target {
+                    meta.is_signer = false;
+                }
+            }
+            ix
+        })
+        .collect()
 }
 
 /// Owner-mutation targets: non-signer, read-only, non-executable, non-sysvar, non-PDA accounts
@@ -515,5 +578,49 @@ mod tests {
     fn wrong_owner_uses_alt_when_already_attacker() {
         assert_eq!(wrong_owner(Pubkey::new_unique()), CRUCIBLE_ATTACKER);
         assert_eq!(wrong_owner(CRUCIBLE_ATTACKER), CRUCIBLE_ATTACKER_ALT);
+    }
+
+    #[test]
+    fn distinct_signers_dedupes_across_instructions() {
+        let program_id = Pubkey::new_unique();
+        let a = Pubkey::new_unique();
+        let b = Pubkey::new_unique();
+        let non_signer = Pubkey::new_unique();
+        let ix0 = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(a, true),
+                AccountMeta::new_readonly(non_signer, false),
+            ],
+            data: vec![],
+        };
+        let ix1 = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(a, true), // duplicate signer
+                AccountMeta::new(b, true),
+            ],
+            data: vec![],
+        };
+        assert_eq!(distinct_signers(&[ix0, ix1]), vec![a, b]);
+    }
+
+    #[test]
+    fn clear_signer_clears_only_target_in_all_instructions() {
+        let program_id = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(target, true),
+                AccountMeta::new(other, true),
+            ],
+            data: vec![],
+        };
+
+        let flipped = clear_signer(std::slice::from_ref(&ix), target);
+        assert!(!flipped[0].accounts[0].is_signer); // target cleared
+        assert!(flipped[0].accounts[1].is_signer); // other untouched
     }
 }
