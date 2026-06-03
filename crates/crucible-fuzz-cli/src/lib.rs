@@ -82,6 +82,9 @@ pub enum FuzzCmd {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
+        /// Enable account-mutation probes (missing owner/signer constraint checks)
+        #[arg(long)]
+        mutate_accounts: bool,
         /// Stateful fuzzing: single action per iteration with state pool
         #[arg(long)]
         stateful: bool,
@@ -184,6 +187,8 @@ struct CrashMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     actions: Vec<ActionRecord>,
+    #[serde(default)]
+    mutation_finding: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,6 +225,7 @@ pub fn run(cli: Cli) -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            mutate_accounts,
             stateful,
             max_depth,
             pool_size,
@@ -247,6 +253,7 @@ pub fn run(cli: Cli) -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            mutate_accounts,
             stateful,
             max_depth,
             pool_size,
@@ -440,6 +447,7 @@ fn fuzz_run(
     stop_on_crash: bool,
     max_actions: Option<usize>,
     no_tracing: bool,
+    mutate_accounts: bool,
     stateful: bool,
     max_depth: Option<u32>,
     pool_size: Option<u64>,
@@ -646,6 +654,11 @@ fn fuzz_run(
     if no_tracing {
         cmd.env("FUZZ_NO_TRACING", "1");
         println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
+    }
+
+    if mutate_accounts {
+        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
+        println!("[FUZZ] Account mutation enabled (owner/signer constraint probes)");
     }
 
     if stats {
@@ -1572,13 +1585,26 @@ fn build_and_find_replay_binary(fuzz_dir: &Path, test_feature: Option<&str>) -> 
 fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<ExitStatus> {
     // Canonicalize crash path so it works regardless of the binary's working directory
     let abs_crash = crash_path.canonicalize().context("Crash file not found")?;
-    Command::new(binary_path)
-        .current_dir(fuzz_dir)
+    let mut cmd = Command::new(binary_path);
+    cmd.current_dir(fuzz_dir)
         .env("FUZZ_INPUT_FILE", &abs_crash)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to run replay")
+        .stderr(Stdio::inherit());
+    // Account-mutation findings only re-fire if the engine is re-enabled on replay.
+    if crash_is_mutation_finding(crash_path) {
+        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
+    }
+    cmd.status().context("Failed to run replay")
+}
+
+/// Read the sibling `.meta.json` and report whether the crash was an account-mutation finding.
+fn crash_is_mutation_finding(crash_path: &Path) -> bool {
+    let meta_path = PathBuf::from(format!("{}.meta.json", crash_path.display()));
+    fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<CrashMetadata>(&s).ok())
+        .map(|m| m.mutation_finding)
+        .unwrap_or(false)
 }
 
 fn print_replay_result(status: &ExitStatus) {

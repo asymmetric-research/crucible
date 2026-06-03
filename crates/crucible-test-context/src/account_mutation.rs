@@ -1,4 +1,4 @@
-use crate::{record_violation, FastHashSet};
+use crate::{record_mutation_violation, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
@@ -83,6 +83,17 @@ impl AccountMutationConfig {
     pub fn skip_pda_candidates(&self) -> bool {
         self.skip_pda_candidates
     }
+}
+
+/// Default config, enabling probes when `FUZZ_MUTATE_ACCOUNTS` is set. The CLI `--mutate-accounts`
+/// flag sets this env var, and replay propagates it for mutation-finding crashes, so every
+/// execution mode (single/multi-core, stateful, replay) picks it up without per-mode codegen.
+pub(crate) fn config_from_env() -> AccountMutationConfig {
+    let mut config = AccountMutationConfig::default();
+    if std::env::var("FUZZ_MUTATE_ACCOUNTS").is_ok() {
+        config.enable();
+    }
+    config
 }
 
 /// A single self-documenting finding: one constraint class, one account, one mutated transaction
@@ -177,7 +188,7 @@ pub(crate) fn maybe_probe_account_mutation(
     // The violation TLS holds one message per iteration and the harness early-exits on the first,
     // so surface the first finding and log the rest for debugging.
     if let Some(first) = findings.first() {
-        record_violation(first.message.clone());
+        record_mutation_violation(first.message.clone());
         if std::env::var("FUZZ_DEBUG").is_ok() {
             for extra in &findings[1..] {
                 eprintln!("[ACCOUNT_MUTATION] additional finding: {}", extra.message);

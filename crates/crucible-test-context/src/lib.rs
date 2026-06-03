@@ -122,6 +122,9 @@ use std::cell::{Cell, RefCell};
 thread_local! {
     // Invariant violation tracking for fuzz_assert! macros
     static VIOLATION: RefCell<Option<String>> = RefCell::new(None);
+    // Whether the recorded violation came from the account-mutation engine (vs an invariant).
+    // Set atomically with VIOLATION so it always matches the stored (first-wins) violation.
+    static VIOLATION_FROM_MUTATION: Cell<bool> = const { Cell::new(false) };
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -291,6 +294,10 @@ pub struct CrashMetadata {
     pub seed: Option<u64>,
     /// Sequence of actions that led to the crash
     pub actions: Vec<ActionRecord>,
+    /// True if the finding came from the account-mutation engine. Replay must re-enable the
+    /// engine (set `FUZZ_MUTATE_ACCOUNTS`) for such crashes to reproduce.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mutation_finding: bool,
 }
 
 /// Set the current test name (called at test start)
@@ -545,6 +552,7 @@ pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
         iteration: get_current_iteration(),
         seed,
         actions: get_action_history(),
+        mutation_finding: violation_from_mutation(),
     }
 }
 
@@ -912,8 +920,27 @@ pub fn record_violation(msg: String) {
         let mut guard = v.borrow_mut();
         if guard.is_none() {
             *guard = Some(msg);
+            VIOLATION_FROM_MUTATION.with(|m| m.set(false));
         }
     });
+}
+
+/// Record a violation produced by the account-mutation engine. Identical to
+/// [`record_violation`] but also flags the violation's origin so crash metadata can mark it
+/// (and replay can re-enable the engine).
+pub(crate) fn record_mutation_violation(msg: String) {
+    VIOLATION.with(|v| {
+        let mut guard = v.borrow_mut();
+        if guard.is_none() {
+            *guard = Some(msg);
+            VIOLATION_FROM_MUTATION.with(|m| m.set(true));
+        }
+    });
+}
+
+/// Whether the currently-recorded violation was produced by the account-mutation engine.
+pub fn violation_from_mutation() -> bool {
+    VIOLATION_FROM_MUTATION.with(|m| m.get())
 }
 
 /// Take the current violation (clearing it). Returns Some if violated.
@@ -1422,7 +1449,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            account_mutation: account_mutation::AccountMutationConfig::default(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -1442,7 +1469,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            account_mutation: account_mutation::AccountMutationConfig::default(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -1618,7 +1645,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
-            account_mutation: account_mutation::AccountMutationConfig::default(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -3597,6 +3624,25 @@ mod tests {
         let meta = build_crash_metadata(None);
         assert_eq!(meta.test_name, "unknown");
         assert!(meta.seed.is_none());
+    }
+
+    #[test]
+    fn mutation_finding_flag_round_trips_through_crash_metadata() {
+        // A plain invariant violation is not a mutation finding.
+        let _ = take_violation();
+        record_violation("plain invariant".to_string());
+        assert!(!build_crash_metadata(None).mutation_finding);
+
+        // An account-mutation finding is, and the flag survives serde (it is omitted when false).
+        let _ = take_violation();
+        record_mutation_violation("[CC-1 owner] ...".to_string());
+        let meta = build_crash_metadata(None);
+        assert!(meta.mutation_finding);
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: CrashMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.mutation_finding);
+
+        let _ = take_violation();
     }
 
     // =========================================================================
