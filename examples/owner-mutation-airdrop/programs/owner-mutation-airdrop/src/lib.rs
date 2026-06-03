@@ -161,6 +161,40 @@ pub mod owner_mutation_airdrop {
             1,
         )
     }
+
+    // ---- CC-5 type-tag: typed account read with / without discriminator check ----
+
+    /// Reads a typed `Config` via `UncheckedAccount`: verifies the owner but trusts the data layout
+    /// without checking the 8-byte discriminator (missing type-tag check).
+    pub fn read_typed_no_check(ctx: Context<ReadTyped>) -> Result<()> {
+        require!(
+            ctx.accounts.config.owner == &crate::ID,
+            AirdropError::WrongOwner
+        );
+        let amount = {
+            let data = ctx.accounts.config.try_borrow_data()?;
+            require!(data.len() >= 16, AirdropError::InvalidConfig);
+            // BUG: never checks `data[0..8] == Config` discriminator.
+            u64::from_le_bytes(data[8..16].try_into().unwrap())
+        };
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same read via `Account<'info, Config>`, which verifies the discriminator (and owner).
+    pub fn read_typed_with_check(ctx: Context<ReadTypedChecked>) -> Result<()> {
+        let amount = ctx.accounts.config.amount;
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -286,6 +320,32 @@ pub struct WithdrawMultisig<'info> {
     pub admin: UncheckedAccount<'info>,
     /// CHECK: co-signer whose signature is never checked (the bug).
     pub cosigner: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[account]
+pub struct Config {
+    pub amount: u64,
+}
+
+#[derive(Accounts)]
+pub struct ReadTyped<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: typed config read without a discriminator check in the no-check variant.
+    pub config: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadTypedChecked<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    pub config: Account<'info, Config>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

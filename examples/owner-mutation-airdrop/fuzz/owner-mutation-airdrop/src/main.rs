@@ -49,6 +49,7 @@ struct OwnerMutationAirdropFixture {
     inert: Pubkey,           // program-owned but never read
     pda_config: Pubkey,      // off-curve PDA
     writable_config: Pubkey, // program-owned, declared writable
+    typed_config: Pubkey,    // Anchor-discriminated Config account (CC-5 target)
 }
 
 #[fuzz_fixture]
@@ -97,6 +98,10 @@ impl OwnerMutationAirdropFixture {
             .create()
             .unwrap();
 
+        let mut typed_data = owner_mutation_airdrop::state::Config::DISCRIMINATOR.to_vec();
+        typed_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+        let typed_config = Self::new_data(&mut ctx, program_id, &typed_data);
+
         let vault = Keypair::new().pubkey();
         ctx.create_account()
             .pubkey(vault)
@@ -121,6 +126,7 @@ impl OwnerMutationAirdropFixture {
             inert,
             pda_config,
             writable_config,
+            typed_config,
         }
     }
 
@@ -265,6 +271,38 @@ impl OwnerMutationAirdropFixture {
             .accounts(accounts::ReadWritableConfigNoCheck {
                 recipient: self.recipient.pubkey(),
                 config: self.writable_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    // ---- CC-5 type-tag paths (typed Config account) ----
+
+    pub fn action_read_typed_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTypedNoCheck {})
+            .accounts(accounts::ReadTypedNoCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.typed_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_typed_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTypedWithCheck {})
+            .accounts(accounts::ReadTypedWithCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.typed_config,
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])

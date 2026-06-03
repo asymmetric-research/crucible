@@ -122,7 +122,11 @@ trait MutationStrategy {
 }
 
 fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationStrategy>> {
-    vec![Box::new(OwnerStrategy), Box::new(SignerStrategy)]
+    vec![
+        Box::new(OwnerStrategy),
+        Box::new(SignerStrategy),
+        Box::new(TypeTagStrategy),
+    ]
 }
 
 /// `(program_id, first 8 bytes of instruction data)` — the identity used to probe each
@@ -254,6 +258,85 @@ fn wrong_owner(original_owner: Pubkey) -> Pubkey {
     } else {
         CRUCIBLE_ATTACKER
     }
+}
+
+/// CC-5: an account the program deserializes by type but whose discriminator (type tag) it never
+/// verifies — type confusion. Bit-flipping the discriminator and still succeeding means the program
+/// trusts the account's type without checking it. The discriminator length comes from the IDL schema
+/// registry, so this is correct for Anchor (8-byte), native (4-byte), and Codama programs; accounts
+/// with no registered discriminator are skipped (we never guess a tag width).
+struct TypeTagStrategy;
+
+impl MutationStrategy for TypeTagStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for pubkey in collect_typed_candidates(ctx.svm, ctx.instructions) {
+            // Relevance gate: an account the program never reads is not exploitable.
+            if !account_is_load_bearing(ctx, &pubkey) {
+                continue;
+            }
+            let mut probe = ctx.svm.clone();
+            let Some(mut account) = probe.get_account(&pubkey) else {
+                continue;
+            };
+            let Some(disc_len) = crate::schema::lookup_discriminator_len(&account.data) else {
+                continue;
+            };
+            if account.data.len() < disc_len {
+                continue;
+            }
+            for b in account.data[..disc_len].iter_mut() {
+                *b = !*b; // flip the type tag; body left intact
+            }
+            let _ = probe.set_account(pubkey, account);
+
+            if let Ok(Ok(_)) = send_probe_transaction(
+                &mut probe,
+                ctx.instructions,
+                ctx.signers,
+                ctx.payer,
+                ctx.sigverify,
+            ) {
+                findings.push(Finding {
+                    message: format!(
+                        "[CC-5 type-tag] account {} discriminator bit-flipped, instr {}:{} still succeeded (missing discriminator check)",
+                        pubkey,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+/// CC-5 targets: any data-bearing, non-executable, non-sysvar account whose data matches a registered
+/// discriminator (a typed account). PDAs are intentionally included — Anchor state accounts are PDAs
+/// and are the prime type-confusion targets.
+fn collect_typed_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut candidates = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if !seen.insert(meta.pubkey) {
+                continue;
+            }
+            if meta.pubkey == ix.program_id || is_known_sysvar(&meta.pubkey) {
+                continue;
+            }
+            let Some(account) = svm.get_account(&meta.pubkey) else {
+                continue;
+            };
+            if account.executable || account.data.is_empty() {
+                continue;
+            }
+            if crate::schema::lookup_discriminator_len(&account.data).is_some() {
+                candidates.push(meta.pubkey);
+            }
+        }
+    }
+    candidates
 }
 
 /// CC-4: an account whose signature is meant to authorize the action but whose `is_signer` flag is

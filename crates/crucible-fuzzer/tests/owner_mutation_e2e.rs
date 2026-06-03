@@ -9,7 +9,7 @@
 
 use crucible_fuzzer::anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use crucible_fuzzer::anchor_lang::solana_program::system_program;
-use crucible_fuzzer::anchor_lang::InstructionData;
+use crucible_fuzzer::anchor_lang::{Discriminator, InstructionData};
 use crucible_fuzzer::*;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -543,6 +543,87 @@ fn no_finding_when_signer_is_fee_payer() {
         AccountMeta::new(h.vault, false),
     ];
     raw_send(&mut h.ctx, h.program_id, data, accounts, &[&h.fee_payer]);
+
+    expect_no_finding();
+}
+
+// ---- CC-5 type-tag (typed account discriminator) ----
+
+/// The program-crate path has no IDL-gen `#[ctor]`, so the `Config` schema must be registered
+/// explicitly for the type-tag strategy to know the discriminator length. Process-global + set-once.
+fn register_config_schema() {
+    if !crucible_test_context::schema::has_schemas() {
+        crucible_test_context::register_account_schemas(vec![
+            crucible_test_context::AccountSchema {
+                type_name: "Config".into(),
+                discriminator: owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+        ]);
+    }
+}
+
+fn seed_config(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
+    let mut data = owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn expect_finding(label: &str, account: Pubkey) {
+    let violation = crucible_test_context::take_violation()
+        .unwrap_or_else(|| panic!("expected a {label} finding"));
+    assert!(
+        violation.contains(label),
+        "unexpected violation: {violation}"
+    );
+    assert!(
+        violation.contains(&account.to_string()),
+        "finding should name account {account}: {violation}"
+    );
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_missing_type_tag_check() {
+    register_config_schema();
+    let mut h = harness();
+    let config = Keypair::new().pubkey();
+    seed_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTypedNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-5 type-tag]", config);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_type_tag_check_present() {
+    register_config_schema();
+    let mut h = harness();
+    let config = Keypair::new().pubkey();
+    seed_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTypedWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTypedChecked {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
 
     expect_no_finding();
 }

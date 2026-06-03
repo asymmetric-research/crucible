@@ -227,6 +227,69 @@
       "args": []
     },
     {
+      "name": "read_typed_no_check",
+      "docs": [
+        "Reads a typed `Config` via `UncheckedAccount`: verifies the owner but trusts the data layout",
+        "without checking the 8-byte discriminator (missing type-tag check)."
+      ],
+      "discriminator": [
+        141,
+        179,
+        74,
+        1,
+        35,
+        225,
+        98,
+        54
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_typed_with_check",
+      "docs": [
+        "Same read via `Account<'info, Config>`, which verifies the discriminator (and owner)."
+      ],
+      "discriminator": [
+        38,
+        89,
+        201,
+        214,
+        168,
+        132,
+        157,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_writable_config_no_check",
       "docs": [
         "Reads a *writable* config without an owner check. The account is only read, so owner mutation",
@@ -387,6 +450,21 @@
       "args": []
     }
   ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    }
+  ],
   "errors": [
     {
       "code": 6000,
@@ -412,6 +490,20 @@
       "code": 6004,
       "name": "MissingSigner",
       "msg": "Missing required signer"
+    }
+  ],
+  "types": [
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
     }
   ]
 }
