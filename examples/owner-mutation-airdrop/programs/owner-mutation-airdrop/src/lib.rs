@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::*;
 
 declare_id!("2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b");
@@ -210,6 +211,36 @@ pub mod owner_mutation_airdrop {
             amount,
         )
     }
+
+    // ---- CC-2 sysvar: read the Clock from a passed account with / without an identity check ----
+
+    /// Reads the clock's `unix_timestamp` from the passed account without verifying its key — a
+    /// program that trusts a sysvar by position (the Wormhole class).
+    pub fn read_clock_no_check(ctx: Context<ReadClock>) -> Result<()> {
+        // BUG: never checks `ctx.accounts.clock.key() == Clock::id()`.
+        let ts = read_clock_unix_timestamp(&ctx.accounts.clock)?;
+        require!(ts > 0, AirdropError::InvalidClock);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
+    /// Same read, but verifies the account is the real Clock sysvar.
+    pub fn read_clock_with_check(ctx: Context<ReadClock>) -> Result<()> {
+        require!(
+            ctx.accounts.clock.key() == Clock::id(),
+            AirdropError::WrongSysvar
+        );
+        let ts = read_clock_unix_timestamp(&ctx.accounts.clock)?;
+        require!(ts > 0, AirdropError::InvalidClock);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -226,6 +257,14 @@ fn read_u32(account: &UncheckedAccount) -> Result<u32> {
     let amount = u32::from_le_bytes(data[0..4].try_into().unwrap());
     require!(amount > 0, AirdropError::InvalidAmount);
     Ok(amount)
+}
+
+/// Read the Clock's `unix_timestamp` (i64 at byte offset 32) directly from the account data,
+/// without going through `Clock::from_account_info` (which would verify the key).
+fn read_clock_unix_timestamp(account: &UncheckedAccount) -> Result<i64> {
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 40, AirdropError::InvalidClock);
+    Ok(i64::from_le_bytes(data[32..40].try_into().unwrap()))
 }
 
 fn payout(vault: &AccountInfo, recipient: &AccountInfo, amount: u64) -> Result<()> {
@@ -366,6 +405,17 @@ pub struct ReadTypedChecked<'info> {
     pub vault: UncheckedAccount<'info>,
 }
 
+#[derive(Accounts)]
+pub struct ReadClock<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: clock sysvar; its key is unchecked in the no-check variant.
+    pub clock: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
 #[error_code]
 pub enum AirdropError {
     #[msg("Invalid config")]
@@ -380,4 +430,8 @@ pub enum AirdropError {
     MissingSigner,
     #[msg("Wrong PDA")]
     WrongPda,
+    #[msg("Wrong sysvar")]
+    WrongSysvar,
+    #[msg("Invalid clock")]
+    InvalidClock,
 }

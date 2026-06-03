@@ -7,6 +7,8 @@
 
 #![allow(unexpected_cfgs)]
 
+use crucible_fuzzer::anchor_lang::prelude::sysvar::SysvarId;
+use crucible_fuzzer::anchor_lang::prelude::Clock;
 use crucible_fuzzer::anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use crucible_fuzzer::anchor_lang::solana_program::system_program;
 use crucible_fuzzer::anchor_lang::{Discriminator, InstructionData};
@@ -645,6 +647,64 @@ fn no_finding_when_type_tag_check_present() {
         .accounts(owner_mutation_airdrop::accounts::ReadTypedChecked {
             recipient: h.recipient.pubkey(),
             config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+// ---- CC-2 sysvar substitution ----
+
+/// Seed the Clock sysvar with a positive unix_timestamp so the program's `ts > 0` check passes for
+/// the real clock (and fails when the relevance gate corrupts it).
+fn seed_clock(ctx: &mut TestContext) {
+    ctx.set_sysvar(&Clock {
+        slot: 10,
+        epoch_start_timestamp: 1_700_000_000,
+        epoch: 0,
+        leader_schedule_epoch: 0,
+        unix_timestamp: 1_700_000_000,
+    });
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_sysvar_substitution_when_no_identity_check() {
+    let mut h = harness();
+    seed_clock(&mut h.ctx);
+    let clock = Clock::id();
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadClockNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadClock {
+            recipient: h.recipient.pubkey(),
+            clock,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-2 sysvar]", clock);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_sysvar_identity_checked() {
+    let mut h = harness();
+    seed_clock(&mut h.ctx);
+    let clock = Clock::id();
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadClockWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadClock {
+            recipient: h.recipient.pubkey(),
+            clock,
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient])

@@ -2,6 +2,7 @@ use crate::{record_mutation_violation, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::system_program;
 use anyhow::Result;
 use litesvm::LiteSVM;
 use solana_keypair::Keypair;
@@ -185,6 +186,7 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(SignerStrategy),
         Box::new(TypeTagStrategy),
         Box::new(PdaSubstitutionStrategy),
+        Box::new(SysvarSubstitutionStrategy),
     ]
 }
 
@@ -557,6 +559,55 @@ fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pu
     candidates
 }
 
+/// CC-2: a sysvar or the system program passed as an account, whose identity (key) the program never
+/// verifies — the Wormhole class. Substituting a clone at a different address and still succeeding
+/// means the program trusted the account by position, not by key. Relevance-gated so a sysvar the
+/// program ignores (e.g. it reads the runtime cache instead) is not falsely reported. Executable
+/// program accounts are filtered naturally: a non-executable decoy fails at the loader when invoked.
+struct SysvarSubstitutionStrategy;
+
+impl MutationStrategy for SysvarSubstitutionStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for target in collect_sysvar_candidates(ctx.instructions) {
+            if !account_is_load_bearing(ctx, &target) {
+                continue;
+            }
+            let decoy = decoy_for(target);
+            if substitute_probe(ctx, target, decoy) {
+                findings.push(Finding {
+                    message: format!(
+                        "[CC-2 sysvar] account {} substituted with decoy {} instr {}:{} still succeeded (missing sysvar/program identity check)",
+                        target,
+                        decoy,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+/// CC-2 targets: known sysvars and the system program, passed as instruction accounts.
+fn collect_sysvar_candidates(instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut candidates = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if meta.pubkey == ix.program_id {
+                continue;
+            }
+            let is_target = is_known_sysvar(&meta.pubkey) || meta.pubkey == system_program::id();
+            if is_target && seen.insert(meta.pubkey) {
+                candidates.push(meta.pubkey);
+            }
+        }
+    }
+    candidates
+}
+
 /// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. Writable accounts are
 /// included (a probe that triggers a runtime ownership failure simply does not report). PDA-like
 /// (off-curve) addresses are skipped by default — they are covered by the CC-3 derivation check;
@@ -909,6 +960,26 @@ mod tests {
     fn decoy_for_uses_alt_when_equal() {
         assert_eq!(decoy_for(Pubkey::new_unique()), CRUCIBLE_DECOY);
         assert_eq!(decoy_for(CRUCIBLE_DECOY), CRUCIBLE_DECOY_ALT);
+    }
+
+    #[test]
+    fn collect_sysvar_candidates_picks_sysvars_and_system_program() {
+        let program_id = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(Clock::id(), false),
+                AccountMeta::new_readonly(system_program::id(), false),
+                AccountMeta::new_readonly(other, false), // not a sysvar/system -> dropped
+                AccountMeta::new_readonly(Clock::id(), false), // dup -> deduped
+            ],
+            data: vec![],
+        };
+        assert_eq!(
+            collect_sysvar_candidates(&[ix]),
+            vec![Clock::id(), system_program::id()]
+        );
     }
 
     #[test]

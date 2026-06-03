@@ -8,6 +8,8 @@
 //!   crucible run owner-mutation-airdrop invariant_test --release
 //!   crucible run owner-mutation-airdrop invariant_test --release --mutate-accounts
 
+use anchor_lang::prelude::sysvar::SysvarId;
+use anchor_lang::prelude::Clock;
 use anchor_lang::InstructionData;
 use crucible_fuzzer::anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use crucible_fuzzer::anchor_lang::solana_program::system_program;
@@ -59,6 +61,15 @@ impl OwnerMutationAirdropFixture {
         let program_id = Pubkey::new_from_array(owner_mutation_airdrop::ID.to_bytes());
         ctx.add_program(&program_id, "../../target/deploy/owner_mutation_airdrop.so")
             .unwrap();
+
+        // Seed the Clock sysvar with a positive unix_timestamp (CC-2 target).
+        ctx.set_sysvar(&Clock {
+            slot: 10,
+            epoch_start_timestamp: 1_700_000_000,
+            epoch: 0,
+            leader_schedule_epoch: 0,
+            unix_timestamp: 1_700_000_000,
+        });
 
         let fee_payer = Rc::new(Keypair::new());
         let recipient = Rc::new(Keypair::new());
@@ -318,6 +329,38 @@ impl OwnerMutationAirdropFixture {
             .accounts(accounts::ReadTypedWithCheck {
                 recipient: self.recipient.pubkey(),
                 config: self.typed_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    // ---- CC-2 sysvar paths (Clock read from a passed account) ----
+
+    pub fn action_read_clock_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadClockNoCheck {})
+            .accounts(accounts::ReadClockNoCheck {
+                recipient: self.recipient.pubkey(),
+                clock: Clock::id(),
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_clock_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadClockWithCheck {})
+            .accounts(accounts::ReadClockWithCheck {
+                recipient: self.recipient.pubkey(),
+                clock: Clock::id(),
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])

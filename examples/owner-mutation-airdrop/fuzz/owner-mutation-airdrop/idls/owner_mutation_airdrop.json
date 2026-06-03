@@ -70,6 +70,69 @@
       "args": []
     },
     {
+      "name": "read_clock_no_check",
+      "docs": [
+        "Reads the clock's `unix_timestamp` from the passed account without verifying its key — a",
+        "program that trusts a sysvar by position (the Wormhole class)."
+      ],
+      "discriminator": [
+        110,
+        145,
+        146,
+        222,
+        253,
+        225,
+        4,
+        128
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "clock"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_clock_with_check",
+      "docs": [
+        "Same read, but verifies the account is the real Clock sysvar."
+      ],
+      "discriminator": [
+        204,
+        214,
+        76,
+        240,
+        144,
+        209,
+        173,
+        61
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "clock"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_foreign_owned_no_check",
       "docs": [
         "Account expected to be owned by a *foreign* program (token/oracle flavor), missing check."
@@ -526,6 +589,16 @@
       "code": 6005,
       "name": "WrongPda",
       "msg": "Wrong PDA"
+    },
+    {
+      "code": 6006,
+      "name": "WrongSysvar",
+      "msg": "Wrong sysvar"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidClock",
+      "msg": "Invalid clock"
     }
   ],
   "types": [
