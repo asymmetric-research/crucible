@@ -67,6 +67,25 @@ pub fn lookup_type_name(data: &[u8]) -> Option<&str> {
     None
 }
 
+/// Look up the discriminator length for an account by prefix match.
+///
+/// Returns the matched (non-empty) discriminator's length, or `None` if no registered schema matches
+/// the start of `data`. Framework-agnostic: the length is whatever the IDL recorded — 8 for Anchor,
+/// 4 for native bincode, variable for Codama — so callers never have to assume a fixed tag width.
+pub fn lookup_discriminator_len(data: &[u8]) -> Option<usize> {
+    match_discriminator_len(SCHEMA_REGISTRY.get()?, data)
+}
+
+fn match_discriminator_len(schemas: &[AccountSchema], data: &[u8]) -> Option<usize> {
+    for schema in schemas {
+        let n = schema.discriminator.len();
+        if n > 0 && data.len() >= n && data[..n] == schema.discriminator[..] {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// Check whether any schemas have been registered.
 pub fn has_schemas() -> bool {
     SCHEMA_REGISTRY
@@ -91,5 +110,34 @@ mod tests {
         let result = lookup_diff_fn(&[0u8; 16]);
         // Either None (no registry) or None (no match) — both are correct
         assert!(result.is_none() || result.is_some());
+    }
+
+    fn schema(type_name: &str, discriminator: Vec<u8>) -> AccountSchema {
+        AccountSchema {
+            type_name: type_name.into(),
+            discriminator,
+            diff_fn: Box::new(|_, _| Vec::new()),
+        }
+    }
+
+    #[test]
+    fn discriminator_len_is_framework_agnostic() {
+        // Native (4-byte) and Anchor (8-byte) discriminators resolve to their actual lengths.
+        let schemas = vec![
+            schema("Native", vec![1, 0, 0, 0]),
+            schema("Anchor", vec![9, 8, 7, 6, 5, 4, 3, 2]),
+        ];
+        let mut native = vec![1, 0, 0, 0];
+        native.extend_from_slice(&[0xAB; 12]);
+        assert_eq!(match_discriminator_len(&schemas, &native), Some(4));
+
+        let mut anchor = vec![9, 8, 7, 6, 5, 4, 3, 2];
+        anchor.extend_from_slice(&[0xCD; 20]);
+        assert_eq!(match_discriminator_len(&schemas, &anchor), Some(8));
+
+        // No registered discriminator matches → None (CC-5 must not guess).
+        assert_eq!(match_discriminator_len(&schemas, &[0xFF; 16]), None);
+        // Data shorter than the discriminator → no match.
+        assert_eq!(match_discriminator_len(&schemas, &[1, 0]), None);
     }
 }
