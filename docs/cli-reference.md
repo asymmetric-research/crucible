@@ -29,6 +29,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--seed <N>` | Random seed for reproducible fuzzing |
 | `--symbols <PATH>` | Path to debug binary with DWARF symbols (for source-level coverage) |
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
+| `--mutate-accounts` | Enable the constraint-check engine (account-mutation probes for missing security checks — see below) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
 | `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
 | `--stateful` | Stateful fuzzing: single action per iteration with state pool |
@@ -185,6 +186,46 @@ crucible run myproject invariant_test --release --stateful --max-depth 50
 
 # Multi-core stateful
 crucible run myproject invariant_test --release --stateful -j 4
+```
+
+---
+
+## Constraint-check engine (`--mutate-accounts`)
+
+`--mutate-accounts` turns on a Neodyme-style negative-testing engine that detects the most common
+account-validation bugs. On the **first success of each instruction type**, it snapshots the
+pre-transaction state, mutates **one property of one account** on a cloned SVM, and replays. If the
+mutated transaction *still succeeds*, the program failed to verify that property — reported as a crash
+with a self-documenting label. Probes run on clones and never change the real transaction's outcome.
+
+It is **opt-in for `run`** (this flag) and **always enabled for `show --replay` and `tmin`**, so a
+mutation finding always reproduces and minimizes.
+
+| Class | Label | Mutation | Oracle |
+|-------|-------|----------|--------|
+| CC-1 owner | `[CC-1 owner]` | set `account.owner` to a sentinel (data/key unchanged) | still succeeds ⇒ owner not checked |
+| CC-2 sysvar | `[CC-2 sysvar]` | substitute a sysvar / system-program account with a cloned copy at a different address | still succeeds ⇒ account identity not checked |
+| CC-3 PDA | `[CC-3 pda]` | substitute a PDA with a cloned copy at a different address | still succeeds ⇒ PDA derivation not checked |
+| CC-4 signer | `[CC-4 signer]` | clear `is_signer` on a non-fee-payer account | still succeeds ⇒ signature not enforced |
+| CC-5 type-tag | `[CC-5 type-tag]` | bit-flip the account's discriminator (type tag) | still succeeds ⇒ account type not checked |
+
+**False-positive discipline.** All classes except CC-4 first run a *relevance gate*: the target's data is
+corrupted and replayed; if the transaction still succeeds the account is inert (the program never reads
+it) and it is skipped — spoofing it gains nothing. CC-4 flags all surviving flips (authority accounts are
+typically dataless). Discriminator length (CC-5) is read from the program IDL's registered schemas, so it
+is correct for Anchor (8-byte), native (4-byte), and Codama programs — CC-5 only probes accounts whose
+type tag is actually known.
+
+**PDAs.** The owner strategy skips PDA-like (off-curve) addresses by default — for a PDA the derivation
+check (CC-3) subsumes the owner check. Set the harness option to also owner-probe PDAs if desired.
+
+```bash
+# Find missing-check bugs while fuzzing
+crucible run myproject invariant_test --release --mutate-accounts --timeout 60
+
+# Findings are normal crashes — inspect / replay / minimize as usual
+crucible show myproject <crash_id>
+crucible show myproject <crash_id> --replay   # engine auto-enabled
 ```
 
 ---
