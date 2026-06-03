@@ -2,7 +2,6 @@ use crate::{record_violation, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
-use anchor_lang::solana_program::system_program;
 use anyhow::Result;
 use litesvm::LiteSVM;
 use solana_keypair::Keypair;
@@ -16,16 +15,36 @@ use solana_sysvar::last_restart_slot::LastRestartSlot;
 #[allow(deprecated)]
 use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
+use std::cell::RefCell;
 
-pub const DEFAULT_OWNER_MUTATION_SAMPLE_RATE: u64 = 10;
-const DEFAULT_PROBES_PER_SAMPLED_TX: usize = 1;
 const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
+
+/// Wrong owner written by the owner-mutation strategy. A recognizable, non-executable key
+/// that no legitimate program could own, so a surviving mutation means the owner was never
+/// checked — never a blur of several possible causes.
+const CRUCIBLE_ATTACKER: Pubkey = Pubkey::new_from_array([0xCC; 32]);
+/// Fallback used in the unlikely case an account is already owned by [`CRUCIBLE_ATTACKER`],
+/// so the mutation is always a real change.
+const CRUCIBLE_ATTACKER_ALT: Pubkey = Pubkey::new_from_array([0xCD; 32]);
+
+thread_local! {
+    /// Instruction types whose mutation battery already ran this run (per worker). The key is
+    /// `(program_id, 8-byte discriminator)`. This persists for the whole run — it is *not*
+    /// cleared between iterations — so each instruction type is probed at most once per worker.
+    static PROBED_IX_TYPES: RefCell<FastHashSet<ProbeKey>> = RefCell::new(FastHashSet::default());
+}
+
+type ProbeKey = (Pubkey, [u8; 8]);
+
+/// Reset the per-run probed-instruction set. Intended for in-process tests that drive several
+/// harness runs within one process; the fuzzer itself starts each worker process fresh.
+pub fn reset_probed_account_mutations() {
+    PROBED_IX_TYPES.with(|s| s.borrow_mut().clear());
+}
 
 #[derive(Clone, Debug)]
 pub struct AccountMutationConfig {
     enabled: bool,
-    sample_rate: u64,
-    probes_per_sampled_tx: usize,
     skip_pda_candidates: bool,
     unverified_accounts: FastHashSet<Pubkey>,
 }
@@ -34,8 +53,6 @@ impl Default for AccountMutationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            sample_rate: DEFAULT_OWNER_MUTATION_SAMPLE_RATE,
-            probes_per_sampled_tx: DEFAULT_PROBES_PER_SAMPLED_TX,
             skip_pda_candidates: DEFAULT_SKIP_PDA_CANDIDATES,
             unverified_accounts: FastHashSet::default(),
         }
@@ -51,10 +68,6 @@ impl AccountMutationConfig {
         self.enabled = false;
     }
 
-    pub fn set_sample_rate(&mut self, sample_rate: u64) {
-        self.sample_rate = sample_rate.max(1);
-    }
-
     pub fn set_skip_pda_candidates(&mut self, skip_pda_candidates: bool) {
         self.skip_pda_candidates = skip_pda_candidates;
     }
@@ -67,19 +80,52 @@ impl AccountMutationConfig {
         self.enabled
     }
 
-    pub fn sample_rate(&self) -> u64 {
-        self.sample_rate
-    }
-
     pub fn skip_pda_candidates(&self) -> bool {
         self.skip_pda_candidates
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OwnerMutationCandidate {
-    pubkey: Pubkey,
-    original_owner: Pubkey,
+/// A single self-documenting finding: one constraint class, one account, one mutated transaction
+/// that still succeeded.
+struct Finding {
+    message: String,
+}
+
+/// Inputs shared by every strategy. Borrows the pre-transaction (baseline) SVM, which is never
+/// mutated — strategies clone it for each probe.
+struct ProbeCtx<'a> {
+    svm: &'a LiteSVM,
+    instructions: &'a [Instruction],
+    signers: &'a [&'a Keypair],
+    payer: &'a Keypair,
+    sigverify: bool,
+    config: &'a AccountMutationConfig,
+}
+
+/// One isolated constraint-class probe. Each strategy owns exactly one oracle and one finding
+/// label, so a finding names the missing check unambiguously. New constraint classes (signer,
+/// sysvar-switch, arbitrary-program, field cross-reference, ...) are added as new strategies
+/// without touching the call sites.
+trait MutationStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding>;
+}
+
+fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationStrategy>> {
+    vec![Box::new(OwnerStrategy)]
+}
+
+/// `(program_id, first 8 bytes of instruction data)` — the identity used to probe each
+/// instruction type at most once. Data shorter than 8 bytes is zero-padded.
+fn probe_key(ix: &Instruction) -> ProbeKey {
+    let mut disc = [0u8; 8];
+    let n = ix.data.len().min(8);
+    disc[..n].copy_from_slice(&ix.data[..n]);
+    (ix.program_id, disc)
+}
+
+fn disc_hex(ix: &Instruction) -> String {
+    let n = ix.data.len().min(8);
+    ix.data[..n].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub(crate) fn maybe_probe_account_mutation(
@@ -90,90 +136,143 @@ pub(crate) fn maybe_probe_account_mutation(
     payer: &Keypair,
     sigverify: bool,
 ) {
-    if !config.enabled || instructions.is_empty() || config.probes_per_sampled_tx == 0 {
+    if !config.enabled || instructions.is_empty() {
         return;
     }
 
-    let fingerprint = transaction_fingerprint(instructions, signers, payer);
-    if !should_sample(fingerprint, config.sample_rate) {
+    // Probe each instruction type only once per run. Multi-instruction transactions are keyed by
+    // their first instruction.
+    let key = probe_key(&instructions[0]);
+    if PROBED_IX_TYPES.with(|s| s.borrow().contains(&key)) {
         return;
     }
 
-    let candidates = collect_candidates(svm, instructions, config);
-    if candidates.is_empty() {
-        return;
+    // Baseline gate: the unmutated transaction must succeed first, otherwise a surviving mutation
+    // tells us nothing. Run it on a clone so the live SVM is untouched.
+    let mut baseline = svm.clone();
+    match send_probe_transaction(&mut baseline, instructions, signers, payer, sigverify) {
+        Ok(Ok(_)) => {}
+        // Don't burn the key on a failed baseline — a later occurrence (in a different state) may
+        // have a succeeding baseline and deserve a probe.
+        _ => return,
     }
+    PROBED_IX_TYPES.with(|s| {
+        s.borrow_mut().insert(key);
+    });
 
-    // The first implementation intentionally performs one probe per sampled tx.
-    // Keep the loop shape so the config can grow without changing call sites.
-    for probe_idx in 0..config.probes_per_sampled_tx.min(1) {
-        let candidate_idx = choose_index(
-            fingerprint,
-            0x9e37_79b9_7f4a_7c15u64 ^ probe_idx as u64,
-            candidates.len(),
-        );
-        let candidate = &candidates[candidate_idx];
-        let replacement_owners =
-            replacement_owners(svm, instructions, candidate, fingerprint, probe_idx as u64);
-        if replacement_owners.is_empty() {
-            continue;
-        }
+    let ctx = ProbeCtx {
+        svm,
+        instructions,
+        signers,
+        payer,
+        sigverify,
+        config,
+    };
 
-        let owner_idx = choose_index(
-            fingerprint,
-            0xc2b2_ae3d_27d4_eb4fu64 ^ probe_idx as u64,
-            replacement_owners.len(),
-        );
-        let replacement_owner = replacement_owners[owner_idx];
+    let findings: Vec<Finding> = enabled_strategies(config)
+        .iter()
+        .flat_map(|s| s.probe(&ctx))
+        .collect();
 
-        let mut probe_svm = svm.clone();
-        if let Some(mut account) = probe_svm.get_account(&candidate.pubkey) {
-            account.owner = replacement_owner;
-            let _ = probe_svm.set_account(candidate.pubkey, account);
-        } else {
-            continue;
-        }
-
-        let result =
-            send_probe_transaction(&mut probe_svm, instructions, signers, payer, sigverify);
-        match result {
-            Ok(Ok(_)) => {
-                record_violation(format!(
-                    "owner mutation succeeded: account {} original_owner {} mutated_owner {} program {}",
-                    candidate.pubkey,
-                    candidate.original_owner,
-                    replacement_owner,
-                    instructions
-                        .first()
-                        .map(|ix| ix.program_id.to_string())
-                        .unwrap_or_else(|| "<none>".to_string())
-                ));
-                return;
-            }
-            Ok(Err(_)) => {}
-            Err(err) => {
-                if std::env::var("FUZZ_DEBUG").is_ok() {
-                    eprintln!("[OWNER_MUTATION] probe transaction failed to build: {err}");
-                }
+    // The violation TLS holds one message per iteration and the harness early-exits on the first,
+    // so surface the first finding and log the rest for debugging.
+    if let Some(first) = findings.first() {
+        record_violation(first.message.clone());
+        if std::env::var("FUZZ_DEBUG").is_ok() {
+            for extra in &findings[1..] {
+                eprintln!("[ACCOUNT_MUTATION] additional finding: {}", extra.message);
             }
         }
     }
 }
 
-fn collect_candidates(
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnerCandidate {
+    pubkey: Pubkey,
+    original_owner: Pubkey,
+}
+
+/// CC-1: an account the program reads (deserializes) without verifying its owner. Mutating the
+/// owner to a sentinel and still succeeding means the owner check is missing.
+struct OwnerStrategy;
+
+impl MutationStrategy for OwnerStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for candidate in collect_owner_candidates(ctx.svm, ctx.instructions, ctx.config) {
+            // Relevance gate first: if the program never reads this account's data, spoofing its
+            // owner gains an attacker nothing — skip it to avoid false positives.
+            if !account_is_load_bearing(ctx, &candidate.pubkey) {
+                continue;
+            }
+
+            let sentinel = wrong_owner(candidate.original_owner);
+            let mut probe = ctx.svm.clone();
+            let Some(mut account) = probe.get_account(&candidate.pubkey) else {
+                continue;
+            };
+            account.owner = sentinel;
+            let _ = probe.set_account(candidate.pubkey, account);
+
+            if let Ok(Ok(_)) = send_probe_transaction(
+                &mut probe,
+                ctx.instructions,
+                ctx.signers,
+                ctx.payer,
+                ctx.sigverify,
+            ) {
+                findings.push(Finding {
+                    message: format!(
+                        "[CC-1 owner] account {} owner {}->{} instr {}:{} still succeeded after owner mutation",
+                        candidate.pubkey,
+                        candidate.original_owner,
+                        sentinel,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+fn wrong_owner(original_owner: Pubkey) -> Pubkey {
+    if original_owner == CRUCIBLE_ATTACKER {
+        CRUCIBLE_ATTACKER_ALT
+    } else {
+        CRUCIBLE_ATTACKER
+    }
+}
+
+/// Owner-mutation targets: non-signer, read-only, non-executable, non-sysvar, non-PDA accounts
+/// that carry data. Read-only because the runtime's write-ownership rule would reject a mutated
+/// owner on a *writable* account for a non-program reason (inconclusive); data-bearing because an
+/// owner check is only exploitable on accounts the program actually deserializes.
+fn collect_owner_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
     config: &AccountMutationConfig,
-) -> Vec<OwnerMutationCandidate> {
+) -> Vec<OwnerCandidate> {
+    // An account writable in *any* instruction is excluded.
+    let mut writable_anywhere = FastHashSet::default();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if meta.is_writable {
+                writable_anywhere.insert(meta.pubkey);
+            }
+        }
+    }
+
     let mut seen = FastHashSet::default();
     let mut candidates = Vec::new();
-
     for ix in instructions {
         for meta in &ix.accounts {
             if !seen.insert(meta.pubkey) {
                 continue;
             }
             if meta.pubkey == ix.program_id
+                || writable_anywhere.contains(&meta.pubkey)
                 || config.unverified_accounts.contains(&meta.pubkey)
                 || is_known_sysvar(&meta.pubkey)
                 || (config.skip_pda_candidates && is_off_curve(&meta.pubkey))
@@ -183,10 +282,10 @@ fn collect_candidates(
             let Some(account) = svm.get_account(&meta.pubkey) else {
                 continue;
             };
-            if account.executable {
+            if account.executable || account.data.is_empty() {
                 continue;
             }
-            candidates.push(OwnerMutationCandidate {
+            candidates.push(OwnerCandidate {
                 pubkey: meta.pubkey,
                 original_owner: account.owner,
             });
@@ -196,95 +295,39 @@ fn collect_candidates(
     candidates
 }
 
+/// Relevance gate (Neodyme-style): corrupt the account body — preserving the 8-byte discriminator
+/// so the type tag still matches — and replay. If the transaction still succeeds the program never
+/// read the contents (inert account), so a surviving owner mutation would be a false positive.
+/// Accounts too small to have a body have all their bytes corrupted.
+fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
+    let mut probe = ctx.svm.clone();
+    let Some(mut account) = probe.get_account(pubkey) else {
+        return false;
+    };
+    if account.data.is_empty() {
+        return false;
+    }
+    if account.data.len() <= 8 {
+        account.data.iter_mut().for_each(|b| *b = 0xFF);
+    } else {
+        account.data[8..].iter_mut().for_each(|b| *b = 0xFF);
+    }
+    let _ = probe.set_account(*pubkey, account);
+
+    !matches!(
+        send_probe_transaction(
+            &mut probe,
+            ctx.instructions,
+            ctx.signers,
+            ctx.payer,
+            ctx.sigverify,
+        ),
+        Ok(Ok(_))
+    )
+}
+
 fn is_off_curve(pubkey: &Pubkey) -> bool {
     !bytes_are_curve_point(pubkey)
-}
-
-fn replacement_owners(
-    svm: &LiteSVM,
-    instructions: &[Instruction],
-    candidate: &OwnerMutationCandidate,
-    fingerprint: u64,
-    probe_idx: u64,
-) -> Vec<Pubkey> {
-    let mut seen = FastHashSet::default();
-    let mut owners = Vec::new();
-
-    let mut push = |owner: Pubkey| {
-        if owner != candidate.original_owner && seen.insert(owner) {
-            owners.push(owner);
-        }
-    };
-
-    push(synthetic_owner(fingerprint, candidate.pubkey, probe_idx));
-    for ix in instructions {
-        push(ix.program_id);
-    }
-    push(system_program::id());
-
-    for ix in instructions {
-        for meta in &ix.accounts {
-            if meta.pubkey == candidate.pubkey {
-                continue;
-            }
-            if let Some(account) = svm.get_account(&meta.pubkey) {
-                push(account.owner);
-            }
-        }
-    }
-
-    owners
-}
-
-fn should_sample(fingerprint: u64, sample_rate: u64) -> bool {
-    fingerprint % sample_rate.max(1) == 0
-}
-
-fn choose_index(fingerprint: u64, salt: u64, len: usize) -> usize {
-    debug_assert!(len > 0);
-    (mix64(fingerprint ^ salt) as usize) % len
-}
-
-fn transaction_fingerprint(
-    instructions: &[Instruction],
-    signers: &[&Keypair],
-    payer: &Keypair,
-) -> u64 {
-    let mut hash = FNV_OFFSET;
-    mix_bytes(&mut hash, b"crucible-owner-mutation-v1");
-    mix_pubkey(&mut hash, &payer.pubkey());
-    mix_u64(&mut hash, signers.len() as u64);
-    for signer in signers {
-        mix_pubkey(&mut hash, &signer.pubkey());
-    }
-    mix_u64(&mut hash, instructions.len() as u64);
-    for ix in instructions {
-        mix_pubkey(&mut hash, &ix.program_id);
-        mix_bytes(&mut hash, &ix.data);
-        mix_u64(&mut hash, ix.accounts.len() as u64);
-        for meta in &ix.accounts {
-            mix_pubkey(&mut hash, &meta.pubkey);
-            mix_u8(&mut hash, meta.is_signer as u8);
-            mix_u8(&mut hash, meta.is_writable as u8);
-        }
-    }
-    hash
-}
-
-fn synthetic_owner(fingerprint: u64, pubkey: Pubkey, probe_idx: u64) -> Pubkey {
-    let mut out = [0u8; 32];
-    let mut seed = fingerprint ^ probe_idx.rotate_left(17);
-    for chunk in 0..4 {
-        seed = mix64(
-            seed ^ u64::from_le_bytes(
-                pubkey.to_bytes()[chunk * 8..chunk * 8 + 8]
-                    .try_into()
-                    .unwrap(),
-            ),
-        );
-        out[chunk * 8..chunk * 8 + 8].copy_from_slice(&seed.to_le_bytes());
-    }
-    Pubkey::new_from_array(out)
 }
 
 fn send_probe_transaction(
@@ -334,52 +377,18 @@ fn is_known_sysvar(pubkey: &Pubkey) -> bool {
         || *pubkey == RecentBlockhashes::id()
 }
 
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-fn mix_bytes(hash: &mut u64, bytes: &[u8]) {
-    mix_u64(hash, bytes.len() as u64);
-    for byte in bytes {
-        mix_u8(hash, *byte);
-    }
-}
-
-fn mix_pubkey(hash: &mut u64, pubkey: &Pubkey) {
-    mix_bytes(hash, pubkey.as_ref());
-}
-
-fn mix_u8(hash: &mut u64, value: u8) {
-    *hash ^= value as u64;
-    *hash = hash.wrapping_mul(FNV_PRIME);
-}
-
-fn mix_u64(hash: &mut u64, value: u64) {
-    for byte in value.to_le_bytes() {
-        mix_u8(hash, byte);
-    }
-}
-
-fn mix64(mut x: u64) -> u64 {
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    x ^= x >> 33;
-    x
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use anchor_lang::solana_program::instruction::AccountMeta;
     use solana_account::Account;
 
-    fn make_account(owner: Pubkey, executable: bool) -> Account {
+    fn make_account(owner: Pubkey, data: Vec<u8>) -> Account {
         Account {
             lamports: 1_000_000,
-            data: vec![],
+            data,
             owner,
-            executable,
+            executable: false,
             rent_epoch: 0,
         }
     }
@@ -389,58 +398,60 @@ mod tests {
     }
 
     #[test]
-    fn owner_mutation_sampling_is_deterministic() {
-        let payer = Keypair::new();
-        let signer = Keypair::new();
-        let account = Pubkey::new_unique();
-        let ix = Instruction {
-            program_id: Pubkey::new_unique(),
-            accounts: vec![AccountMeta::new(account, false)],
+    fn probe_key_is_deterministic_and_pads_short_data() {
+        let prog = Pubkey::new_unique();
+        let a = Instruction {
+            program_id: prog,
+            accounts: vec![],
             data: vec![1, 2, 3],
         };
-        let signers = vec![&payer, &signer];
+        let b = a.clone();
+        assert_eq!(probe_key(&a), probe_key(&b));
+        assert_eq!(probe_key(&a), (prog, [1, 2, 3, 0, 0, 0, 0, 0]));
 
-        let first = transaction_fingerprint(std::slice::from_ref(&ix), &signers, &payer);
-        let second = transaction_fingerprint(std::slice::from_ref(&ix), &signers, &payer);
-
-        assert_eq!(first, second);
-        assert!(should_sample(first, 1));
+        let long = Instruction {
+            program_id: prog,
+            accounts: vec![],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        };
+        assert_eq!(probe_key(&long), (prog, [1, 2, 3, 4, 5, 6, 7, 8]));
     }
 
     #[test]
-    fn owner_mutation_candidate_selection_filters_unverified_and_system_accounts() {
+    fn collect_owner_candidates_keeps_only_readonly_data_accounts() {
         let mut svm = LiteSVM::new();
-        let mut config = AccountMutationConfig::default();
+        let config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
-        let keep = on_curve_pubkey();
-        let unverified = on_curve_pubkey();
-        let missing = Pubkey::new_unique();
-
-        svm.set_account(keep, make_account(owner, false)).unwrap();
-        svm.set_account(unverified, make_account(owner, false))
-            .unwrap();
-
         let program_id = Pubkey::new_unique();
+        let keep = on_curve_pubkey();
+        let writable = on_curve_pubkey();
+        let empty = on_curve_pubkey();
+
+        svm.set_account(keep, make_account(owner, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]))
+            .unwrap();
+        svm.set_account(
+            writable,
+            make_account(owner, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]),
+        )
+        .unwrap();
+        svm.set_account(empty, make_account(owner, vec![])).unwrap();
+
         let ix = Instruction {
             program_id,
             accounts: vec![
-                AccountMeta::new(keep, false),
-                AccountMeta::new(keep, false),
-                AccountMeta::new(unverified, false),
-                AccountMeta::new(missing, false),
-                AccountMeta::new_readonly(Clock::id(), false),
-                AccountMeta::new_readonly(program_id, false),
+                AccountMeta::new_readonly(keep, false),
+                AccountMeta::new(writable, false), // writable -> dropped
+                AccountMeta::new_readonly(empty, false), // empty data -> dropped
+                AccountMeta::new_readonly(Clock::id(), false), // sysvar -> dropped
+                AccountMeta::new_readonly(program_id, false), // program id -> dropped
             ],
             data: vec![],
         };
 
-        config.mark_unverified(unverified);
-
-        let candidates = collect_candidates(&svm, &[ix], &config);
-
+        let candidates = collect_owner_candidates(&svm, &[ix], &config);
         assert_eq!(
             candidates,
-            vec![OwnerMutationCandidate {
+            vec![OwnerCandidate {
                 pubkey: keep,
                 original_owner: owner,
             }]
@@ -448,48 +459,52 @@ mod tests {
     }
 
     #[test]
-    fn owner_mutation_candidate_selection_skips_pdas_by_default() {
+    fn collect_owner_candidates_drops_account_writable_in_any_instruction() {
         let mut svm = LiteSVM::new();
         let config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
         let program_id = Pubkey::new_unique();
-        let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
+        let acct = on_curve_pubkey();
+        svm.set_account(acct, make_account(owner, vec![9; 16]))
+            .unwrap();
 
-        svm.set_account(pda, make_account(owner, false)).unwrap();
-
-        let ix = Instruction {
+        // read-only in ix0 but writable in ix1 -> excluded
+        let ix0 = Instruction {
             program_id,
-            accounts: vec![AccountMeta::new(pda, false)],
+            accounts: vec![AccountMeta::new_readonly(acct, false)],
+            data: vec![],
+        };
+        let ix1 = Instruction {
+            program_id,
+            accounts: vec![AccountMeta::new(acct, false)],
             data: vec![],
         };
 
-        let candidates = collect_candidates(&svm, &[ix], &config);
-
-        assert!(candidates.is_empty());
+        assert!(collect_owner_candidates(&svm, &[ix0, ix1], &config).is_empty());
     }
 
     #[test]
-    fn owner_mutation_candidate_selection_can_include_pdas() {
+    fn collect_owner_candidates_skips_pdas_by_default_and_can_include() {
         let mut svm = LiteSVM::new();
-        let mut config = AccountMutationConfig::default();
-        let owner = Pubkey::new_unique();
         let program_id = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
         let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
-
-        config.set_skip_pda_candidates(false);
-        svm.set_account(pda, make_account(owner, false)).unwrap();
+        svm.set_account(pda, make_account(owner, vec![7; 16]))
+            .unwrap();
 
         let ix = Instruction {
             program_id,
-            accounts: vec![AccountMeta::new(pda, false)],
+            accounts: vec![AccountMeta::new_readonly(pda, false)],
             data: vec![],
         };
 
-        let candidates = collect_candidates(&svm, &[ix], &config);
+        let mut config = AccountMutationConfig::default();
+        assert!(collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config).is_empty());
 
+        config.set_skip_pda_candidates(false);
         assert_eq!(
-            candidates,
-            vec![OwnerMutationCandidate {
+            collect_owner_candidates(&svm, &[ix], &config),
+            vec![OwnerCandidate {
                 pubkey: pda,
                 original_owner: owner,
             }]
@@ -497,38 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn owner_mutation_replacement_owners_skip_original_and_dedupe() {
-        let mut svm = LiteSVM::new();
-        let original_owner = system_program::id();
-        let other_owner = Pubkey::new_unique();
-        let candidate_pk = on_curve_pubkey();
-        let other_pk = on_curve_pubkey();
-        let program_id = Pubkey::new_unique();
-        let candidate = OwnerMutationCandidate {
-            pubkey: candidate_pk,
-            original_owner,
-        };
-
-        svm.set_account(candidate_pk, make_account(original_owner, false))
-            .unwrap();
-        svm.set_account(other_pk, make_account(other_owner, false))
-            .unwrap();
-
-        let ix = Instruction {
-            program_id,
-            accounts: vec![
-                AccountMeta::new(candidate_pk, false),
-                AccountMeta::new(other_pk, false),
-            ],
-            data: vec![],
-        };
-
-        let owners = replacement_owners(&svm, &[ix], &candidate, 42, 0);
-        let unique: FastHashSet<_> = owners.iter().copied().collect();
-
-        assert_eq!(owners.len(), unique.len());
-        assert!(!owners.contains(&original_owner));
-        assert!(owners.contains(&program_id));
-        assert!(owners.contains(&other_owner));
+    fn wrong_owner_uses_alt_when_already_attacker() {
+        assert_eq!(wrong_owner(Pubkey::new_unique()), CRUCIBLE_ATTACKER);
+        assert_eq!(wrong_owner(CRUCIBLE_ATTACKER), CRUCIBLE_ATTACKER_ALT);
     }
 }

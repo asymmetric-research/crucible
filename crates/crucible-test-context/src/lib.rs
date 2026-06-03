@@ -24,12 +24,12 @@ pub use crate::account_builders::AccountBuilderBase;
 pub use crate::account_builders::GenericAccountBuilder;
 pub use crate::account_builders::MintAccountBuilder;
 pub use crate::account_builders::TokenAccountBuilder;
+pub use crate::account_mutation::{reset_probed_account_mutations, AccountMutationConfig};
 pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::mock_oracles::{
     MockPythOracleBuilder, PriceFeedMessage, PriceUpdateV2, VerificationLevel,
     DEFAULT_PYTH_RECEIVER_ID, PYTH_DISCRIMINATOR,
 };
-pub use crate::account_mutation::{AccountMutationConfig, DEFAULT_OWNER_MUTATION_SAMPLE_RATE};
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
 use anchor_lang::prelude::{Clock, Rent};
@@ -41,8 +41,8 @@ use anyhow::{Context, Result};
 use spl_token::solana_program::program_option::COption;
 
 mod account_builders;
-mod instruction_builder;
 mod account_mutation;
+mod instruction_builder;
 mod program_builder;
 pub mod schema;
 pub mod snapshot;
@@ -1683,29 +1683,19 @@ impl TestContext {
         Arc::make_mut(&mut self.tracked_accounts).insert(pubkey);
     }
 
-    /// Enable sampled owner mutation checks.
+    /// Enable account-mutation probes.
     ///
-    /// Defaults to probing one transaction out of every
-    /// [`DEFAULT_OWNER_MUTATION_SAMPLE_RATE`] transactions, with one mutated-owner
-    /// probe for each sampled transaction. The original transaction always runs
-    /// after the probe and still determines the returned outcome.
+    /// The first time each instruction type executes with a succeeding baseline transaction, its
+    /// accounts are probed for missing constraint checks (owner, ...). Probes run on cloned SVMs
+    /// and never change the real transaction's outcome.
     pub fn enable_account_mutation(&mut self) -> &mut Self {
         self.account_mutation.enable();
         self
     }
 
-    /// Disable owner mutation checks.
+    /// Disable account-mutation probes.
     pub fn disable_account_mutation(&mut self) -> &mut Self {
         self.account_mutation.disable();
-        self
-    }
-
-    /// Set the owner mutation sampling rate.
-    ///
-    /// `1` probes every transaction, `10` probes roughly one in ten transaction
-    /// fingerprints. `0` is treated as `1`.
-    pub fn set_owner_mutation_sample_rate(&mut self, sample_rate: u64) -> &mut Self {
-        self.account_mutation.set_sample_rate(sample_rate);
         self
     }
 
@@ -4971,16 +4961,17 @@ mod tests {
     }
 
     #[test]
-    fn owner_mutation_probe_success_records_violation_and_real_tx_runs() {
+    fn account_mutation_enabled_keeps_real_tx_outcome() {
+        // The probe runs on a clone and must never change the real transaction's result. The
+        // dataless system recipient is also (correctly) not a candidate, so no violation fires.
         let _ = take_violation();
+        reset_probed_account_mutations();
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
         let recipient = Keypair::new().pubkey();
         ctx.svm.airdrop(&recipient, 1).unwrap();
 
         ctx.enable_account_mutation();
-        ctx.set_owner_mutation_sample_rate(1);
-        ctx.mark_owner_unverified(payer.pubkey());
 
         let original_owner = ctx.svm.get_account(&recipient).unwrap().owner;
         let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
@@ -5001,55 +4992,21 @@ mod tests {
             ctx.svm.get_account(&recipient).unwrap().owner,
             original_owner
         );
-
-        let violation = take_violation().expect("owner mutation should record a violation");
-        assert!(violation.contains("owner mutation succeeded"));
-        assert!(violation.contains(&recipient.to_string()));
-    }
-
-    #[test]
-    fn owner_mutation_unverified_account_is_skipped() {
-        let _ = take_violation();
-        let mut ctx = TestContext::new();
-        let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
-        ctx.create_account()
-            .pubkey(recipient)
-            .lamports(1)
-            .owner(system_program::id())
-            .owner_unverified()
-            .create()
-            .unwrap();
-
-        ctx.enable_account_mutation();
-        ctx.set_owner_mutation_sample_rate(1);
-        ctx.mark_owner_unverified(payer.pubkey());
-
-        let ix = anchor_lang::solana_program::system_instruction::transfer(
-            &payer.pubkey(),
-            &recipient,
-            1000,
-        );
-
-        let outcome = ctx.raw_call(ix).signers(&[&payer]).send().unwrap();
-
-        assert!(outcome.is_success());
         assert!(!has_violation());
     }
 
     #[test]
-    fn owner_mutation_send_batch_records_violation_and_runs_real_tx() {
+    fn account_mutation_probe_runs_in_send_batch_path() {
+        // Same guarantee through the send_batch hook.
         let _ = take_violation();
+        reset_probed_account_mutations();
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
         let recipient = Keypair::new().pubkey();
         ctx.svm.airdrop(&recipient, 1).unwrap();
 
         ctx.enable_account_mutation();
-        ctx.set_owner_mutation_sample_rate(1);
-        ctx.mark_owner_unverified(payer.pubkey());
 
-        let original_owner = ctx.svm.get_account(&recipient).unwrap().owner;
         let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5066,13 +5023,7 @@ mod tests {
             ctx.svm.get_balance(&recipient).unwrap_or(0),
             before_balance + 2000
         );
-        assert_eq!(
-            ctx.svm.get_account(&recipient).unwrap().owner,
-            original_owner
-        );
-        assert!(take_violation()
-            .expect("owner mutation should record a violation")
-            .contains("owner mutation succeeded"));
+        assert!(!has_violation());
     }
 
     #[test]
