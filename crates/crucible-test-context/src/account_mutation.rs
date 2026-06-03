@@ -17,7 +17,7 @@ use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
 use std::cell::RefCell;
 
-const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
+const DEFAULT_SKIP_PDA_CANDIDATES: bool = false;
 
 /// Wrong owner written by the owner-mutation strategy. A recognizable, non-executable key
 /// that no legitimate program could own, so a surviving mutation means the owner was never
@@ -258,27 +258,36 @@ fn wrong_owner(original_owner: Pubkey) -> Pubkey {
 
 /// CC-4: an account whose signature is meant to authorize the action but whose `is_signer` flag is
 /// never enforced by the program. Clearing the flag and still succeeding means the signer check is
-/// missing. The fee payer is skipped — it must sign for the transaction to pay fees, so clearing it
-/// would fail for a runtime reason rather than a program one.
+/// missing. If the harness supplied a signer keypair for an account that was not marked signer in
+/// the instruction metas, a succeeding baseline is also a missing-signer finding: the program
+/// accepted the action without the signature the harness author intended. The fee payer is skipped
+/// because it must sign for transaction fees.
 struct SignerStrategy;
 
 impl MutationStrategy for SignerStrategy {
     fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
         let mut findings = Vec::new();
         let payer = ctx.payer.pubkey();
-        for signer in distinct_signers(ctx.instructions) {
-            if signer == payer {
+        for candidate in signer_candidates(ctx.instructions, ctx.signers) {
+            if candidate.pubkey == payer {
                 continue;
             }
-            let flipped = clear_signer(ctx.instructions, signer);
+            let flipped = clear_signer(ctx.instructions, candidate.pubkey);
             let mut probe = ctx.svm.clone();
             if let Ok(Ok(_)) =
                 send_probe_transaction(&mut probe, &flipped, ctx.signers, ctx.payer, ctx.sigverify)
             {
+                let detail = match candidate.kind {
+                    SignerCandidateKind::MetaSigner => "is_signer cleared",
+                    SignerCandidateKind::SuppliedSigner => {
+                        "signer keypair supplied but account meta was not signer"
+                    }
+                };
                 findings.push(Finding {
                     message: format!(
-                        "[CC-4 signer] account {} is_signer cleared, instr {}:{} still succeeded (missing signer check)",
-                        signer,
+                        "[CC-4 signer] account {} {}, instr {}:{} still succeeded (missing signer check)",
+                        candidate.pubkey,
+                        detail,
                         ctx.instructions[0].program_id,
                         disc_hex(&ctx.instructions[0]),
                     ),
@@ -289,18 +298,47 @@ impl MutationStrategy for SignerStrategy {
     }
 }
 
-/// Distinct signer pubkeys across all instructions, in first-seen order.
-fn distinct_signers(instructions: &[Instruction]) -> Vec<Pubkey> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignerCandidateKind {
+    MetaSigner,
+    SuppliedSigner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SignerCandidate {
+    pubkey: Pubkey,
+    kind: SignerCandidateKind,
+}
+
+/// Distinct signer-intent pubkeys in first-seen order. Instruction metas are authoritative, but
+/// harness-supplied signer keypairs are also treated as intent when their pubkey appears as an
+/// account in the instruction. This covers IDL/native harnesses where the builder had a keypair but
+/// the account meta forgot to carry `is_signer`.
+fn signer_candidates(instructions: &[Instruction], signers: &[&Keypair]) -> Vec<SignerCandidate> {
     let mut seen = FastHashSet::default();
-    let mut signers = Vec::new();
+    let mut candidates = Vec::new();
+    let mut account_pubkeys = FastHashSet::default();
     for ix in instructions {
         for meta in &ix.accounts {
+            account_pubkeys.insert(meta.pubkey);
             if meta.is_signer && seen.insert(meta.pubkey) {
-                signers.push(meta.pubkey);
+                candidates.push(SignerCandidate {
+                    pubkey: meta.pubkey,
+                    kind: SignerCandidateKind::MetaSigner,
+                });
             }
         }
     }
-    signers
+    for signer in signers {
+        let pubkey = signer.pubkey();
+        if account_pubkeys.contains(&pubkey) && seen.insert(pubkey) {
+            candidates.push(SignerCandidate {
+                pubkey,
+                kind: SignerCandidateKind::SuppliedSigner,
+            });
+        }
+    }
+    candidates
 }
 
 /// Clone the instructions, clearing `is_signer` for every occurrence of `target`.
@@ -319,25 +357,15 @@ fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction
         .collect()
 }
 
-/// Owner-mutation targets: non-signer, read-only, non-executable, non-sysvar, non-PDA accounts
-/// that carry data. Read-only because the runtime's write-ownership rule would reject a mutated
-/// owner on a *writable* account for a non-program reason (inconclusive); data-bearing because an
-/// owner check is only exploitable on accounts the program actually deserializes.
+/// Owner-mutation targets: non-executable, non-sysvar accounts that carry data. Writable accounts
+/// and PDA-like addresses are included by default: if mutating the owner triggers a runtime
+/// ownership failure the probe simply does not report, while a surviving mutation is still useful
+/// for Anchor, Pinocchio, native, and closed-source harnesses.
 fn collect_owner_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
     config: &AccountMutationConfig,
 ) -> Vec<OwnerCandidate> {
-    // An account writable in *any* instruction is excluded.
-    let mut writable_anywhere = FastHashSet::default();
-    for ix in instructions {
-        for meta in &ix.accounts {
-            if meta.is_writable {
-                writable_anywhere.insert(meta.pubkey);
-            }
-        }
-    }
-
     let mut seen = FastHashSet::default();
     let mut candidates = Vec::new();
     for ix in instructions {
@@ -346,7 +374,6 @@ fn collect_owner_candidates(
                 continue;
             }
             if meta.pubkey == ix.program_id
-                || writable_anywhere.contains(&meta.pubkey)
                 || config.unverified_accounts.contains(&meta.pubkey)
                 || is_known_sysvar(&meta.pubkey)
                 || (config.skip_pda_candidates && is_off_curve(&meta.pubkey))
@@ -369,35 +396,68 @@ fn collect_owner_candidates(
     candidates
 }
 
-/// Relevance gate (Neodyme-style): corrupt the account body — preserving the 8-byte discriminator
-/// so the type tag still matches — and replay. If the transaction still succeeds the program never
-/// read the contents (inert account), so a surviving owner mutation would be a false positive.
-/// Accounts too small to have a body have all their bytes corrupted.
+/// Relevance gate (Neodyme-style): corrupt the account data and replay. If every corrupted replay
+/// still succeeds the program never read the contents (inert account), so a surviving owner mutation
+/// would be a false positive. We try Anchor-friendly body corruption plus prefix/full corruption so
+/// native, Pinocchio, and closed-source layouts with important bytes before offset 8 are covered.
 fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
-    let mut probe = ctx.svm.clone();
-    let Some(mut account) = probe.get_account(pubkey) else {
+    let Some(account) = ctx.svm.get_account(pubkey) else {
         return false;
     };
     if account.data.is_empty() {
         return false;
     }
-    if account.data.len() <= 8 {
-        account.data.iter_mut().for_each(|b| *b = 0xFF);
-    } else {
-        account.data[8..].iter_mut().for_each(|b| *b = 0xFF);
-    }
-    let _ = probe.set_account(*pubkey, account);
 
-    !matches!(
-        send_probe_transaction(
-            &mut probe,
-            ctx.instructions,
-            ctx.signers,
-            ctx.payer,
-            ctx.sigverify,
-        ),
-        Ok(Ok(_))
-    )
+    for data in data_corruption_variants(&account.data) {
+        let mut probe = ctx.svm.clone();
+        let Some(mut account) = probe.get_account(pubkey) else {
+            continue;
+        };
+        account.data = data;
+        let _ = probe.set_account(*pubkey, account);
+
+        if !matches!(
+            send_probe_transaction(
+                &mut probe,
+                ctx.instructions,
+                ctx.signers,
+                ctx.payer,
+                ctx.sigverify,
+            ),
+            Ok(Ok(_))
+        ) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn data_corruption_variants(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut variants = Vec::new();
+    let len = data.len();
+
+    if len > 8 {
+        push_unique_corruption(&mut variants, data, 8..len);
+    }
+    push_unique_corruption(&mut variants, data, 0..len.min(8));
+    push_unique_corruption(&mut variants, data, 0..len);
+
+    variants
+}
+
+fn push_unique_corruption(variants: &mut Vec<Vec<u8>>, data: &[u8], range: std::ops::Range<usize>) {
+    if range.is_empty() {
+        return;
+    }
+
+    let mut corrupted = data.to_vec();
+    for b in &mut corrupted[range] {
+        *b = if *b == 0xFF { 0x00 } else { 0xFF };
+    }
+    if corrupted != data && !variants.iter().any(|existing| existing == &corrupted) {
+        variants.push(corrupted);
+    }
 }
 
 fn is_off_curve(pubkey: &Pubkey) -> bool {
@@ -492,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_owner_candidates_keeps_only_readonly_data_accounts() {
+    fn collect_owner_candidates_keeps_data_accounts_including_writable() {
         let mut svm = LiteSVM::new();
         let config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
@@ -514,7 +574,7 @@ mod tests {
             program_id,
             accounts: vec![
                 AccountMeta::new_readonly(keep, false),
-                AccountMeta::new(writable, false), // writable -> dropped
+                AccountMeta::new(writable, false), // writable -> kept; runtime decides conclusiveness
                 AccountMeta::new_readonly(empty, false), // empty data -> dropped
                 AccountMeta::new_readonly(Clock::id(), false), // sysvar -> dropped
                 AccountMeta::new_readonly(program_id, false), // program id -> dropped
@@ -525,15 +585,21 @@ mod tests {
         let candidates = collect_owner_candidates(&svm, &[ix], &config);
         assert_eq!(
             candidates,
-            vec![OwnerCandidate {
-                pubkey: keep,
-                original_owner: owner,
-            }]
+            vec![
+                OwnerCandidate {
+                    pubkey: keep,
+                    original_owner: owner,
+                },
+                OwnerCandidate {
+                    pubkey: writable,
+                    original_owner: owner,
+                },
+            ]
         );
     }
 
     #[test]
-    fn collect_owner_candidates_drops_account_writable_in_any_instruction() {
+    fn collect_owner_candidates_keeps_account_writable_in_any_instruction() {
         let mut svm = LiteSVM::new();
         let config = AccountMutationConfig::default();
         let owner = Pubkey::new_unique();
@@ -542,7 +608,8 @@ mod tests {
         svm.set_account(acct, make_account(owner, vec![9; 16]))
             .unwrap();
 
-        // read-only in ix0 but writable in ix1 -> excluded
+        // read-only in ix0 but writable in ix1 -> still probed; if owner mutation triggers a
+        // runtime write-ownership failure later the strategy simply will not report it.
         let ix0 = Instruction {
             program_id,
             accounts: vec![AccountMeta::new_readonly(acct, false)],
@@ -554,11 +621,17 @@ mod tests {
             data: vec![],
         };
 
-        assert!(collect_owner_candidates(&svm, &[ix0, ix1], &config).is_empty());
+        assert_eq!(
+            collect_owner_candidates(&svm, &[ix0, ix1], &config),
+            vec![OwnerCandidate {
+                pubkey: acct,
+                original_owner: owner,
+            }]
+        );
     }
 
     #[test]
-    fn collect_owner_candidates_skips_pdas_by_default_and_can_include() {
+    fn collect_owner_candidates_includes_pdas_by_default_and_can_skip() {
         let mut svm = LiteSVM::new();
         let program_id = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -573,16 +646,16 @@ mod tests {
         };
 
         let mut config = AccountMutationConfig::default();
-        assert!(collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config).is_empty());
-
-        config.set_skip_pda_candidates(false);
         assert_eq!(
-            collect_owner_candidates(&svm, &[ix], &config),
+            collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config),
             vec![OwnerCandidate {
                 pubkey: pda,
                 original_owner: owner,
             }]
         );
+
+        config.set_skip_pda_candidates(true);
+        assert!(collect_owner_candidates(&svm, &[ix], &config).is_empty());
     }
 
     #[test]
@@ -592,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_signers_dedupes_across_instructions() {
+    fn signer_candidates_dedupes_across_instructions() {
         let program_id = Pubkey::new_unique();
         let a = Pubkey::new_unique();
         let b = Pubkey::new_unique();
@@ -613,7 +686,42 @@ mod tests {
             ],
             data: vec![],
         };
-        assert_eq!(distinct_signers(&[ix0, ix1]), vec![a, b]);
+        assert_eq!(
+            signer_candidates(&[ix0, ix1], &[]),
+            vec![
+                SignerCandidate {
+                    pubkey: a,
+                    kind: SignerCandidateKind::MetaSigner,
+                },
+                SignerCandidate {
+                    pubkey: b,
+                    kind: SignerCandidateKind::MetaSigner,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn signer_candidates_includes_supplied_signer_present_as_non_signer_account() {
+        let program_id = Pubkey::new_unique();
+        let supplied = Keypair::new();
+        let payer = Keypair::new();
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(supplied.pubkey(), false),
+                AccountMeta::new_readonly(Pubkey::new_unique(), false),
+            ],
+            data: vec![],
+        };
+
+        assert_eq!(
+            signer_candidates(&[ix], &[&payer, &supplied]),
+            vec![SignerCandidate {
+                pubkey: supplied.pubkey(),
+                kind: SignerCandidateKind::SuppliedSigner,
+            }]
+        );
     }
 
     #[test]
@@ -633,5 +741,30 @@ mod tests {
         let flipped = clear_signer(std::slice::from_ref(&ix), target);
         assert!(!flipped[0].accounts[0].is_signer); // target cleared
         assert!(flipped[0].accounts[1].is_signer); // other untouched
+    }
+
+    #[test]
+    fn data_corruption_variants_cover_anchor_body_prefix_and_full_data() {
+        let data: Vec<u8> = (0..16).collect();
+        let variants = data_corruption_variants(&data);
+
+        assert!(
+            variants
+                .iter()
+                .any(|v| v[..8] == data[..8] && v[8..] != data[8..]),
+            "should preserve 8-byte discriminator and corrupt body"
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|v| v[..8] != data[..8] && v[8..] == data[8..]),
+            "should corrupt prefix for native/pinocchio layouts"
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|v| v[..8] != data[..8] && v[8..] != data[8..]),
+            "should include full-data corruption for closed-source layouts"
+        );
     }
 }

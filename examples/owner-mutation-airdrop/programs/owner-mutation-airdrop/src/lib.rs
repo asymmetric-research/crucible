@@ -59,7 +59,7 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    // ---- CC-1 negatives / edges: engine must NOT flag ----
+    // ---- CC-1 negatives / edges ----
 
     /// Program-owned config *with* the owner check present.
     pub fn claim_with_owner_check(ctx: Context<ClaimAirdrop>) -> Result<()> {
@@ -101,8 +101,8 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Reads a PDA config without an owner check. A PDA cannot be reassigned by an external
-    /// signer, so the engine skips off-curve addresses by default and must not flag this.
+    /// Reads a PDA config without an owner check. The detector includes PDA-like addresses by
+    /// default so closed-source and PDA-heavy programs do not silently miss this owner-check class.
     pub fn read_pda_config_no_check(ctx: Context<ReadPda>) -> Result<()> {
         let amount = read_u64(&ctx.accounts.config)?;
         payout(
@@ -112,8 +112,8 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Reads a *writable* config without an owner check. The runtime's write-ownership rule makes
-    /// the result inconclusive, so the engine excludes writable accounts and must not flag this.
+    /// Reads a *writable* config without an owner check. The account is only read, so owner mutation
+    /// can still produce a conclusive finding even though the meta is writable.
     pub fn read_writable_config_no_check(ctx: Context<ReadWritable>) -> Result<()> {
         let amount = read_u64(&ctx.accounts.config)?;
         payout(

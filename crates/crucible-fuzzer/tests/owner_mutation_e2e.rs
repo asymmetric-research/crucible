@@ -254,7 +254,7 @@ fn flags_missing_owner_check_on_tiny_account() {
     expect_owner_finding(config);
 }
 
-// ---- CC-1 negatives / edges: the engine must NOT flag ----
+// ---- CC-1 negatives / edges ----
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
@@ -335,9 +335,10 @@ fn no_finding_for_inert_account() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_for_pda_config() {
+fn flags_missing_owner_check_on_pda_config() {
     let mut h = harness();
-    // PDAs are off-curve and cannot be reassigned by an external signer; engine skips them.
+    // PDAs are off-curve, but the detector includes them by default so PDA-heavy and
+    // closed-source targets do not silently miss this owner-check class.
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
         &mut h.ctx,
@@ -358,14 +359,15 @@ fn no_finding_for_pda_config() {
         .send()
         .unwrap();
 
-    expect_no_finding();
+    expect_owner_finding(config);
 }
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_for_writable_config() {
+fn flags_missing_owner_check_on_writable_config() {
     let mut h = harness();
-    // Config is declared writable (but only read); engine excludes writable accounts.
+    // Config is declared writable but only read, so an owner mutation that still succeeds is a
+    // conclusive missing-owner-check finding.
     let config = Keypair::new().pubkey();
     create_data_account(
         &mut h.ctx,
@@ -386,7 +388,7 @@ fn no_finding_for_writable_config() {
         .send()
         .unwrap();
 
-    expect_no_finding();
+    expect_owner_finding(config);
 }
 
 // ---- CC-4 signer checks ----

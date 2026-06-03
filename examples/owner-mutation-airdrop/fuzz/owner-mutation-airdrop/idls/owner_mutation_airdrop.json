@@ -134,8 +134,8 @@
     {
       "name": "read_pda_config_no_check",
       "docs": [
-        "Reads a PDA config without an owner check. A PDA cannot be reassigned by an external",
-        "signer, so the engine skips off-curve addresses by default and must not flag this."
+        "Reads a PDA config without an owner check. The detector includes PDA-like addresses by",
+        "default so closed-source and PDA-heavy programs do not silently miss this owner-check class."
       ],
       "discriminator": [
         199,
@@ -229,8 +229,8 @@
     {
       "name": "read_writable_config_no_check",
       "docs": [
-        "Reads a *writable* config without an owner check. The runtime's write-ownership rule makes",
-        "the result inconclusive, so the engine excludes writable accounts and must not flag this."
+        "Reads a *writable* config without an owner check. The account is only read, so owner mutation",
+        "can still produce a conclusive finding even though the meta is writable."
       ],
       "discriminator": [
         78,

@@ -1421,6 +1421,23 @@ fn replay_crash_directory(fuzz_dir: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn configure_crash_replay_env(
+    cmd: &mut Command,
+    crash_path: &Path,
+    crashes_dir: Option<&Path>,
+    meta_dir: Option<&Path>,
+) {
+    cmd.env("FUZZ_INPUT_FILE", crash_path)
+        // Account mutation is always enabled on replay so mutation findings reproduce.
+        .env("FUZZ_MUTATE_ACCOUNTS", "1");
+    if let Some(dir) = crashes_dir {
+        cmd.env("FUZZ_CRASHES_DIR", dir);
+    }
+    if let Some(dir) = meta_dir {
+        cmd.env("FUZZ_META_DIR", dir);
+    }
+}
+
 /// Find a single crash file by name in the crashes directory tree.
 fn find_crash_file(
     crashes_dir: &Path,
@@ -1586,12 +1603,9 @@ fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<
     // Canonicalize crash path so it works regardless of the binary's working directory
     let abs_crash = crash_path.canonicalize().context("Crash file not found")?;
     let mut cmd = Command::new(binary_path);
-    cmd.current_dir(fuzz_dir)
-        .env("FUZZ_INPUT_FILE", &abs_crash)
-        // Account mutation is always enabled on replay so mutation findings reproduce.
-        .env("FUZZ_MUTATE_ACCOUNTS", "1")
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+    cmd.current_dir(fuzz_dir);
+    configure_crash_replay_env(&mut cmd, &abs_crash, None, None);
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     cmd.status().context("Failed to run replay")
 }
 
@@ -1842,14 +1856,10 @@ fn regen_crashes(
             print!("[REGEN] {}/{} {}... ", idx + 1, crash_files.len(), crash_id);
 
             let meta_test_dir = meta_dir.join(test_name);
-            let status = Command::new(&binary_path)
-                .current_dir(fuzz_dir)
-                .env("FUZZ_INPUT_FILE", crash_path)
-                .env("FUZZ_CRASHES_DIR", &test_dir)
-                .env("FUZZ_META_DIR", &meta_test_dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let mut cmd = Command::new(&binary_path);
+            cmd.current_dir(fuzz_dir);
+            configure_crash_replay_env(&mut cmd, crash_path, Some(&test_dir), Some(&meta_test_dir));
+            let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
 
             match status {
                 Ok(s) => {
@@ -2169,6 +2179,40 @@ mod tests {
         let abs = tmp.canonicalize().unwrap();
         assert!(abs.is_absolute());
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_crash_replay_env_enables_account_mutation_for_regen() {
+        fn env_value(cmd: &Command, key: &str) -> Option<String> {
+            cmd.get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().into_owned())
+        }
+
+        let mut cmd = Command::new("dummy");
+        let crash_path = Path::new("/tmp/crash_abc");
+        let crashes_dir = Path::new("/tmp/crashes/invariant_test");
+        let meta_dir = Path::new("/tmp/meta/invariant_test");
+
+        configure_crash_replay_env(&mut cmd, crash_path, Some(crashes_dir), Some(meta_dir));
+
+        assert_eq!(
+            env_value(&cmd, "FUZZ_MUTATE_ACCOUNTS").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            env_value(&cmd, "FUZZ_INPUT_FILE").as_deref(),
+            Some("/tmp/crash_abc")
+        );
+        assert_eq!(
+            env_value(&cmd, "FUZZ_CRASHES_DIR").as_deref(),
+            Some("/tmp/crashes/invariant_test")
+        );
+        assert_eq!(
+            env_value(&cmd, "FUZZ_META_DIR").as_deref(),
+            Some("/tmp/meta/invariant_test")
+        );
     }
 
     // === Regression: crash dir must not fallback to ./output ===

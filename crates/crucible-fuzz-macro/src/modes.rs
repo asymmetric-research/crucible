@@ -508,6 +508,7 @@ pub fn tmin_mode(
             let crashes = |actions: &[#action_ty], template: &#fixture_name| -> bool {
                 let mut fixture = template.clone();
                 crucible_test_context::clear_iteration_state();
+                crucible_test_context::reset_probed_account_mutations();
                 let _ = crucible_test_context::take_violation();
                 with_stderr_suppressed(|| #fn_name(&mut fixture, actions.to_vec()));
                 crucible_test_context::has_violation()
@@ -585,6 +586,7 @@ pub fn tmin_mode(
 
                     // Update .meta.json — re-execute to capture clean action history
                     crucible_test_context::clear_iteration_state();
+                    crucible_test_context::reset_probed_account_mutations();
                     {
                         let mut fixture = template_fixture.clone();
                         with_stderr_suppressed(|| #fn_name(&mut fixture, actions));
@@ -803,6 +805,25 @@ mod tests {
             "should suppress stderr during trials"
         );
         assert!(output.contains("dev/null"), "should redirect to /dev/null");
+    }
+
+    #[test]
+    fn tmin_resets_account_mutation_probe_cache_between_trials() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("reset_probed_account_mutations"),
+            "mutation-only crashes must reproduce independently for every tmin trial"
+        );
     }
 
     #[test]

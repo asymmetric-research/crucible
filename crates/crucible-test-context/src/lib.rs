@@ -1728,9 +1728,9 @@ impl TestContext {
 
     /// Set whether owner mutation should skip off-curve account addresses.
     ///
-    /// This is enabled by default because Solana PDAs are off-curve and cannot
-    /// be reassigned by an external private key. Set this to `false` when a
-    /// harness intentionally wants owner probes against PDA-like addresses.
+    /// This is disabled by default so PDA-heavy and closed-source targets still
+    /// get owner probes. Set this to `true` when a harness intentionally wants
+    /// to suppress PDA-like addresses.
     pub fn set_owner_mutation_skip_pdas(&mut self, skip_pdas: bool) -> &mut Self {
         self.account_mutation.set_skip_pda_candidates(skip_pdas);
         self
