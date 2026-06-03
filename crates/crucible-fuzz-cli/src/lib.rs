@@ -187,8 +187,6 @@ struct CrashMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     actions: Vec<ActionRecord>,
-    #[serde(default)]
-    mutation_finding: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -628,6 +626,8 @@ fn fuzz_run(
             }
         };
         cmd.env("FUZZ_INPUT_FILE", &resolved_path);
+        // Account mutation is always enabled on replay so mutation findings reproduce.
+        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
         println!("[FUZZ] Replaying input: {}", resolved_path.display());
     }
 
@@ -1588,23 +1588,11 @@ fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<
     let mut cmd = Command::new(binary_path);
     cmd.current_dir(fuzz_dir)
         .env("FUZZ_INPUT_FILE", &abs_crash)
+        // Account mutation is always enabled on replay so mutation findings reproduce.
+        .env("FUZZ_MUTATE_ACCOUNTS", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    // Account-mutation findings only re-fire if the engine is re-enabled on replay.
-    if crash_is_mutation_finding(crash_path) {
-        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
-    }
     cmd.status().context("Failed to run replay")
-}
-
-/// Read the sibling `.meta.json` and report whether the crash was an account-mutation finding.
-fn crash_is_mutation_finding(crash_path: &Path) -> bool {
-    let meta_path = PathBuf::from(format!("{}.meta.json", crash_path.display()));
-    fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<CrashMetadata>(&s).ok())
-        .map(|m| m.mutation_finding)
-        .unwrap_or(false)
 }
 
 fn print_replay_result(status: &ExitStatus) {
@@ -1746,6 +1734,8 @@ fn fuzz_tmin(
             .env("FUZZ_TMIN_ALL_DIR", &crashes_dir)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
             .env("FUZZ_META_DIR", &meta_dir)
+            // Account mutation is always enabled so mutation findings still reproduce while minimizing.
+            .env("FUZZ_MUTATE_ACCOUNTS", "1")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -1765,6 +1755,8 @@ fn fuzz_tmin(
             .env("FUZZ_TMIN_CRASH_ID", crash_id)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
             .env("FUZZ_META_DIR", &meta_dir)
+            // Account mutation is always enabled so mutation findings still reproduce while minimizing.
+            .env("FUZZ_MUTATE_ACCOUNTS", "1")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
