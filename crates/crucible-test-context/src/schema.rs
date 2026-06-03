@@ -32,6 +32,16 @@ pub struct AccountSchema {
 
 static SCHEMA_REGISTRY: OnceLock<Vec<AccountSchema>> = OnceLock::new();
 
+/// All account-type discriminators from the IDL (borsh *and* zero-copy), for type-tag length
+/// lookup. Separate from `SCHEMA_REGISTRY` (which only holds the zero-copy accounts that have a
+/// field-diff function), so the diff feature is unaffected.
+static ACCOUNT_DISCRIMINATORS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+
+/// Register every account type's discriminator. Call once at harness startup (generated code).
+pub fn register_account_discriminators(discriminators: Vec<Vec<u8>>) {
+    let _ = ACCOUNT_DISCRIMINATORS.set(discriminators);
+}
+
 /// Register account schemas for semantic diffs.
 /// Call once at harness startup (e.g., from generated `register_schemas()`).
 /// Subsequent calls are ignored (OnceLock).
@@ -73,13 +83,20 @@ pub fn lookup_type_name(data: &[u8]) -> Option<&str> {
 /// the start of `data`. Framework-agnostic: the length is whatever the IDL recorded — 8 for Anchor,
 /// 4 for native bincode, variable for Codama — so callers never have to assume a fixed tag width.
 pub fn lookup_discriminator_len(data: &[u8]) -> Option<usize> {
-    match_discriminator_len(SCHEMA_REGISTRY.get()?, data)
+    // Prefer the complete account-discriminator registry; fall back to the diff-schema registry.
+    if let Some(discs) = ACCOUNT_DISCRIMINATORS.get() {
+        if let Some(n) = match_len(discs.iter().map(Vec::as_slice), data) {
+            return Some(n);
+        }
+    }
+    let schemas = SCHEMA_REGISTRY.get()?;
+    match_len(schemas.iter().map(|s| s.discriminator.as_slice()), data)
 }
 
-fn match_discriminator_len(schemas: &[AccountSchema], data: &[u8]) -> Option<usize> {
-    for schema in schemas {
-        let n = schema.discriminator.len();
-        if n > 0 && data.len() >= n && data[..n] == schema.discriminator[..] {
+fn match_len<'a>(discriminators: impl Iterator<Item = &'a [u8]>, data: &[u8]) -> Option<usize> {
+    for disc in discriminators {
+        let n = disc.len();
+        if n > 0 && data.len() >= n && data[..n] == disc[..] {
             return Some(n);
         }
     }
@@ -112,32 +129,25 @@ mod tests {
         assert!(result.is_none() || result.is_some());
     }
 
-    fn schema(type_name: &str, discriminator: Vec<u8>) -> AccountSchema {
-        AccountSchema {
-            type_name: type_name.into(),
-            discriminator,
-            diff_fn: Box::new(|_, _| Vec::new()),
-        }
-    }
-
     #[test]
     fn discriminator_len_is_framework_agnostic() {
         // Native (4-byte) and Anchor (8-byte) discriminators resolve to their actual lengths.
-        let schemas = vec![
-            schema("Native", vec![1, 0, 0, 0]),
-            schema("Anchor", vec![9, 8, 7, 6, 5, 4, 3, 2]),
-        ];
-        let mut native = vec![1, 0, 0, 0];
-        native.extend_from_slice(&[0xAB; 12]);
-        assert_eq!(match_discriminator_len(&schemas, &native), Some(4));
+        let native: Vec<u8> = vec![1, 0, 0, 0];
+        let anchor: Vec<u8> = vec![9, 8, 7, 6, 5, 4, 3, 2];
+        let discs = [native.clone(), anchor.clone()];
+        let slices = || discs.iter().map(Vec::as_slice);
 
-        let mut anchor = vec![9, 8, 7, 6, 5, 4, 3, 2];
-        anchor.extend_from_slice(&[0xCD; 20]);
-        assert_eq!(match_discriminator_len(&schemas, &anchor), Some(8));
+        let mut native_data = native.clone();
+        native_data.extend_from_slice(&[0xAB; 12]);
+        assert_eq!(match_len(slices(), &native_data), Some(4));
+
+        let mut anchor_data = anchor.clone();
+        anchor_data.extend_from_slice(&[0xCD; 20]);
+        assert_eq!(match_len(slices(), &anchor_data), Some(8));
 
         // No registered discriminator matches → None (CC-5 must not guess).
-        assert_eq!(match_discriminator_len(&schemas, &[0xFF; 16]), None);
+        assert_eq!(match_len(slices(), &[0xFF; 16]), None);
         // Data shorter than the discriminator → no match.
-        assert_eq!(match_discriminator_len(&schemas, &[1, 0]), None);
+        assert_eq!(match_len(slices(), &[1, 0]), None);
     }
 }

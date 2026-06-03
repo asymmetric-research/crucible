@@ -48,7 +48,7 @@ pub mod schema;
 pub mod snapshot;
 
 // Re-export schema types for generated code (register_schemas())
-pub use schema::{register_account_schemas, AccountSchema};
+pub use schema::{register_account_discriminators, register_account_schemas, AccountSchema};
 mod transaction_builder;
 
 // Coverage analysis and visualization
