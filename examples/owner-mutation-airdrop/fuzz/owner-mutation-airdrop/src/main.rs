@@ -51,6 +51,7 @@ struct OwnerMutationAirdropFixture {
     inert: Pubkey,           // program-owned but never read
     pda_config: Pubkey,      // off-curve PDA data account
     pda_authority: Pubkey,   // off-curve PDA authority with no data read
+    inert_pda: Pubkey,       // off-curve PDA passed but never read
     writable_config: Pubkey, // program-owned, declared writable
     typed_config: Pubkey,    // Anchor-discriminated Config account (CC-5 target)
 }
@@ -119,6 +120,15 @@ impl OwnerMutationAirdropFixture {
             .create()
             .unwrap();
 
+        let (inert_pda, _) = Pubkey::find_program_address(&[b"inert"], &program_id);
+        ctx.create_account()
+            .pubkey(inert_pda)
+            .lamports(1_000_000)
+            .owner(program_id)
+            .data(&[])
+            .create()
+            .unwrap();
+
         let mut typed_data = owner_mutation_airdrop::state::Config::DISCRIMINATOR.to_vec();
         typed_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
         let typed_config = Self::new_data(&mut ctx, program_id, &typed_data);
@@ -147,6 +157,7 @@ impl OwnerMutationAirdropFixture {
             inert,
             pda_config,
             pda_authority,
+            inert_pda,
             writable_config,
             typed_config,
         }
@@ -346,6 +357,21 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
+    pub fn action_with_inert_pda_account(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::WithInertPdaAccount {})
+            .accounts(accounts::WithInertPdaAccount {
+                recipient: self.recipient.pubkey(),
+                inert_pda: self.inert_pda,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     pub fn action_read_writable_config_no_check(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
@@ -368,6 +394,21 @@ impl OwnerMutationAirdropFixture {
             .program(self.program_id)
             .call(instruction::ReadTypedNoCheck {})
             .accounts(accounts::ReadTypedNoCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.typed_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_optional_typed_config(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadOptionalTypedConfig {})
+            .accounts(accounts::ReadOptionalTypedConfig {
                 recipient: self.recipient.pubkey(),
                 config: self.typed_config,
                 vault: self.vault,

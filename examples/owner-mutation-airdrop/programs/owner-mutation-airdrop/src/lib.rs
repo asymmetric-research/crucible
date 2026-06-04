@@ -113,7 +113,8 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Verifies the PDA address but omits the owner check, so CC-1 must still flag it.
+    /// Verifies the PDA address but omits the owner check. The owner-mutation engine skips
+    /// key-pinned PDAs by default because an attacker cannot normally create this wrong-owner state.
     pub fn read_pda_config_with_pda_check_no_owner_check(ctx: Context<ReadPda>) -> Result<()> {
         let (expected, _) = Pubkey::find_program_address(&[b"config"], &crate::ID);
         require!(
@@ -144,6 +145,17 @@ pub mod owner_mutation_airdrop {
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
             amount,
+        )
+    }
+
+    /// Passes an empty PDA account that the instruction never reads. The CC-3 relevance gate should
+    /// suppress this instead of treating every successful substitution as a missing derivation check.
+    pub fn with_inert_pda_account(ctx: Context<WithInertPda>) -> Result<()> {
+        let _ = &ctx.accounts.inert_pda;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
         )
     }
 
@@ -255,6 +267,28 @@ pub mod owner_mutation_airdrop {
     /// Same read via `Account<'info, Config>`, which verifies the discriminator (and owner).
     pub fn read_typed_with_check(ctx: Context<ReadTypedChecked>) -> Result<()> {
         let amount = ctx.accounts.config.amount;
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Optional-account pattern: a valid `Config` pays out, but a malformed/placeholder account is
+    /// deliberately treated as absent. A discriminator flip should not be reported as exploitable
+    /// because the mutated execution no-ops instead of matching the baseline effects.
+    pub fn read_optional_typed_config(ctx: Context<ReadTyped>) -> Result<()> {
+        if ctx.accounts.config.owner != &crate::ID {
+            return Ok(());
+        }
+        let amount = {
+            let data = ctx.accounts.config.try_borrow_data()?;
+            if data.len() < 16 || &data[0..8] != Config::DISCRIMINATOR {
+                return Ok(());
+            }
+            u64::from_le_bytes(data[8..16].try_into().unwrap())
+        };
         require!(amount > 0, AirdropError::InvalidAmount);
         payout(
             &ctx.accounts.vault.to_account_info(),
@@ -398,6 +432,17 @@ pub struct UsePdaAuthority<'info> {
     pub recipient: Signer<'info>,
     /// CHECK: PDA-like authority; key checked only in the checked variant.
     pub authority: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithInertPda<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: empty PDA-like account the instruction never reads.
+    pub inert_pda: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

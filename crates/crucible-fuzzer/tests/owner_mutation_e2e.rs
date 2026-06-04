@@ -365,7 +365,7 @@ fn flags_pda_substitution_when_no_derivation_check() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_missing_owner_check_when_pda_derivation_checked() {
+fn no_finding_when_pda_derivation_checked_without_owner_check() {
     let mut h = harness();
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
@@ -387,7 +387,7 @@ fn flags_missing_owner_check_when_pda_derivation_checked() {
         .send()
         .unwrap();
 
-    expect_owner_finding(config);
+    expect_no_finding();
 }
 
 #[test]
@@ -452,6 +452,28 @@ fn no_finding_when_pda_authority_checked_without_data_read() {
         .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
             recipient: h.recipient.pubkey(),
             authority,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_inert_empty_pda_account() {
+    let mut h = harness();
+    let (inert_pda, _bump) = Pubkey::find_program_address(&[b"inert"], &h.program_id);
+    create_data_account(&mut h.ctx, inert_pda, h.program_id, &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::WithInertPdaAccount {})
+        .accounts(owner_mutation_airdrop::accounts::WithInertPda {
+            recipient: h.recipient.pubkey(),
+            inert_pda,
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient])
@@ -716,6 +738,29 @@ fn no_finding_when_type_tag_check_present() {
         .program(h.program_id)
         .call(owner_mutation_airdrop::instruction::ReadTypedWithCheck {})
         .accounts(owner_mutation_airdrop::accounts::ReadTypedChecked {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_optional_type_tag_fallback_noops() {
+    register_config_schema();
+    let mut h = harness();
+    let config = Keypair::new().pubkey();
+    seed_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadOptionalTypedConfig {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,

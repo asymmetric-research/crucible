@@ -197,6 +197,8 @@ account-validation bugs. On the **first success of each instruction type**, it s
 pre-transaction state, mutates **one property of one account** on a cloned SVM, and replays. If the
 mutated transaction *still succeeds*, the program failed to verify that property — reported as a crash
 with a self-documenting label. Probes run on clones and never change the real transaction's outcome.
+For account-data mutations, the mutated transaction must also produce the same non-mutated account
+effects as the baseline; a safe optional-account no-op is not enough to report a finding.
 
 It is **opt-in for `run`** (this flag) and **always enabled for `show --replay` and `tmin`**, so a
 mutation finding always reproduces and minimizes.
@@ -211,16 +213,25 @@ mutation finding always reproduces and minimizes.
 
 **False-positive discipline.** CC-1, CC-2, and CC-5 run a data relevance gate where applicable: the
 target's data is corrupted and replayed; if the transaction still succeeds the account is inert and is
-skipped. CC-3 is identity-only and also covers dataless PDA authority accounts. CC-4 flags all surviving
-signer flips.
+skipped. CC-3 runs an identity-relevance gate: data-bearing PDAs must be data-load-bearing, while
+dataless PDA authority accounts can still be flagged when lamports are semantically checked. CC-4 flags
+all surviving signer flips; redundant signers are a harness-design boundary and should be excluded by
+not marking them as signers.
 
 Discriminator length (CC-5) is read from the program IDL's registered schemas when available, so it is
 correct for Anchor (8-byte), native (4-byte), and Codama programs. Closed-source harnesses with no
 registered account schema use `FUZZ_TYPE_TAG_LEN` or an 8-byte default; set `FUZZ_TYPE_TAG_LEN=0` to
 disable that fallback.
 
-**PDAs.** Owner equality and PDA derivation are separate checks. PDA-like addresses are owner-probed by
-default; set the harness option to skip PDA owner probes when a specific target needs that suppression.
+**PDAs.** Owner equality and PDA derivation are separate checks, but owner spoofing at a key-pinned PDA
+is normally unreachable on-chain. PDA-like addresses are skipped by the owner strategy by default; set
+the harness option to include PDA owner probes only when the target has a reachable wrong-owner PDA
+state.
+
+**Known boundaries.** `--mutate-accounts` is intentionally a one-account structural mutator. It does
+not prove CC-6 data-size bounds, CC-7 initialization state, CC-8 field cross-references, CC-9 value/
+state-machine constraints, or CC-10 authority-chain/delegate confusion. Those need invariant scenarios
+that construct valid-but-wrong counterpart accounts or invalid state values.
 
 ```bash
 # Find missing-check bugs while fuzzing

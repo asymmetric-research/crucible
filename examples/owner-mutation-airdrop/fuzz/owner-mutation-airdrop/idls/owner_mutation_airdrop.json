@@ -229,7 +229,8 @@
     {
       "name": "read_pda_config_with_pda_check_no_owner_check",
       "docs": [
-        "Verifies the PDA address but omits the owner check, so CC-1 must still flag it."
+        "Verifies the PDA address but omits the owner check. The owner-mutation engine skips",
+        "key-pinned PDAs by default because an attacker cannot normally create this wrong-owner state."
       ],
       "discriminator": [
         122,
@@ -351,6 +352,38 @@
       "args": []
     },
     {
+      "name": "with_inert_pda_account",
+      "docs": [
+        "Passes an empty PDA account that the instruction never reads. The CC-3 relevance gate should",
+        "suppress this instead of treating every successful substitution as a missing derivation check."
+      ],
+      "discriminator": [
+        196,
+        17,
+        68,
+        123,
+        74,
+        248,
+        89,
+        225
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inert_pda"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_state_no_check",
       "docs": [
         "A second program-owned account in a different role, same missing-owner-check class."
@@ -428,6 +461,39 @@
         225,
         98,
         54
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_optional_typed_config",
+      "docs": [
+        "Optional-account pattern: a valid `Config` pays out, but a malformed/placeholder account is",
+        "deliberately treated as absent. A discriminator flip should not be reported as exploitable",
+        "because the mutated execution no-ops instead of matching the baseline effects."
+      ],
+      "discriminator": [
+        154,
+        148,
+        7,
+        59,
+        208,
+        88,
+        91,
+        157
       ],
       "accounts": [
         {

@@ -17,7 +17,7 @@ use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
 use std::cell::RefCell;
 
-const DEFAULT_SKIP_PDA_CANDIDATES: bool = false;
+const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
 
 /// Wrong owner written by the owner-mutation strategy. A recognizable, non-executable key
 /// that no legitimate program could own, so a surviving mutation means the owner was never
@@ -73,16 +73,7 @@ fn substitute_probe(ctx: &ProbeCtx, target: Pubkey, decoy: Pubkey) -> bool {
         return false;
     }
     let rewritten = rewrite_account(ctx.instructions, target, decoy);
-    matches!(
-        send_probe_transaction(
-            &mut probe,
-            &rewritten,
-            ctx.signers,
-            ctx.payer,
-            ctx.sigverify
-        ),
-        Ok(Ok(_))
-    )
+    probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[(target, decoy)], &[])
 }
 
 thread_local! {
@@ -165,6 +156,7 @@ struct Finding {
 /// mutated — strategies clone it for each probe.
 struct ProbeCtx<'a> {
     svm: &'a LiteSVM,
+    baseline_after: &'a LiteSVM,
     instructions: &'a [Instruction],
     signers: &'a [&'a Keypair],
     payer: &'a Keypair,
@@ -242,6 +234,7 @@ pub(crate) fn maybe_probe_account_mutation(
 
     let ctx = ProbeCtx {
         svm,
+        baseline_after: &baseline,
         instructions,
         signers,
         payer,
@@ -307,12 +300,12 @@ impl MutationStrategy for OwnerStrategy {
             account.owner = sentinel;
             let _ = probe.set_account(candidate.pubkey, account);
 
-            if let Ok(Ok(_)) = send_probe_transaction(
+            if probe_matches_baseline_effects(
+                ctx,
                 &mut probe,
                 ctx.instructions,
-                ctx.signers,
-                ctx.payer,
-                ctx.sigverify,
+                &[],
+                &[candidate.pubkey],
             ) {
                 findings.push(Finding {
                     id: finding_id("CC-1 owner", &ctx.instructions[0]),
@@ -369,13 +362,7 @@ impl MutationStrategy for TypeTagStrategy {
             }
             let _ = probe.set_account(pubkey, account);
 
-            if let Ok(Ok(_)) = send_probe_transaction(
-                &mut probe,
-                ctx.instructions,
-                ctx.signers,
-                ctx.payer,
-                ctx.sigverify,
-            ) {
+            if probe_matches_baseline_effects(ctx, &mut probe, ctx.instructions, &[], &[pubkey]) {
                 findings.push(Finding {
                     id: finding_id("CC-5 type-tag", &ctx.instructions[0]),
                     message: format!(
@@ -437,9 +424,7 @@ impl MutationStrategy for SignerStrategy {
             }
             let flipped = clear_signer(ctx.instructions, candidate.pubkey);
             let mut probe = ctx.svm.clone();
-            if let Ok(Ok(_)) =
-                send_probe_transaction(&mut probe, &flipped, ctx.signers, ctx.payer, ctx.sigverify)
-            {
+            if probe_matches_baseline_effects(ctx, &mut probe, &flipped, &[], &[]) {
                 let detail = match candidate.kind {
                     SignerCandidateKind::MetaSigner => "is_signer cleared",
                     SignerCandidateKind::SuppliedSigner => {
@@ -529,6 +514,9 @@ impl MutationStrategy for PdaSubstitutionStrategy {
     fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
         let mut findings = Vec::new();
         for target in collect_pda_candidates(ctx.svm, ctx.instructions, ctx.config) {
+            if !account_is_identity_relevant(ctx, &target) {
+                continue;
+            }
             let decoy = decoy_for(target);
             if substitute_probe(ctx, target, decoy) {
                 findings.push(Finding {
@@ -548,7 +536,9 @@ impl MutationStrategy for PdaSubstitutionStrategy {
 }
 
 /// CC-3 targets: off-curve (PDA-like), non-executable, non-sysvar accounts. Data is not required:
-/// derivation checks are often about an authority or role address whose account body is empty.
+/// derivation checks are often about an authority or role address whose account body is empty. The
+/// strategy applies an identity-relevance gate before reporting so inert threaded-through accounts
+/// are skipped.
 fn collect_pda_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
@@ -628,9 +618,10 @@ fn collect_sysvar_candidates(instructions: &[Instruction]) -> Vec<Pubkey> {
     candidates
 }
 
-/// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. Writable and PDA-like
-/// accounts are included by default; address derivation and owner equality are separate constraints.
-/// A harness can opt out of PDA owner probes with `skip_pda_candidates=true`.
+/// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. PDA-like addresses are
+/// skipped by default: mutating an owner in-place at a key-pinned PDA fabricates an account state an
+/// attacker cannot normally create on-chain. Harnesses can opt into PDA owner probes when a target has
+/// a reachable program-owned account-creation path that makes that class meaningful.
 fn collect_owner_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
@@ -664,6 +655,108 @@ fn collect_owner_candidates(
     }
 
     candidates
+}
+
+fn probe_matches_baseline_effects(
+    ctx: &ProbeCtx,
+    probe: &mut LiteSVM,
+    mutated_instructions: &[Instruction],
+    equivalent_accounts: &[(Pubkey, Pubkey)],
+    ignored_accounts: &[Pubkey],
+) -> bool {
+    if !matches!(
+        send_probe_transaction(
+            probe,
+            mutated_instructions,
+            ctx.signers,
+            ctx.payer,
+            ctx.sigverify,
+        ),
+        Ok(Ok(_))
+    ) {
+        return false;
+    }
+
+    post_state_matches(
+        ctx.baseline_after,
+        probe,
+        ctx.instructions,
+        mutated_instructions,
+        equivalent_accounts,
+        ignored_accounts,
+        ctx.payer.pubkey(),
+    )
+}
+
+fn post_state_matches(
+    baseline: &LiteSVM,
+    mutated: &LiteSVM,
+    baseline_instructions: &[Instruction],
+    mutated_instructions: &[Instruction],
+    equivalent_accounts: &[(Pubkey, Pubkey)],
+    ignored_accounts: &[Pubkey],
+    payer: Pubkey,
+) -> bool {
+    let mut ignored = FastHashSet::default();
+    for pubkey in ignored_accounts {
+        ignored.insert(*pubkey);
+    }
+    for (baseline_key, mutated_key) in equivalent_accounts {
+        if !same_account_state(
+            baseline.get_account(baseline_key),
+            mutated.get_account(mutated_key),
+        ) {
+            return false;
+        }
+        ignored.insert(*baseline_key);
+        ignored.insert(*mutated_key);
+    }
+
+    let mut keys = instruction_account_keys(baseline_instructions);
+    keys.extend(instruction_account_keys(mutated_instructions));
+    keys.insert(payer);
+
+    for key in keys {
+        if ignored.contains(&key) {
+            continue;
+        }
+        if !same_account_state(baseline.get_account(&key), mutated.get_account(&key)) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn instruction_account_keys(instructions: &[Instruction]) -> FastHashSet<Pubkey> {
+    let mut keys = FastHashSet::default();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            keys.insert(meta.pubkey);
+        }
+    }
+    keys
+}
+
+fn same_account_state(
+    a: Option<solana_account::Account>,
+    b: Option<solana_account::Account>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.lamports == b.lamports
+                && a.data == b.data
+                && a.owner == b.owner
+                && a.executable == b.executable
+                && a.rent_epoch == b.rent_epoch
+        }
+        _ => false,
+    }
+}
+
+fn account_is_identity_relevant(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
+    account_is_load_bearing(ctx, pubkey) || account_is_lamport_bearing(ctx, pubkey)
 }
 
 /// Relevance gate (Neodyme-style): corrupt the account data and replay. If every corrupted replay
@@ -701,6 +794,33 @@ fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
     }
 
     false
+}
+
+fn account_is_lamport_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
+    let Some(account) = ctx.svm.get_account(pubkey) else {
+        return false;
+    };
+    if account.lamports == 0 {
+        return false;
+    }
+
+    let mut probe = ctx.svm.clone();
+    let Some(mut account) = probe.get_account(pubkey) else {
+        return false;
+    };
+    account.lamports = 0;
+    let _ = probe.set_account(*pubkey, account);
+
+    !matches!(
+        send_probe_transaction(
+            &mut probe,
+            ctx.instructions,
+            ctx.signers,
+            ctx.payer,
+            ctx.sigverify,
+        ),
+        Ok(Ok(_))
+    )
 }
 
 fn data_corruption_variants(data: &[u8]) -> Vec<Vec<u8>> {
@@ -901,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_owner_candidates_includes_pdas_by_default_and_can_skip() {
+    fn collect_owner_candidates_skips_pdas_by_default_and_can_include() {
         let mut svm = LiteSVM::new();
         let program_id = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -916,16 +1036,16 @@ mod tests {
         };
 
         let mut config = AccountMutationConfig::default();
+        assert!(collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config).is_empty());
+
+        config.set_skip_pda_candidates(false);
         assert_eq!(
-            collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config),
+            collect_owner_candidates(&svm, &[ix], &config),
             vec![OwnerCandidate {
                 pubkey: pda,
                 original_owner: owner,
             }]
         );
-
-        config.set_skip_pda_candidates(true);
-        assert!(collect_owner_candidates(&svm, &[ix], &config).is_empty());
     }
 
     #[test]
@@ -958,6 +1078,117 @@ mod tests {
             collect_pda_candidates(&svm, &[ix], &config),
             vec![pda, empty_pda]
         );
+    }
+
+    #[test]
+    fn post_state_matches_ignores_intentional_target_mutation_but_checks_effects() {
+        let mut baseline = LiteSVM::new();
+        let mut mutated = LiteSVM::new();
+        let owner = Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
+        let target = on_curve_pubkey();
+        let recipient = on_curve_pubkey();
+        let payer = on_curve_pubkey();
+
+        baseline
+            .set_account(target, make_account(owner, vec![1; 8]))
+            .unwrap();
+        mutated
+            .set_account(target, make_account(Pubkey::new_unique(), vec![9; 8]))
+            .unwrap();
+        baseline
+            .set_account(recipient, make_account(owner, vec![2; 8]))
+            .unwrap();
+        mutated
+            .set_account(recipient, make_account(owner, vec![2; 8]))
+            .unwrap();
+
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(target, false),
+                AccountMeta::new(recipient, false),
+            ],
+            data: vec![],
+        };
+
+        assert!(post_state_matches(
+            &baseline,
+            &mutated,
+            std::slice::from_ref(&ix),
+            std::slice::from_ref(&ix),
+            &[],
+            &[target],
+            payer,
+        ));
+
+        mutated
+            .set_account(recipient, make_account(owner, vec![3; 8]))
+            .unwrap();
+        assert!(!post_state_matches(
+            &baseline,
+            &mutated,
+            std::slice::from_ref(&ix),
+            std::slice::from_ref(&ix),
+            &[],
+            &[target],
+            payer,
+        ));
+    }
+
+    #[test]
+    fn post_state_matches_maps_substitution_decoy_to_baseline_target() {
+        let mut baseline = LiteSVM::new();
+        let mut mutated = LiteSVM::new();
+        let owner = Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
+        let target = on_curve_pubkey();
+        let decoy = on_curve_pubkey();
+        let recipient = on_curve_pubkey();
+        let payer = on_curve_pubkey();
+
+        baseline
+            .set_account(target, make_account(owner, vec![1; 8]))
+            .unwrap();
+        mutated
+            .set_account(target, make_account(owner, vec![9; 8]))
+            .unwrap();
+        mutated
+            .set_account(decoy, make_account(owner, vec![1; 8]))
+            .unwrap();
+        baseline
+            .set_account(recipient, make_account(owner, vec![2; 8]))
+            .unwrap();
+        mutated
+            .set_account(recipient, make_account(owner, vec![2; 8]))
+            .unwrap();
+
+        let baseline_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(target, false),
+                AccountMeta::new(recipient, false),
+            ],
+            data: vec![],
+        };
+        let mutated_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(decoy, false),
+                AccountMeta::new(recipient, false),
+            ],
+            data: vec![],
+        };
+
+        assert!(post_state_matches(
+            &baseline,
+            &mutated,
+            &[baseline_ix],
+            &[mutated_ix],
+            &[(target, decoy)],
+            &[],
+            payer,
+        ));
     }
 
     #[test]

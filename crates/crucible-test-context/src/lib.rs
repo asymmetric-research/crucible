@@ -1810,9 +1810,10 @@ impl TestContext {
 
     /// Set whether owner mutation should skip off-curve account addresses.
     ///
-    /// This is disabled by default so PDA-heavy and closed-source targets still
-    /// get owner probes. Set this to `true` when a harness intentionally wants
-    /// to suppress PDA-like addresses from the owner-equality strategy.
+    /// This is enabled by default because mutating owner in-place at a
+    /// key-pinned PDA fabricates a state attackers cannot normally create.
+    /// Set this to `false` only when the harness intentionally wants to probe
+    /// reachable wrong-owner PDA states.
     pub fn set_owner_mutation_skip_pdas(&mut self, skip_pdas: bool) -> &mut Self {
         self.account_mutation.set_skip_pda_candidates(skip_pdas);
         self
