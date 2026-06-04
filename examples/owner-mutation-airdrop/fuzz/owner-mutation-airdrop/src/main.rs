@@ -33,6 +33,9 @@ const CLAIM_AMOUNT: u64 = 1_000;
 const STATE_AMOUNT: u64 = 1_000;
 const FOREIGN_AMOUNT: u64 = 1_000;
 const TINY_AMOUNT: u32 = 1_000;
+const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
+const ALTERNATE_CONFIG_DISCRIMINATOR: [u8; 8] = [112, 26, 206, 10, 180, 130, 5, 4];
+const TRADER_STATE_DISCRIMINATOR: [u8; 8] = [124, 33, 101, 17, 158, 79, 26, 140];
 
 #[derive(Clone)]
 struct OwnerMutationAirdropFixture {
@@ -54,6 +57,9 @@ struct OwnerMutationAirdropFixture {
     inert_pda: Pubkey,       // off-curve PDA passed but never read
     writable_config: Pubkey, // program-owned, declared writable
     typed_config: Pubkey,    // Anchor-discriminated Config account (CC-5 target)
+    alternate_config: Pubkey, // valid-but-wrong type account (documented FN)
+    source_trader: Pubkey,   // custom invariant source account (documented FN)
+    destination_trader: Pubkey, // custom invariant destination account (documented FN)
 }
 
 #[fuzz_fixture]
@@ -129,9 +135,23 @@ impl OwnerMutationAirdropFixture {
             .create()
             .unwrap();
 
-        let mut typed_data = owner_mutation_airdrop::state::Config::DISCRIMINATOR.to_vec();
+        let mut typed_data = CONFIG_DISCRIMINATOR.to_vec();
         typed_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
         let typed_config = Self::new_data(&mut ctx, program_id, &typed_data);
+
+        let mut alternate_data = ALTERNATE_CONFIG_DISCRIMINATOR.to_vec();
+        alternate_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+        let alternate_config = Self::new_data(&mut ctx, program_id, &alternate_data);
+
+        let mut source_trader_data = TRADER_STATE_DISCRIMINATOR.to_vec();
+        source_trader_data.extend_from_slice(authority.pubkey().as_ref());
+        source_trader_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+        let source_trader = Self::new_data(&mut ctx, program_id, &source_trader_data);
+
+        let mut destination_trader_data = TRADER_STATE_DISCRIMINATOR.to_vec();
+        destination_trader_data.extend_from_slice(Pubkey::new_unique().as_ref());
+        destination_trader_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+        let destination_trader = Self::new_data(&mut ctx, program_id, &destination_trader_data);
 
         let vault = Keypair::new().pubkey();
         ctx.create_account()
@@ -160,6 +180,9 @@ impl OwnerMutationAirdropFixture {
             inert_pda,
             writable_config,
             typed_config,
+            alternate_config,
+            source_trader,
+            destination_trader,
         }
     }
 
@@ -357,6 +380,21 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
+    pub fn action_use_pda_authority_key_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::UsePdaAuthorityKeyNoCheck {})
+            .accounts(accounts::UsePdaAuthorityKeyNoCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.pda_authority,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     pub fn action_with_inert_pda_account(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
@@ -414,6 +452,38 @@ impl OwnerMutationAirdropFixture {
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_allowed_type_no_expected_type_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadAllowedTypeNoExpectedTypeCheck {})
+            .accounts(accounts::ReadAllowedTypeNoExpectedTypeCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.alternate_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_transfer_between_traders_no_cross_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::TransferBetweenTradersNoCrossCheck {})
+            .accounts(accounts::TransferBetweenTradersNoCrossCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.authority.pubkey(),
+                source_trader: self.source_trader,
+                destination_trader: self.destination_trader,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient, &*self.authority])
             .send()
             .map(|o| o.is_success())
             .unwrap_or(false)

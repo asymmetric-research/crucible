@@ -365,6 +365,30 @@ fn flags_pda_substitution_when_no_derivation_check() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn documents_false_positive_for_singleton_pda_clone() {
+    let mut h = harness();
+    let (config, _bump) = Pubkey::find_program_address(&[b"singleton"], &h.program_id);
+    seed_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(
+            owner_mutation_airdrop::instruction::ReadSingletonPdaWithOwnerTypeCheckNoDerivationCheck {},
+        )
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-3 pda]", config);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn no_finding_when_pda_derivation_checked_without_owner_check() {
     let mut h = harness();
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
@@ -449,6 +473,28 @@ fn no_finding_when_pda_authority_checked_without_data_read() {
     h.ctx
         .program(h.program_id)
         .call(owner_mutation_airdrop::instruction::UsePdaAuthorityWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+            recipient: h.recipient.pubkey(),
+            authority,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_key_only_pda_authority_bug() {
+    let mut h = harness();
+    let (authority, _bump) = Pubkey::find_program_address(&[b"authority"], &h.program_id);
+    create_data_account(&mut h.ctx, authority, h.program_id, &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityKeyNoCheck {})
         .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
             recipient: h.recipient.pubkey(),
             authority,
@@ -651,6 +697,35 @@ fn flags_unchecked_cosigner_in_multisig() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn documents_false_positive_for_redundant_cosigner() {
+    let mut h = harness();
+    let admin = Keypair::new();
+    let cosigner = Keypair::new();
+    let dest = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, admin.pubkey());
+    create_system_account(&mut h.ctx, cosigner.pubkey());
+    create_system_account(&mut h.ctx, dest);
+
+    let data = owner_mutation_airdrop::instruction::WithdrawRedundantCosigner {}.data();
+    let accounts = vec![
+        AccountMeta::new(dest, false),
+        AccountMeta::new_readonly(admin.pubkey(), true),
+        AccountMeta::new_readonly(cosigner.pubkey(), true),
+        AccountMeta::new(h.vault, false),
+    ];
+    raw_send(
+        &mut h.ctx,
+        h.program_id,
+        data,
+        accounts,
+        &[&h.fee_payer, &admin, &cosigner],
+    );
+
+    expect_signer_finding(cosigner.pubkey());
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn no_finding_when_signer_is_fee_payer() {
     let mut h = harness();
     let dest = Keypair::new().pubkey();
@@ -670,14 +745,24 @@ fn no_finding_when_signer_is_fee_payer() {
 
 // ---- CC-5 type-tag (typed account discriminator) ----
 
-/// The program-crate path has no IDL-gen `#[ctor]`, so the `Config` schema must be registered
-/// explicitly for the type-tag strategy to know the discriminator length. Process-global + set-once.
+/// The program-crate path has no IDL-gen `#[ctor]`, so account schemas must be registered explicitly
+/// for the type-tag strategy to know discriminator lengths. Process-global + set-once.
 fn register_config_schema() {
     if !crucible_test_context::schema::has_schemas() {
         crucible_test_context::register_account_schemas(vec![
             crucible_test_context::AccountSchema {
                 type_name: "Config".into(),
                 discriminator: owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "AlternateConfig".into(),
+                discriminator: owner_mutation_airdrop::AlternateConfig::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "TraderState".into(),
+                discriminator: owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
         ]);
@@ -687,6 +772,19 @@ fn register_config_schema() {
 fn seed_config(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
     let mut data = owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_alternate_config(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
+    let mut data = owner_mutation_airdrop::AlternateConfig::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_trader_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, authority: Pubkey) {
+    let mut data = owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
@@ -763,6 +861,107 @@ fn no_finding_when_optional_type_tag_fallback_noops() {
         .accounts(owner_mutation_airdrop::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_valid_but_wrong_type_confusion() {
+    register_config_schema();
+    let mut h = harness();
+    let config = Keypair::new().pubkey();
+    seed_alternate_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadAllowedTypeNoExpectedTypeCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_custom_cross_account_invariant_bug() {
+    register_config_schema();
+    let mut h = harness();
+    let authority = Keypair::new();
+    create_system_account(&mut h.ctx, authority.pubkey());
+    let source_trader = Keypair::new().pubkey();
+    let destination_trader = Keypair::new().pubkey();
+    let other_authority = Pubkey::new_unique();
+    seed_trader_state(&mut h.ctx, source_trader, h.program_id, authority.pubkey());
+    seed_trader_state(
+        &mut h.ctx,
+        destination_trader,
+        h.program_id,
+        other_authority,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::TransferBetweenTradersNoCrossCheck {})
+        .accounts(owner_mutation_airdrop::accounts::TransferBetweenTraders {
+            recipient: h.recipient.pubkey(),
+            authority: authority.pubkey(),
+            source_trader,
+            destination_trader,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient, &authority])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_first_success_cache_hides_later_present_account_bug() {
+    let mut h = harness();
+    let placeholder = Keypair::new().pubkey();
+    create_data_account(&mut h.ctx, placeholder, system_program::id(), &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadMaybeConfigNoOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+            recipient: h.recipient.pubkey(),
+            config: placeholder,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+    expect_no_finding();
+
+    let present = Keypair::new().pubkey();
+    create_data_account(
+        &mut h.ctx,
+        present,
+        foreign_owner(),
+        &CLAIM_AMOUNT.to_le_bytes(),
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadMaybeConfigNoOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+            recipient: h.recipient.pubkey(),
+            config: present,
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient])

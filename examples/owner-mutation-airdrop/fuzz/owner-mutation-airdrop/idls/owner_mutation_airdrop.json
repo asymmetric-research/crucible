@@ -227,6 +227,37 @@
       "args": []
     },
     {
+      "name": "read_singleton_pda_with_owner_type_check_no_derivation_check",
+      "docs": [
+        "Singleton-style PDA with owner/type checks but no key check."
+      ],
+      "discriminator": [
+        98,
+        233,
+        130,
+        0,
+        5,
+        253,
+        103,
+        49
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_pda_config_with_pda_check_no_owner_check",
       "docs": [
         "Verifies the PDA address but omits the owner check. The owner-mutation engine skips",
@@ -334,6 +365,39 @@
         176,
         75,
         193
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_key_no_check",
+      "docs": [
+        "Uses the PDA account's key as the intended authority but never verifies it. This is a",
+        "key-only PDA bug: no data or lamports are semantically relevant, so the account mutator's",
+        "relevance gates intentionally miss it."
+      ],
+      "discriminator": [
+        182,
+        213,
+        189,
+        46,
+        154,
+        254,
+        243,
+        187
       ],
       "accounts": [
         {
@@ -512,6 +576,110 @@
       "args": []
     },
     {
+      "name": "read_allowed_type_no_expected_type_check",
+      "docs": [
+        "Checks that the account has *some* valid known type, but not the expected type. A bit-flip",
+        "probe is rejected, while a real `AlternateConfig` is incorrectly accepted."
+      ],
+      "discriminator": [
+        142,
+        96,
+        132,
+        120,
+        50,
+        137,
+        225,
+        228
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_maybe_config_no_owner_check",
+      "docs": [
+        "Optional-present path with a missing owner check. If the instruction is first observed with",
+        "an empty placeholder, the per-instruction probe cache suppresses the later present-account bug."
+      ],
+      "discriminator": [
+        121,
+        202,
+        193,
+        17,
+        217,
+        206,
+        113,
+        23
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "transfer_between_traders_no_cross_check",
+      "docs": [
+        "Both trader accounts are individually valid and signer authorization is checked, but the",
+        "destination trader is not required to belong to the same authority. This is the custom",
+        "invariant class: valid-but-wrong counterpart accounts must be constructed by the harness."
+      ],
+      "discriminator": [
+        217,
+        54,
+        99,
+        86,
+        226,
+        104,
+        89,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "source_trader"
+        },
+        {
+          "name": "destination_trader"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_typed_with_check",
       "docs": [
         "Same read via `Account<'info, Config>`, which verifies the discriminator (and owner)."
@@ -643,6 +811,40 @@
       "args": []
     },
     {
+      "name": "withdraw_redundant_cosigner",
+      "docs": [
+        "`cosigner` is intentionally redundant metadata. The account mutator will still report a",
+        "missing signer check because it cannot infer that this signer is not an authority boundary."
+      ],
+      "discriminator": [
+        246,
+        58,
+        95,
+        96,
+        211,
+        212,
+        12,
+        106
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "admin"
+        },
+        {
+          "name": "cosigner"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "withdraw_no_signer_check",
       "docs": [
         "Pays out without verifying that the `authority` actually signed (missing signer check)."
@@ -716,6 +918,32 @@
         204,
         130
       ]
+    },
+    {
+      "name": "AlternateConfig",
+      "discriminator": [
+        112,
+        26,
+        206,
+        10,
+        180,
+        130,
+        5,
+        4
+      ]
+    },
+    {
+      "name": "TraderState",
+      "discriminator": [
+        124,
+        33,
+        101,
+        17,
+        158,
+        79,
+        26,
+        140
+      ]
     }
   ],
   "errors": [
@@ -758,20 +986,53 @@
       "code": 6007,
       "name": "InvalidClock",
       "msg": "Invalid clock"
+    },
+    {
+      "code": 6008,
+      "name": "WrongAuthority",
+      "msg": "Wrong authority"
     }
   ],
   "types": [
-    {
-      "name": "Config",
-      "type": {
-        "kind": "struct",
-        "fields": [
+        {
+            "name": "Config",
+            "type": {
+                "kind": "struct",
+                "fields": [
           {
             "name": "amount",
             "type": "u64"
-          }
-        ]
-      }
-    }
-  ]
+                    }
+                ]
+            }
+        },
+        {
+            "name": "AlternateConfig",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "TraderState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "authority",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        }
+    ]
 }

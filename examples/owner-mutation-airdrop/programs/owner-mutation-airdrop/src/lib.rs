@@ -113,6 +113,32 @@ pub mod owner_mutation_airdrop {
         )
     }
 
+    /// Singleton-style PDA: owner and type are checked, but the key is not. The local CC-3 probe
+    /// can still fabricate a program-owned clone, so this documents a current false-positive shape.
+    pub fn read_singleton_pda_with_owner_type_check_no_derivation_check(
+        ctx: Context<ReadTyped>,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.config.owner == &crate::ID,
+            AirdropError::WrongOwner
+        );
+        let amount = {
+            let data = ctx.accounts.config.try_borrow_data()?;
+            require!(data.len() >= 16, AirdropError::InvalidConfig);
+            require!(
+                &data[0..8] == Config::DISCRIMINATOR,
+                AirdropError::InvalidConfig
+            );
+            u64::from_le_bytes(data[8..16].try_into().unwrap())
+        };
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
     /// Verifies the PDA address but omits the owner check. The owner-mutation engine skips
     /// key-pinned PDAs by default because an attacker cannot normally create this wrong-owner state.
     pub fn read_pda_config_with_pda_check_no_owner_check(ctx: Context<ReadPda>) -> Result<()> {
@@ -202,6 +228,22 @@ pub mod owner_mutation_airdrop {
         )
     }
 
+    /// Uses the PDA account's key as the intended authority but never verifies it. This is a
+    /// key-only PDA bug: no data or lamports are semantically relevant, so the account mutator's
+    /// relevance gates intentionally miss it.
+    pub fn use_pda_authority_key_no_check(ctx: Context<UsePdaAuthority>) -> Result<()> {
+        // BUG: any non-default key is accepted as the intended PDA authority.
+        require!(
+            ctx.accounts.authority.key() != Pubkey::default(),
+            AirdropError::InvalidConfig
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
     // ---- CC-4 true positives / negatives: signer authorization ----
 
     /// Pays out without verifying that the `authority` actually signed (missing signer check).
@@ -233,6 +275,18 @@ pub mod owner_mutation_airdrop {
     pub fn withdraw_multisig_one_unchecked(ctx: Context<WithdrawMultisig>) -> Result<()> {
         require!(ctx.accounts.admin.is_signer, AirdropError::MissingSigner);
         // BUG: never checks `ctx.accounts.cosigner.is_signer`.
+        let _ = &ctx.accounts.cosigner;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
+    /// `cosigner` is intentionally redundant metadata. The account mutator will still report a
+    /// missing signer check because it cannot infer that this signer is not an authority boundary.
+    pub fn withdraw_redundant_cosigner(ctx: Context<WithdrawMultisig>) -> Result<()> {
+        require!(ctx.accounts.admin.is_signer, AirdropError::MissingSigner);
         let _ = &ctx.accounts.cosigner;
         payout(
             &ctx.accounts.vault.to_account_info(),
@@ -297,6 +351,71 @@ pub mod owner_mutation_airdrop {
         )
     }
 
+    /// Checks that the account has *some* valid known type, but not the expected type. A bit-flip
+    /// probe is rejected, while a real `AlternateConfig` is incorrectly accepted.
+    pub fn read_allowed_type_no_expected_type_check(ctx: Context<ReadTyped>) -> Result<()> {
+        require!(
+            ctx.accounts.config.owner == &crate::ID,
+            AirdropError::WrongOwner
+        );
+        let amount = {
+            let data = ctx.accounts.config.try_borrow_data()?;
+            require!(data.len() >= 16, AirdropError::InvalidConfig);
+            let disc = &data[0..8];
+            require!(
+                disc == Config::DISCRIMINATOR || disc == AlternateConfig::DISCRIMINATOR,
+                AirdropError::InvalidConfig
+            );
+            // BUG: accepts AlternateConfig where Config is expected.
+            u64::from_le_bytes(data[8..16].try_into().unwrap())
+        };
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Optional-present path with a missing owner check. If the instruction is first observed with
+    /// an empty placeholder, the per-instruction probe cache suppresses the later present-account bug.
+    pub fn read_maybe_config_no_owner_check(ctx: Context<ReadTyped>) -> Result<()> {
+        let data = ctx.accounts.config.try_borrow_data()?;
+        let amount = if data.is_empty() {
+            1
+        } else {
+            // BUG: reads present config data without checking owner.
+            require!(data.len() >= 8, AirdropError::InvalidConfig);
+            u64::from_le_bytes(data[0..8].try_into().unwrap())
+        };
+        require!(amount > 0, AirdropError::InvalidAmount);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Both trader accounts are individually valid and signer authorization is checked, but the
+    /// destination trader is not required to belong to the same authority. This is the custom
+    /// invariant class: valid-but-wrong counterpart accounts must be constructed by the harness.
+    pub fn transfer_between_traders_no_cross_check(
+        ctx: Context<TransferBetweenTraders>,
+    ) -> Result<()> {
+        let (src_authority, amount) = read_trader_state(&ctx.accounts.source_trader)?;
+        let (_dst_authority, _) = read_trader_state(&ctx.accounts.destination_trader)?;
+        require!(
+            src_authority == ctx.accounts.authority.key(),
+            AirdropError::WrongAuthority
+        );
+        // BUG: never checks destination_trader.authority == source_trader.authority.
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
     // ---- CC-2 sysvar: read the Clock from a passed account with / without an identity check ----
 
     /// Reads the clock's `unix_timestamp` from the passed account without verifying its key — a
@@ -350,6 +469,20 @@ fn read_clock_unix_timestamp(account: &UncheckedAccount) -> Result<i64> {
     let data = account.try_borrow_data()?;
     require!(data.len() >= 40, AirdropError::InvalidClock);
     Ok(i64::from_le_bytes(data[32..40].try_into().unwrap()))
+}
+
+fn read_trader_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == TraderState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let authority = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((authority, amount))
 }
 
 fn payout(vault: &AccountInfo, recipient: &AccountInfo, amount: u64) -> Result<()> {
@@ -491,6 +624,17 @@ pub struct Config {
     pub amount: u64,
 }
 
+#[account]
+pub struct AlternateConfig {
+    pub amount: u64,
+}
+
+#[account]
+pub struct TraderState {
+    pub authority: Pubkey,
+    pub amount: u64,
+}
+
 #[derive(Accounts)]
 pub struct ReadTyped<'info> {
     #[account(mut)]
@@ -507,6 +651,20 @@ pub struct ReadTypedChecked<'info> {
     #[account(mut)]
     pub recipient: Signer<'info>,
     pub config: Account<'info, Config>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct TransferBetweenTraders<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    pub authority: Signer<'info>,
+    /// CHECK: individually validated in the instruction.
+    pub source_trader: UncheckedAccount<'info>,
+    /// CHECK: individually validated in the instruction.
+    pub destination_trader: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,
@@ -541,4 +699,6 @@ pub enum AirdropError {
     WrongSysvar,
     #[msg("Invalid clock")]
     InvalidClock,
+    #[msg("Wrong authority")]
+    WrongAuthority,
 }

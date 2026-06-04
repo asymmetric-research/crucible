@@ -759,10 +759,8 @@ fn account_is_identity_relevant(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
     account_is_load_bearing(ctx, pubkey) || account_is_lamport_bearing(ctx, pubkey)
 }
 
-/// Relevance gate (Neodyme-style): corrupt the account data and replay. If every corrupted replay
-/// still succeeds the program never read the contents (inert account), so a surviving owner mutation
-/// would be a false positive. We try Anchor-friendly body corruption plus prefix/full corruption so
-/// native, Pinocchio, and closed-source layouts with important bytes before offset 8 are covered.
+/// Relevance gate: corrupt account data and replay. If corruption still succeeds, the account is
+/// treated as inert for structural probes.
 fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
     let Some(account) = ctx.svm.get_account(pubkey) else {
         return false;
