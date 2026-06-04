@@ -2,7 +2,6 @@ use crate::{record_mutation_violation, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
-use anchor_lang::solana_program::system_program;
 use anyhow::Result;
 use litesvm::LiteSVM;
 use solana_keypair::Keypair;
@@ -18,7 +17,7 @@ use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
 use std::cell::RefCell;
 
-const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
+const DEFAULT_SKIP_PDA_CANDIDATES: bool = false;
 
 /// Wrong owner written by the owner-mutation strategy. A recognizable, non-executable key
 /// that no legitimate program could own, so a surviving mutation means the owner was never
@@ -158,6 +157,7 @@ pub(crate) fn config_from_env() -> AccountMutationConfig {
 /// A single self-documenting finding: one constraint class, one account, one mutated transaction
 /// that still succeeded.
 struct Finding {
+    id: String,
     message: String,
 }
 
@@ -182,11 +182,11 @@ trait MutationStrategy {
 
 fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationStrategy>> {
     vec![
+        Box::new(PdaSubstitutionStrategy),
+        Box::new(SysvarSubstitutionStrategy),
         Box::new(OwnerStrategy),
         Box::new(SignerStrategy),
         Box::new(TypeTagStrategy),
-        Box::new(PdaSubstitutionStrategy),
-        Box::new(SysvarSubstitutionStrategy),
     ]
 }
 
@@ -202,6 +202,10 @@ fn probe_key(ix: &Instruction) -> ProbeKey {
 fn disc_hex(ix: &Instruction) -> String {
     let n = ix.data.len().min(8);
     ix.data[..n].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn finding_id(class: &str, ix: &Instruction) -> String {
+    format!("{class}:{}:{}", ix.program_id, disc_hex(ix))
 }
 
 pub(crate) fn maybe_probe_account_mutation(
@@ -250,15 +254,28 @@ pub(crate) fn maybe_probe_account_mutation(
         .flat_map(|s| s.probe(&ctx))
         .collect();
 
-    // The violation TLS holds one message per iteration and the harness early-exits on the first,
-    // so surface the first finding and log the rest for debugging.
-    if let Some(first) = findings.first() {
-        record_mutation_violation(first.message.clone());
+    // The violation TLS holds one message per iteration and the harness early-exits on the first.
+    // Replay/tmin may set an expected finding id so earlier, unrelated mutation bugs in the same
+    // action sequence do not mask the original crash class.
+    let expected = crate::expected_mutation_finding_id();
+    let selected = match expected.as_deref() {
+        Some(id) => findings.iter().find(|finding| finding.id == id),
+        None => findings.first(),
+    };
+
+    if let Some(first) = selected {
+        record_mutation_violation(first.message.clone(), first.id.clone());
         if std::env::var("FUZZ_DEBUG").is_ok() {
-            for extra in &findings[1..] {
+            for extra in findings.iter().filter(|extra| extra.id != first.id) {
                 eprintln!("[ACCOUNT_MUTATION] additional finding: {}", extra.message);
             }
         }
+    } else if expected.is_some() && !findings.is_empty() && std::env::var("FUZZ_DEBUG").is_ok() {
+        eprintln!(
+            "[ACCOUNT_MUTATION] ignored {} finding(s) while waiting for replay target {:?}",
+            findings.len(),
+            expected
+        );
     }
 }
 
@@ -298,6 +315,7 @@ impl MutationStrategy for OwnerStrategy {
                 ctx.sigverify,
             ) {
                 findings.push(Finding {
+                    id: finding_id("CC-1 owner", &ctx.instructions[0]),
                     message: format!(
                         "[CC-1 owner] account {} owner {}->{} instr {}:{} still succeeded after owner mutation",
                         candidate.pubkey,
@@ -359,6 +377,7 @@ impl MutationStrategy for TypeTagStrategy {
                 ctx.sigverify,
             ) {
                 findings.push(Finding {
+                    id: finding_id("CC-5 type-tag", &ctx.instructions[0]),
                     message: format!(
                         "[CC-5 type-tag] account {} discriminator bit-flipped, instr {}:{} still succeeded (missing discriminator check)",
                         pubkey,
@@ -428,6 +447,7 @@ impl MutationStrategy for SignerStrategy {
                     }
                 };
                 findings.push(Finding {
+                    id: finding_id("CC-4 signer", &ctx.instructions[0]),
                     message: format!(
                         "[CC-4 signer] account {} {}, instr {}:{} still succeeded (missing signer check)",
                         candidate.pubkey,
@@ -508,14 +528,11 @@ struct PdaSubstitutionStrategy;
 impl MutationStrategy for PdaSubstitutionStrategy {
     fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
         let mut findings = Vec::new();
-        for target in collect_pda_candidates(ctx.svm, ctx.instructions) {
-            // Relevance gate: a PDA the program never reads is not exploitable.
-            if !account_is_load_bearing(ctx, &target) {
-                continue;
-            }
+        for target in collect_pda_candidates(ctx.svm, ctx.instructions, ctx.config) {
             let decoy = decoy_for(target);
             if substitute_probe(ctx, target, decoy) {
                 findings.push(Finding {
+                    id: finding_id("CC-3 pda", &ctx.instructions[0]),
                     message: format!(
                         "[CC-3 pda] account {} substituted with decoy {} instr {}:{} still succeeded (missing PDA derivation check)",
                         target,
@@ -530,10 +547,13 @@ impl MutationStrategy for PdaSubstitutionStrategy {
     }
 }
 
-/// CC-3 targets: off-curve (PDA-like), data-bearing, non-executable, non-sysvar accounts. These are
-/// exactly the addresses the owner strategy skips by default — PDA identity is the derivation check,
-/// which the owner check subsumes once present.
-fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pubkey> {
+/// CC-3 targets: off-curve (PDA-like), non-executable, non-sysvar accounts. Data is not required:
+/// derivation checks are often about an authority or role address whose account body is empty.
+fn collect_pda_candidates(
+    svm: &LiteSVM,
+    instructions: &[Instruction],
+    config: &AccountMutationConfig,
+) -> Vec<Pubkey> {
     let mut seen = FastHashSet::default();
     let mut candidates = Vec::new();
     for ix in instructions {
@@ -542,6 +562,7 @@ fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pu
                 continue;
             }
             if meta.pubkey == ix.program_id
+                || config.unverified_accounts.contains(&meta.pubkey)
                 || is_known_sysvar(&meta.pubkey)
                 || !is_off_curve(&meta.pubkey)
             {
@@ -550,7 +571,7 @@ fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pu
             let Some(account) = svm.get_account(&meta.pubkey) else {
                 continue;
             };
-            if account.executable || account.data.is_empty() {
+            if account.executable {
                 continue;
             }
             candidates.push(meta.pubkey);
@@ -559,11 +580,10 @@ fn collect_pda_candidates(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<Pu
     candidates
 }
 
-/// CC-2: a sysvar or the system program passed as an account, whose identity (key) the program never
-/// verifies — the Wormhole class. Substituting a clone at a different address and still succeeding
-/// means the program trusted the account by position, not by key. Relevance-gated so a sysvar the
-/// program ignores (e.g. it reads the runtime cache instead) is not falsely reported. Executable
-/// program accounts are filtered naturally: a non-executable decoy fails at the loader when invoked.
+/// CC-2: a sysvar passed as an account, whose identity (key) the program never verifies — the
+/// Wormhole class. Substituting a clone at a different address and still succeeding means the program
+/// trusted the account by position, not by key. Relevance-gated so a sysvar the program ignores
+/// (e.g. it reads the runtime cache instead) is not falsely reported.
 struct SysvarSubstitutionStrategy;
 
 impl MutationStrategy for SysvarSubstitutionStrategy {
@@ -576,8 +596,9 @@ impl MutationStrategy for SysvarSubstitutionStrategy {
             let decoy = decoy_for(target);
             if substitute_probe(ctx, target, decoy) {
                 findings.push(Finding {
+                    id: finding_id("CC-2 sysvar", &ctx.instructions[0]),
                     message: format!(
-                        "[CC-2 sysvar] account {} substituted with decoy {} instr {}:{} still succeeded (missing sysvar/program identity check)",
+                        "[CC-2 sysvar] account {} substituted with decoy {} instr {}:{} still succeeded (missing sysvar identity check)",
                         target,
                         decoy,
                         ctx.instructions[0].program_id,
@@ -590,7 +611,7 @@ impl MutationStrategy for SysvarSubstitutionStrategy {
     }
 }
 
-/// CC-2 targets: known sysvars and the system program, passed as instruction accounts.
+/// CC-2 targets: known sysvars passed as instruction accounts.
 fn collect_sysvar_candidates(instructions: &[Instruction]) -> Vec<Pubkey> {
     let mut seen = FastHashSet::default();
     let mut candidates = Vec::new();
@@ -599,8 +620,7 @@ fn collect_sysvar_candidates(instructions: &[Instruction]) -> Vec<Pubkey> {
             if meta.pubkey == ix.program_id {
                 continue;
             }
-            let is_target = is_known_sysvar(&meta.pubkey) || meta.pubkey == system_program::id();
-            if is_target && seen.insert(meta.pubkey) {
+            if is_known_sysvar(&meta.pubkey) && seen.insert(meta.pubkey) {
                 candidates.push(meta.pubkey);
             }
         }
@@ -608,10 +628,9 @@ fn collect_sysvar_candidates(instructions: &[Instruction]) -> Vec<Pubkey> {
     candidates
 }
 
-/// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. Writable accounts are
-/// included (a probe that triggers a runtime ownership failure simply does not report). PDA-like
-/// (off-curve) addresses are skipped by default — they are covered by the CC-3 derivation check;
-/// set `skip_pda_candidates=false` to also owner-probe them.
+/// Owner-mutation targets: non-executable, non-sysvar, data-bearing accounts. Writable and PDA-like
+/// accounts are included by default; address derivation and owner equality are separate constraints.
+/// A harness can opt out of PDA owner probes with `skip_pda_candidates=true`.
 fn collect_owner_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
@@ -882,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_owner_candidates_skips_pdas_by_default_and_can_include() {
+    fn collect_owner_candidates_includes_pdas_by_default_and_can_skip() {
         let mut svm = LiteSVM::new();
         let program_id = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -896,29 +915,31 @@ mod tests {
             data: vec![],
         };
 
-        // Default: PDAs are skipped by the owner strategy (CC-3 owns PDA identity).
         let mut config = AccountMutationConfig::default();
-        assert!(collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config).is_empty());
-
-        // Opt-in: also owner-probe PDAs.
-        config.set_skip_pda_candidates(false);
         assert_eq!(
-            collect_owner_candidates(&svm, &[ix], &config),
+            collect_owner_candidates(&svm, std::slice::from_ref(&ix), &config),
             vec![OwnerCandidate {
                 pubkey: pda,
                 original_owner: owner,
             }]
         );
+
+        config.set_skip_pda_candidates(true);
+        assert!(collect_owner_candidates(&svm, &[ix], &config).is_empty());
     }
 
     #[test]
-    fn collect_pda_candidates_keeps_offcurve_data_accounts_only() {
+    fn collect_pda_candidates_keeps_offcurve_accounts_even_without_data() {
         let mut svm = LiteSVM::new();
+        let config = AccountMutationConfig::default();
         let program_id = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
         let (pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
+        let (empty_pda, _) = Pubkey::find_program_address(&[b"authority"], &program_id);
         let on_curve = Keypair::new().pubkey();
         svm.set_account(pda, make_account(owner, vec![7; 16]))
+            .unwrap();
+        svm.set_account(empty_pda, make_account(owner, vec![]))
             .unwrap();
         svm.set_account(on_curve, make_account(owner, vec![7; 16]))
             .unwrap();
@@ -927,12 +948,16 @@ mod tests {
             program_id,
             accounts: vec![
                 AccountMeta::new_readonly(pda, false),
-                AccountMeta::new_readonly(on_curve, false), // on-curve -> dropped
+                AccountMeta::new_readonly(empty_pda, false), // empty PDA authority -> kept
+                AccountMeta::new_readonly(on_curve, false),  // on-curve -> dropped
                 AccountMeta::new_readonly(Clock::id(), false), // sysvar -> dropped
             ],
             data: vec![],
         };
-        assert_eq!(collect_pda_candidates(&svm, &[ix]), vec![pda]);
+        assert_eq!(
+            collect_pda_candidates(&svm, &[ix], &config),
+            vec![pda, empty_pda]
+        );
     }
 
     #[test]
@@ -963,23 +988,19 @@ mod tests {
     }
 
     #[test]
-    fn collect_sysvar_candidates_picks_sysvars_and_system_program() {
+    fn collect_sysvar_candidates_picks_sysvars_only() {
         let program_id = Pubkey::new_unique();
         let other = Pubkey::new_unique();
         let ix = Instruction {
             program_id,
             accounts: vec![
                 AccountMeta::new_readonly(Clock::id(), false),
-                AccountMeta::new_readonly(system_program::id(), false),
                 AccountMeta::new_readonly(other, false), // not a sysvar/system -> dropped
                 AccountMeta::new_readonly(Clock::id(), false), // dup -> deduped
             ],
             data: vec![],
         };
-        assert_eq!(
-            collect_sysvar_candidates(&[ix]),
-            vec![Clock::id(), system_program::id()]
-        );
+        assert_eq!(collect_sysvar_candidates(&[ix]), vec![Clock::id()]);
     }
 
     #[test]

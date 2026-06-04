@@ -220,6 +220,7 @@ pub fn replay_mode(
 
             // Compute crash_id from input_bytes BEFORE the deser block moves it
             let crash_id = format!("crash_{:016x}", libafl_bolts::hash_std(&input_bytes));
+            crucible_test_context::load_expected_mutation_finding_id_from_metadata(input_path);
 
             // Parse input and run test
             #deser_block
@@ -536,6 +537,7 @@ pub fn tmin_mode(
                     continue;
                 }
                 eprint!("[TMIN] {} actions", original_count);
+                crucible_test_context::load_expected_mutation_finding_id_from_metadata(tmin_file);
 
                 // Verify crash reproduces
                 let mut actions = fuzz_input.actions;

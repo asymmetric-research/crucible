@@ -227,19 +227,19 @@
       "args": []
     },
     {
-      "name": "read_pda_config_with_check",
+      "name": "read_pda_config_with_pda_check_no_owner_check",
       "docs": [
-        "Same read, but verifies the config account is the expected `[b\"config\"]` PDA."
+        "Verifies the PDA address but omits the owner check, so CC-1 must still flag it."
       ],
       "discriminator": [
-        240,
-        221,
-        73,
-        97,
-        151,
-        1,
-        173,
-        26
+        122,
+        179,
+        181,
+        50,
+        190,
+        114,
+        37,
+        179
       ],
       "accounts": [
         {
@@ -249,6 +249,99 @@
         },
         {
           "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_with_owner_and_pda_check",
+      "docs": [
+        "Same read, but verifies both the expected `[b\"config\"]` PDA and its owner."
+      ],
+      "discriminator": [
+        228,
+        85,
+        136,
+        255,
+        14,
+        101,
+        193,
+        22
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_no_check",
+      "docs": [
+        "Uses a PDA-like authority account without reading data and without verifying its address."
+      ],
+      "discriminator": [
+        230,
+        85,
+        201,
+        74,
+        43,
+        70,
+        164,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_with_check",
+      "docs": [
+        "Same authority path, but verifies the PDA address."
+      ],
+      "discriminator": [
+        126,
+        21,
+        200,
+        116,
+        142,
+        176,
+        75,
+        193
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
         },
         {
           "name": "vault",

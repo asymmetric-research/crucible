@@ -125,6 +125,11 @@ thread_local! {
     // Whether the recorded violation came from the account-mutation engine (vs an invariant).
     // Set atomically with VIOLATION so it always matches the stored (first-wins) violation.
     static VIOLATION_FROM_MUTATION: Cell<bool> = const { Cell::new(false) };
+    // Stable account-mutation finding identity/message for metadata and replay. The ID omits
+    // per-run pubkeys, so replay can target the same CC class + instruction even with fresh setup keys.
+    static MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
+    static MUTATION_FINDING_MESSAGE: RefCell<Option<String>> = RefCell::new(None);
+    static EXPECTED_MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -298,6 +303,13 @@ pub struct CrashMetadata {
     /// engine (set `FUZZ_MUTATE_ACCOUNTS`) for such crashes to reproduce.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mutation_finding: bool,
+    /// Stable mutation finding identity: `<class>:<program_id>:<instruction-discriminator>`.
+    /// Used by replay/tmin to avoid stopping on an earlier, different mutation bug in the same input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_finding_id: Option<String>,
+    /// Human-readable finding observed when the crash was first written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_finding_message: Option<String>,
 }
 
 /// Set the current test name (called at test start)
@@ -464,12 +476,20 @@ pub fn clear_violation_tracking() {
     VIOLATION_ACTION_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
+fn clear_current_violation() {
+    VIOLATION.with(|v| *v.borrow_mut() = None);
+    VIOLATION_FROM_MUTATION.with(|m| m.set(false));
+    MUTATION_FINDING_ID.with(|id| *id.borrow_mut() = None);
+    MUTATION_FINDING_MESSAGE.with(|msg| *msg.borrow_mut() = None);
+}
+
 /// Clear all per-iteration state: action history + violation tracking.
 /// Convenience wrapper — call at the start of each fuzzing iteration.
 #[inline]
 pub fn clear_iteration_state() {
     clear_action_history();
     clear_violation_tracking();
+    clear_current_violation();
 }
 
 // ============================================================================
@@ -553,6 +573,8 @@ pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
         seed,
         actions: get_action_history(),
         mutation_finding: violation_from_mutation(),
+        mutation_finding_id: mutation_finding_id(),
+        mutation_finding_message: mutation_finding_message(),
     }
 }
 
@@ -921,6 +943,8 @@ pub fn record_violation(msg: String) {
         if guard.is_none() {
             *guard = Some(msg);
             VIOLATION_FROM_MUTATION.with(|m| m.set(false));
+            MUTATION_FINDING_ID.with(|id| *id.borrow_mut() = None);
+            MUTATION_FINDING_MESSAGE.with(|mutation_msg| *mutation_msg.borrow_mut() = None);
         }
     });
 }
@@ -928,10 +952,13 @@ pub fn record_violation(msg: String) {
 /// Record a violation produced by the account-mutation engine. Identical to
 /// [`record_violation`] but also flags the violation's origin so crash metadata can mark it
 /// (and replay can re-enable the engine).
-pub(crate) fn record_mutation_violation(msg: String) {
+pub(crate) fn record_mutation_violation(msg: String, id: String) {
     VIOLATION.with(|v| {
         let mut guard = v.borrow_mut();
         if guard.is_none() {
+            MUTATION_FINDING_ID.with(|finding_id| *finding_id.borrow_mut() = Some(id));
+            MUTATION_FINDING_MESSAGE
+                .with(|finding_msg| *finding_msg.borrow_mut() = Some(msg.clone()));
             *guard = Some(msg);
             VIOLATION_FROM_MUTATION.with(|m| m.set(true));
         }
@@ -941,6 +968,61 @@ pub(crate) fn record_mutation_violation(msg: String) {
 /// Whether the currently-recorded violation was produced by the account-mutation engine.
 pub fn violation_from_mutation() -> bool {
     VIOLATION_FROM_MUTATION.with(|m| m.get())
+}
+
+/// Stable identity of the current account-mutation finding, if any.
+pub fn mutation_finding_id() -> Option<String> {
+    if violation_from_mutation() {
+        MUTATION_FINDING_ID.with(|id| id.borrow().clone())
+    } else {
+        None
+    }
+}
+
+/// Human-readable current account-mutation finding, if any.
+pub fn mutation_finding_message() -> Option<String> {
+    if violation_from_mutation() {
+        MUTATION_FINDING_MESSAGE.with(|msg| msg.borrow().clone())
+    } else {
+        None
+    }
+}
+
+/// Restrict replay/tmin to the original account-mutation finding identity.
+pub fn set_expected_mutation_finding_id(id: Option<String>) {
+    EXPECTED_MUTATION_FINDING_ID.with(|expected| *expected.borrow_mut() = id);
+}
+
+/// Current replay/tmin mutation finding identity filter.
+pub fn expected_mutation_finding_id() -> Option<String> {
+    EXPECTED_MUTATION_FINDING_ID.with(|expected| expected.borrow().clone())
+}
+
+/// Load `mutation_finding_id` from the `.meta.json` associated with a crash input path.
+pub fn load_expected_mutation_finding_id_from_metadata(input_path: &str) {
+    set_expected_mutation_finding_id(None);
+
+    let input = std::path::Path::new(input_path);
+    let mut candidates = Vec::new();
+    if let Some(name) = input.file_name().and_then(|n| n.to_str()) {
+        if let Ok(meta_dir) = std::env::var("FUZZ_META_DIR") {
+            candidates.push(std::path::Path::new(&meta_dir).join(format!("{name}.meta.json")));
+        }
+    }
+    candidates.push(std::path::PathBuf::from(format!("{input_path}.meta.json")));
+
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if let Some(id) = meta.get("mutation_finding_id").and_then(|v| v.as_str()) {
+            set_expected_mutation_finding_id(Some(id.to_string()));
+            return;
+        }
+    }
 }
 
 /// Take the current violation (clearing it). Returns Some if violated.
@@ -1730,16 +1812,16 @@ impl TestContext {
     ///
     /// This is disabled by default so PDA-heavy and closed-source targets still
     /// get owner probes. Set this to `true` when a harness intentionally wants
-    /// to suppress PDA-like addresses.
+    /// to suppress PDA-like addresses from the owner-equality strategy.
     pub fn set_owner_mutation_skip_pdas(&mut self, skip_pdas: bool) -> &mut Self {
         self.account_mutation.set_skip_pda_candidates(skip_pdas);
         self
     }
 
-    /// Mark an account as unverified for owner mutation.
+    /// Mark an account as unverified for account-mutation identity probes.
     ///
-    /// Unverified accounts are skipped by owner mutation probes because their
-    /// owner is not security-relevant for the harness.
+    /// Unverified accounts are skipped by owner/PDA probes because their
+    /// identity is not security-relevant for the harness.
     pub fn mark_owner_unverified(&mut self, pubkey: Pubkey) -> &mut Self {
         self.account_mutation.mark_unverified(pubkey);
         self
@@ -3633,16 +3715,32 @@ mod tests {
         record_violation("plain invariant".to_string());
         assert!(!build_crash_metadata(None).mutation_finding);
 
-        // An account-mutation finding is, and the flag survives serde (it is omitted when false).
+        // An account-mutation finding is, and the replay identity survives serde.
         let _ = take_violation();
-        record_mutation_violation("[CC-1 owner] ...".to_string());
+        record_mutation_violation(
+            "[CC-1 owner] ...".to_string(),
+            "CC-1 owner:Program:disc".to_string(),
+        );
         let meta = build_crash_metadata(None);
         assert!(meta.mutation_finding);
+        assert_eq!(
+            meta.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
+        assert_eq!(
+            meta.mutation_finding_message.as_deref(),
+            Some("[CC-1 owner] ...")
+        );
         let json = serde_json::to_string(&meta).unwrap();
         let back: CrashMetadata = serde_json::from_str(&json).unwrap();
         assert!(back.mutation_finding);
+        assert_eq!(
+            back.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
 
         let _ = take_violation();
+        clear_iteration_state();
     }
 
     // =========================================================================

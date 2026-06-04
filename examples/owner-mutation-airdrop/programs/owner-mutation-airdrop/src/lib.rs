@@ -113,12 +113,31 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Same read, but verifies the config account is the expected `[b"config"]` PDA.
-    pub fn read_pda_config_with_check(ctx: Context<ReadPda>) -> Result<()> {
+    /// Verifies the PDA address but omits the owner check, so CC-1 must still flag it.
+    pub fn read_pda_config_with_pda_check_no_owner_check(ctx: Context<ReadPda>) -> Result<()> {
         let (expected, _) = Pubkey::find_program_address(&[b"config"], &crate::ID);
         require!(
             ctx.accounts.config.key() == expected,
             AirdropError::WrongPda
+        );
+        let amount = read_u64(&ctx.accounts.config)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same read, but verifies both the expected `[b"config"]` PDA and its owner.
+    pub fn read_pda_config_with_owner_and_pda_check(ctx: Context<ReadPda>) -> Result<()> {
+        let (expected, _) = Pubkey::find_program_address(&[b"config"], &crate::ID);
+        require!(
+            ctx.accounts.config.key() == expected,
+            AirdropError::WrongPda
+        );
+        require!(
+            ctx.accounts.config.owner == &crate::ID,
+            AirdropError::WrongOwner
         );
         let amount = read_u64(&ctx.accounts.config)?;
         payout(
@@ -136,6 +155,38 @@ pub mod owner_mutation_airdrop {
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
             amount,
+        )
+    }
+
+    /// Uses a PDA-like authority account without reading data and without verifying its address.
+    pub fn use_pda_authority_no_check(ctx: Context<UsePdaAuthority>) -> Result<()> {
+        // BUG: never checks `authority.key() == PDA([b"authority"], crate::ID)`.
+        require!(
+            ctx.accounts.authority.lamports() > 0,
+            AirdropError::InvalidConfig
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
+
+    /// Same authority path, but verifies the PDA address.
+    pub fn use_pda_authority_with_check(ctx: Context<UsePdaAuthority>) -> Result<()> {
+        let (expected, _) = Pubkey::find_program_address(&[b"authority"], &crate::ID);
+        require!(
+            ctx.accounts.authority.key() == expected,
+            AirdropError::WrongPda
+        );
+        require!(
+            ctx.accounts.authority.lamports() > 0,
+            AirdropError::InvalidConfig
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
         )
     }
 
@@ -336,6 +387,17 @@ pub struct ReadPda<'info> {
     pub recipient: Signer<'info>,
     /// CHECK: read-only PDA config; owner unchecked.
     pub config: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct UsePdaAuthority<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: PDA-like authority; key checked only in the checked variant.
+    pub authority: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

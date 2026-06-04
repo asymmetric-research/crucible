@@ -187,6 +187,12 @@ struct CrashMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     actions: Vec<ActionRecord>,
+    #[serde(default)]
+    mutation_finding: bool,
+    #[serde(default)]
+    mutation_finding_id: Option<String>,
+    #[serde(default)]
+    mutation_finding_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1204,6 +1210,15 @@ fn show_crash_metadata(
         println!("Iteration: {}", meta.iteration);
         if let Some(seed) = meta.seed {
             println!("Seed: {}", seed);
+        }
+        if meta.mutation_finding {
+            println!("Mutation finding: yes");
+            if let Some(id) = &meta.mutation_finding_id {
+                println!("Mutation finding id: {}", id);
+            }
+            if let Some(message) = &meta.mutation_finding_message {
+                println!("Mutation finding message: {}", message);
+            }
         }
 
         println!("\n=== Action Sequence ({} actions) ===", meta.actions.len());

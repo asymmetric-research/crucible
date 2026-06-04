@@ -204,20 +204,23 @@ mutation finding always reproduces and minimizes.
 | Class | Label | Mutation | Oracle |
 |-------|-------|----------|--------|
 | CC-1 owner | `[CC-1 owner]` | set `account.owner` to a sentinel (data/key unchanged) | still succeeds ⇒ owner not checked |
-| CC-2 sysvar | `[CC-2 sysvar]` | substitute a sysvar / system-program account with a cloned copy at a different address | still succeeds ⇒ account identity not checked |
-| CC-3 PDA | `[CC-3 pda]` | substitute a PDA with a cloned copy at a different address | still succeeds ⇒ PDA derivation not checked |
+| CC-2 sysvar | `[CC-2 sysvar]` | substitute a sysvar account with a cloned copy at a different address | still succeeds ⇒ sysvar identity not checked |
+| CC-3 PDA | `[CC-3 pda]` | substitute a PDA-like account with a cloned copy at a different address | still succeeds ⇒ PDA address/derivation not checked |
 | CC-4 signer | `[CC-4 signer]` | clear `is_signer` on a non-fee-payer account | still succeeds ⇒ signature not enforced |
 | CC-5 type-tag | `[CC-5 type-tag]` | bit-flip the account's discriminator (type tag) | still succeeds ⇒ account type not checked |
 
-**False-positive discipline.** All classes except CC-4 first run a *relevance gate*: the target's data is
-corrupted and replayed; if the transaction still succeeds the account is inert (the program never reads
-it) and it is skipped — spoofing it gains nothing. CC-4 flags all surviving flips (authority accounts are
-typically dataless). Discriminator length (CC-5) is read from the program IDL's registered schemas, so it
-is correct for Anchor (8-byte), native (4-byte), and Codama programs — CC-5 only probes accounts whose
-type tag is actually known.
+**False-positive discipline.** CC-1, CC-2, and CC-5 run a data relevance gate where applicable: the
+target's data is corrupted and replayed; if the transaction still succeeds the account is inert and is
+skipped. CC-3 is identity-only and also covers dataless PDA authority accounts. CC-4 flags all surviving
+signer flips.
 
-**PDAs.** The owner strategy skips PDA-like (off-curve) addresses by default — for a PDA the derivation
-check (CC-3) subsumes the owner check. Set the harness option to also owner-probe PDAs if desired.
+Discriminator length (CC-5) is read from the program IDL's registered schemas when available, so it is
+correct for Anchor (8-byte), native (4-byte), and Codama programs. Closed-source harnesses with no
+registered account schema use `FUZZ_TYPE_TAG_LEN` or an 8-byte default; set `FUZZ_TYPE_TAG_LEN=0` to
+disable that fallback.
+
+**PDAs.** Owner equality and PDA derivation are separate checks. PDA-like addresses are owner-probed by
+default; set the harness option to skip PDA owner probes when a specific target needs that suppression.
 
 ```bash
 # Find missing-check bugs while fuzzing

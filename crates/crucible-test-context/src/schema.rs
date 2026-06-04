@@ -77,30 +77,52 @@ pub fn lookup_type_name(data: &[u8]) -> Option<&str> {
     None
 }
 
+const DEFAULT_TYPE_TAG_LEN: usize = 8;
+
 /// Look up the discriminator length for an account by prefix match.
 ///
 /// Returns the matched (non-empty) discriminator's length, or `None` if no registered schema matches
 /// the start of `data`. Framework-agnostic: the length is whatever the IDL recorded — 8 for Anchor,
-/// 4 for native bincode, variable for Codama — so callers never have to assume a fixed tag width.
+/// 4 for native bincode, variable for Codama. If no registry exists at all, closed-source harnesses
+/// fall back to `FUZZ_TYPE_TAG_LEN` or 8 bytes. Set `FUZZ_TYPE_TAG_LEN=0` to disable the fallback.
 pub fn lookup_discriminator_len(data: &[u8]) -> Option<usize> {
     // Prefer the complete account-discriminator registry; fall back to the diff-schema registry.
+    let mut saw_registry = false;
     if let Some(discs) = ACCOUNT_DISCRIMINATORS.get() {
+        saw_registry |= !discs.is_empty();
         if let Some(n) = match_len(discs.iter().map(Vec::as_slice), data) {
             return Some(n);
         }
     }
-    let schemas = SCHEMA_REGISTRY.get()?;
-    match_len(schemas.iter().map(|s| s.discriminator.as_slice()), data)
-}
-
-fn match_len<'a>(discriminators: impl Iterator<Item = &'a [u8]>, data: &[u8]) -> Option<usize> {
-    for disc in discriminators {
-        let n = disc.len();
-        if n > 0 && data.len() >= n && data[..n] == disc[..] {
+    if let Some(schemas) = SCHEMA_REGISTRY.get() {
+        saw_registry |= !schemas.is_empty();
+        if let Some(n) = match_len(schemas.iter().map(|s| s.discriminator.as_slice()), data) {
             return Some(n);
         }
     }
-    None
+    if saw_registry {
+        None
+    } else {
+        fallback_discriminator_len(data)
+    }
+}
+
+fn match_len<'a>(discriminators: impl Iterator<Item = &'a [u8]>, data: &[u8]) -> Option<usize> {
+    discriminators
+        .filter_map(|disc| {
+            let n = disc.len();
+            (n > 0 && data.len() >= n && data[..n] == disc[..]).then_some(n)
+        })
+        .max()
+}
+
+fn fallback_discriminator_len(data: &[u8]) -> Option<usize> {
+    let n = match std::env::var("FUZZ_TYPE_TAG_LEN") {
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("off") => return None,
+        Ok(value) => value.parse().unwrap_or(DEFAULT_TYPE_TAG_LEN),
+        Err(_) => DEFAULT_TYPE_TAG_LEN,
+    };
+    (n > 0 && data.len() >= n).then_some(n)
 }
 
 /// Check whether any schemas have been registered.
@@ -145,9 +167,20 @@ mod tests {
         anchor_data.extend_from_slice(&[0xCD; 20]);
         assert_eq!(match_len(slices(), &anchor_data), Some(8));
 
-        // No registered discriminator matches → None (CC-5 must not guess).
+        // No registered discriminator matches → None when a registry exists.
         assert_eq!(match_len(slices(), &[0xFF; 16]), None);
         // Data shorter than the discriminator → no match.
         assert_eq!(match_len(slices(), &[1, 0]), None);
+    }
+
+    #[test]
+    fn discriminator_len_prefers_longest_prefix_match() {
+        let short = vec![1, 2, 3, 4];
+        let long = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let discs = [short, long.clone()];
+        let mut data = long;
+        data.extend_from_slice(&[0xAB; 8]);
+
+        assert_eq!(match_len(discs.iter().map(Vec::as_slice), &data), Some(8));
     }
 }

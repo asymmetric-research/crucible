@@ -1,9 +1,9 @@
-//! End-to-end regression for the account-mutation engine (CC-1 owner checks).
+//! End-to-end regression for the account-mutation engine.
 //!
 //! The external SBPF program (`examples/owner-mutation-airdrop`) exposes one instruction per
-//! flavor of the missing-owner-check class plus its negatives/edges. Each test enables account
-//! mutation, runs one instruction, and asserts whether the engine reports a `[CC-1 owner]`
-//! finding. Together they prove both detection power and false-positive discipline.
+//! flavor of the seeded account-constraint classes plus their negatives/edges. Each test enables
+//! account mutation, runs one instruction, and asserts the expected CC label. Together they prove
+//! both detection power and false-positive discipline.
 
 #![allow(unexpected_cfgs)]
 
@@ -339,7 +339,7 @@ fn no_finding_for_inert_account() {
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn flags_pda_substitution_when_no_derivation_check() {
     let mut h = harness();
-    // The owner strategy skips PDAs; the CC-3 strategy substitutes a clone at a different address.
+    // The CC-3 strategy runs before owner mutation and substitutes a clone at a different address.
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
         &mut h.ctx,
@@ -365,7 +365,7 @@ fn flags_pda_substitution_when_no_derivation_check() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_when_pda_derivation_checked() {
+fn flags_missing_owner_check_when_pda_derivation_checked() {
     let mut h = harness();
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
@@ -377,10 +377,81 @@ fn no_finding_when_pda_derivation_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithCheck {})
+        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithPdaCheckNoOwnerCheck {})
         .accounts(owner_mutation_airdrop::accounts::ReadPda {
             recipient: h.recipient.pubkey(),
             config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_owner_finding(config);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_pda_derivation_and_owner_checked() {
+    let mut h = harness();
+    let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
+    create_data_account(
+        &mut h.ctx,
+        config,
+        h.program_id,
+        &CLAIM_AMOUNT.to_le_bytes(),
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithOwnerAndPdaCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPda {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_pda_address_check_without_data_read() {
+    let mut h = harness();
+    let (authority, _bump) = Pubkey::find_program_address(&[b"authority"], &h.program_id);
+    create_data_account(&mut h.ctx, authority, h.program_id, &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+            recipient: h.recipient.pubkey(),
+            authority,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-3 pda]", authority);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_pda_authority_checked_without_data_read() {
+    let mut h = harness();
+    let (authority, _bump) = Pubkey::find_program_address(&[b"authority"], &h.program_id);
+    create_data_account(&mut h.ctx, authority, h.program_id, &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+            recipient: h.recipient.pubkey(),
+            authority,
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient])

@@ -2,8 +2,8 @@
 //!
 //! It drives the program through every positive (missing-check) and negative (check-present)
 //! instruction path. On its own it fuzzes a lamport-conservation invariant; run with
-//! `--mutate-accounts` it additionally reports the seeded missing owner (CC-1) and signer (CC-4)
-//! checks as `[CC-1 owner]` / `[CC-4 signer]` findings.
+//! `--mutate-accounts` it additionally reports the seeded CC-1/CC-2/CC-3/CC-4/CC-5
+//! constraint bugs as account-mutation findings.
 //!
 //!   crucible run owner-mutation-airdrop invariant_test --release
 //!   crucible run owner-mutation-airdrop invariant_test --release --mutate-accounts
@@ -49,7 +49,8 @@ struct OwnerMutationAirdropFixture {
     foreign_config: Pubkey,  // owned by a foreign program
     tiny_config: Pubkey,     // <= 8 bytes
     inert: Pubkey,           // program-owned but never read
-    pda_config: Pubkey,      // off-curve PDA
+    pda_config: Pubkey,      // off-curve PDA data account
+    pda_authority: Pubkey,   // off-curve PDA authority with no data read
     writable_config: Pubkey, // program-owned, declared writable
     typed_config: Pubkey,    // Anchor-discriminated Config account (CC-5 target)
 }
@@ -109,6 +110,15 @@ impl OwnerMutationAirdropFixture {
             .create()
             .unwrap();
 
+        let (pda_authority, _) = Pubkey::find_program_address(&[b"authority"], &program_id);
+        ctx.create_account()
+            .pubkey(pda_authority)
+            .lamports(1_000_000)
+            .owner(program_id)
+            .data(&[])
+            .create()
+            .unwrap();
+
         let mut typed_data = owner_mutation_airdrop::state::Config::DISCRIMINATOR.to_vec();
         typed_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
         let typed_config = Self::new_data(&mut ctx, program_id, &typed_data);
@@ -136,6 +146,7 @@ impl OwnerMutationAirdropFixture {
             tiny_config,
             inert,
             pda_config,
+            pda_authority,
             writable_config,
             typed_config,
         }
@@ -275,13 +286,58 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
-    pub fn action_read_pda_config_with_check(&mut self) -> bool {
+    pub fn action_read_pda_config_with_pda_check_no_owner_check(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
-            .call(instruction::ReadPdaConfigWithCheck {})
-            .accounts(accounts::ReadPdaConfigWithCheck {
+            .call(instruction::ReadPdaConfigWithPdaCheckNoOwnerCheck {})
+            .accounts(accounts::ReadPdaConfigWithPdaCheckNoOwnerCheck {
                 recipient: self.recipient.pubkey(),
                 config: self.pda_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_pda_config_with_owner_and_pda_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPdaConfigWithOwnerAndPdaCheck {})
+            .accounts(accounts::ReadPdaConfigWithOwnerAndPdaCheck {
+                recipient: self.recipient.pubkey(),
+                config: self.pda_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_use_pda_authority_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::UsePdaAuthorityNoCheck {})
+            .accounts(accounts::UsePdaAuthorityNoCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.pda_authority,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_use_pda_authority_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::UsePdaAuthorityWithCheck {})
+            .accounts(accounts::UsePdaAuthorityWithCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.pda_authority,
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])
