@@ -33,6 +33,8 @@ const CLAIM_AMOUNT: u64 = 1_000;
 const STATE_AMOUNT: u64 = 1_000;
 const FOREIGN_AMOUNT: u64 = 1_000;
 const TINY_AMOUNT: u32 = 1_000;
+const TOKEN_AMOUNT: u64 = 1_000;
+const MINT_DECIMALS: u8 = 6;
 const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
 const ALTERNATE_CONFIG_DISCRIMINATOR: [u8; 8] = [112, 26, 206, 10, 180, 130, 5, 4];
 const TRADER_STATE_DISCRIMINATOR: [u8; 8] = [124, 33, 101, 17, 158, 79, 26, 140];
@@ -58,6 +60,8 @@ struct OwnerMutationAirdropFixture {
     writable_config: Pubkey, // program-owned, declared writable
     typed_config: Pubkey,    // Anchor-discriminated Config account (CC-5 target)
     alternate_config: Pubkey, // valid-but-wrong type account (documented FN)
+    mint: Pubkey,            // SPL mint-shaped account
+    token_account: Pubkey,   // SPL token-account-shaped account
     source_trader: Pubkey,   // custom invariant source account (documented FN)
     destination_trader: Pubkey, // custom invariant destination account (documented FN)
 }
@@ -143,6 +147,22 @@ impl OwnerMutationAirdropFixture {
         alternate_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
         let alternate_config = Self::new_data(&mut ctx, program_id, &alternate_data);
 
+        let mint = Keypair::new().pubkey();
+        ctx.create_mint()
+            .pubkey(mint)
+            .decimals(MINT_DECIMALS)
+            .create()
+            .unwrap();
+
+        let token_account = Keypair::new().pubkey();
+        ctx.create_token_account()
+            .pubkey(token_account)
+            .mint(mint)
+            .token_owner(recipient.pubkey())
+            .amount(TOKEN_AMOUNT)
+            .create()
+            .unwrap();
+
         let mut source_trader_data = TRADER_STATE_DISCRIMINATOR.to_vec();
         source_trader_data.extend_from_slice(authority.pubkey().as_ref());
         source_trader_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
@@ -181,6 +201,8 @@ impl OwnerMutationAirdropFixture {
             writable_config,
             typed_config,
             alternate_config,
+            mint,
+            token_account,
             source_trader,
             destination_trader,
         }
@@ -417,6 +439,115 @@ impl OwnerMutationAirdropFixture {
             .accounts(accounts::ReadWritableConfigNoCheck {
                 recipient: self.recipient.pubkey(),
                 config: self.writable_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    // ---- Token owner and mint-relation paths ----
+
+    pub fn action_read_mint_no_owner_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadMintNoOwnerCheck {})
+            .accounts(accounts::ReadMintNoOwnerCheck {
+                recipient: self.recipient.pubkey(),
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_mint_with_owner_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadMintWithOwnerCheck {})
+            .accounts(accounts::ReadMintWithOwnerCheck {
+                recipient: self.recipient.pubkey(),
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_token_account_no_owner_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTokenAccountNoOwnerCheck {})
+            .accounts(accounts::ReadTokenAccountNoOwnerCheck {
+                recipient: self.recipient.pubkey(),
+                token_account: self.token_account,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_token_account_with_owner_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTokenAccountWithOwnerCheck {})
+            .accounts(accounts::ReadTokenAccountWithOwnerCheck {
+                recipient: self.recipient.pubkey(),
+                token_account: self.token_account,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_token_with_mint_no_mint_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTokenWithMintNoMintCheck {})
+            .accounts(accounts::ReadTokenWithMintNoMintCheck {
+                recipient: self.recipient.pubkey(),
+                token_account: self.token_account,
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_token_with_mint_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTokenWithMintCheck {})
+            .accounts(accounts::ReadTokenWithMintCheck {
+                recipient: self.recipient.pubkey(),
+                token_account: self.token_account,
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_token_without_mint_relation_context(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadTokenWithoutMintRelationContext {})
+            .accounts(accounts::ReadTokenWithoutMintRelationContext {
+                recipient: self.recipient.pubkey(),
+                token_account: self.token_account,
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])

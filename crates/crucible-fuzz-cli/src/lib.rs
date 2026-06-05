@@ -82,7 +82,7 @@ pub enum FuzzCmd {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
-        /// Enable account-mutation probes (missing owner/signer constraint checks)
+        /// Enable account-mutation probes for missing account checks
         #[arg(long)]
         mutate_accounts: bool,
         /// Stateful fuzzing: single action per iteration with state pool
@@ -664,7 +664,7 @@ fn fuzz_run(
 
     if mutate_accounts {
         cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
-        println!("[FUZZ] Account mutation enabled (owner/signer constraint probes)");
+        println!("[FUZZ] Account mutation enabled (account constraint probes)");
     }
 
     if stats {

@@ -197,8 +197,7 @@
     {
       "name": "read_pda_config_no_check",
       "docs": [
-        "Reads a PDA config without verifying its derivation (missing PDA check) — the CC-3 detector",
-        "substitutes a clone at a different address and the program accepts it."
+        "Reads a PDA config without verifying its derivation or owner."
       ],
       "discriminator": [
         199,
@@ -502,6 +501,229 @@
         },
         {
           "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_mint_no_owner_check",
+      "docs": [
+        "Reads mint-shaped data without verifying the account is owned by the token program."
+      ],
+      "discriminator": [
+        60,
+        69,
+        99,
+        166,
+        149,
+        153,
+        248,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_mint_with_owner_check",
+      "docs": [
+        "Same mint read, with the token-program owner check present."
+      ],
+      "discriminator": [
+        15,
+        191,
+        217,
+        4,
+        128,
+        68,
+        175,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_account_no_owner_check",
+      "docs": [
+        "Reads token-account-shaped data without verifying the token-program owner."
+      ],
+      "discriminator": [
+        248,
+        142,
+        93,
+        111,
+        212,
+        30,
+        131,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_account_with_owner_check",
+      "docs": [
+        "Same token-account read, with the token-program owner check present."
+      ],
+      "discriminator": [
+        227,
+        156,
+        181,
+        36,
+        57,
+        67,
+        33,
+        204
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_with_mint_no_mint_check",
+      "docs": [
+        "Receives a token account and mint but never checks `token_account.mint == mint.key()`."
+      ],
+      "discriminator": [
+        25,
+        74,
+        145,
+        109,
+        87,
+        63,
+        218,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_with_mint_check",
+      "docs": [
+        "Same pair, with the token-account-to-mint relation checked."
+      ],
+      "discriminator": [
+        26,
+        41,
+        8,
+        176,
+        36,
+        142,
+        109,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_without_mint_relation_context",
+      "docs": [
+        "Owner is checked, but no mint account is present; the wrong-mint oracle must not run here."
+      ],
+      "discriminator": [
+        81,
+        99,
+        110,
+        222,
+        128,
+        73,
+        184,
+        120
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
         },
         {
           "name": "vault",
@@ -991,6 +1213,11 @@
       "code": 6008,
       "name": "WrongAuthority",
       "msg": "Wrong authority"
+    },
+    {
+      "code": 6009,
+      "name": "WrongMint",
+      "msg": "Wrong mint"
     }
   ],
   "types": [

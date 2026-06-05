@@ -8,6 +8,15 @@ declare_id!("2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b");
 /// Stand-in for a foreign program that is *supposed* to own certain accounts (e.g. an SPL token
 /// program or an oracle program). The harness creates the relevant config account with this owner.
 pub const FOREIGN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0x0A; 32]);
+pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+
+const MINT_LEN: usize = 82;
+const TOKEN_ACCOUNT_LEN: usize = 165;
+const MINT_DECIMALS_OFFSET: usize = 44;
+const MINT_INITIALIZED_OFFSET: usize = 45;
+const TOKEN_MINT_OFFSET: usize = 0;
+const TOKEN_AMOUNT_OFFSET: usize = 64;
+const TOKEN_STATE_OFFSET: usize = 108;
 
 #[program]
 pub mod owner_mutation_airdrop {
@@ -102,8 +111,7 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Reads a PDA config without verifying its derivation (missing PDA check) — the CC-3 detector
-    /// substitutes a clone at a different address and the program accepts it.
+    /// Reads a PDA config without verifying its derivation or owner.
     pub fn read_pda_config_no_check(ctx: Context<ReadPda>) -> Result<()> {
         let amount = read_u64(&ctx.accounts.config)?;
         payout(
@@ -113,8 +121,8 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Singleton-style PDA: owner and type are checked, but the key is not. The local CC-3 probe
-    /// can still fabricate a program-owned clone, so this documents a current false-positive shape.
+    /// Singleton-style PDA: owner and type are checked, but the key is not. The account mutator
+    /// should not report this as CC-3 because the spoofed owner is rejected.
     pub fn read_singleton_pda_with_owner_type_check_no_derivation_check(
         ctx: Context<ReadTyped>,
     ) -> Result<()> {
@@ -241,6 +249,114 @@ pub mod owner_mutation_airdrop {
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
             1,
+        )
+    }
+
+    // ---- Token account checks: fake owners and mint relation ----
+
+    /// Reads mint-shaped data without verifying the account is owned by the token program.
+    pub fn read_mint_no_owner_check(ctx: Context<ReadMint>) -> Result<()> {
+        let decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            u64::from(decimals) + 1,
+        )
+    }
+
+    /// Same mint read, with the token-program owner check present.
+    pub fn read_mint_with_owner_check(ctx: Context<ReadMint>) -> Result<()> {
+        require!(
+            ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            u64::from(decimals) + 1,
+        )
+    }
+
+    /// Reads token-account-shaped data without verifying the token-program owner.
+    pub fn read_token_account_no_owner_check(ctx: Context<ReadTokenAccountOnly>) -> Result<()> {
+        let (_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same token-account read, with the token-program owner check present.
+    pub fn read_token_account_with_owner_check(ctx: Context<ReadTokenAccountOnly>) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let (_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Receives a token account and mint but never checks `token_account.mint == mint.key()`.
+    pub fn read_token_with_mint_no_mint_check(ctx: Context<ReadTokenWithMint>) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        require!(
+            ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let _decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        let (_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same pair, with the token-account-to-mint relation checked.
+    pub fn read_token_with_mint_check(ctx: Context<ReadTokenWithMint>) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        require!(
+            ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let _decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        let (token_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        require!(
+            token_mint == ctx.accounts.mint.key(),
+            AirdropError::WrongMint
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Owner is checked, but no mint account is present; the wrong-mint oracle must not run here.
+    pub fn read_token_without_mint_relation_context(
+        ctx: Context<ReadTokenAccountOnly>,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let (_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
         )
     }
 
@@ -471,6 +587,34 @@ fn read_clock_unix_timestamp(account: &UncheckedAccount) -> Result<i64> {
     Ok(i64::from_le_bytes(data[32..40].try_into().unwrap()))
 }
 
+fn read_mint_decimals(account: &UncheckedAccount) -> Result<u8> {
+    let data = account.try_borrow_data()?;
+    require!(data.len() == MINT_LEN, AirdropError::InvalidConfig);
+    require!(
+        data[MINT_INITIALIZED_OFFSET] != 0,
+        AirdropError::InvalidConfig
+    );
+    Ok(data[MINT_DECIMALS_OFFSET])
+}
+
+fn read_token_account_data(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    let data = account.try_borrow_data()?;
+    require!(data.len() == TOKEN_ACCOUNT_LEN, AirdropError::InvalidConfig);
+    require!(data[TOKEN_STATE_OFFSET] != 0, AirdropError::InvalidConfig);
+    let mint = Pubkey::new_from_array(
+        data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]
+            .try_into()
+            .unwrap(),
+    );
+    let amount = u64::from_le_bytes(
+        data[TOKEN_AMOUNT_OFFSET..TOKEN_AMOUNT_OFFSET + 8]
+            .try_into()
+            .unwrap(),
+    );
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((mint, amount))
+}
+
 fn read_trader_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
     require!(account.owner == &crate::ID, AirdropError::WrongOwner);
     let data = account.try_borrow_data()?;
@@ -594,6 +738,41 @@ pub struct ReadWritable<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ReadMint<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: SPL mint-shaped data; owner checked only in the checked variant.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadTokenAccountOnly<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: SPL token-account-shaped data; owner checked only in the checked variants.
+    pub token_account: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadTokenWithMint<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: SPL token-account-shaped data.
+    pub token_account: UncheckedAccount<'info>,
+    /// CHECK: SPL mint-shaped data.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Withdraw<'info> {
     /// CHECK: payout destination.
     #[account(mut)]
@@ -701,4 +880,6 @@ pub enum AirdropError {
     InvalidClock,
     #[msg("Wrong authority")]
     WrongAuthority,
+    #[msg("Wrong mint")]
+    WrongMint,
 }

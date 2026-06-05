@@ -2,6 +2,7 @@ use crate::{record_mutation_violation, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::program_pack::Pack;
 use anyhow::Result;
 use litesvm::LiteSVM;
 use solana_keypair::Keypair;
@@ -27,17 +28,26 @@ const CRUCIBLE_ATTACKER: Pubkey = Pubkey::new_from_array([0xCC; 32]);
 /// so the mutation is always a real change.
 const CRUCIBLE_ATTACKER_ALT: Pubkey = Pubkey::new_from_array([0xCD; 32]);
 
-/// Replacement address used by the substitution strategies (CC-2 sysvar, CC-3 PDA). A clone of the
-/// target account is planted here and the instruction's account meta is repointed to it, so only the
-/// address differs — a surviving success means the account's identity was never verified.
+/// Fixed replacement address used by sysvar/PDA probes.
 const CRUCIBLE_DECOY: Pubkey = Pubkey::new_from_array([0xDD; 32]);
 const CRUCIBLE_DECOY_ALT: Pubkey = Pubkey::new_from_array([0xDE; 32]);
+const TOKEN_2022_PROGRAM: Pubkey =
+    solana_pubkey::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFicQfKkqPnx5xSvyJm");
 
 fn decoy_for(target: Pubkey) -> Pubkey {
     if target == CRUCIBLE_DECOY {
         CRUCIBLE_DECOY_ALT
     } else {
         CRUCIBLE_DECOY
+    }
+}
+
+fn token_decoy_for(target: Pubkey) -> Pubkey {
+    let decoy = Keypair::new().pubkey();
+    if decoy == target {
+        Keypair::new().pubkey()
+    } else {
+        decoy
     }
 }
 
@@ -61,9 +71,7 @@ fn rewrite_account(
         .collect()
 }
 
-/// Plant a clone of `target`'s account at `decoy`, repoint the metas, and replay. Returns true iff the
-/// substituted transaction still succeeds (identity not verified). `target` must not be a signer
-/// (PDAs and sysvars never are), so signers/payer are unaffected.
+/// Plant a clone of `target`'s account at `decoy`, repoint the metas, and replay.
 fn substitute_probe(ctx: &ProbeCtx, target: Pubkey, decoy: Pubkey) -> bool {
     let mut probe = ctx.svm.clone();
     let Some(account) = probe.get_account(&target) else {
@@ -74,6 +82,24 @@ fn substitute_probe(ctx: &ProbeCtx, target: Pubkey, decoy: Pubkey) -> bool {
     }
     let rewritten = rewrite_account(ctx.instructions, target, decoy);
     probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[(target, decoy)], &[])
+}
+
+fn substitute_mutated_account_probe(
+    ctx: &ProbeCtx,
+    target: Pubkey,
+    decoy: Pubkey,
+    mut mutate: impl FnMut(&mut solana_account::Account),
+) -> bool {
+    let mut probe = ctx.svm.clone();
+    let Some(mut account) = probe.get_account(&target) else {
+        return false;
+    };
+    mutate(&mut account);
+    if probe.set_account(decoy, account).is_err() {
+        return false;
+    }
+    let rewritten = rewrite_account(ctx.instructions, target, decoy);
+    probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[], &[target, decoy])
 }
 
 thread_local! {
@@ -175,6 +201,8 @@ trait MutationStrategy {
 fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationStrategy>> {
     vec![
         Box::new(PdaSubstitutionStrategy),
+        Box::new(TokenFakeOwnerStrategy),
+        Box::new(TokenWrongMintStrategy),
         Box::new(SysvarSubstitutionStrategy),
         Box::new(OwnerStrategy),
         Box::new(SignerStrategy),
@@ -506,8 +534,7 @@ fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction
         .collect()
 }
 
-/// CC-3: an account expected to be a specific PDA whose derivation the program never verifies.
-/// Substituting a clone at a different address and still succeeding means the address went unchecked.
+/// CC-3: an off-curve account accepted after both its address and owner are changed.
 struct PdaSubstitutionStrategy;
 
 impl MutationStrategy for PdaSubstitutionStrategy {
@@ -518,13 +545,21 @@ impl MutationStrategy for PdaSubstitutionStrategy {
                 continue;
             }
             let decoy = decoy_for(target);
-            if substitute_probe(ctx, target, decoy) {
+            let Some(account) = ctx.svm.get_account(&target) else {
+                continue;
+            };
+            let spoof_owner = wrong_owner(account.owner);
+            if substitute_mutated_account_probe(ctx, target, decoy, |account| {
+                account.owner = spoof_owner;
+            }) {
                 findings.push(Finding {
-                    id: finding_id("CC-3 pda", &ctx.instructions[0]),
+                    id: finding_id("CC-3 pda-spoof", &ctx.instructions[0]),
                     message: format!(
-                        "[CC-3 pda] account {} substituted with decoy {} instr {}:{} still succeeded (missing PDA derivation check)",
+                        "[CC-3 pda-spoof] account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing PDA derivation/owner check)",
                         target,
                         decoy,
+                        account.owner,
+                        spoof_owner,
                         ctx.instructions[0].program_id,
                         disc_hex(&ctx.instructions[0]),
                     ),
@@ -568,6 +603,229 @@ fn collect_pda_candidates(
         }
     }
     candidates
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenShapeKind {
+    Mint,
+    Account,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TokenShapeCandidate {
+    pubkey: Pubkey,
+    owner: Pubkey,
+    kind: TokenShapeKind,
+}
+
+/// Token owner checks are common enough to get precise labels instead of generic CC-1 findings.
+struct TokenFakeOwnerStrategy;
+
+impl MutationStrategy for TokenFakeOwnerStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for candidate in collect_token_shape_candidates(ctx.svm, ctx.instructions) {
+            if !account_is_load_bearing(ctx, &candidate.pubkey) {
+                continue;
+            }
+
+            let decoy = token_decoy_for(candidate.pubkey);
+            let spoof_owner = wrong_owner(candidate.owner);
+            if substitute_mutated_account_probe(ctx, candidate.pubkey, decoy, |account| {
+                account.owner = spoof_owner;
+            }) {
+                let (class, label, detail) = match candidate.kind {
+                    TokenShapeKind::Mint => (
+                        "CC-token fake-mint-owner",
+                        "[CC-token fake-mint-owner]",
+                        "SPL mint-shaped",
+                    ),
+                    TokenShapeKind::Account => (
+                        "CC-token fake-account-owner",
+                        "[CC-token fake-account-owner]",
+                        "SPL token-account-shaped",
+                    ),
+                };
+                findings.push(Finding {
+                    id: finding_id(class, &ctx.instructions[0]),
+                    message: format!(
+                        "{} account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing {} owner check)",
+                        label,
+                        candidate.pubkey,
+                        decoy,
+                        candidate.owner,
+                        spoof_owner,
+                        ctx.instructions[0].program_id,
+                        disc_hex(&ctx.instructions[0]),
+                        detail,
+                    ),
+                });
+            }
+        }
+        findings
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TokenAccountCandidate {
+    pubkey: Pubkey,
+    token: spl_token::state::Account,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MintCandidate {
+    pubkey: Pubkey,
+}
+
+/// Detects instructions that receive both a token account and a mint but never verify their relation.
+struct TokenWrongMintStrategy;
+
+impl MutationStrategy for TokenWrongMintStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let (token_accounts, mints) = collect_token_relation_candidates(ctx.svm, ctx.instructions);
+        if token_accounts.is_empty() || mints.is_empty() {
+            return findings;
+        }
+
+        for token_account in token_accounts {
+            if !account_is_load_bearing(ctx, &token_account.pubkey) {
+                continue;
+            }
+            for mint in &mints {
+                if token_account.token.mint != mint.pubkey {
+                    continue;
+                }
+                let wrong_mint = mints
+                    .iter()
+                    .map(|candidate| candidate.pubkey)
+                    .find(|pubkey| *pubkey != mint.pubkey)
+                    .unwrap_or(CRUCIBLE_ATTACKER);
+                let mut spoofed_token = token_account.token.clone();
+                spoofed_token.mint = wrong_mint;
+                let Some(data) = pack_token_account(spoofed_token) else {
+                    continue;
+                };
+                let decoy = token_decoy_for(token_account.pubkey);
+                if substitute_mutated_account_probe(ctx, token_account.pubkey, decoy, |account| {
+                    account.data = data.clone();
+                }) {
+                    findings.push(Finding {
+                        id: finding_id("CC-token wrong-mint", &ctx.instructions[0]),
+                        message: format!(
+                            "[CC-token wrong-mint] token account {} substituted with decoy {} mint {}->{} while mint account {} was provided, instr {}:{} still succeeded",
+                            token_account.pubkey,
+                            decoy,
+                            mint.pubkey,
+                            wrong_mint,
+                            mint.pubkey,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                        ),
+                    });
+                }
+            }
+        }
+        findings
+    }
+}
+
+fn collect_token_shape_candidates(
+    svm: &LiteSVM,
+    instructions: &[Instruction],
+) -> Vec<TokenShapeCandidate> {
+    let mut seen = FastHashSet::default();
+    let mut candidates = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if !seen.insert(meta.pubkey)
+                || meta.pubkey == ix.program_id
+                || is_known_sysvar(&meta.pubkey)
+            {
+                continue;
+            }
+            let Some(account) = svm.get_account(&meta.pubkey) else {
+                continue;
+            };
+            if account.executable || !is_token_program_owner(&account.owner) {
+                continue;
+            }
+            if unpack_mint(&account.data).is_some() {
+                candidates.push(TokenShapeCandidate {
+                    pubkey: meta.pubkey,
+                    owner: account.owner,
+                    kind: TokenShapeKind::Mint,
+                });
+            } else if unpack_token_account(&account.data).is_some() {
+                candidates.push(TokenShapeCandidate {
+                    pubkey: meta.pubkey,
+                    owner: account.owner,
+                    kind: TokenShapeKind::Account,
+                });
+            }
+        }
+    }
+    candidates
+}
+
+fn collect_token_relation_candidates(
+    svm: &LiteSVM,
+    instructions: &[Instruction],
+) -> (Vec<TokenAccountCandidate>, Vec<MintCandidate>) {
+    let mut seen = FastHashSet::default();
+    let mut token_accounts = Vec::new();
+    let mut mints = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if !seen.insert(meta.pubkey)
+                || meta.pubkey == ix.program_id
+                || is_known_sysvar(&meta.pubkey)
+            {
+                continue;
+            }
+            let Some(account) = svm.get_account(&meta.pubkey) else {
+                continue;
+            };
+            if account.executable || !is_token_program_owner(&account.owner) {
+                continue;
+            }
+            if let Some(token) = unpack_token_account(&account.data) {
+                token_accounts.push(TokenAccountCandidate {
+                    pubkey: meta.pubkey,
+                    token,
+                });
+            } else if unpack_mint(&account.data).is_some() {
+                mints.push(MintCandidate {
+                    pubkey: meta.pubkey,
+                });
+            }
+        }
+    }
+    (token_accounts, mints)
+}
+
+fn is_token_program_owner(owner: &Pubkey) -> bool {
+    *owner == spl_token::id() || *owner == TOKEN_2022_PROGRAM
+}
+
+fn unpack_mint(data: &[u8]) -> Option<spl_token::state::Mint> {
+    if data.len() != spl_token::state::Mint::LEN {
+        return None;
+    }
+    spl_token::state::Mint::unpack(data).ok()
+}
+
+fn unpack_token_account(data: &[u8]) -> Option<spl_token::state::Account> {
+    if data.len() != spl_token::state::Account::LEN {
+        return None;
+    }
+    spl_token::state::Account::unpack(data).ok()
+}
+
+fn pack_token_account(token: spl_token::state::Account) -> Option<Vec<u8>> {
+    let mut data = vec![0; spl_token::state::Account::LEN];
+    spl_token::state::Account::pack(token, &mut data).ok()?;
+    Some(data)
 }
 
 /// CC-2: a sysvar passed as an account, whose identity (key) the program never verifies — the
@@ -903,6 +1161,7 @@ fn is_known_sysvar(pubkey: &Pubkey) -> bool {
 mod tests {
     use super::*;
     use anchor_lang::solana_program::instruction::AccountMeta;
+    use anchor_lang::solana_program::program_option::COption;
     use solana_account::Account;
 
     fn make_account(owner: Pubkey, data: Vec<u8>) -> Account {
@@ -917,6 +1176,41 @@ mod tests {
 
     fn on_curve_pubkey() -> Pubkey {
         Keypair::new().pubkey()
+    }
+
+    fn packed_mint(decimals: u8) -> Vec<u8> {
+        let mut data = vec![0; spl_token::state::Mint::LEN];
+        spl_token::state::Mint::pack(
+            spl_token::state::Mint {
+                mint_authority: COption::None,
+                supply: 0,
+                decimals,
+                is_initialized: true,
+                freeze_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    }
+
+    fn packed_token_account(mint: Pubkey, owner: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = vec![0; spl_token::state::Account::LEN];
+        spl_token::state::Account::pack(
+            spl_token::state::Account {
+                mint,
+                owner,
+                amount,
+                delegate: COption::None,
+                state: spl_token::state::AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
     }
 
     #[test]
@@ -1079,6 +1373,90 @@ mod tests {
     }
 
     #[test]
+    fn collect_token_shape_candidates_picks_initialized_mint_and_token_account() {
+        let mut svm = LiteSVM::new();
+        let program_id = Pubkey::new_unique();
+        let mint = on_curve_pubkey();
+        let token_account = on_curve_pubkey();
+        let owner = on_curve_pubkey();
+        let random_data = on_curve_pubkey();
+
+        svm.set_account(mint, make_account(spl_token::id(), packed_mint(6)))
+            .unwrap();
+        svm.set_account(
+            token_account,
+            make_account(spl_token::id(), packed_token_account(mint, owner, 10)),
+        )
+        .unwrap();
+        svm.set_account(random_data, make_account(spl_token::id(), vec![1; 32]))
+            .unwrap();
+
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(mint, false),
+                AccountMeta::new_readonly(token_account, false),
+                AccountMeta::new_readonly(random_data, false),
+            ],
+            data: vec![],
+        };
+
+        assert_eq!(
+            collect_token_shape_candidates(&svm, &[ix]),
+            vec![
+                TokenShapeCandidate {
+                    pubkey: mint,
+                    owner: spl_token::id(),
+                    kind: TokenShapeKind::Mint,
+                },
+                TokenShapeCandidate {
+                    pubkey: token_account,
+                    owner: spl_token::id(),
+                    kind: TokenShapeKind::Account,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_token_relation_candidates_requires_a_mint_account() {
+        let mut svm = LiteSVM::new();
+        let program_id = Pubkey::new_unique();
+        let mint = on_curve_pubkey();
+        let token_account = on_curve_pubkey();
+        let owner = on_curve_pubkey();
+
+        svm.set_account(
+            token_account,
+            make_account(spl_token::id(), packed_token_account(mint, owner, 10)),
+        )
+        .unwrap();
+
+        let token_only_ix = Instruction {
+            program_id,
+            accounts: vec![AccountMeta::new_readonly(token_account, false)],
+            data: vec![],
+        };
+        let (token_accounts, mints) = collect_token_relation_candidates(&svm, &[token_only_ix]);
+        assert_eq!(token_accounts.len(), 1);
+        assert!(mints.is_empty());
+
+        svm.set_account(mint, make_account(spl_token::id(), packed_mint(6)))
+            .unwrap();
+        let paired_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(token_account, false),
+                AccountMeta::new_readonly(mint, false),
+            ],
+            data: vec![],
+        };
+        let (token_accounts, mints) = collect_token_relation_candidates(&svm, &[paired_ix]);
+        assert_eq!(token_accounts.len(), 1);
+        assert_eq!(mints, vec![MintCandidate { pubkey: mint }]);
+    }
+
+    #[test]
     fn post_state_matches_ignores_intentional_target_mutation_but_checks_effects() {
         let mut baseline = LiteSVM::new();
         let mut mutated = LiteSVM::new();
@@ -1214,6 +1592,14 @@ mod tests {
     fn decoy_for_uses_alt_when_equal() {
         assert_eq!(decoy_for(Pubkey::new_unique()), CRUCIBLE_DECOY);
         assert_eq!(decoy_for(CRUCIBLE_DECOY), CRUCIBLE_DECOY_ALT);
+    }
+
+    #[test]
+    fn token_decoy_is_on_curve_and_not_target() {
+        let target = Pubkey::new_unique();
+        let decoy = token_decoy_for(target);
+        assert_ne!(decoy, target);
+        assert!(bytes_are_curve_point(&decoy));
     }
 
     #[test]

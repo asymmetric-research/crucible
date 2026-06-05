@@ -192,23 +192,22 @@ crucible run myproject invariant_test --release --stateful -j 4
 
 ## Constraint-check engine (`--mutate-accounts`)
 
-`--mutate-accounts` turns on account-mutation probes for common missing account checks. Findings are
-reported as normal crashes with labels that identify the suspected missing check.
-
-It is **opt-in for `run`** (this flag) and **always enabled for `show --replay` and `tmin`**, so a
-mutation finding always reproduces and minimizes.
+`--mutate-accounts` turns on probes for common missing account checks. Findings are reported as
+normal crashes with labels that identify the suspected missing check. Replay and tmin enable the
+same probes automatically so mutation findings reproduce.
 
 Current labels:
 
 - `[CC-1 owner]` missing owner check
 - `[CC-2 sysvar]` missing sysvar identity check
-- `[CC-3 pda]` missing PDA address/derivation check
+- `[CC-3 pda-spoof]` missing PDA address/owner check
 - `[CC-4 signer]` missing signer assertion
 - `[CC-5 type-tag]` missing discriminator/type-tag check
+- `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
+- `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner
+- `[CC-token wrong-mint]` token account accepted with a mint field that does not match the mint account
 
-Discriminator length (CC-5) is read from registered account schemas when available. Closed-source
-harnesses with no registered account schema use `FUZZ_TYPE_TAG_LEN` or an 8-byte default; set
-`FUZZ_TYPE_TAG_LEN=0` to disable that fallback.
+Token relation probes require both a token account and a separate mint account in the instruction.
 
 ```bash
 # Find missing-check bugs while fuzzing
@@ -216,7 +215,7 @@ crucible run myproject invariant_test --release --mutate-accounts --timeout 60
 
 # Findings are normal crashes — inspect / replay / minimize as usual
 crucible show myproject <crash_id>
-crucible show myproject <crash_id> --replay   # engine auto-enabled
+crucible show myproject <crash_id> --replay
 ```
 
 ---

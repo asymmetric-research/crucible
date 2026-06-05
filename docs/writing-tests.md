@@ -94,6 +94,30 @@ pub fn action_stake(
 
 ---
 
+## Account-Mutation Checks
+
+Run a harness with `--mutate-accounts` to probe common missing account checks on cloned SVM state:
+
+```bash
+crucible run myproject invariant_test --release --mutate-accounts --timeout 60
+```
+
+Current finding labels:
+
+- `[CC-1 owner]` missing owner check
+- `[CC-2 sysvar]` missing sysvar identity check
+- `[CC-3 pda-spoof]` off-curve account accepted after both address and owner change
+- `[CC-4 signer]` missing signer assertion
+- `[CC-5 type-tag]` missing discriminator/type-tag check
+- `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
+- `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner
+- `[CC-token wrong-mint]` token account accepted with a mint field that does not match the mint account
+
+For token relation checks, seed both the token account and the mint account in the instruction. If
+only a token account is passed, the wrong-mint probe is skipped.
+
+---
+
 ## Simple Fuzzing (`#[crucible_fuzz]`)
 
 For testing individual operations with random inputs:

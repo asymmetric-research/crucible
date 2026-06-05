@@ -24,6 +24,8 @@ const CLAIM_AMOUNT: u64 = 10_000;
 const STATE_AMOUNT: u64 = 5_000;
 const FOREIGN_AMOUNT: u64 = 8_000;
 const TINY_AMOUNT: u32 = 7_000;
+const TOKEN_AMOUNT: u64 = 9_000;
+const MINT_DECIMALS: u8 = 6;
 const INITIAL_RECIPIENT_BALANCE: u64 = 1_000_000;
 const INITIAL_VAULT_BALANCE: u64 = 1_000_000_000;
 
@@ -339,7 +341,7 @@ fn no_finding_for_inert_account() {
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn flags_pda_substitution_when_no_derivation_check() {
     let mut h = harness();
-    // The CC-3 strategy runs before owner mutation and substitutes a clone at a different address.
+    // The CC-3 strategy substitutes a clone at a different address with a different owner.
     let (config, _bump) = Pubkey::find_program_address(&[b"config"], &h.program_id);
     create_data_account(
         &mut h.ctx,
@@ -360,12 +362,12 @@ fn flags_pda_substitution_when_no_derivation_check() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-3 pda]", config);
+    expect_finding("[CC-3 pda-spoof]", config);
 }
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn documents_false_positive_for_singleton_pda_clone() {
+fn no_finding_for_same_owner_singleton_pda_content_binding() {
     let mut h = harness();
     let (config, _bump) = Pubkey::find_program_address(&[b"singleton"], &h.program_id);
     seed_config(&mut h.ctx, config, h.program_id, CLAIM_AMOUNT);
@@ -384,7 +386,7 @@ fn documents_false_positive_for_singleton_pda_clone() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-3 pda]", config);
+    expect_no_finding();
 }
 
 #[test]
@@ -460,7 +462,7 @@ fn flags_pda_address_check_without_data_read() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-3 pda]", authority);
+    expect_finding("[CC-3 pda-spoof]", authority);
 }
 
 #[test]
@@ -556,6 +558,192 @@ fn flags_missing_owner_check_on_writable_config() {
         .unwrap();
 
     expect_owner_finding(config);
+}
+
+// ---- Token account owner and mint-relation checks ----
+
+fn seed_mint(ctx: &mut TestContext, pubkey: Pubkey) {
+    ctx.create_mint()
+        .pubkey(pubkey)
+        .decimals(MINT_DECIMALS)
+        .create()
+        .unwrap();
+}
+
+fn seed_token_account(ctx: &mut TestContext, pubkey: Pubkey, mint: Pubkey, owner: Pubkey) {
+    ctx.create_token_account()
+        .pubkey(pubkey)
+        .mint(mint)
+        .token_owner(owner)
+        .amount(TOKEN_AMOUNT)
+        .create()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_fake_mint_owner() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadMintNoOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadMint {
+            recipient: h.recipient.pubkey(),
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-token fake-mint-owner]", mint);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_mint_owner_checked() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadMintWithOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadMint {
+            recipient: h.recipient.pubkey(),
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_fake_token_account_owner() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTokenAccountNoOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+            recipient: h.recipient.pubkey(),
+            token_account,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-token fake-account-owner]", token_account);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_token_account_owner_checked() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTokenAccountWithOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+            recipient: h.recipient.pubkey(),
+            token_account,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_wrong_token_mint_relation() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTokenWithMintNoMintCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTokenWithMint {
+            recipient: h.recipient.pubkey(),
+            token_account,
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-token wrong-mint]", token_account);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_token_mint_relation_checked() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTokenWithMintCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTokenWithMint {
+            recipient: h.recipient.pubkey(),
+            token_account,
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_wrong_mint_probe_without_mint_account() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadTokenWithoutMintRelationContext {})
+        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+            recipient: h.recipient.pubkey(),
+            token_account,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
 }
 
 // ---- CC-4 signer checks ----
