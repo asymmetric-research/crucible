@@ -109,6 +109,9 @@ Current finding labels:
 - `[CC-3 pda-spoof]` off-curve account accepted after both address and owner change
 - `[CC-4 signer]` missing signer assertion
 - `[CC-5 type-tag]` missing discriminator/type-tag check
+- `[CC-8 field-ref]` same-class account accepted without checking an embedded pubkey relation
+- `[CC-8 root-ref]` child account accepted without checking a singleton/root account's embedded pubkey relation
+- `[CC-10 authority]` state account accepted with a different valid signer than the embedded authority
 - `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
 - `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner
 - `[CC-token wrong-mint]` token account accepted with a mint field that does not match the mint account

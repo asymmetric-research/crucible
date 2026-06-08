@@ -133,6 +133,142 @@
       "args": []
     },
     {
+      "name": "read_linked_no_check",
+      "docs": [
+        "Source embeds the expected target key, but the instruction never checks that relation."
+      ],
+      "discriminator": [
+        141,
+        28,
+        241,
+        22,
+        95,
+        132,
+        31,
+        253
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "target"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_linked_with_check",
+      "docs": [
+        "Same linked-source read, with `source.target == target.key()` checked."
+      ],
+      "discriminator": [
+        200,
+        156,
+        240,
+        115,
+        40,
+        250,
+        18,
+        39
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "target"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_root_child_no_check",
+      "docs": [
+        "Singleton/root account embeds a child key, but the instruction accepts a wrong child."
+      ],
+      "discriminator": [
+        173,
+        221,
+        180,
+        76,
+        111,
+        7,
+        146,
+        251
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "child"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_root_child_with_check",
+      "docs": [
+        "Same root-child read, with `root.child == child.key()` checked."
+      ],
+      "discriminator": [
+        131,
+        223,
+        101,
+        68,
+        67,
+        25,
+        227,
+        77
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "child"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_foreign_owned_no_check",
       "docs": [
         "Account expected to be owned by a *foreign* program (token/oracle flavor), missing check."
@@ -1033,6 +1169,74 @@
       "args": []
     },
     {
+      "name": "withdraw_authority_no_authority_check",
+      "docs": [
+        "State embeds the required authority, but any signer is accepted."
+      ],
+      "discriminator": [
+        179,
+        212,
+        168,
+        238,
+        110,
+        67,
+        133,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_authority_with_authority_check",
+      "docs": [
+        "Same authority-state read, with `state.authority == authority.key()` checked."
+      ],
+      "discriminator": [
+        133,
+        165,
+        118,
+        49,
+        78,
+        57,
+        116,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "withdraw_redundant_cosigner",
       "docs": [
         "`cosigner` is intentionally redundant metadata. The account mutator will still report a",
@@ -1166,6 +1370,58 @@
         26,
         140
       ]
+    },
+    {
+      "name": "LinkedState",
+      "discriminator": [
+        178,
+        163,
+        210,
+        62,
+        47,
+        48,
+        13,
+        148
+      ]
+    },
+    {
+      "name": "TargetState",
+      "discriminator": [
+        147,
+        73,
+        167,
+        190,
+        147,
+        166,
+        153,
+        37
+      ]
+    },
+    {
+      "name": "RootState",
+      "discriminator": [
+        168,
+        212,
+        194,
+        223,
+        236,
+        239,
+        59,
+        86
+      ]
+    },
+    {
+      "name": "AuthorityState",
+      "discriminator": [
+        217,
+        219,
+        18,
+        179,
+        143,
+        126,
+        98,
+        123
+      ]
     }
   ],
   "errors": [
@@ -1218,6 +1474,11 @@
       "code": 6009,
       "name": "WrongMint",
       "msg": "Wrong mint"
+    },
+    {
+      "code": 6010,
+      "name": "WrongTarget",
+      "msg": "Wrong target"
     }
   ],
   "types": [
@@ -1247,6 +1508,66 @@
         },
         {
             "name": "TraderState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "authority",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "LinkedState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "target",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "TargetState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "RootState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "child",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "AuthorityState",
             "type": {
                 "kind": "struct",
                 "fields": [

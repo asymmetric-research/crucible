@@ -953,6 +953,26 @@ fn register_config_schema() {
                 discriminator: owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
+            crucible_test_context::AccountSchema {
+                type_name: "LinkedState".into(),
+                discriminator: owner_mutation_airdrop::LinkedState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "TargetState".into(),
+                discriminator: owner_mutation_airdrop::TargetState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "RootState".into(),
+                discriminator: owner_mutation_airdrop::RootState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "AuthorityState".into(),
+                discriminator: owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
         ]);
     }
 }
@@ -973,6 +993,51 @@ fn seed_trader_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, autho
     let mut data = owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(authority.as_ref());
     data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_linked_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    target: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::LinkedState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(target.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_target_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
+    let mut data = owner_mutation_airdrop::TargetState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_root_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    child: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::RootState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(child.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_authority_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    authority: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
@@ -1110,6 +1175,224 @@ fn no_finding_for_custom_cross_account_invariant_bug() {
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient, &authority])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc8_field_ref_when_linked_target_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let source = Keypair::new().pubkey();
+    let source_alt = Keypair::new().pubkey();
+    let target = Keypair::new().pubkey();
+    let target_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, target, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, target_alt, h.program_id, CLAIM_AMOUNT);
+    seed_linked_state(&mut h.ctx, source, h.program_id, target, CLAIM_AMOUNT);
+    seed_linked_state(
+        &mut h.ctx,
+        source_alt,
+        h.program_id,
+        target_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLinkedNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+            recipient: h.recipient.pubkey(),
+            source,
+            target,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-8 field-ref]", source);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_linked_target_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let source = Keypair::new().pubkey();
+    let source_alt = Keypair::new().pubkey();
+    let target = Keypair::new().pubkey();
+    let target_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, target, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, target_alt, h.program_id, CLAIM_AMOUNT);
+    seed_linked_state(&mut h.ctx, source, h.program_id, target, CLAIM_AMOUNT);
+    seed_linked_state(
+        &mut h.ctx,
+        source_alt,
+        h.program_id,
+        target_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLinkedWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+            recipient: h.recipient.pubkey(),
+            source,
+            target,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_cc8_finding_for_singleton_classes() {
+    register_config_schema();
+    let mut h = harness();
+    let source = Keypair::new().pubkey();
+    let target = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, target, h.program_id, CLAIM_AMOUNT);
+    seed_linked_state(&mut h.ctx, source, h.program_id, target, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLinkedNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+            recipient: h.recipient.pubkey(),
+            source,
+            target,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc8_root_ref_when_child_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let child = Keypair::new().pubkey();
+    let child_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, child, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, child_alt, h.program_id, CLAIM_AMOUNT);
+    seed_root_state(&mut h.ctx, root, h.program_id, child, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadRootChildNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadRootChild {
+            recipient: h.recipient.pubkey(),
+            root,
+            child,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-8 root-ref]", root);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_root_child_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let child = Keypair::new().pubkey();
+    let child_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, child, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, child_alt, h.program_id, CLAIM_AMOUNT);
+    seed_root_state(&mut h.ctx, root, h.program_id, child, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadRootChildWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadRootChild {
+            recipient: h.recipient.pubkey(),
+            root,
+            child,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc10_wrong_signer_when_authority_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let authority = Keypair::new();
+    let state = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, authority.pubkey());
+    seed_authority_state(
+        &mut h.ctx,
+        state,
+        h.program_id,
+        authority.pubkey(),
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::WithdrawAuthorityNoAuthorityCheck {})
+        .accounts(owner_mutation_airdrop::accounts::WithdrawAuthorityState {
+            recipient: h.recipient.pubkey(),
+            authority: authority.pubkey(),
+            state,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &authority])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-10 authority]", state);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_authority_relation_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let authority = Keypair::new();
+    let state = Keypair::new().pubkey();
+    create_system_account(&mut h.ctx, authority.pubkey());
+    seed_authority_state(
+        &mut h.ctx,
+        state,
+        h.program_id,
+        authority.pubkey(),
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::WithdrawAuthorityWithAuthorityCheck {})
+        .accounts(owner_mutation_airdrop::accounts::WithdrawAuthorityState {
+            recipient: h.recipient.pubkey(),
+            authority: authority.pubkey(),
+            state,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &authority])
         .send()
         .unwrap();
 

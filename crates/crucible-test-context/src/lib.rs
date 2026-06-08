@@ -1849,6 +1849,7 @@ impl TestContext {
         account_mutation::maybe_probe_account_mutation(
             &self.svm,
             &self.account_mutation,
+            self.tracked_accounts.as_ref(),
             instructions,
             signers,
             payer,

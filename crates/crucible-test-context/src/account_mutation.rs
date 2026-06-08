@@ -1,8 +1,9 @@
-use crate::{record_mutation_violation, FastHashSet};
+use crate::{record_mutation_violation, FastHashMap, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program_pack::Pack;
+use anchor_lang::solana_program::system_program;
 use anyhow::Result;
 use litesvm::LiteSVM;
 use solana_keypair::Keypair;
@@ -17,6 +18,7 @@ use solana_sysvar::last_restart_slot::LastRestartSlot;
 use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_transaction::versioned::VersionedTransaction;
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 const DEFAULT_SKIP_PDA_CANDIDATES: bool = true;
 
@@ -102,6 +104,44 @@ fn substitute_mutated_account_probe(
     probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[], &[target, decoy])
 }
 
+fn substitute_existing_account_probe(ctx: &ProbeCtx, target: Pubkey, replacement: Pubkey) -> bool {
+    let mut probe = ctx.svm.clone();
+    let rewritten = rewrite_account(ctx.instructions, target, replacement);
+    probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[], &[target, replacement])
+}
+
+fn probe_matches_baseline_effects_with_signers(
+    ctx: &ProbeCtx,
+    probe: &mut LiteSVM,
+    mutated_instructions: &[Instruction],
+    signers: &[&Keypair],
+    equivalent_accounts: &[(Pubkey, Pubkey)],
+    ignored_accounts: &[Pubkey],
+) -> bool {
+    if !matches!(
+        send_probe_transaction(
+            probe,
+            mutated_instructions,
+            signers,
+            ctx.payer,
+            ctx.sigverify
+        ),
+        Ok(Ok(_))
+    ) {
+        return false;
+    }
+
+    post_state_matches(
+        ctx.baseline_after,
+        probe,
+        ctx.instructions,
+        mutated_instructions,
+        equivalent_accounts,
+        ignored_accounts,
+        ctx.payer.pubkey(),
+    )
+}
+
 thread_local! {
     /// Instruction types whose mutation battery already ran this run (per worker). The key is
     /// `(program_id, 8-byte discriminator)`. This persists for the whole run — it is *not*
@@ -183,6 +223,7 @@ struct Finding {
 struct ProbeCtx<'a> {
     svm: &'a LiteSVM,
     baseline_after: &'a LiteSVM,
+    observed_accounts: &'a HashSet<Pubkey>,
     instructions: &'a [Instruction],
     signers: &'a [&'a Keypair],
     payer: &'a Keypair,
@@ -203,9 +244,11 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(PdaSubstitutionStrategy),
         Box::new(TokenFakeOwnerStrategy),
         Box::new(TokenWrongMintStrategy),
+        Box::new(FieldCrossReferenceStrategy),
         Box::new(SysvarSubstitutionStrategy),
         Box::new(OwnerStrategy),
         Box::new(SignerStrategy),
+        Box::new(AuthoritySignerStrategy),
         Box::new(TypeTagStrategy),
     ]
 }
@@ -231,6 +274,7 @@ fn finding_id(class: &str, ix: &Instruction) -> String {
 pub(crate) fn maybe_probe_account_mutation(
     svm: &LiteSVM,
     config: &AccountMutationConfig,
+    observed_accounts: &HashSet<Pubkey>,
     instructions: &[Instruction],
     signers: &[&Keypair],
     payer: &Keypair,
@@ -263,6 +307,7 @@ pub(crate) fn maybe_probe_account_mutation(
     let ctx = ProbeCtx {
         svm,
         baseline_after: &baseline,
+        observed_accounts,
         instructions,
         signers,
         payer,
@@ -532,6 +577,109 @@ fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction
             ix
         })
         .collect()
+}
+
+/// CC-10: account data names an authority/delegate signer, but the instruction accepts a different
+/// valid signer. This is separate from CC-4: the replacement account still signs, so a plain
+/// `is_signer` assertion is satisfied.
+struct AuthoritySignerStrategy;
+
+impl MutationStrategy for AuthoritySignerStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let payer = ctx.payer.pubkey();
+
+        for source in instruction_account_keys(ctx.instructions) {
+            if account_has_signer_meta(ctx.instructions, source) || is_known_sysvar(&source) {
+                continue;
+            }
+            let Some(account) = ctx.svm.get_account(&source) else {
+                continue;
+            };
+            if account.executable
+                || account.data.is_empty()
+                || !account_is_load_bearing(ctx, &source)
+            {
+                continue;
+            }
+
+            for signer in signer_meta_pubkeys(ctx.instructions) {
+                if signer == payer
+                    || signer == source
+                    || !data_contains_pubkey(&account.data, &signer)
+                {
+                    continue;
+                }
+
+                let attacker = Keypair::new();
+                let attacker_pubkey = attacker.pubkey();
+                let mut probe = ctx.svm.clone();
+                if probe
+                    .set_account(attacker_pubkey, system_signer_account())
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let rewritten = rewrite_account(ctx.instructions, signer, attacker_pubkey);
+                let mut signers = ctx.signers.to_vec();
+                signers.push(&attacker);
+
+                if probe_matches_baseline_effects_with_signers(
+                    ctx,
+                    &mut probe,
+                    &rewritten,
+                    &signers,
+                    &[],
+                    &[signer, attacker_pubkey],
+                ) {
+                    findings.push(Finding {
+                        id: finding_id("CC-10 authority", &ctx.instructions[0]),
+                        message: format!(
+                            "[CC-10 authority] account {} contains authority {}, but instr {}:{} still succeeded with replacement signer {}",
+                            source,
+                            signer,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                            attacker_pubkey,
+                        ),
+                    });
+                }
+            }
+        }
+
+        findings
+    }
+}
+
+fn signer_meta_pubkeys(instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut signers = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if meta.is_signer && seen.insert(meta.pubkey) {
+                signers.push(meta.pubkey);
+            }
+        }
+    }
+    signers
+}
+
+fn account_has_signer_meta(instructions: &[Instruction], pubkey: Pubkey) -> bool {
+    instructions
+        .iter()
+        .flat_map(|ix| ix.accounts.iter())
+        .any(|meta| meta.pubkey == pubkey && meta.is_signer)
+}
+
+fn system_signer_account() -> solana_account::Account {
+    solana_account::Account {
+        lamports: 1_000_000,
+        data: Vec::new(),
+        owner: system_program::id(),
+        executable: false,
+        rent_epoch: 0,
+    }
 }
 
 /// CC-3: an off-curve account accepted after both its address and owner are changed.
@@ -826,6 +974,261 @@ fn pack_token_account(token: spl_token::state::Account) -> Option<Vec<u8>> {
     let mut data = vec![0; spl_token::state::Account::LEN];
     spl_token::state::Account::pack(token, &mut data).ok()?;
     Some(data)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AccountClass {
+    owner: Pubkey,
+    shape: AccountShape,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AccountShape {
+    SplMint,
+    SplTokenAccount,
+    Discriminator(Vec<u8>),
+    DataLen(usize),
+}
+
+#[derive(Clone, Debug)]
+struct AccountClassIndex {
+    by_pubkey: FastHashMap<Pubkey, AccountClass>,
+    by_class: FastHashMap<AccountClass, Vec<Pubkey>>,
+}
+
+impl AccountClassIndex {
+    fn build(
+        svm: &LiteSVM,
+        observed_accounts: &HashSet<Pubkey>,
+        config: &AccountMutationConfig,
+    ) -> Self {
+        let mut by_pubkey = FastHashMap::default();
+        let mut by_class: FastHashMap<AccountClass, Vec<Pubkey>> = FastHashMap::default();
+
+        for pubkey in observed_accounts {
+            if config.unverified_accounts.contains(pubkey) || is_known_sysvar(pubkey) {
+                continue;
+            }
+            let Some(account) = svm.get_account(pubkey) else {
+                continue;
+            };
+            let Some(class) = classify_account(&account) else {
+                continue;
+            };
+            by_pubkey.insert(*pubkey, class.clone());
+            by_class.entry(class).or_default().push(*pubkey);
+        }
+
+        for accounts in by_class.values_mut() {
+            accounts.sort_by_key(|pubkey| pubkey.to_bytes());
+        }
+
+        Self {
+            by_pubkey,
+            by_class,
+        }
+    }
+
+    fn class_count(&self, pubkey: &Pubkey) -> usize {
+        self.by_pubkey
+            .get(pubkey)
+            .and_then(|class| self.by_class.get(class))
+            .map(|accounts| accounts.len())
+            .unwrap_or(0)
+    }
+
+    fn same_class_replacements(&self, pubkey: &Pubkey) -> Vec<Pubkey> {
+        let Some(class) = self.by_pubkey.get(pubkey) else {
+            return Vec::new();
+        };
+        let Some(accounts) = self.by_class.get(class) else {
+            return Vec::new();
+        };
+        if accounts.len() < 2 {
+            return Vec::new();
+        }
+        accounts
+            .iter()
+            .copied()
+            .filter(|candidate| candidate != pubkey)
+            .collect()
+    }
+}
+
+fn classify_account(account: &solana_account::Account) -> Option<AccountClass> {
+    if account.executable || account.data.is_empty() {
+        return None;
+    }
+
+    let shape = if is_token_program_owner(&account.owner) {
+        if unpack_mint(&account.data).is_some() {
+            AccountShape::SplMint
+        } else if unpack_token_account(&account.data).is_some() {
+            AccountShape::SplTokenAccount
+        } else if let Some(discriminator) = registered_discriminator(&account.data) {
+            AccountShape::Discriminator(discriminator)
+        } else {
+            AccountShape::DataLen(account.data.len())
+        }
+    } else if let Some(discriminator) = registered_discriminator(&account.data) {
+        AccountShape::Discriminator(discriminator)
+    } else {
+        AccountShape::DataLen(account.data.len())
+    };
+
+    Some(AccountClass {
+        owner: account.owner,
+        shape,
+    })
+}
+
+fn registered_discriminator(data: &[u8]) -> Option<Vec<u8>> {
+    let disc_len = crate::schema::lookup_discriminator_len(data)?;
+    if data.len() < disc_len {
+        return None;
+    }
+    Some(data[..disc_len].to_vec())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FieldRefEdge {
+    source: Pubkey,
+    target: Pubkey,
+}
+
+struct FieldCrossReferenceStrategy;
+
+impl MutationStrategy for FieldCrossReferenceStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let class_index = AccountClassIndex::build(ctx.svm, ctx.observed_accounts, ctx.config);
+        let current_accounts = instruction_account_keys(ctx.instructions);
+
+        for edge in collect_field_ref_edges(ctx.svm, ctx.instructions) {
+            if !account_is_load_bearing(ctx, &edge.source)
+                || !account_is_identity_relevant(ctx, &edge.target)
+            {
+                continue;
+            }
+
+            let Some(source_account) = ctx.svm.get_account(&edge.source) else {
+                continue;
+            };
+
+            for replacement in class_index.same_class_replacements(&edge.source) {
+                if current_accounts.contains(&replacement) {
+                    continue;
+                }
+                let Some(replacement_account) = ctx.svm.get_account(&replacement) else {
+                    continue;
+                };
+                if data_contains_pubkey(&replacement_account.data, &edge.target) {
+                    continue;
+                }
+                if substitute_existing_account_probe(ctx, edge.source, replacement) {
+                    findings.push(cc8_finding(
+                        ctx,
+                        &class_index,
+                        edge,
+                        edge.source,
+                        replacement,
+                    ));
+                }
+            }
+
+            for replacement in class_index.same_class_replacements(&edge.target) {
+                if current_accounts.contains(&replacement)
+                    || data_contains_pubkey(&source_account.data, &replacement)
+                {
+                    continue;
+                }
+                if substitute_existing_account_probe(ctx, edge.target, replacement) {
+                    findings.push(cc8_finding(
+                        ctx,
+                        &class_index,
+                        edge,
+                        edge.target,
+                        replacement,
+                    ));
+                }
+            }
+        }
+
+        findings
+    }
+}
+
+fn cc8_finding(
+    ctx: &ProbeCtx,
+    class_index: &AccountClassIndex,
+    edge: FieldRefEdge,
+    substituted: Pubkey,
+    replacement: Pubkey,
+) -> Finding {
+    let opposite = if substituted == edge.source {
+        edge.target
+    } else {
+        edge.source
+    };
+    let (class, label) = if class_index.class_count(&opposite) <= 1 {
+        ("CC-8 root-ref", "[CC-8 root-ref]")
+    } else {
+        ("CC-8 field-ref", "[CC-8 field-ref]")
+    };
+
+    Finding {
+        id: finding_id(class, &ctx.instructions[0]),
+        message: format!(
+            "{} account {} references {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing field cross-reference check)",
+            label,
+            edge.source,
+            edge.target,
+            substituted,
+            replacement,
+            ctx.instructions[0].program_id,
+            disc_hex(&ctx.instructions[0]),
+        ),
+    }
+}
+
+fn collect_field_ref_edges(svm: &LiteSVM, instructions: &[Instruction]) -> Vec<FieldRefEdge> {
+    let current_accounts = instruction_account_keys(instructions);
+    let mut edges = Vec::new();
+    let mut seen = FastHashSet::default();
+
+    for source in &current_accounts {
+        if is_known_sysvar(source) {
+            continue;
+        }
+        let Some(account) = svm.get_account(source) else {
+            continue;
+        };
+        if account.executable || account.data.is_empty() {
+            continue;
+        }
+        for target in &current_accounts {
+            if source == target || is_known_sysvar(target) || target == &Pubkey::default() {
+                continue;
+            }
+            if svm.get_account(target).is_none() {
+                continue;
+            }
+            let edge = FieldRefEdge {
+                source: *source,
+                target: *target,
+            };
+            if data_contains_pubkey(&account.data, target) && seen.insert(edge) {
+                edges.push(edge);
+            }
+        }
+    }
+
+    edges.sort_by_key(|edge| (edge.source.to_bytes(), edge.target.to_bytes()));
+    edges
+}
+
+fn data_contains_pubkey(data: &[u8], pubkey: &Pubkey) -> bool {
+    data.windows(32).any(|window| window == pubkey.as_ref())
 }
 
 /// CC-2: a sysvar passed as an account, whose identity (key) the program never verifies — the
@@ -1457,6 +1860,89 @@ mod tests {
     }
 
     #[test]
+    fn account_class_index_groups_same_shape_and_skips_singletons() {
+        let mut svm = LiteSVM::new();
+        let owner = Pubkey::new_unique();
+        let same_a = on_curve_pubkey();
+        let same_b = on_curve_pubkey();
+        let singleton = on_curve_pubkey();
+        let empty = on_curve_pubkey();
+
+        let mut same_a_data = vec![0xAA; 8];
+        same_a_data.extend_from_slice(&[1; 8]);
+        let mut same_b_data = vec![0xAA; 8];
+        same_b_data.extend_from_slice(&[2; 8]);
+        let mut singleton_data = vec![0xBB; 8];
+        singleton_data.extend_from_slice(&[3; 16]);
+        svm.set_account(same_a, make_account(owner, same_a_data))
+            .unwrap();
+        svm.set_account(same_b, make_account(owner, same_b_data))
+            .unwrap();
+        svm.set_account(singleton, make_account(owner, singleton_data))
+            .unwrap();
+        svm.set_account(empty, make_account(owner, Vec::new()))
+            .unwrap();
+
+        let observed = HashSet::from([same_a, same_b, singleton, empty]);
+        let index = AccountClassIndex::build(&svm, &observed, &AccountMutationConfig::default());
+
+        assert_eq!(index.class_count(&same_a), 2);
+        assert_eq!(index.class_count(&singleton), 1);
+        assert_eq!(index.class_count(&empty), 0);
+        assert_eq!(index.same_class_replacements(&same_a), vec![same_b]);
+        assert!(index.same_class_replacements(&singleton).is_empty());
+    }
+
+    #[test]
+    fn collect_field_ref_edges_finds_pubkey_embedded_in_account_data() {
+        let mut svm = LiteSVM::new();
+        let program_id = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let source = Pubkey::new_from_array([1; 32]);
+        let target = Pubkey::new_from_array([2; 32]);
+        let unrelated = Pubkey::new_from_array([3; 32]);
+        let mut source_data = vec![9; 7];
+        source_data.extend_from_slice(target.as_ref());
+        source_data.extend_from_slice(&[8; 5]);
+
+        svm.set_account(source, make_account(owner, source_data))
+            .unwrap();
+        svm.set_account(target, make_account(owner, vec![4; 16]))
+            .unwrap();
+        svm.set_account(unrelated, make_account(owner, vec![5; 16]))
+            .unwrap();
+
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(source, false),
+                AccountMeta::new_readonly(target, false),
+                AccountMeta::new_readonly(unrelated, false),
+            ],
+            data: vec![],
+        };
+
+        assert_eq!(
+            collect_field_ref_edges(&svm, &[ix]),
+            vec![FieldRefEdge { source, target }]
+        );
+    }
+
+    #[test]
+    fn data_contains_pubkey_matches_exact_32_byte_window() {
+        let target = Pubkey::new_from_array([7; 32]);
+        let mut data = vec![1; 3];
+        data.extend_from_slice(target.as_ref());
+        data.extend_from_slice(&[2; 3]);
+
+        assert!(data_contains_pubkey(&data, &target));
+        assert!(!data_contains_pubkey(
+            &data,
+            &Pubkey::new_from_array([8; 32])
+        ));
+    }
+
+    #[test]
     fn post_state_matches_ignores_intentional_target_mutation_but_checks_effects() {
         let mut baseline = LiteSVM::new();
         let mut mutated = LiteSVM::new();
@@ -1659,6 +2145,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn signer_meta_pubkeys_and_meta_lookup_use_instruction_flags_only() {
+        let program_id = Pubkey::new_unique();
+        let signer = Pubkey::new_unique();
+        let non_signer = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(signer, true),
+                AccountMeta::new_readonly(non_signer, false),
+            ],
+            data: vec![],
+        };
+
+        assert_eq!(signer_meta_pubkeys(std::slice::from_ref(&ix)), vec![signer]);
+        assert!(account_has_signer_meta(std::slice::from_ref(&ix), signer));
+        assert!(!account_has_signer_meta(&[ix], non_signer));
     }
 
     #[test]

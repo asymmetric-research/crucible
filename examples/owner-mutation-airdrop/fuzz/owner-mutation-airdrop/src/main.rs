@@ -38,6 +38,10 @@ const MINT_DECIMALS: u8 = 6;
 const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
 const ALTERNATE_CONFIG_DISCRIMINATOR: [u8; 8] = [112, 26, 206, 10, 180, 130, 5, 4];
 const TRADER_STATE_DISCRIMINATOR: [u8; 8] = [124, 33, 101, 17, 158, 79, 26, 140];
+const LINKED_STATE_DISCRIMINATOR: [u8; 8] = [178, 163, 210, 62, 47, 48, 13, 148];
+const TARGET_STATE_DISCRIMINATOR: [u8; 8] = [147, 73, 167, 190, 147, 166, 153, 37];
+const ROOT_STATE_DISCRIMINATOR: [u8; 8] = [168, 212, 194, 223, 236, 239, 59, 86];
+const AUTHORITY_STATE_DISCRIMINATOR: [u8; 8] = [217, 219, 18, 179, 143, 126, 98, 123];
 
 #[derive(Clone)]
 struct OwnerMutationAirdropFixture {
@@ -64,6 +68,11 @@ struct OwnerMutationAirdropFixture {
     token_account: Pubkey,   // SPL token-account-shaped account
     source_trader: Pubkey,   // custom invariant source account (documented FN)
     destination_trader: Pubkey, // custom invariant destination account (documented FN)
+    linked_source: Pubkey,   // CC-8 same-class source containing a target pubkey
+    linked_target: Pubkey,   // CC-8 same-class referenced target
+    root: Pubkey,            // CC-8 singleton/root account containing a child pubkey
+    root_child: Pubkey,
+    authority_state: Pubkey, // CC-10 state containing the expected signer pubkey
 }
 
 #[fuzz_fixture]
@@ -173,6 +182,36 @@ impl OwnerMutationAirdropFixture {
         destination_trader_data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
         let destination_trader = Self::new_data(&mut ctx, program_id, &destination_trader_data);
 
+        let linked_target =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+        let linked_target_alt =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+        let linked_source = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::linked_state_data(linked_target, CLAIM_AMOUNT),
+        );
+        let _linked_source_alt = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::linked_state_data(linked_target_alt, CLAIM_AMOUNT),
+        );
+
+        let root_child =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+        let _root_child_alt =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+        let root = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::root_state_data(root_child, CLAIM_AMOUNT),
+        );
+        let authority_state = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::authority_state_data(authority.pubkey(), CLAIM_AMOUNT),
+        );
+
         let vault = Keypair::new().pubkey();
         ctx.create_account()
             .pubkey(vault)
@@ -205,6 +244,11 @@ impl OwnerMutationAirdropFixture {
             token_account,
             source_trader,
             destination_trader,
+            linked_source,
+            linked_target,
+            root,
+            root_child,
+            authority_state,
         }
     }
 
@@ -218,6 +262,33 @@ impl OwnerMutationAirdropFixture {
             .create()
             .unwrap();
         pubkey
+    }
+
+    fn linked_state_data(target: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = LINKED_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(target.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn target_state_data(amount: u64) -> Vec<u8> {
+        let mut data = TARGET_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn root_state_data(child: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = ROOT_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(child.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn authority_state_data(authority: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = AUTHORITY_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(authority.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
     }
 
     // ---- CC-1 owner-check paths (typed API; config accounts are read-only) ----
@@ -615,6 +686,104 @@ impl OwnerMutationAirdropFixture {
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient, &*self.authority])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    // ---- CC-8 / CC-10 relation paths ----
+
+    pub fn action_read_linked_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadLinkedNoCheck {})
+            .accounts(accounts::ReadLinkedNoCheck {
+                recipient: self.recipient.pubkey(),
+                source: self.linked_source,
+                target: self.linked_target,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_linked_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadLinkedWithCheck {})
+            .accounts(accounts::ReadLinkedWithCheck {
+                recipient: self.recipient.pubkey(),
+                source: self.linked_source,
+                target: self.linked_target,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_root_child_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadRootChildNoCheck {})
+            .accounts(accounts::ReadRootChildNoCheck {
+                recipient: self.recipient.pubkey(),
+                root: self.root,
+                child: self.root_child,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_root_child_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadRootChildWithCheck {})
+            .accounts(accounts::ReadRootChildWithCheck {
+                recipient: self.recipient.pubkey(),
+                root: self.root,
+                child: self.root_child,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_withdraw_authority_no_authority_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::WithdrawAuthorityNoAuthorityCheck {})
+            .accounts(accounts::WithdrawAuthorityNoAuthorityCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.authority.pubkey(),
+                state: self.authority_state,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.authority])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_withdraw_authority_with_authority_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::WithdrawAuthorityWithAuthorityCheck {})
+            .accounts(accounts::WithdrawAuthorityWithAuthorityCheck {
+                recipient: self.recipient.pubkey(),
+                authority: self.authority.pubkey(),
+                state: self.authority_state,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.authority])
             .send()
             .map(|o| o.is_success())
             .unwrap_or(false)

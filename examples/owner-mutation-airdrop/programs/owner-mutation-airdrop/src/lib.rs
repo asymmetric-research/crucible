@@ -532,6 +532,88 @@ pub mod owner_mutation_airdrop {
         )
     }
 
+    // ---- CC-8 / CC-10 relation checks ----
+
+    /// Source embeds the expected target key, but the instruction never checks that relation.
+    pub fn read_linked_no_check(ctx: Context<ReadLinked>) -> Result<()> {
+        let (_expected_target, source_amount) = read_linked_state(&ctx.accounts.source)?;
+        let target_amount = read_target_state(&ctx.accounts.target)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            source_amount + target_amount,
+        )
+    }
+
+    /// Same linked-source read, with `source.target == target.key()` checked.
+    pub fn read_linked_with_check(ctx: Context<ReadLinked>) -> Result<()> {
+        let (expected_target, source_amount) = read_linked_state(&ctx.accounts.source)?;
+        require!(
+            expected_target == ctx.accounts.target.key(),
+            AirdropError::WrongTarget
+        );
+        let target_amount = read_target_state(&ctx.accounts.target)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            source_amount + target_amount,
+        )
+    }
+
+    /// Singleton/root account embeds a child key, but the instruction accepts a wrong child.
+    pub fn read_root_child_no_check(ctx: Context<ReadRootChild>) -> Result<()> {
+        let (_expected_child, root_amount) = read_root_state(&ctx.accounts.root)?;
+        let child_amount = read_target_state(&ctx.accounts.child)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            root_amount + child_amount,
+        )
+    }
+
+    /// Same root-child read, with `root.child == child.key()` checked.
+    pub fn read_root_child_with_check(ctx: Context<ReadRootChild>) -> Result<()> {
+        let (expected_child, root_amount) = read_root_state(&ctx.accounts.root)?;
+        require!(
+            expected_child == ctx.accounts.child.key(),
+            AirdropError::WrongTarget
+        );
+        let child_amount = read_target_state(&ctx.accounts.child)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            root_amount + child_amount,
+        )
+    }
+
+    /// State embeds the required authority, but any signer is accepted.
+    pub fn withdraw_authority_no_authority_check(
+        ctx: Context<WithdrawAuthorityState>,
+    ) -> Result<()> {
+        let (_expected_authority, amount) = read_authority_state(&ctx.accounts.state)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same authority-state read, with `state.authority == authority.key()` checked.
+    pub fn withdraw_authority_with_authority_check(
+        ctx: Context<WithdrawAuthorityState>,
+    ) -> Result<()> {
+        let (expected_authority, amount) = read_authority_state(&ctx.accounts.state)?;
+        require!(
+            expected_authority == ctx.accounts.authority.key(),
+            AirdropError::WrongAuthority
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
     // ---- CC-2 sysvar: read the Clock from a passed account with / without an identity check ----
 
     /// Reads the clock's `unix_timestamp` from the passed account without verifying its key — a
@@ -621,6 +703,61 @@ fn read_trader_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
     require!(data.len() >= 48, AirdropError::InvalidConfig);
     require!(
         &data[0..8] == TraderState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let authority = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((authority, amount))
+}
+
+fn read_linked_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == LinkedState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let target = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((target, amount))
+}
+
+fn read_target_state(account: &UncheckedAccount) -> Result<u64> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 16, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == TargetState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let amount = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok(amount)
+}
+
+fn read_root_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == RootState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let child = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((child, amount))
+}
+
+fn read_authority_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == AuthorityState::DISCRIMINATOR,
         AirdropError::InvalidConfig
     );
     let authority = Pubkey::new_from_array(data[8..40].try_into().unwrap());
@@ -814,6 +951,29 @@ pub struct TraderState {
     pub amount: u64,
 }
 
+#[account]
+pub struct LinkedState {
+    pub target: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct TargetState {
+    pub amount: u64,
+}
+
+#[account]
+pub struct RootState {
+    pub child: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct AuthorityState {
+    pub authority: Pubkey,
+    pub amount: u64,
+}
+
 #[derive(Accounts)]
 pub struct ReadTyped<'info> {
     #[account(mut)]
@@ -844,6 +1004,45 @@ pub struct TransferBetweenTraders<'info> {
     pub source_trader: UncheckedAccount<'info>,
     /// CHECK: individually validated in the instruction.
     pub destination_trader: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadLinked<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub source: UncheckedAccount<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub target: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadRootChild<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub root: UncheckedAccount<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub child: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawAuthorityState<'info> {
+    /// CHECK: payout destination.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+    pub authority: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub state: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,
@@ -882,4 +1081,6 @@ pub enum AirdropError {
     WrongAuthority,
     #[msg("Wrong mint")]
     WrongMint,
+    #[msg("Wrong target")]
+    WrongTarget,
 }
