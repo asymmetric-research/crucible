@@ -497,7 +497,8 @@ impl MutationStrategy for SignerStrategy {
             }
             let flipped = clear_signer(ctx.instructions, candidate.pubkey);
             let mut probe = ctx.svm.clone();
-            if probe_matches_baseline_effects(ctx, &mut probe, &flipped, &[], &[]) {
+            let ignored = signer_probe_ignored_accounts(ctx.instructions, &flipped, payer);
+            if probe_matches_baseline_effects(ctx, &mut probe, &flipped, &[], &ignored) {
                 let detail = match candidate.kind {
                     SignerCandidateKind::MetaSigner => "is_signer cleared",
                     SignerCandidateKind::SuppliedSigner => {
@@ -579,6 +580,20 @@ fn clear_signer(instructions: &[Instruction], target: Pubkey) -> Vec<Instruction
         .collect()
 }
 
+fn signer_probe_ignored_accounts(
+    baseline_instructions: &[Instruction],
+    mutated_instructions: &[Instruction],
+    payer: Pubkey,
+) -> Vec<Pubkey> {
+    let mut keys = instruction_account_keys(baseline_instructions);
+    keys.extend(instruction_account_keys(mutated_instructions));
+    if keys.contains(&payer) {
+        Vec::new()
+    } else {
+        vec![payer]
+    }
+}
+
 /// CC-10: account data names an authority/delegate signer, but the instruction accepts a different
 /// valid signer. This is separate from CC-4: the replacement account still signs, so a plain
 /// `is_signer` assertion is satisfied.
@@ -598,6 +613,7 @@ impl MutationStrategy for AuthoritySignerStrategy {
             };
             if account.executable
                 || account.data.is_empty()
+                || is_spl_token_shape(&account)
                 || !account_is_load_bearing(ctx, &source)
             {
                 continue;
@@ -954,6 +970,11 @@ fn collect_token_relation_candidates(
 
 fn is_token_program_owner(owner: &Pubkey) -> bool {
     *owner == spl_token::id() || *owner == TOKEN_2022_PROGRAM
+}
+
+fn is_spl_token_shape(account: &solana_account::Account) -> bool {
+    is_token_program_owner(&account.owner)
+        && (unpack_mint(&account.data).is_some() || unpack_token_account(&account.data).is_some())
 }
 
 fn unpack_mint(data: &[u8]) -> Option<spl_token::state::Mint> {
@@ -1447,6 +1468,18 @@ fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
                 ctx.sigverify,
             ),
             Ok(Ok(_))
+        ) {
+            return true;
+        }
+
+        if !post_state_matches(
+            ctx.baseline_after,
+            &probe,
+            ctx.instructions,
+            ctx.instructions,
+            &[],
+            &[*pubkey],
+            ctx.payer.pubkey(),
         ) {
             return true;
         }
@@ -2049,6 +2082,83 @@ mod tests {
             &[mutated_ix],
             &[(target, decoy)],
             &[],
+            payer,
+        ));
+    }
+
+    #[test]
+    fn signer_probe_ignores_only_out_of_instruction_fee_payer() {
+        let mut baseline = LiteSVM::new();
+        let mut mutated = LiteSVM::new();
+        let owner = Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
+        let payer = on_curve_pubkey();
+        let account = on_curve_pubkey();
+
+        baseline
+            .set_account(payer, make_account(owner, vec![1; 8]))
+            .unwrap();
+        mutated
+            .set_account(payer, make_account(owner, vec![1; 8]))
+            .unwrap();
+        let mut mutated_payer = mutated.get_account(&payer).unwrap();
+        mutated_payer.lamports -= 5_000;
+        mutated.set_account(payer, mutated_payer).unwrap();
+
+        baseline
+            .set_account(account, make_account(owner, vec![2; 8]))
+            .unwrap();
+        mutated
+            .set_account(account, make_account(owner, vec![2; 8]))
+            .unwrap();
+
+        let ix_without_payer = Instruction {
+            program_id,
+            accounts: vec![AccountMeta::new(account, false)],
+            data: vec![],
+        };
+        let ignored =
+            signer_probe_ignored_accounts(&[ix_without_payer.clone()], &[ix_without_payer], payer);
+        assert_eq!(ignored, vec![payer]);
+        assert!(post_state_matches(
+            &baseline,
+            &mutated,
+            std::slice::from_ref(&Instruction {
+                program_id,
+                accounts: vec![AccountMeta::new(account, false)],
+                data: vec![],
+            }),
+            std::slice::from_ref(&Instruction {
+                program_id,
+                accounts: vec![AccountMeta::new(account, false)],
+                data: vec![],
+            }),
+            &[],
+            &ignored,
+            payer,
+        ));
+
+        let ix_with_payer = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(payer, false),
+                AccountMeta::new(account, false),
+            ],
+            data: vec![],
+        };
+        let ignored = signer_probe_ignored_accounts(
+            &[ix_with_payer.clone()],
+            &[ix_with_payer.clone()],
+            payer,
+        );
+        assert!(ignored.is_empty());
+        assert!(!post_state_matches(
+            &baseline,
+            &mutated,
+            std::slice::from_ref(&ix_with_payer),
+            std::slice::from_ref(&ix_with_payer),
+            &[],
+            &ignored,
             payer,
         ));
     }
