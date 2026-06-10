@@ -102,7 +102,7 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
 
     // Generate code
     let program_id = codegen::gen_program_id(&idl);
-    let instructions = codegen::instructions::generate(&idl);
+    let instructions = codegen::instructions::generate(&idl, use_bincode);
     let accounts = codegen::accounts::generate(&idl);
     let state = codegen::state::generate(&idl);
     let types = codegen::types::generate(&idl, use_bincode);
@@ -221,7 +221,7 @@ mod tests {
             .unwrap_or(false);
 
         let program_id = codegen::gen_program_id(&idl);
-        let instructions = codegen::instructions::generate(&idl);
+        let instructions = codegen::instructions::generate(&idl, use_bincode);
         let accounts = codegen::accounts::generate(&idl);
         let state = codegen::state::generate(&idl);
         let types = codegen::types::generate(&idl, use_bincode);
@@ -1906,6 +1906,159 @@ mod tests {
                 filename
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Codama program accounts → state module + discriminator registry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_codama_token_accounts_converted() {
+        let idl = parse_test_idl("codama_token.json");
+        assert_eq!(
+            idl.accounts.len(),
+            3,
+            "codama token should convert 3 program accounts (Mint, Token, Multisig)"
+        );
+        for acc in &idl.accounts {
+            assert!(
+                idl.types.iter().any(|t| t.name == acc.name),
+                "account '{}' should have a matching typedef",
+                acc.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_pipeline_codama_token_state_module() {
+        let output = run_full_pipeline("codama_token.json");
+        let state_mod = extract_module(&output, "state");
+
+        for name in ["Mint", "Token", "Multisig"] {
+            assert!(
+                state_mod.contains(&format!("pub struct {name}")),
+                "state module should contain account struct '{name}', got: {}",
+                &state_mod[..state_mod.len().min(500)]
+            );
+        }
+        assert!(
+            state_mod.contains("DISCRIMINATOR"),
+            "state accounts should carry DISCRIMINATOR consts"
+        );
+
+        // The account-discriminator registry must be emitted so the
+        // constraint-check engine can look up type-tag lengths.
+        assert!(
+            output.contains("register_account_discriminators"),
+            "codama token pipeline should register account discriminators"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Native (bincode) instruction-arg encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encoding_bincode_instructions_use_serde_bincode_data() {
+        // Bincode programs: arg structs override data() to use
+        // bincode-compatible field writes after the 4-byte discriminator.
+        let output = run_full_pipeline("codama_stake.json");
+        let ix_mod = extract_module(&output, "instruction");
+        assert!(
+            ix_mod.contains("bincode :: serialize_into"),
+            "bincode instruction data() should use bincode-compatible writes"
+        );
+
+        // Borsh programs keep the default borsh InstructionData path.
+        let marginfi = run_full_pipeline("anchor_marginfi.json");
+        let marginfi_ix = extract_module(&marginfi, "instruction");
+        assert!(
+            !marginfi_ix.contains("bincode"),
+            "borsh instruction module should not reference bincode"
+        );
+        assert!(
+            !marginfi_ix.contains("serde :: Serialize"),
+            "borsh instruction args should not derive serde::Serialize"
+        );
+    }
+
+    /// Replicates the generated bincode `data()` body byte-for-byte: 4-byte
+    /// discriminator, then field-wise bincode-compatible writes.
+    /// Verifies the layout differences vs borsh that motivated the change:
+    /// u64 length prefixes for Vec/String (borsh uses u32).
+    #[test]
+    fn test_bincode_arg_encoding_roundtrip() {
+        // Hand-written equivalent of a generated native arg struct:
+        //   pub struct Transfer { data: Vec<u8>, memo: String, tag: Option<u32> }
+        #[derive(serde::Serialize)]
+        struct Transfer {
+            data: Vec<u8>,
+            memo: String,
+            tag: Option<u32>,
+        }
+
+        let args = Transfer {
+            data: vec![0xDE, 0xAD, 0xBE],
+            memo: "hi".to_string(),
+            tag: Some(7),
+        };
+
+        // Generated data(): DISCRIMINATOR.to_vec() + field-wise bincode writes
+        let discriminator: &[u8] = &[2, 0, 0, 0];
+        let mut data = discriminator.to_vec();
+        data.extend(bincode::serialize(&args).expect("bincode serialize"));
+
+        let mut expected: Vec<u8> = vec![2, 0, 0, 0]; // 4-byte u32 LE discriminator
+        expected.extend_from_slice(&3u64.to_le_bytes()); // Vec len: u64 (borsh would be u32)
+        expected.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
+        expected.extend_from_slice(&2u64.to_le_bytes()); // String len: u64 (borsh would be u32)
+        expected.extend_from_slice(b"hi");
+        expected.push(1); // bincode v1 Option tag: single byte (Some)
+        expected.extend_from_slice(&7u32.to_le_bytes());
+
+        assert_eq!(
+            data, expected,
+            "bincode arg encoding should match Solana's native wire format"
+        );
+
+        // None case: single 0 byte, no payload
+        let none_args = Transfer {
+            data: vec![],
+            memo: String::new(),
+            tag: None,
+        };
+        let encoded = bincode::serialize(&none_args).expect("bincode serialize");
+        let mut expected_none = Vec::new();
+        expected_none.extend_from_slice(&0u64.to_le_bytes());
+        expected_none.extend_from_slice(&0u64.to_le_bytes());
+        expected_none.push(0);
+        assert_eq!(encoded, expected_none);
+    }
+
+    /// Unit enums in bincode programs derive serde::Serialize; bincode encodes
+    /// the variant index as u32 LE — matching the manual repr(u32)
+    /// AnchorSerialize impl that the borsh path uses for these enums.
+    #[test]
+    fn test_bincode_unit_enum_serde_roundtrip() {
+        // Hand-written equivalent of a generated bincode unit enum:
+        #[derive(serde::Serialize)]
+        #[repr(u32)]
+        #[allow(dead_code)]
+        enum StakeAuthorize {
+            Staker = 0,
+            Withdrawer = 1,
+        }
+
+        assert_eq!(
+            bincode::serialize(&StakeAuthorize::Staker).unwrap(),
+            0u32.to_le_bytes().to_vec(),
+            "variant 0 should encode as u32 LE 0"
+        );
+        assert_eq!(
+            bincode::serialize(&StakeAuthorize::Withdrawer).unwrap(),
+            1u32.to_le_bytes().to_vec(),
+            "variant 1 should encode as u32 LE 1"
+        );
     }
 
     // -----------------------------------------------------------------------
