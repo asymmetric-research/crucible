@@ -964,6 +964,16 @@ fn register_config_schema() {
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
+                type_name: "ValueSourceState".into(),
+                discriminator: owner_mutation_airdrop::ValueSourceState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "PriceState".into(),
+                discriminator: owner_mutation_airdrop::PriceState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
                 type_name: "RootState".into(),
                 discriminator: owner_mutation_airdrop::RootState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
@@ -971,6 +981,11 @@ fn register_config_schema() {
             crucible_test_context::AccountSchema {
                 type_name: "AuthorityState".into(),
                 discriminator: owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "SemanticState".into(),
+                discriminator: owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
         ]);
@@ -1015,6 +1030,25 @@ fn seed_target_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amoun
     create_data_account(ctx, pubkey, owner, &data);
 }
 
+fn seed_value_source_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    price: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::ValueSourceState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(price.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_price_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, price: u64) {
+    let mut data = owner_mutation_airdrop::PriceState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(&price.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
 fn seed_root_state(
     ctx: &mut TestContext,
     pubkey: Pubkey,
@@ -1037,6 +1071,19 @@ fn seed_authority_state(
 ) {
     let mut data = owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_semantic_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    context: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(context.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
@@ -1255,6 +1302,78 @@ fn no_finding_when_linked_target_checked() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc8_value_ref_when_referenced_value_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let source = Keypair::new().pubkey();
+    let source_alt = Keypair::new().pubkey();
+    let price = Keypair::new().pubkey();
+    let price_alt = Keypair::new().pubkey();
+    seed_price_state(&mut h.ctx, price, h.program_id, CLAIM_AMOUNT);
+    seed_price_state(&mut h.ctx, price_alt, h.program_id, CLAIM_AMOUNT);
+    seed_value_source_state(&mut h.ctx, source, h.program_id, price, CLAIM_AMOUNT);
+    seed_value_source_state(
+        &mut h.ctx,
+        source_alt,
+        h.program_id,
+        price_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPriceRefNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPriceRef {
+            recipient: h.recipient.pubkey(),
+            source,
+            price,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-8 value-ref]", price);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_referenced_value_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let source = Keypair::new().pubkey();
+    let source_alt = Keypair::new().pubkey();
+    let price = Keypair::new().pubkey();
+    let price_alt = Keypair::new().pubkey();
+    seed_price_state(&mut h.ctx, price, h.program_id, CLAIM_AMOUNT);
+    seed_price_state(&mut h.ctx, price_alt, h.program_id, CLAIM_AMOUNT);
+    seed_value_source_state(&mut h.ctx, source, h.program_id, price, CLAIM_AMOUNT);
+    seed_value_source_state(
+        &mut h.ctx,
+        source_alt,
+        h.program_id,
+        price_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPriceRefWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPriceRef {
+            recipient: h.recipient.pubkey(),
+            source,
+            price,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn no_cc8_finding_for_singleton_classes() {
     register_config_schema();
     let mut h = harness();
@@ -1326,6 +1445,104 @@ fn no_finding_when_root_child_checked() {
             recipient: h.recipient.pubkey(),
             root,
             child,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc86_semantic_swap_when_same_class_context_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let semantic = Keypair::new().pubkey();
+    let semantic_alt = Keypair::new().pubkey();
+    seed_target_state(
+        &mut h.ctx,
+        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        h.program_id,
+        CLAIM_AMOUNT,
+    );
+    seed_target_state(
+        &mut h.ctx,
+        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        h.program_id,
+        CLAIM_AMOUNT,
+    );
+    seed_semantic_state(
+        &mut h.ctx,
+        semantic,
+        h.program_id,
+        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        CLAIM_AMOUNT,
+    );
+    seed_semantic_state(
+        &mut h.ctx,
+        semantic_alt,
+        h.program_id,
+        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ConsumeSemanticNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ConsumeSemantic {
+            recipient: h.recipient.pubkey(),
+            semantic,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-8.6 semantic-swap]", semantic);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_cc86_finding_when_semantic_context_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let semantic = Keypair::new().pubkey();
+    let semantic_alt = Keypair::new().pubkey();
+    seed_target_state(
+        &mut h.ctx,
+        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        h.program_id,
+        CLAIM_AMOUNT,
+    );
+    seed_target_state(
+        &mut h.ctx,
+        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        h.program_id,
+        CLAIM_AMOUNT,
+    );
+    seed_semantic_state(
+        &mut h.ctx,
+        semantic,
+        h.program_id,
+        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        CLAIM_AMOUNT,
+    );
+    seed_semantic_state(
+        &mut h.ctx,
+        semantic_alt,
+        h.program_id,
+        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ConsumeSemanticWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ConsumeSemantic {
+            recipient: h.recipient.pubkey(),
+            semantic,
             vault: h.vault,
         })
         .signers(&[&h.fee_payer, &h.recipient])

@@ -44,7 +44,7 @@ fn test_weight_formula_extreme_pick_count_no_nan_inf() {
     let count = pool.pick_weighted_batch(&rng_vals, &mut out);
     assert_eq!(count, 4);
     assert_eq!(out.len(), 4);
-    for &(_, _, state_idx, _, _, _, _, _) in &out {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &out {
         assert!(state_idx < pool.len());
     }
 }
@@ -288,7 +288,7 @@ fn test_batch_pick_with_mid_iteration_crashes() {
     let c1 = pool.pick_weighted_batch(&rng1, &mut out1);
     assert_eq!(c1, 4);
     assert_eq!(out1.len(), 4);
-    for &(_, _, idx, _, _, _, _, _) in &out1 {
+    for &(_, _, idx, _, _, _, _, _, _) in &out1 {
         assert!(idx < pool.len());
     }
 
@@ -303,7 +303,7 @@ fn test_batch_pick_with_mid_iteration_crashes() {
     let c2 = pool.pick_weighted_batch(&rng2, &mut out2);
     assert_eq!(c2, 6);
     let crashed: std::collections::HashSet<usize> = [0, 2].into_iter().collect();
-    for &(_, _, idx, _, _, _, _, _) in &out2 {
+    for &(_, _, idx, _, _, _, _, _, _) in &out2 {
         assert!(idx < pool.len(), "returned idx {idx} out of bounds");
         assert!(
             !crashed.contains(&idx),
@@ -551,6 +551,7 @@ fn test_pick_weighted_exhausted_vs_fresh() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         30,
         30,
         true,
@@ -571,7 +572,7 @@ fn test_pick_weighted_exhausted_vs_fresh() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -602,6 +603,7 @@ fn test_try_add_fingerprint_zero_dedup() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -619,6 +621,7 @@ fn test_try_add_fingerprint_zero_dedup() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -795,6 +798,7 @@ fn test_batched_flush_five_novel_states() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -825,6 +829,7 @@ fn test_batched_flush_five_novel_states() {
             Some(*idx as u16),
             vec![*idx as u8],
             None,
+            std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
             0,
             0,
             true,
@@ -1179,6 +1184,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1202,6 +1208,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
         Some(0),
         vec![42],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1225,6 +1232,7 @@ fn test_deep_chain_intermediate_arcs_preserved() {
         Some(1),
         vec![77],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1697,6 +1705,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1712,6 +1721,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
         Some(1),
         vec![1],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1727,6 +1737,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
         Some(2),
         vec![2],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         10,
         10,
         true,
@@ -1742,6 +1753,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
         Some(3),
         vec![3],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1762,6 +1774,7 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
         Arc<Vec<u8>>,
         u64,
         Option<Arc<dyn std::any::Any + Send + Sync>>,
+        Arc<crate::snapshot::CreationTracker>,
     )> = Vec::new();
 
     let n = pool.pick_weighted_batch(&rng_vals, &mut picks);
@@ -1769,19 +1782,19 @@ fn test_pick_weighted_batch_coverage_novel_favoured() {
 
     let state2_count = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 2)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 2)
         .count();
     let state0_count = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 0)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 0)
         .count();
     let state1_count = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 1)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 1)
         .count();
     let state3_count = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 3)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 3)
         .count();
 
     // state0 is parent of all 3 children (including coverage-novel state2),
@@ -1904,6 +1917,7 @@ fn test_record_violation_reduces_pick_weight() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1919,6 +1933,7 @@ fn test_record_violation_reduces_pick_weight() {
         Some(1),
         vec![1],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1946,16 +1961,17 @@ fn test_record_violation_reduces_pick_weight() {
         Arc<Vec<u8>>,
         u64,
         Option<Arc<dyn std::any::Any + Send + Sync>>,
+        Arc<crate::snapshot::CreationTracker>,
     )> = Vec::new();
     pool.pick_weighted_batch(&rng_vals, &mut picks);
 
     let state0_picks = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 0)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 0)
         .count();
     let state1_picks = picks
         .iter()
-        .filter(|(_, _, idx, _, _, _, _, _)| *idx == 1)
+        .filter(|(_, _, idx, _, _, _, _, _, _)| *idx == 1)
         .count();
 
     // Both should get substantial picks (violations don't affect weight)

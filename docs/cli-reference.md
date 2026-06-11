@@ -34,7 +34,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
 | `--stateful` | Stateful fuzzing: single action per iteration with state pool |
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
-| `--pool-size <N>` | State pool capacity in stateful mode (default: 256000) |
+| `--pool-size <N>` | State pool capacity in stateful mode (default: 256000). Also scales the fingerprint-dedup keyspace, so a larger pool raises the distinct-state ceiling |
 | `--program-so <PATH>` | Override the program `.so` loaded by the harness |
 | `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
 | `--lcov-out <PATH>` | Custom LCOV coverage output file path |
@@ -205,6 +205,9 @@ Current labels:
 - `[CC-5 type-tag]` missing discriminator/type-tag check
 - `[CC-8 field-ref]` same-class account accepted without checking an embedded pubkey relation
 - `[CC-8 root-ref]` child account accepted without checking a singleton/root account's embedded pubkey relation
+- `[CC-8 value-ref]` referenced same-class account accepted without checking an embedded pubkey relation
+- `[CC-8.3 bidirectional-ref]` paired accounts accepted without checking mutual or shared-root pubkey fields
+- `[CC-8.6 semantic-swap]` same-class account with a different embedded-key profile accepted
 - `[CC-10 authority]` state account accepted with a different valid signer than the embedded authority
 - `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
 - `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner

@@ -514,8 +514,8 @@ fn test_fingerprint_collect_deleted_account_produces_tombstone() {
     let (_fp, changed, _novelty) = unsafe {
         fingerprint_and_collect_changed(
             &svm, &dirty, &initial,
-            bitmap.as_mut_ptr(), bitmap_size,
-        )
+            &crate::snapshot::CreationTracker::new(),
+            bitmap.as_mut_ptr(), bitmap_size)
     };
 
     // pk_stays should be in changed (lamports diff)

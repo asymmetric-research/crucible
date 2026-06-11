@@ -2,8 +2,8 @@
 //!
 //! It drives the program through every positive (missing-check) and negative (check-present)
 //! instruction path. On its own it fuzzes a lamport-conservation invariant; run with
-//! `--mutate-accounts` it additionally reports the seeded CC-1/CC-2/CC-3/CC-4/CC-5
-//! constraint bugs as account-mutation findings.
+//! `--mutate-accounts` it additionally reports seeded owner, signer, PDA, type-tag,
+//! SPL-token, and field-cross-reference bugs as account-mutation findings.
 //!
 //!   crucible run owner-mutation-airdrop invariant_test --release
 //!   crucible run owner-mutation-airdrop invariant_test --release --mutate-accounts
@@ -40,8 +40,15 @@ const ALTERNATE_CONFIG_DISCRIMINATOR: [u8; 8] = [112, 26, 206, 10, 180, 130, 5, 
 const TRADER_STATE_DISCRIMINATOR: [u8; 8] = [124, 33, 101, 17, 158, 79, 26, 140];
 const LINKED_STATE_DISCRIMINATOR: [u8; 8] = [178, 163, 210, 62, 47, 48, 13, 148];
 const TARGET_STATE_DISCRIMINATOR: [u8; 8] = [147, 73, 167, 190, 147, 166, 153, 37];
+const VALUE_SOURCE_STATE_DISCRIMINATOR: [u8; 8] = [54, 98, 108, 196, 246, 208, 150, 132];
+const PRICE_STATE_DISCRIMINATOR: [u8; 8] = [202, 40, 37, 157, 73, 117, 152, 251];
 const ROOT_STATE_DISCRIMINATOR: [u8; 8] = [168, 212, 194, 223, 236, 239, 59, 86];
 const AUTHORITY_STATE_DISCRIMINATOR: [u8; 8] = [217, 219, 18, 179, 143, 126, 98, 123];
+const PAIR_LEFT_STATE_DISCRIMINATOR: [u8; 8] = [139, 52, 59, 189, 192, 91, 80, 216];
+const PAIR_RIGHT_STATE_DISCRIMINATOR: [u8; 8] = [67, 248, 77, 163, 40, 119, 172, 151];
+const SEMANTIC_STATE_DISCRIMINATOR: [u8; 8] = [35, 220, 247, 206, 91, 179, 102, 198];
+const EXPECTED_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x86; 32]);
+const ALT_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x87; 32]);
 
 #[derive(Clone)]
 struct OwnerMutationAirdropFixture {
@@ -70,8 +77,16 @@ struct OwnerMutationAirdropFixture {
     destination_trader: Pubkey, // custom invariant destination account (documented FN)
     linked_source: Pubkey,   // CC-8 same-class source containing a target pubkey
     linked_target: Pubkey,   // CC-8 same-class referenced target
+    value_source: Pubkey,    // CC-8 value-ref source containing a price account pubkey
+    price: Pubkey,           // CC-8 value-ref referenced value account
     root: Pubkey,            // CC-8 singleton/root account containing a child pubkey
     root_child: Pubkey,
+    pair_root: Pubkey,        // CC-8.3 root/counterpart account
+    pair_left: Pubkey,        // CC-8.3 left side with right/root fields
+    pair_right: Pubkey,       // CC-8.3 right side with left/root fields
+    shared_left: Pubkey,      // CC-8.3 shared-root left side
+    shared_right: Pubkey,     // CC-8.3 shared-root right side
+    semantic_state: Pubkey,   // CC-8.6 same-class account with embedded semantic context
     authority_state: Pubkey, // CC-10 state containing the expected signer pubkey
 }
 
@@ -197,6 +212,19 @@ impl OwnerMutationAirdropFixture {
             &Self::linked_state_data(linked_target_alt, CLAIM_AMOUNT),
         );
 
+        let price = Self::new_data(&mut ctx, program_id, &Self::price_state_data(CLAIM_AMOUNT));
+        let price_alt = Self::new_data(&mut ctx, program_id, &Self::price_state_data(CLAIM_AMOUNT));
+        let value_source = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::value_source_state_data(price, CLAIM_AMOUNT),
+        );
+        let _value_source_alt = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::value_source_state_data(price_alt, CLAIM_AMOUNT),
+        );
+
         let root_child =
             Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
         let _root_child_alt =
@@ -206,6 +234,95 @@ impl OwnerMutationAirdropFixture {
             program_id,
             &Self::root_state_data(root_child, CLAIM_AMOUNT),
         );
+
+        let pair_root =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+        let pair_root_alt =
+            Self::new_data(&mut ctx, program_id, &Self::target_state_data(CLAIM_AMOUNT));
+
+        let pair_left = Keypair::new().pubkey();
+        let pair_right = Keypair::new().pubkey();
+        Self::new_data_at(
+            &mut ctx,
+            pair_left,
+            program_id,
+            &Self::pair_left_state_data(pair_right, pair_root, CLAIM_AMOUNT),
+        );
+        Self::new_data_at(
+            &mut ctx,
+            pair_right,
+            program_id,
+            &Self::pair_right_state_data(pair_left, pair_root, CLAIM_AMOUNT),
+        );
+
+        let pair_left_alt = Keypair::new().pubkey();
+        let pair_right_alt = Keypair::new().pubkey();
+        Self::new_data_at(
+            &mut ctx,
+            pair_left_alt,
+            program_id,
+            &Self::pair_left_state_data(pair_right_alt, pair_root_alt, CLAIM_AMOUNT),
+        );
+        Self::new_data_at(
+            &mut ctx,
+            pair_right_alt,
+            program_id,
+            &Self::pair_right_state_data(pair_left_alt, pair_root_alt, CLAIM_AMOUNT),
+        );
+
+        let shared_left = Keypair::new().pubkey();
+        let shared_right = Keypair::new().pubkey();
+        Self::new_data_at(
+            &mut ctx,
+            shared_left,
+            program_id,
+            &Self::pair_left_state_data(Pubkey::default(), pair_root, CLAIM_AMOUNT),
+        );
+        Self::new_data_at(
+            &mut ctx,
+            shared_right,
+            program_id,
+            &Self::pair_right_state_data(Pubkey::default(), pair_root, CLAIM_AMOUNT),
+        );
+
+        let shared_left_alt = Keypair::new().pubkey();
+        let shared_right_alt = Keypair::new().pubkey();
+        Self::new_data_at(
+            &mut ctx,
+            shared_left_alt,
+            program_id,
+            &Self::pair_left_state_data(Pubkey::default(), pair_root_alt, CLAIM_AMOUNT),
+        );
+        Self::new_data_at(
+            &mut ctx,
+            shared_right_alt,
+            program_id,
+            &Self::pair_right_state_data(Pubkey::default(), pair_root_alt, CLAIM_AMOUNT),
+        );
+
+        Self::new_data_at(
+            &mut ctx,
+            EXPECTED_SEMANTIC_CONTEXT,
+            program_id,
+            &Self::target_state_data(CLAIM_AMOUNT),
+        );
+        Self::new_data_at(
+            &mut ctx,
+            ALT_SEMANTIC_CONTEXT,
+            program_id,
+            &Self::target_state_data(CLAIM_AMOUNT),
+        );
+        let semantic_state = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::semantic_state_data(EXPECTED_SEMANTIC_CONTEXT, CLAIM_AMOUNT),
+        );
+        let _semantic_state_alt = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::semantic_state_data(ALT_SEMANTIC_CONTEXT, CLAIM_AMOUNT),
+        );
+
         let authority_state = Self::new_data(
             &mut ctx,
             program_id,
@@ -246,8 +363,16 @@ impl OwnerMutationAirdropFixture {
             destination_trader,
             linked_source,
             linked_target,
+            value_source,
+            price,
             root,
             root_child,
+            pair_root,
+            pair_left,
+            pair_right,
+            shared_left,
+            shared_right,
+            semantic_state,
             authority_state,
         }
     }
@@ -264,6 +389,16 @@ impl OwnerMutationAirdropFixture {
         pubkey
     }
 
+    fn new_data_at(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, data: &[u8]) {
+        ctx.create_account()
+            .pubkey(pubkey)
+            .lamports(1_000_000)
+            .owner(owner)
+            .data(data)
+            .create()
+            .unwrap();
+    }
+
     fn linked_state_data(target: Pubkey, amount: u64) -> Vec<u8> {
         let mut data = LINKED_STATE_DISCRIMINATOR.to_vec();
         data.extend_from_slice(target.as_ref());
@@ -277,9 +412,45 @@ impl OwnerMutationAirdropFixture {
         data
     }
 
+    fn value_source_state_data(price: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = VALUE_SOURCE_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(price.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn price_state_data(price: u64) -> Vec<u8> {
+        let mut data = PRICE_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(&price.to_le_bytes());
+        data
+    }
+
     fn root_state_data(child: Pubkey, amount: u64) -> Vec<u8> {
         let mut data = ROOT_STATE_DISCRIMINATOR.to_vec();
         data.extend_from_slice(child.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn pair_left_state_data(right: Pubkey, root: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = PAIR_LEFT_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(right.as_ref());
+        data.extend_from_slice(root.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn pair_right_state_data(left: Pubkey, root: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = PAIR_RIGHT_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(left.as_ref());
+        data.extend_from_slice(root.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn semantic_state_data(context: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = SEMANTIC_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(context.as_ref());
         data.extend_from_slice(&amount.to_le_bytes());
         data
     }
@@ -725,6 +896,38 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
+    pub fn action_read_price_ref_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPriceRefNoCheck {})
+            .accounts(accounts::ReadPriceRefNoCheck {
+                recipient: self.recipient.pubkey(),
+                source: self.value_source,
+                price: self.price,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_price_ref_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPriceRefWithCheck {})
+            .accounts(accounts::ReadPriceRefWithCheck {
+                recipient: self.recipient.pubkey(),
+                source: self.value_source,
+                price: self.price,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     pub fn action_read_root_child_no_check(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
@@ -749,6 +952,104 @@ impl OwnerMutationAirdropFixture {
                 recipient: self.recipient.pubkey(),
                 root: self.root,
                 child: self.root_child,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_pair_bidirectional_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPairBidirectionalNoCheck {})
+            .accounts(accounts::ReadPairBidirectionalNoCheck {
+                recipient: self.recipient.pubkey(),
+                left: self.pair_left,
+                right: self.pair_right,
+                root: self.pair_root,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_pair_bidirectional_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPairBidirectionalWithCheck {})
+            .accounts(accounts::ReadPairBidirectionalWithCheck {
+                recipient: self.recipient.pubkey(),
+                left: self.pair_left,
+                right: self.pair_right,
+                root: self.pair_root,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_pair_shared_root_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPairSharedRootNoCheck {})
+            .accounts(accounts::ReadPairSharedRootNoCheck {
+                recipient: self.recipient.pubkey(),
+                left: self.shared_left,
+                right: self.shared_right,
+                root: self.pair_root,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_pair_shared_root_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadPairSharedRootWithCheck {})
+            .accounts(accounts::ReadPairSharedRootWithCheck {
+                recipient: self.recipient.pubkey(),
+                left: self.shared_left,
+                right: self.shared_right,
+                root: self.pair_root,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_consume_semantic_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ConsumeSemanticNoCheck {})
+            .accounts(accounts::ConsumeSemanticNoCheck {
+                recipient: self.recipient.pubkey(),
+                semantic: self.semantic_state,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_consume_semantic_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ConsumeSemanticWithCheck {})
+            .accounts(accounts::ConsumeSemanticWithCheck {
+                recipient: self.recipient.pubkey(),
+                semantic: self.semantic_state,
                 vault: self.vault,
             })
             .signers(&[&*self.fee_payer, &*self.recipient])
@@ -908,4 +1209,46 @@ fn invariant_test(fixture: &mut OwnerMutationAirdropFixture) {
         INITIAL_VAULT_BALANCE + INITIAL_RECIPIENT_BALANCE,
         "vault + recipient lamports must be conserved by payouts"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_actions_succeed() {
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        assert_eq!(
+            instruction::ConsumeSemanticNoCheck {}.data()[..8],
+            [93, 197, 193, 73, 47, 57, 141, 90]
+        );
+        let result = fixture
+            .ctx
+            .program(fixture.program_id)
+            .call(instruction::ConsumeSemanticNoCheck {})
+            .accounts(accounts::ConsumeSemanticNoCheck {
+                recipient: fixture.recipient.pubkey(),
+                semantic: fixture.semantic_state,
+                vault: fixture.vault,
+            })
+            .signers(&[&*fixture.fee_payer, &*fixture.recipient])
+            .send()
+            .unwrap();
+        assert!(result.is_success(), "{result:?}");
+
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let result = fixture
+            .ctx
+            .program(fixture.program_id)
+            .call(instruction::ConsumeSemanticWithCheck {})
+            .accounts(accounts::ConsumeSemanticWithCheck {
+                recipient: fixture.recipient.pubkey(),
+                semantic: fixture.semantic_state,
+                vault: fixture.vault,
+            })
+            .signers(&[&*fixture.fee_payer, &*fixture.recipient])
+            .send()
+            .unwrap();
+        assert!(result.is_success(), "{result:?}");
+    }
 }

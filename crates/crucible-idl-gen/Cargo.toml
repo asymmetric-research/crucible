@@ -32,3 +32,7 @@ heck = "0.5"
 
 # Error handling
 anyhow = "1.0"
+
+[dev-dependencies]
+# For the native-instruction bincode encoding round-trip tests
+bincode = "1.3"

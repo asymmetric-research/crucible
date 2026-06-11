@@ -703,7 +703,22 @@ pub fn multicore_mode(
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
-                        let input_hash = hash_std(slice);
+                        // Account-mutation findings dedup on the finding identity
+                        // (fixed by the final probed action). Naming the crash
+                        // artifact by the finding-id hash makes different sequences
+                        // reaching the same probed instruction (a…k, b…k) collide on
+                        // one shared file across workers instead of N copies.
+                        let __mut_fid = crucible_test_context::mutation_finding_id();
+                        if let Some(ref __fid) = __mut_fid {
+                            if !crucible_test_context::is_novel_mutation_finding(__fid) {
+                                // Already reported in this worker — suppress duplicate.
+                                return ExitKind::Ok;
+                            }
+                        }
+                        let input_hash = match __mut_fid {
+                            Some(ref __fid) => hash_std(__fid.as_bytes()),
+                            None => hash_std(slice),
+                        };
                         let crash_id = format!("crash_{:016x}", input_hash);
                         println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
                         eprintln!("[FUZZ_FINDING] {}: {}", crash_id, msg);

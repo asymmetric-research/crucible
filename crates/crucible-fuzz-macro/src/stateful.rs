@@ -519,6 +519,8 @@ fn gen_corpus_seeding(
                 let mut __current_delta = std::sync::Arc::new(
                     CompactDelta::empty(initial_snapshot.clock().clone())
                 );
+                // Creation-ordinal tracker for this seed lineage (extended per action)
+                let mut __current_creation = crucible_test_context::snapshot::CreationTracker::new();
 
                 for __seed_action in &__fuzz_input.actions {
                     if __current_depth >= max_depth.min(__seed_depth_limit) { break; }
@@ -580,9 +582,16 @@ fn gen_corpus_seeding(
                         &__seed_fixture.ctx.svm,
                     );
 
+                    // Extend the lineage's creation tracker with accounts first
+                    // written by this action, then fingerprint with it so created
+                    // accounts get deterministic creation-ordinal identities.
+                    let __next_creation = crucible_test_context::snapshot::CreationTracker::extended_with_iteration(
+                        &__current_creation, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
+                    );
+
                     // Fingerprint
                     let __fp = compute_state_fingerprint_from_snapshot(
-                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot,
+                        &__seed_fixture.ctx.svm, &__seed_fixture.ctx.dirty_tracker, &*initial_snapshot, &__next_creation,
                     );
 
                     __current_depth += 1;
@@ -610,7 +619,7 @@ fn gen_corpus_seeding(
                     if __fp != 0 && #pool_var.try_add(
                         __fp, __new_delta.clone(), __current_depth, __parent_idx,
                         __accum.clone(), __action_desc, Some(__variant), __field_bytes,
-                        __fs, 8, 1, true, None,
+                        __fs, std::sync::Arc::new(__next_creation.clone()), 8, 1, true, None,
                     ) {
                         __parent_idx = Some(#pool_var.len() - 1);
                         __seeded += 1;
@@ -618,6 +627,7 @@ fn gen_corpus_seeding(
 
                     __current_delta = std::sync::Arc::new(__new_delta);
                     __current_action_bytes = __accum;
+                    __current_creation = __next_creation;
 
                     // Swap SVMs back for next action (SVM stays modified = correct sequential state)
                     #swap_back_seed
@@ -692,7 +702,7 @@ fn stateful_singlecore_body(
         let mut state_pool = StatePool::new(pool_capacity, max_depth);
         // Initial pool entry: empty delta (state is identical to initial_snapshot)
         let initial_clock = initial_snapshot.clock().clone();
-        state_pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), 0, 0, true, None);
+        state_pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
 
         // Action success tracking: learns which actions work from which state classes
         let mut action_stats = crucible_test_context::snapshot::ActionStatsMap::new(
@@ -771,7 +781,7 @@ fn stateful_singlecore_body(
 
         // Batched picks: compute weights once per batch, O(1) per iteration instead of O(n).
         const __BATCH_SIZE: usize = 64;
-        type __PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+        type __PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>);
         let mut __pick_batch: Vec<__PickTuple> = Vec::with_capacity(__BATCH_SIZE);
         let mut __rng_vals: Vec<u64> = Vec::with_capacity(__BATCH_SIZE);
         let mut __crossover_buf: Vec<(usize, std::sync::Arc<Vec<u8>>)> = Vec::with_capacity(16);
@@ -859,7 +869,7 @@ fn stateful_singlecore_body(
                     break;
                 }
             }
-            let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut __picked_fixture_state) =
+            let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut __picked_fixture_state, mut __parent_creation) =
                 __pick_batch.pop().unwrap();
 
             // Subsequence splice (5%): pick a random contiguous subsequence (len 2-5) from
@@ -897,6 +907,7 @@ fn stateful_singlecore_body(
                             parent_action_bytes = entry.action_bytes.clone();
                             parent_fingerprint = entry.fingerprint;
                             __picked_fixture_state = entry.fixture_state.clone();
+                            __parent_creation = entry.creation.clone();
                         }
                         __splice_chain = Some(__spliced_actions);
                     }
@@ -1060,11 +1071,20 @@ fn stateful_singlecore_body(
             // Combined fingerprint + field novelty + patch collection in one pass.
             // This replaces the separate check_field_novelty call.
             let __t_fn = if __do_profile { Some(std::time::Instant::now()) } else { None };
+            // Extend the parent's creation tracker with accounts first written this
+            // iteration so created accounts get deterministic, lineage-relative
+            // identities (creation ordinal, not random pubkey) in the fingerprint.
+            let __iteration_creation = crucible_test_context::snapshot::CreationTracker::extended_with_iteration(
+                &*__parent_creation,
+                &#fixture_param_name.ctx.dirty_tracker,
+                &*initial_snapshot,
+            );
             let (mut __combined_fingerprint, __changed_accounts, __field_novel_bits) = unsafe {
                 crucible_test_context::snapshot::fingerprint_and_collect_changed(
                     &#fixture_param_name.ctx.svm,
                     &#fixture_param_name.ctx.dirty_tracker,
                     &*initial_snapshot,
+                    &__iteration_creation,
                     __field_novelty_bitmap.as_mut_ptr(),
                     __field_novelty_bitmap.len(),
                 )
@@ -1116,12 +1136,20 @@ fn stateful_singlecore_body(
                         __parent_count + __chain_len as u32);
                 }
 
-                // Dedup by action variant sequence (coarse: same action types = same crash class)
-                let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
-                __variant_seq.push(__action_variant_idx as u16);
-                let input_hash = libafl_bolts::hash_std(
-                    &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
-                );
+                // Dedup key. Account-mutation findings dedup on the finding
+                // identity (fixed by the final probed action), so a…k and b…k
+                // collapse to one finding. Normal invariant violations keep their
+                // full action-variant-sequence identity (distinct paths = distinct
+                // crash classes).
+                let input_hash = if let Some(__fid) = crucible_test_context::mutation_finding_id() {
+                    libafl_bolts::hash_std(__fid.as_bytes())
+                } else {
+                    let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
+                    __variant_seq.push(__action_variant_idx as u16);
+                    libafl_bolts::hash_std(
+                        &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
+                    )
+                };
                 if state_pool.is_novel_crash(input_hash) {
                     crashes_found += 1;
                     let crash_id = format!("crash_{:016x}", input_hash);
@@ -1272,6 +1300,7 @@ fn stateful_singlecore_body(
                             Some(__action_variant_idx as u16),
                             __field_bytes,
                             __fixture_for_storage,
+                            std::sync::Arc::new(__iteration_creation.clone()),
                             __novel_bits,
                             __edge_novel_bits,
                             succeeded,
@@ -1665,7 +1694,7 @@ fn stateful_multicore_body(
         {
             let initial_clock = initial_snapshot.clock().clone();
             let mut pool = state_pool.write().unwrap();
-            pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), 0, 0, true, None);
+            pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
         }
 
         // Shared atomics
@@ -1690,7 +1719,10 @@ fn stateful_multicore_body(
         // Lock-free bitmap for fingerprint novelty pre-checking.
         // Workers check this BEFORE doing expensive save-phase work (take_delta,
         // fixture clone). Eliminates ~99.8% of wasted mutex acquisitions.
-        let fingerprint_bitmap = Arc::new(crucible_test_context::snapshot::FingerprintBitmap::new());
+        // Sized from --pool-size so the dedup keyspace scales with the pool.
+        let fingerprint_bitmap = Arc::new(crucible_test_context::snapshot::FingerprintBitmap::new(
+            crucible_test_context::snapshot::fingerprint_bits_for_capacity(pool_capacity),
+        ));
         // Serializes fixture cloning (Rc::clone is not thread-safe) WITHOUT
         // blocking pool operations. Decoupled from RwLock so workers can
         // flush novel states and pick batches while one worker clones fixtures.
@@ -1800,8 +1832,8 @@ fn stateful_multicore_body(
                     // (pick_count/total_picks are atomic — no write lock needed for picking),
                     // accumulate results locally, flush with one write lock per batch.
                     const BATCH_SIZE: usize = 512;
-                    // (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
-                    type PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+                    // (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state, creation)
+                    type PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>);
                     // Reuse rng_vals allocation across batch refills (C4)
                     let mut rng_vals: Vec<u64> = Vec::with_capacity(BATCH_SIZE);
                     let mut local_batch: Vec<PickTuple> = Vec::with_capacity(BATCH_SIZE);
@@ -1814,10 +1846,10 @@ fn stateful_multicore_body(
                     // and clear the list inside the mutex alongside the next batch of clones.
                     let mut pending_fixture_drops: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE + 1);
                     // Accumulated results to flush after each batch
-                    // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, novelty_bits, edge_novelty, succeeded, coverage_positions)
-                    let mut pending_novel: Vec<(u64, CompactDelta, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
+                    // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, creation, novelty_bits, edge_novelty, succeeded, coverage_positions)
+                    let mut pending_novel: Vec<(u64, CompactDelta, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
                     // Crash info: (action_variant, msg, current_action_desc, parent_state_idx, crash_bytes)
-                    let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>)> = Vec::new();
+                    let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>, Option<String>)> = Vec::new();
                     // Track pending violations: state indices that need record_violation() in the flush
                     let mut pending_violations: Vec<usize> = Vec::new();
                     let mut pending_barren: Vec<usize> = Vec::new();
@@ -1845,8 +1877,8 @@ fn stateful_multicore_body(
                                     }
                                     pool.set_current_iteration(iters.load(Ordering::Relaxed));
                                     pool.maybe_advance_phase();
-                                    for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) in pending_novel.drain(..) {
-                                        if pool.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) {
+                                    for (fp, delta, depth, parent, bytes, desc, var, fb, fs, ct, cov_novel, edge_novel, succ, cov_pos) in pending_novel.drain(..) {
+                                        if pool.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, ct, cov_novel, edge_novel, succ, cov_pos) {
                                             novel.fetch_add(1, Ordering::Relaxed);
                                             fp_bitmap.mark(fp);
                                             if let Some(ref __cop) = corpus_out_for_worker {
@@ -1861,13 +1893,19 @@ fn stateful_multicore_body(
                                     for bi_idx in pending_barren.drain(..) {
                                         pool.record_barren_pick(bi_idx);
                                     }
-                                    for (cur_variant, msg, current_descs, parent_idx, crash_bytes) in pending_crashes.drain(..) {
-                                        // Compute variant-only hash inside the lock
-                                        let mut __variant_seq = pool.reconstruct_variant_sequence(parent_idx);
-                                        __variant_seq.push(cur_variant);
-                                        let vh = libafl_bolts::hash_std(
-                                            &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
-                                        );
+                                    for (cur_variant, msg, current_descs, parent_idx, crash_bytes, __mut_fid) in pending_crashes.drain(..) {
+                                        // Account-mutation findings key the crash on the finding
+                                        // identity (fixed by the final probed action); normal
+                                        // invariant violations key on the full variant sequence.
+                                        let vh = if let Some(ref __fid) = __mut_fid {
+                                            libafl_bolts::hash_std(__fid.as_bytes())
+                                        } else {
+                                            let mut __variant_seq = pool.reconstruct_variant_sequence(parent_idx);
+                                            __variant_seq.push(cur_variant);
+                                            libafl_bolts::hash_std(
+                                                &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
+                                            )
+                                        };
                                         if pool.is_novel_crash(vh) {
                                             crashes.fetch_add(1, Ordering::Relaxed);
                                             let parent_descs = pool.reconstruct_action_descriptions(parent_idx);
@@ -1967,7 +2005,7 @@ fn stateful_multicore_body(
                                 fixture_batch.clear();
                                 pending_fixture_drops.clear();
                                 // 2. Clone new batch (Rc increments — safe under mutex)
-                                for (_, _, _, _, _, _, _, fixture_arc) in local_batch.iter() {
+                                for (_, _, _, _, _, _, _, fixture_arc, _) in local_batch.iter() {
                                     if let Some(ref arc) = fixture_arc {
                                         let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
                                         fixture_batch.push(wrapper.0.clone());
@@ -1981,7 +2019,7 @@ fn stateful_multicore_body(
                         local_iter += 1;
 
                         // Pop one state + pre-cloned fixture from local batch (no lock needed)
-                        let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc) =
+                        let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc, mut __parent_creation) =
                             local_batch.pop().unwrap();
                         let mut __iter_fixture = fixture_batch.pop().unwrap();
 
@@ -2019,6 +2057,7 @@ fn stateful_multicore_body(
                                             parent_action_bytes = entry.action_bytes.clone();
                                             parent_fingerprint = entry.fingerprint;
                                             fixture_arc = entry.fixture_state.clone();
+                                            __parent_creation = entry.creation.clone();
                                             // Re-clone fixture from initial state under mutex
                                             {
                                                 let _guard = fixture_clone_lock.lock().unwrap();
@@ -2100,12 +2139,21 @@ fn stateful_multicore_body(
                             #mod_name::flush_local_bitmap_buffers(shared_edge_ptr, shared_branch_ptr);
                             #mod_name::new_coverage_count()
                         } else { 0u32 };
+                        // Extend the parent's creation tracker with accounts first written
+                        // this iteration — deterministic lineage-relative identities for
+                        // created accounts in the fingerprint.
+                        let __iteration_creation = crucible_test_context::snapshot::CreationTracker::extended_with_iteration(
+                            &*__parent_creation,
+                            &__iter_fixture.ctx.dirty_tracker,
+                            &*worker_initial,
+                        );
                         // Combined fingerprint + field novelty + patch collection in one pass
                         let (mut __combined_fingerprint, __changed_accounts, __field_novel_bits) = unsafe {
                             crucible_test_context::snapshot::fingerprint_and_collect_changed(
                                 &__iter_fixture.ctx.svm,
                                 &__iter_fixture.ctx.dirty_tracker,
                                 &*worker_initial,
+                                &__iteration_creation,
                                 shared_field_novelty_ptr,
                                 crucible_test_context::snapshot::FIELD_NOVELTY_BITMAP_SIZE,
                             )
@@ -2125,11 +2173,18 @@ fn stateful_multicore_body(
                             // Track violation for record_violation() during flush
                             pending_violations.push(state_idx);
 
-                            // Quick local dedup: skip if we've seen this variant from this state before
+                            // Quick local dedup. Account-mutation findings key on the
+                            // finding identity (fixed by the final probed action) so
+                            // a…k and b…k collapse; normal invariant violations key on
+                            // (parent state, final variant) as before.
                             let __cur_variant = __action_variant_idx as u16;
-                            let __local_key = libafl_bolts::hash_std(
-                                &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
-                            );
+                            let __mut_fid = crucible_test_context::mutation_finding_id();
+                            let __local_key = match __mut_fid {
+                                Some(ref __fid) => libafl_bolts::hash_std(__fid.as_bytes()),
+                                None => libafl_bolts::hash_std(
+                                    &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
+                                ),
+                            };
                             if seen_variant_hashes.insert(__local_key) {
                                 // Build crash bytes (strip inherited ghosts from parent)
                                 let mut crash_bytes = {
@@ -2153,7 +2208,7 @@ fn stateful_multicore_body(
                                     let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
                                     format!("{} -> {}", desc, status)
                                 }).collect();
-                                pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes));
+                                pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes, __mut_fid));
                             }
                         }
 
@@ -2247,7 +2302,8 @@ fn stateful_multicore_body(
                                         fingerprint, new_delta, parent_depth + __chain_len as u32,
                                         Some(state_idx), accumulated_bytes, action_desc,
                                         Some(__action_variant_idx as u16), __field_bytes,
-                                        __fixture_for_storage, __novel_bits, __edge_novel_bits, succeeded, __coverage_positions,
+                                        __fixture_for_storage, std::sync::Arc::new(__iteration_creation.clone()),
+                                        __novel_bits, __edge_novel_bits, succeeded, __coverage_positions,
                                     ));
                                 }
                             }
@@ -2397,7 +2453,7 @@ fn stateful_multicore_body(
             // process locally, flush results with one write lock per batch.
             const BATCH_SIZE: usize = 512;
             // (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
-            type PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+            type PickTuple = (std::sync::Arc<CompactDelta>, u32, usize, std::sync::Arc<Vec<u8>>, Option<u16>, std::sync::Arc<Vec<u8>>, u64, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>);
             // Reuse rng_vals allocation across batch refills (C4)
             let mut rng_vals: Vec<u64> = Vec::with_capacity(BATCH_SIZE);
             let mut local_batch: Vec<PickTuple> = Vec::with_capacity(BATCH_SIZE);
@@ -2408,8 +2464,8 @@ fn stateful_multicore_body(
             // Deferred fixture drops: serialized with clones under mutex to prevent Rc races
             let mut w0_pending_drops: Vec<#fixture_name> = Vec::with_capacity(BATCH_SIZE + 1);
             // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, coverage_novel, edge_novelty, succeeded, coverage_positions)
-            let mut pending_novel: Vec<(u64, CompactDelta, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
-            let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>)> = Vec::new();
+            let mut pending_novel: Vec<(u64, CompactDelta, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
+            let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>, Option<String>)> = Vec::new();
             // Track pending violations: state indices that need record_violation() in the flush
             let mut pending_violations: Vec<usize> = Vec::new();
             let mut pending_barren: Vec<usize> = Vec::new();
@@ -2461,8 +2517,8 @@ fn stateful_multicore_body(
                             }
                             p.set_current_iteration(local_iter);
                             p.maybe_advance_phase();
-                            for (fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) in pending_novel.drain(..) {
-                                if p.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, cov_novel, edge_novel, succ, cov_pos) {
+                            for (fp, delta, depth, parent, bytes, desc, var, fb, fs, ct, cov_novel, edge_novel, succ, cov_pos) in pending_novel.drain(..) {
+                                if p.try_add(fp, delta, depth, parent, bytes, desc, var, fb, fs, ct, cov_novel, edge_novel, succ, cov_pos) {
                                     novel.fetch_add(1, Ordering::Relaxed);
                                     fingerprint_bitmap.mark(fp);
                                     if let Some(ref __cop) = corpus_out_dir {
@@ -2477,13 +2533,19 @@ fn stateful_multicore_body(
                             for bi_idx in pending_barren.drain(..) {
                                 p.record_barren_pick(bi_idx);
                             }
-                            for (cur_variant, msg, current_descs, parent_idx, crash_bytes) in pending_crashes.drain(..) {
-                                // Compute variant-only hash inside the lock
-                                let mut __variant_seq = p.reconstruct_variant_sequence(parent_idx);
-                                __variant_seq.push(cur_variant);
-                                let vh = libafl_bolts::hash_std(
-                                    &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
-                                );
+                            for (cur_variant, msg, current_descs, parent_idx, crash_bytes, __mut_fid) in pending_crashes.drain(..) {
+                                // Account-mutation findings key the crash on the finding
+                                // identity (fixed by the final probed action); normal
+                                // invariant violations key on the full variant sequence.
+                                let vh = if let Some(ref __fid) = __mut_fid {
+                                    libafl_bolts::hash_std(__fid.as_bytes())
+                                } else {
+                                    let mut __variant_seq = p.reconstruct_variant_sequence(parent_idx);
+                                    __variant_seq.push(cur_variant);
+                                    libafl_bolts::hash_std(
+                                        &__variant_seq.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()
+                                    )
+                                };
                                 if p.is_novel_crash(vh) {
                                     crashes.fetch_add(1, Ordering::Relaxed);
                                     let parent_descs = p.reconstruct_action_descriptions(parent_idx);
@@ -2592,7 +2654,7 @@ fn stateful_multicore_body(
                         w0_pending_drops.clear();
                         // 2. Clone new batch
                         w0_fixture_batch.clear();
-                        for (_, _, _, _, _, _, _, fixture_arc) in local_batch.iter() {
+                        for (_, _, _, _, _, _, _, fixture_arc, _) in local_batch.iter() {
                             if let Some(ref arc) = fixture_arc {
                                 let wrapper = arc.downcast_ref::<__FixtureWrapper>().expect("fixture downcast failed");
                                 w0_fixture_batch.push(wrapper.0.clone());
@@ -2604,7 +2666,7 @@ fn stateful_multicore_body(
                 }
 
                 // Pop one state + pre-cloned fixture from local batch (no lock needed)
-                let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc) =
+                let (mut delta_arc, mut parent_depth, mut state_idx, mut parent_action_bytes, parent_variant, parent_field_bytes, mut parent_fingerprint, mut fixture_arc, mut __parent_creation) =
                     local_batch.pop().unwrap();
                 let mut __iter_fixture = w0_fixture_batch.pop().unwrap();
 
@@ -2643,6 +2705,7 @@ fn stateful_multicore_body(
                                     parent_action_bytes = entry.action_bytes.clone();
                                     parent_fingerprint = entry.fingerprint;
                                     fixture_arc = entry.fixture_state.clone();
+                                    __parent_creation = entry.creation.clone();
                                     // Re-clone fixture from initial state under mutex
                                     {
                                         let _guard = fixture_clone_mutex.lock().unwrap();
@@ -2747,11 +2810,20 @@ fn stateful_multicore_body(
 
                 // Combined fingerprint + field novelty + patch collection in one pass
                 let __t_fn = if __do_profile { Some(std::time::Instant::now()) } else { None };
+                // Extend the parent's creation tracker with accounts first written
+                // this iteration — deterministic lineage-relative identities for
+                // created accounts in the fingerprint.
+                let __iteration_creation = crucible_test_context::snapshot::CreationTracker::extended_with_iteration(
+                    &*__parent_creation,
+                    &__iter_fixture.ctx.dirty_tracker,
+                    &*w0_initial,
+                );
                 let (mut __combined_fingerprint, __changed_accounts, __field_novel_bits) = unsafe {
                     crucible_test_context::snapshot::fingerprint_and_collect_changed(
                         &__iter_fixture.ctx.svm,
                         &__iter_fixture.ctx.dirty_tracker,
                         &*w0_initial,
+                        &__iteration_creation,
                         shared_field_novelty_ptr,
                         crucible_test_context::snapshot::FIELD_NOVELTY_BITMAP_SIZE,
                     )
@@ -2778,11 +2850,17 @@ fn stateful_multicore_body(
                     // Track violation for record_violation() during flush
                     pending_violations.push(state_idx);
 
-                    // Quick local dedup: skip if we've seen this variant from this state before
+                    // Quick local dedup. Account-mutation findings key on the finding
+                    // identity (fixed by the final probed action) so a…k and b…k
+                    // collapse; others key on (parent state, final variant).
                     let __cur_variant = __action_variant_idx as u16;
-                    let __local_key = libafl_bolts::hash_std(
-                        &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
-                    );
+                    let __mut_fid = crucible_test_context::mutation_finding_id();
+                    let __local_key = match __mut_fid {
+                        Some(ref __fid) => libafl_bolts::hash_std(__fid.as_bytes()),
+                        None => libafl_bolts::hash_std(
+                            &[&parent_fingerprint.to_le_bytes()[..], &__cur_variant.to_le_bytes()[..]].concat()
+                        ),
+                    };
                     if seen_variant_hashes.insert(__local_key) {
                         let mut crash_bytes = {
                             let raw = (*parent_action_bytes).clone();
@@ -2810,7 +2888,7 @@ fn stateful_multicore_body(
                             let status = if history.get(i).map(|r| r.success).unwrap_or(false) { "OK" } else { "FAIL" };
                             format!("{} -> {}", desc, status)
                         }).collect();
-                        pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes));
+                        pending_crashes.push((__cur_variant, msg.clone(), current_descs, state_idx, crash_bytes, __mut_fid));
                     }
                 }
                 if let Some(__t) = __t { __phase_crash_ns += __t.elapsed().as_nanos() as u64; }
@@ -2908,7 +2986,8 @@ fn stateful_multicore_body(
                                 fingerprint, new_delta, parent_depth + __chain_len as u32,
                                 Some(state_idx), accumulated_bytes, action_desc,
                                 Some(__action_variant_idx as u16), __field_bytes,
-                                __fixture_for_storage, __novel_bits, __edge_novel_bits, succeeded, __coverage_positions,
+                                __fixture_for_storage, std::sync::Arc::new(__iteration_creation.clone()),
+                                __novel_bits, __edge_novel_bits, succeeded, __coverage_positions,
                             ));
                             if let Some(__t) = __t_save { __phase_save_ns += __t.elapsed().as_nanos() as u64; }
                         }
@@ -4042,11 +4121,17 @@ mod tests {
         let output = gen_singlecore();
         assert!(
             output.contains("is_novel_crash"),
-            "should check crash novelty by variant hash"
+            "should check crash novelty"
         );
+        // Normal invariant violations dedup by the full action variant sequence.
         assert!(
             output.contains("reconstruct_variant_sequence"),
-            "should reconstruct variant sequence for hashing"
+            "invariant violations should dedup by the reconstructed variant sequence"
+        );
+        // Account-mutation findings dedup by finding identity (final probed action).
+        assert!(
+            output.contains("mutation_finding_id"),
+            "mutation findings should dedup by finding identity"
         );
     }
 
@@ -4055,11 +4140,15 @@ mod tests {
         let output = gen_multicore();
         assert!(
             output.contains("is_novel_crash"),
-            "should check crash novelty by variant hash"
+            "should check crash novelty"
         );
         assert!(
             output.contains("reconstruct_variant_sequence"),
-            "should reconstruct variant sequence for hashing"
+            "invariant violations should dedup by the reconstructed variant sequence"
+        );
+        assert!(
+            output.contains("mutation_finding_id"),
+            "mutation findings should dedup by finding identity"
         );
     }
 

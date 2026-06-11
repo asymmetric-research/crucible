@@ -188,7 +188,7 @@ fn test_state_pool_pick_weighted_batch() {
     assert_eq!(count, 10);
     assert_eq!(out.len(), 10);
     // All returned state indices should be valid
-    for &(_, _, state_idx, _, _, _, _, _) in &out {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &out {
         assert!(state_idx < pool.len());
     }
 }
@@ -296,6 +296,7 @@ fn test_state_pool_reconstruct_action_sequence() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -351,6 +352,7 @@ fn test_state_pool_export_corpus_basic() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -368,6 +370,7 @@ fn test_state_pool_export_corpus_basic() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -385,6 +388,7 @@ fn test_state_pool_export_corpus_basic() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -419,6 +423,7 @@ fn test_state_pool_export_corpus_empty() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -447,6 +452,7 @@ fn test_state_pool_export_corpus_content() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -480,6 +486,7 @@ fn test_state_pool_export_corpus_creates_dir() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -509,6 +516,7 @@ fn test_state_pool_export_corpus_deterministic() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -692,6 +700,7 @@ fn test_state_pool_coverage_novel_weight_boost() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -709,6 +718,7 @@ fn test_state_pool_coverage_novel_weight_boost() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         50,
         50,
         true,
@@ -786,6 +796,7 @@ fn test_state_pool_try_add_parent_idx_out_of_bounds() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -822,6 +833,7 @@ fn test_state_pool_fixture_state_round_trip() {
         Some(0),
         vec![],
         Some(fixture),
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -864,6 +876,7 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -879,6 +892,7 @@ fn test_state_pool_export_corpus_duplicate_action_bytes() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -1107,7 +1121,7 @@ fn test_pool_weighted_favors_unexplored() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -1141,6 +1155,7 @@ fn test_pool_weighted_novelty_differentiates() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         40,
         40,
         true,
@@ -1159,7 +1174,7 @@ fn test_pool_weighted_novelty_differentiates() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -1191,6 +1206,7 @@ fn test_pool_weighted_coverage_bonus() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         50,
         50,
         true,
@@ -1210,7 +1226,7 @@ fn test_pool_weighted_coverage_bonus() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -1243,6 +1259,7 @@ fn test_pool_weighted_novelty_bits_rarity() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         100,
         0,
         true,
@@ -1260,6 +1277,7 @@ fn test_pool_weighted_novelty_bits_rarity() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1280,7 +1298,7 @@ fn test_pool_weighted_novelty_bits_rarity() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -1310,6 +1328,7 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1326,6 +1345,7 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         50,
         50,
         true,
@@ -1344,7 +1364,7 @@ fn test_pool_weighted_zero_vs_high_novelty_ratio() {
     pool.pick_weighted_batch(&rng_vals, &mut batch);
 
     let mut counts = [0u32; 2];
-    for &(_, _, state_idx, _, _, _, _, _) in &batch {
+    for &(_, _, state_idx, _, _, _, _, _, _) in &batch {
         counts[state_idx] += 1;
     }
 
@@ -1376,7 +1396,7 @@ fn test_pool_pick_weighted_batch_returns_arcs() {
     assert_eq!(batch.len(), 5);
 
     // Each entry in the batch should have a valid Arc<SvmSnapshot>
-    for (delta_arc, depth, state_idx, action_bytes, _variant, _fb, _fp, _fs) in &batch {
+    for (delta_arc, depth, state_idx, action_bytes, _variant, _fb, _fp, _fs, _ct) in &batch {
         assert!(state_idx < &pool.len());
         // The Arc should be the same object as in the pool
         let pool_arc = &pool.states[*state_idx].delta;
@@ -1421,7 +1441,7 @@ fn test_pool_pick_weighted_batch_single_state() {
     let count = pool.pick_weighted_batch(&rng_vals, &mut batch);
     assert_eq!(count, 3);
     // All picks must be state 0
-    for (_, _, state_idx, _, _, _, _, _) in &batch {
+    for (_, _, state_idx, _, _, _, _, _, _) in &batch {
         assert_eq!(*state_idx, 0);
     }
     assert_eq!(pool.states[0].pick_count.load(Ordering::Relaxed), 3);
@@ -1571,6 +1591,7 @@ fn test_pool_export_corpus_skips_shallow() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -1587,6 +1608,7 @@ fn test_pool_export_corpus_skips_shallow() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         1,
         1,
         true,
@@ -2632,6 +2654,7 @@ fn test_pool_edge_rarity_scoring() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2657,6 +2680,7 @@ fn test_pool_edge_rarity_scoring() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2690,6 +2714,7 @@ fn test_pool_edge_rarity_scoring() {
         Some(2),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -2709,6 +2734,7 @@ fn test_pool_edge_rarity_scoring() {
         Some(3),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2733,6 +2759,7 @@ fn test_pool_edge_freq_decrement_on_eviction() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2749,6 +2776,7 @@ fn test_pool_edge_freq_decrement_on_eviction() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2771,6 +2799,7 @@ fn test_pool_edge_freq_decrement_on_eviction() {
         Some(2),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2796,6 +2825,7 @@ fn test_pool_edge_freq_decrement_on_crash() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         5,
         true,
@@ -2863,6 +2893,7 @@ fn test_state_registry_accounting() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -2888,6 +2919,7 @@ fn test_state_registry_accounting() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         5,
         0,
         true,
@@ -2919,6 +2951,7 @@ fn test_state_registry_accounting() {
         Some(1),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -3007,6 +3040,7 @@ fn test_phase_transition() {
             None,
             vec![],
             None,
+            std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
             0,
             0,
             true,
@@ -3044,6 +3078,7 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -3059,6 +3094,7 @@ fn test_state_seed_weight_fallback_in_coverage_phase() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -3104,6 +3140,7 @@ fn test_blended_phase_uses_scfuzz_formula() {
             None,
             vec![],
             None,
+            std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
             0,
             0,
             true,
@@ -3132,6 +3169,7 @@ fn test_blended_phase_uses_scfuzz_formula() {
         None,
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         0,
         0,
         true,
@@ -3154,4 +3192,78 @@ fn test_blended_phase_uses_scfuzz_formula() {
         "Blended phase should use SCFuzz formula, not fast-decay"
     );
     assert!(w > 0.0, "SCFuzz weight should be positive");
+}
+
+// =========================================================================
+// Fix 2 — dedup ceiling wired to --pool-size
+// =========================================================================
+
+#[test]
+fn test_fingerprint_bits_for_capacity() {
+    // Floor: small pools keep the tuned 18-bit default
+    assert_eq!(fingerprint_bits_for_capacity(1), 18);
+    assert_eq!(fingerprint_bits_for_capacity(1_000), 18);
+    assert_eq!(fingerprint_bits_for_capacity(256_000), 18);
+    assert_eq!(fingerprint_bits_for_capacity(1 << 18), 18);
+    // Larger pools raise the ceiling
+    assert_eq!(fingerprint_bits_for_capacity((1 << 18) + 1), 19);
+    assert_eq!(fingerprint_bits_for_capacity(1 << 20), 20);
+    assert_eq!(fingerprint_bits_for_capacity(3_000_000), 22);
+}
+
+/// The distinct-state ceiling must scale with `--pool-size`. Two fingerprints
+/// that differ only above bit 18 collide in a default-width pool but are
+/// distinct in a pool sized past 2^18 — with the old fixed cap both pools
+/// rejected the second state at the same point.
+#[test]
+fn test_pool_cap_scales_with_capacity() {
+    let fp_low = 0x2_FFFFu64; // bits 0..18
+    let fp_high = fp_low | (1u64 << 19); // same bottom 18 bits, differs above
+
+    // Default-width pool (capacity below 2^18): the two fingerprints collide.
+    let mut small = StatePool::new(1_000, 10);
+    assert_eq!(small.fingerprint_bits(), 18);
+    assert!(add_test_state(&mut small, fp_low, 1, None, "a", Some(0)));
+    assert!(
+        !add_test_state(&mut small, fp_high, 1, None, "b", Some(1)),
+        "18-bit dedup must collapse fingerprints that only differ above bit 18"
+    );
+    assert_eq!(small.len(), 1);
+
+    // Large pool: the dedup width grows with capacity, so both are admitted.
+    let mut large = StatePool::new(1 << 20, 10);
+    assert_eq!(large.fingerprint_bits(), 20);
+    assert!(add_test_state(&mut large, fp_low, 1, None, "a", Some(0)));
+    assert!(
+        add_test_state(&mut large, fp_high, 1, None, "b", Some(1)),
+        "a larger --pool-size must raise the distinct-state ceiling"
+    );
+    assert_eq!(large.len(), 2);
+}
+
+/// FingerprintBitmap::new(bits) allocates 2^bits / 8 bytes and round-trips
+/// is_seen/mark across the keyspace, with aliasing beyond the mask.
+#[test]
+fn test_fingerprint_bitmap_sized_from_bits() {
+    let bits = 10u32;
+    let keyspace = 1u64 << bits;
+    let bitmap = FingerprintBitmap::new(bits);
+
+    for key in [0u64, 1, keyspace / 2, keyspace - 1] {
+        assert!(!bitmap.is_seen(key), "fresh bitmap must report unseen");
+        bitmap.mark(key);
+        assert!(bitmap.is_seen(key), "marked key must be seen");
+    }
+    // Keys beyond the mask alias onto the truncated key
+    assert!(bitmap.is_seen(keyspace), "key 2^bits aliases to key 0");
+    assert!(bitmap.is_seen(1 | keyspace), "high bits are masked off");
+    assert!(!bitmap.is_seen(2), "unmarked keys stay unseen");
+
+    // A wider bitmap distinguishes keys that alias in the narrow one
+    let wide = FingerprintBitmap::new(bits + 2);
+    wide.mark(0);
+    assert!(
+        !wide.is_seen(keyspace),
+        "wider mask separates previously-aliased keys"
+    );
 }

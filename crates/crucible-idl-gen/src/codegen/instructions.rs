@@ -71,7 +71,7 @@ pub fn generate(idl: &Idl, use_bincode: bool) -> proc_macro2::TokenStream {
                         data
                     }
 
-                    fn write_to(&self, data: &mut Vec<u8>) {
+                    fn write_to(&self, mut data: &mut Vec<u8>) {
                         data.clear();
                         data.extend_from_slice(Self::DISCRIMINATOR);
                         #(#bincode_writes)*

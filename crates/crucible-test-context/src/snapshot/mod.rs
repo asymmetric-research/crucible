@@ -16,16 +16,16 @@ pub mod state_pool;
 pub mod svm_snapshot;
 
 pub use account_diff::AccountDiff;
-pub use dirty_tracker::DirtyTracker;
+pub use dirty_tracker::{CreationTracker, DirtyTracker};
 pub use state_pool::{
-    extract_coverage_positions, state_class_from_fingerprint, ActionStats, ActionStatsMap,
-    FingerprintBitmap, FuzzPhase, PoolMemoryStats, StateEntry, StatePool, StateRegistry,
-    StateStats,
+    extract_coverage_positions, fingerprint_bits_for_capacity, state_class_from_fingerprint,
+    ActionStats, ActionStatsMap, FingerprintBitmap, FuzzPhase, PoolMemoryStats, StateEntry,
+    StatePool, StateRegistry, StateStats,
 };
 pub use svm_snapshot::{
-    check_field_novelty, compute_state_fingerprint_from_snapshot, fingerprint_and_collect_changed,
-    slot_bucket, slot_diff_bucket, value_bucket, AccountPatch, CompactDelta, SvmSnapshot,
-    FIELD_NOVELTY_BITMAP_SIZE,
+    account_identity_hash, check_field_novelty, compute_state_fingerprint_from_snapshot,
+    fingerprint_and_collect_changed, slot_bucket, slot_diff_bucket, value_bucket, AccountPatch,
+    CompactDelta, SvmSnapshot, FIELD_NOVELTY_BITMAP_SIZE,
 };
 
 #[cfg(test)]

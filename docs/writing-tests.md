@@ -111,6 +111,9 @@ Current finding labels:
 - `[CC-5 type-tag]` missing discriminator/type-tag check
 - `[CC-8 field-ref]` same-class account accepted without checking an embedded pubkey relation
 - `[CC-8 root-ref]` child account accepted without checking a singleton/root account's embedded pubkey relation
+- `[CC-8 value-ref]` referenced same-class account accepted without checking an embedded pubkey relation
+- `[CC-8.3 bidirectional-ref]` paired accounts accepted without checking mutual or shared-root pubkey fields
+- `[CC-8.6 semantic-swap]` same-class account with a different embedded-key profile accepted
 - `[CC-10 authority]` state account accepted with a different valid signer than the embedded authority
 - `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
 - `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner

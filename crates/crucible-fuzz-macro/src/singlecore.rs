@@ -151,6 +151,27 @@ pub fn singlecore_mode(
             }
 
             if let Some(msg) = crucible_test_context::take_violation() {
+                // Account-mutation findings dedup on the finding identity (fixed by
+                // the final probed action), not the action sequence — so different
+                // inputs reaching the same probed instruction (a…k, b…k) are one
+                // finding. Skip repeats so the crash artifact is written once.
+                if let Some(__fid) = crucible_test_context::mutation_finding_id() {
+                    if !crucible_test_context::is_novel_mutation_finding(&__fid) {
+                        // Already reported this finding — suppress the duplicate.
+                        return ExitKind::Ok;
+                    }
+                    let input_hash = hash_std(__fid.as_bytes());
+                    let crash_id = format!("crash_{:016x}", input_hash);
+                    println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                    eprintln!("[FUZZ_FINDING] {}: {}", crash_id, msg);
+                    crucible_test_context::print_action_sequence();
+                    crucible_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
+                    if std::env::var("FUZZ_STOP_ON_CRASH").is_ok() {
+                        eprintln!("[FUZZ] First crash found. Exiting (--stop-on-crash).");
+                        std::process::exit(0);
+                    }
+                    return ExitKind::Crash;
+                }
                 // Use the same hash as LibAFL (xxh3_64) so our metadata matches LibAFL's crash filenames
                 let input_hash = hash_std(slice);
                 let crash_id = format!("crash_{:016x}", input_hash);

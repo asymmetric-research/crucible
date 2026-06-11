@@ -201,6 +201,76 @@
       "args": []
     },
     {
+      "name": "read_price_ref_no_check",
+      "docs": [
+        "Source embeds the expected price/value account key, but the instruction accepts any",
+        "same-class price account. The price is read but does not affect this test's post-state,",
+        "matching economic-value inputs whose byte corruption is a weak relevance signal."
+      ],
+      "discriminator": [
+        192,
+        165,
+        40,
+        139,
+        148,
+        227,
+        183,
+        184
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "price"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_price_ref_with_check",
+      "docs": [
+        "Same price/value read, with `source.price == price.key()` checked."
+      ],
+      "discriminator": [
+        115,
+        242,
+        172,
+        177,
+        141,
+        42,
+        124,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "price"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_root_child_no_check",
       "docs": [
         "Singleton/root account embeds a child key, but the instruction accepts a wrong child."
@@ -260,6 +330,221 @@
         },
         {
           "name": "child"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_bidirectional_no_check",
+      "docs": [
+        "Pair accounts each carry their expected counterpart, but the instruction never verifies the",
+        "bidirectional binding."
+      ],
+      "discriminator": [
+        93,
+        190,
+        54,
+        65,
+        169,
+        95,
+        116,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_bidirectional_with_check",
+      "docs": [
+        "Same pair read, with both counterpart directions checked."
+      ],
+      "discriminator": [
+        150,
+        99,
+        206,
+        14,
+        115,
+        220,
+        63,
+        131
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_shared_root_no_check",
+      "docs": [
+        "Both accounts point at a root/counterpart, but the instruction never verifies that the root",
+        "fields match the provided root."
+      ],
+      "discriminator": [
+        59,
+        56,
+        178,
+        144,
+        34,
+        233,
+        160,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_shared_root_with_check",
+      "docs": [
+        "Same shared-root read, with both root fields checked against the provided root account."
+      ],
+      "discriminator": [
+        180,
+        77,
+        159,
+        186,
+        101,
+        3,
+        22,
+        95
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "consume_semantic_no_check",
+      "docs": [
+        "Semantic account has an embedded context key, but the instruction accepts any same-class",
+        "account and consumes it."
+      ],
+      "discriminator": [
+        93,
+        197,
+        193,
+        73,
+        47,
+        57,
+        141,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "semantic",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "consume_semantic_with_check",
+      "docs": [
+        "Same consume path, with the expected semantic context checked before mutation."
+      ],
+      "discriminator": [
+        43,
+        164,
+        195,
+        252,
+        30,
+        147,
+        243,
+        37
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "semantic",
+          "writable": true
         },
         {
           "name": "vault",
@@ -1398,6 +1683,32 @@
       ]
     },
     {
+      "name": "ValueSourceState",
+      "discriminator": [
+        54,
+        98,
+        108,
+        196,
+        246,
+        208,
+        150,
+        132
+      ]
+    },
+    {
+      "name": "PriceState",
+      "discriminator": [
+        202,
+        40,
+        37,
+        157,
+        73,
+        117,
+        152,
+        251
+      ]
+    },
+    {
       "name": "RootState",
       "discriminator": [
         168,
@@ -1408,6 +1719,45 @@
         239,
         59,
         86
+      ]
+    },
+    {
+      "name": "PairLeftState",
+      "discriminator": [
+        139,
+        52,
+        59,
+        189,
+        192,
+        91,
+        80,
+        216
+      ]
+    },
+    {
+      "name": "PairRightState",
+      "discriminator": [
+        67,
+        248,
+        77,
+        163,
+        40,
+        119,
+        172,
+        151
+      ]
+    },
+    {
+      "name": "SemanticState",
+      "discriminator": [
+        35,
+        220,
+        247,
+        206,
+        91,
+        179,
+        102,
+        198
       ]
     },
     {
@@ -1551,12 +1901,96 @@
             }
         },
         {
+            "name": "ValueSourceState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "price",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "PriceState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "price",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
             "name": "RootState",
             "type": {
                 "kind": "struct",
                 "fields": [
                     {
                         "name": "child",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "PairLeftState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "right",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "root",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "PairRightState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "left",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "root",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "SemanticState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "context",
                         "type": "pubkey"
                     },
                     {

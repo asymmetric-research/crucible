@@ -130,6 +130,12 @@ thread_local! {
     static MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
     static MUTATION_FINDING_MESSAGE: RefCell<Option<String>> = RefCell::new(None);
     static EXPECTED_MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
+    // Account-mutation finding identities already reported as crashes this run.
+    // Mutation findings dedup on the finding identity ({class}:{program}:{disc}),
+    // which is fixed by the final (probed) action — so two different action
+    // sequences that reach the same probed instruction collapse to one finding.
+    static SEEN_MUTATION_FINDINGS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -986,6 +992,21 @@ pub fn mutation_finding_message() -> Option<String> {
     } else {
         None
     }
+}
+
+/// Record an account-mutation finding identity and report whether it is the
+/// first time this identity has been seen this run. The identity
+/// (`{class}:{program}:{disc}`) is determined by the final probed action, not
+/// the action-sequence prefix, so distinct sequences ending at the same probed
+/// instruction (a…k and b…k) are treated as one finding. Returns `false` for a
+/// repeat (caller should suppress the duplicate crash).
+pub fn is_novel_mutation_finding(id: &str) -> bool {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow_mut().insert(id.to_string()))
+}
+
+/// Number of distinct account-mutation findings reported this run.
+pub fn seen_mutation_finding_count() -> usize {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().len())
 }
 
 /// Restrict replay/tmin to the original account-mutation finding identity.
@@ -3743,6 +3764,24 @@ mod tests {
 
         let _ = take_violation();
         clear_iteration_state();
+    }
+
+    #[test]
+    fn is_novel_mutation_finding_dedups_by_identity() {
+        // Same identity reported via two different sequences (a…k, b…k) is one
+        // finding: first is novel, the second is suppressed.
+        let id = "CC-1 owner:Program:abc";
+        assert!(
+            is_novel_mutation_finding(id),
+            "first sighting of a finding identity is novel"
+        );
+        assert!(
+            !is_novel_mutation_finding(id),
+            "a different sequence reaching the same finding identity is a duplicate"
+        );
+        // A different identity (e.g. another constraint class on the same ix) is distinct.
+        assert!(is_novel_mutation_finding("CC-4 signer:Program:abc"));
+        assert!(seen_mutation_finding_count() >= 2);
     }
 
     // =========================================================================

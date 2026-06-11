@@ -1,7 +1,7 @@
 #![allow(unexpected_cfgs)]
 
-use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::SysvarId;
 
 declare_id!("2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b");
 
@@ -9,6 +9,8 @@ declare_id!("2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b");
 /// program or an oracle program). The harness creates the relevant config account with this owner.
 pub const FOREIGN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([0x0A; 32]);
 pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const EXPECTED_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x86; 32]);
+pub const ALT_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x87; 32]);
 
 const MINT_LEN: usize = 82;
 const TOKEN_ACCOUNT_LEN: usize = 165;
@@ -560,6 +562,34 @@ pub mod owner_mutation_airdrop {
         )
     }
 
+    /// Source embeds the expected price/value account key, but the instruction accepts any
+    /// same-class price account. The price is read but does not affect this test's post-state,
+    /// matching economic-value inputs whose byte corruption is a weak relevance signal.
+    pub fn read_price_ref_no_check(ctx: Context<ReadPriceRef>) -> Result<()> {
+        let (_expected_price, source_amount) = read_value_source_state(&ctx.accounts.source)?;
+        let _price = read_price_value(&ctx.accounts.price)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            source_amount,
+        )
+    }
+
+    /// Same price/value read, with `source.price == price.key()` checked.
+    pub fn read_price_ref_with_check(ctx: Context<ReadPriceRef>) -> Result<()> {
+        let (expected_price, source_amount) = read_value_source_state(&ctx.accounts.source)?;
+        require!(
+            expected_price == ctx.accounts.price.key(),
+            AirdropError::WrongTarget
+        );
+        let _price = read_price_value(&ctx.accounts.price)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            source_amount,
+        )
+    }
+
     /// Singleton/root account embeds a child key, but the instruction accepts a wrong child.
     pub fn read_root_child_no_check(ctx: Context<ReadRootChild>) -> Result<()> {
         let (_expected_child, root_amount) = read_root_state(&ctx.accounts.root)?;
@@ -583,6 +613,98 @@ pub mod owner_mutation_airdrop {
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
             root_amount + child_amount,
+        )
+    }
+
+    /// Pair accounts each carry their expected counterpart, but the instruction never verifies the
+    /// bidirectional binding.
+    pub fn read_pair_bidirectional_no_check(ctx: Context<ReadPair>) -> Result<()> {
+        let (_expected_right, _left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
+        let (_expected_left, _right_root, right_amount) =
+            read_pair_right_state(&ctx.accounts.right)?;
+        let root_amount = read_target_state(&ctx.accounts.root)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            left_amount + right_amount + root_amount,
+        )
+    }
+
+    /// Same pair read, with both counterpart directions checked.
+    pub fn read_pair_bidirectional_with_check(ctx: Context<ReadPair>) -> Result<()> {
+        let (expected_right, _left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
+        let (expected_left, _right_root, right_amount) =
+            read_pair_right_state(&ctx.accounts.right)?;
+        require!(
+            expected_right == ctx.accounts.right.key(),
+            AirdropError::WrongTarget
+        );
+        require!(
+            expected_left == ctx.accounts.left.key(),
+            AirdropError::WrongTarget
+        );
+        let root_amount = read_target_state(&ctx.accounts.root)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            left_amount + right_amount + root_amount,
+        )
+    }
+
+    /// Both accounts point at a root/counterpart, but the instruction never verifies that the root
+    /// fields match the provided root.
+    pub fn read_pair_shared_root_no_check(ctx: Context<ReadPair>) -> Result<()> {
+        let (_expected_right, _left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
+        let (_expected_left, _right_root, right_amount) =
+            read_pair_right_state(&ctx.accounts.right)?;
+        let root_amount = read_target_state(&ctx.accounts.root)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            left_amount + right_amount + root_amount,
+        )
+    }
+
+    /// Same shared-root read, with both root fields checked against the provided root account.
+    pub fn read_pair_shared_root_with_check(ctx: Context<ReadPair>) -> Result<()> {
+        let (_expected_right, left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
+        let (_expected_left, right_root, right_amount) =
+            read_pair_right_state(&ctx.accounts.right)?;
+        require!(
+            left_root == ctx.accounts.root.key(),
+            AirdropError::WrongTarget
+        );
+        require!(
+            right_root == ctx.accounts.root.key(),
+            AirdropError::WrongTarget
+        );
+        let root_amount = read_target_state(&ctx.accounts.root)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            left_amount + right_amount + root_amount,
+        )
+    }
+
+    /// Semantic account has an embedded context key, but the instruction accepts any same-class
+    /// account and consumes it.
+    pub fn consume_semantic_no_check(ctx: Context<ConsumeSemantic>) -> Result<()> {
+        let (_context, amount) = consume_semantic_state(&ctx.accounts.semantic, None)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same consume path, with the expected semantic context checked before mutation.
+    pub fn consume_semantic_with_check(ctx: Context<ConsumeSemantic>) -> Result<()> {
+        let (_context, amount) =
+            consume_semantic_state(&ctx.accounts.semantic, Some(EXPECTED_SEMANTIC_CONTEXT))?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
         )
     }
 
@@ -738,6 +860,29 @@ fn read_target_state(account: &UncheckedAccount) -> Result<u64> {
     Ok(amount)
 }
 
+fn read_value_source_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == ValueSourceState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let price = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((price, amount))
+}
+
+fn read_price_value(account: &UncheckedAccount) -> Result<u64> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 16, AirdropError::InvalidConfig);
+    let price = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    require!(price > 0, AirdropError::InvalidAmount);
+    Ok(price)
+}
+
 fn read_root_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
     require!(account.owner == &crate::ID, AirdropError::WrongOwner);
     let data = account.try_borrow_data()?;
@@ -750,6 +895,57 @@ fn read_root_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
     let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
     require!(amount > 0, AirdropError::InvalidAmount);
     Ok((child, amount))
+}
+
+fn read_pair_left_state(account: &UncheckedAccount) -> Result<(Pubkey, Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 80, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == PairLeftState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let right = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let root = Pubkey::new_from_array(data[40..72].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((right, root, amount))
+}
+
+fn read_pair_right_state(account: &UncheckedAccount) -> Result<(Pubkey, Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 80, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == PairRightState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let left = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let root = Pubkey::new_from_array(data[40..72].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((left, root, amount))
+}
+
+fn consume_semantic_state(
+    account: &UncheckedAccount,
+    expected_context: Option<Pubkey>,
+) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let mut data = account.try_borrow_mut_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == SemanticState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let context = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    if let Some(expected_context) = expected_context {
+        require!(context == expected_context, AirdropError::WrongTarget);
+    }
+    data[40..48].copy_from_slice(&(amount - 1).to_le_bytes());
+    Ok((context, amount))
 }
 
 fn read_authority_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
@@ -963,8 +1159,39 @@ pub struct TargetState {
 }
 
 #[account]
+pub struct ValueSourceState {
+    pub price: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct PriceState {
+    pub price: u64,
+}
+
+#[account]
 pub struct RootState {
     pub child: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct PairLeftState {
+    pub right: Pubkey,
+    pub root: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct PairRightState {
+    pub left: Pubkey,
+    pub root: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct SemanticState {
+    pub context: Pubkey,
     pub amount: u64,
 }
 
@@ -1023,6 +1250,19 @@ pub struct ReadLinked<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ReadPriceRef<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub source: UncheckedAccount<'info>,
+    /// CHECK: owner checked manually; discriminator intentionally not checked by the reader.
+    pub price: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct ReadRootChild<'info> {
     #[account(mut)]
     pub recipient: Signer<'info>,
@@ -1030,6 +1270,33 @@ pub struct ReadRootChild<'info> {
     pub root: UncheckedAccount<'info>,
     /// CHECK: owner and discriminator checked manually.
     pub child: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadPair<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub left: UncheckedAccount<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub right: UncheckedAccount<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub root: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ConsumeSemantic<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    #[account(mut)]
+    pub semantic: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

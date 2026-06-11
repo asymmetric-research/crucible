@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-macro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libafl",
  "libafl_bolts",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzzer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
@@ -1356,10 +1356,11 @@ dependencies = [
 
 [[package]]
 name = "crucible-idl-gen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anchor-lang-idl",
  "anyhow",
+ "bincode 1.3.3",
  "bs58",
  "codama-nodes",
  "heck 0.5.0",
@@ -1372,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-invariant-macro"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1382,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-macro-utils"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1391,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-test-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "addr2line 0.24.2",
  "anchor-lang",

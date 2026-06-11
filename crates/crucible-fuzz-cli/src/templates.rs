@@ -20,7 +20,9 @@ crucible-idl-gen = {{ git = "{repo}", branch = "{branch}" }}
 anchor-lang = "1.0.1"
 
 # Solana v3.x (required for litesvm 0.9.0)
-solana-pubkey = "3.0"
+# `serde` feature: generated native-program (bincode) arg structs derive
+# serde::Serialize, so Pubkey fields must implement it too.
+solana-pubkey = {{ version = "3.0", features = ["serde"] }}
 solana-keypair = "3.1"
 solana-signer = "3.0"
 solana-program = "3.0"
@@ -38,6 +40,11 @@ anyhow = "1.0"
 bytemuck = "1.14"
 ctor = "0.6"
 ctrlc = "3.4"
+
+# Native-program (bincode) instruction encoding — generated code for 4-byte
+# discriminator IDLs serializes args with serde + bincode (fixint, LE).
+serde = {{ version = "1.0", features = ["derive"] }}
+bincode = "1.3"
 
 [[bin]]
 name = "invariant_test"

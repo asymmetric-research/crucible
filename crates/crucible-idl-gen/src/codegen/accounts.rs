@@ -137,12 +137,22 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
                 *idx += 1;
 
                 if single.optional {
+                    // Anchor 0.30+ resolves optional accounts positionally: an
+                    // absent optional must still occupy its slot, passed as the
+                    // program ID (non-signer, non-writable). Omitting it would
+                    // shift every later account's position.
                     quote! {
                         if let Some(key) = &self.#field_name {
                             account_metas.push(AccountMeta {
                                 pubkey: *key,
                                 is_signer: #is_signer,
                                 is_writable: #is_writable,
+                            });
+                        } else {
+                            account_metas.push(AccountMeta {
+                                pubkey: super::ID,
+                                is_signer: false,
+                                is_writable: false,
                             });
                         }
                     }
@@ -427,6 +437,80 @@ mod tests {
         assert!(
             output.contains("pub stake : Pubkey"),
             "non-optional account should be plain Pubkey"
+        );
+    }
+
+    #[test]
+    fn test_none_optional_pushes_program_id() {
+        // Anchor 0.30+ resolves optional accounts positionally: a None optional
+        // must occupy its slot as the program ID (non-signer, non-writable) so
+        // trailing accounts keep their index.
+        let idl = make_idl(vec![IdlInstruction {
+            name: "WithOptional".to_string(),
+            docs: vec![],
+            discriminator: vec![],
+            accounts: vec![
+                make_account("stake"),
+                make_optional_account("lockupAuthority"),
+                make_account("trailing"),
+            ],
+            args: vec![],
+            returns: None,
+        }]);
+
+        let output = generate(&idl).to_string();
+
+        // The else branch of the optional must push the program ID placeholder.
+        assert!(
+            output.contains("pubkey : super :: ID"),
+            "None optional should push the program ID, got: {output}"
+        );
+
+        // Extract the to_account_metas body and verify push order/contents:
+        // stake, optional (if/else = 2 pushes), trailing.
+        let meta_fn_start = output
+            .find("fn to_account_metas")
+            .expect("should have to_account_metas");
+        let meta_body = &output[meta_fn_start..];
+        let pushes: Vec<&str> = meta_body.split("account_metas . push").skip(1).collect();
+        assert_eq!(
+            pushes.len(),
+            4,
+            "stake + optional Some-branch + optional None-branch + trailing = 4 pushes, got {}",
+            pushes.len()
+        );
+
+        // The None branch (3rd push) holds the program ID placeholder,
+        // non-signer and non-writable regardless of the IDL flags.
+        assert!(
+            pushes[2].contains("super :: ID"),
+            "None branch should push program ID, got: {}",
+            pushes[2]
+        );
+        assert!(
+            pushes[2].contains("is_signer : false"),
+            "program ID placeholder must be non-signer"
+        );
+        assert!(
+            pushes[2].contains("is_writable : false"),
+            "program ID placeholder must be non-writable"
+        );
+
+        // The trailing account keeps its slot after the optional.
+        assert!(
+            pushes[3].contains("self . trailing"),
+            "trailing account should be the final push, got: {}",
+            pushes[3]
+        );
+
+        // The optional slot is always filled — there is no path that skips the
+        // push entirely (the old buggy behavior).
+        let stake_pos = output.find("pubkey : self . stake").unwrap();
+        let if_some_pos = output.find("if let Some (key)").unwrap();
+        let trailing_pos = output.find("pubkey : self . trailing").unwrap();
+        assert!(
+            stake_pos < if_some_pos && if_some_pos < trailing_pos,
+            "optional slot should sit between stake and trailing"
         );
     }
 
@@ -930,11 +1014,12 @@ mod tests {
         let meta_body = &generated[meta_fn_start..];
         let pushes: Vec<&str> = meta_body.split("account_metas . push").skip(1).collect();
 
-        // plain, vault, optional_reserve (if-let), rent (fixed) = 4 pushes
+        // plain, vault, optional_reserve (if + else placeholder), rent (fixed)
+        // = 5 pushes
         assert_eq!(
             pushes.len(),
-            4,
-            "should have 4 account pushes, got {}",
+            5,
+            "should have 5 account pushes, got {}",
             pushes.len()
         );
 
