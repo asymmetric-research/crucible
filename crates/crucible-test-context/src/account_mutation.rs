@@ -162,6 +162,18 @@ pub fn reset_probed_account_mutations() {
     PROBED_IX_TYPES.with(|s| s.borrow_mut().clear());
 }
 
+fn probe_key_already_seen(key: ProbeKey, replay_target_active: bool) -> bool {
+    !replay_target_active && PROBED_IX_TYPES.with(|s| s.borrow().contains(&key))
+}
+
+fn mark_probe_key_seen(key: ProbeKey, replay_target_active: bool) {
+    if !replay_target_active {
+        PROBED_IX_TYPES.with(|s| {
+            s.borrow_mut().insert(key);
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AccountMutationConfig {
     enabled: bool,
@@ -249,6 +261,7 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(PdaSubstitutionStrategy),
         Box::new(TokenFakeOwnerStrategy),
         Box::new(TokenWrongMintStrategy),
+        Box::new(TokenForgedMintPairStrategy),
         Box::new(BidirectionalFieldBindingStrategy),
         Box::new(FieldCrossReferenceStrategy),
         Box::new(SysvarSubstitutionStrategy),
@@ -257,6 +270,8 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(AuthoritySignerStrategy),
         Box::new(TypeTagStrategy),
         Box::new(SemanticSwapStrategy),
+        Box::new(CrossAuthorityAgreementStrategy),
+        Box::new(DuplicateAccountStrategy),
     ]
 }
 
@@ -278,9 +293,31 @@ fn finding_id(class: &str, ix: &Instruction) -> String {
     format!("{class}:{}:{}", ix.program_id, disc_hex(ix))
 }
 
+fn finding_instruction_id(id: &str) -> String {
+    if id.starts_with("account-mutation:") {
+        return id.to_string();
+    }
+
+    let mut parts = id.rsplitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(disc), Some(program), Some(_class)) => {
+            format!("account-mutation:{program}:{disc}")
+        }
+        _ => id.to_string(),
+    }
+}
+
+fn finding_matches_expected(finding_id: &str, expected: &str) -> bool {
+    finding_id == expected
+        || (expected.starts_with("account-mutation:")
+            && finding_instruction_id(finding_id) == expected)
+}
+
 fn select_finding<'a>(findings: &'a [Finding], expected: Option<&str>) -> Option<&'a Finding> {
     match expected {
-        Some(id) => findings.iter().find(|finding| finding.id == id),
+        Some(id) => findings
+            .iter()
+            .find(|finding| finding_matches_expected(&finding.id, id)),
         None => findings
             .iter()
             .enumerate()
@@ -290,7 +327,7 @@ fn select_finding<'a>(findings: &'a [Finding], expected: Option<&str>) -> Option
 }
 
 fn finding_priority(finding: &Finding) -> u8 {
-    if finding.id.starts_with("CC-8 value-ref:") {
+    if finding.id.starts_with("CC-7 value-ref:") {
         0
     } else {
         10
@@ -310,10 +347,15 @@ pub(crate) fn maybe_probe_account_mutation(
         return;
     }
 
+    let expected = crate::expected_mutation_finding_id();
+
     // Probe each instruction type only once per run. Multi-instruction transactions are keyed by
-    // their first instruction.
+    // their first instruction. Replay/tmin with an expected finding is the exception: a serialized
+    // sequence can contain the same discriminator before the state that originally produced the
+    // mutation finding, so the cache must not burn that replay target early.
     let key = probe_key(&instructions[0]);
-    if PROBED_IX_TYPES.with(|s| s.borrow().contains(&key)) {
+    let replay_target_active = expected.is_some();
+    if probe_key_already_seen(key, replay_target_active) {
         return;
     }
 
@@ -326,9 +368,7 @@ pub(crate) fn maybe_probe_account_mutation(
         // have a succeeding baseline and deserve a probe.
         _ => return,
     }
-    PROBED_IX_TYPES.with(|s| {
-        s.borrow_mut().insert(key);
-    });
+    mark_probe_key_seen(key, replay_target_active);
 
     let ctx = ProbeCtx {
         svm,
@@ -349,7 +389,6 @@ pub(crate) fn maybe_probe_account_mutation(
     // The violation TLS holds one message per iteration and the harness early-exits on the first.
     // Replay/tmin may set an expected finding id so earlier, unrelated mutation bugs in the same
     // action sequence do not mask the original crash class.
-    let expected = crate::expected_mutation_finding_id();
     let selected = select_finding(&findings, expected.as_deref());
 
     if let Some(first) = selected {
@@ -394,7 +433,9 @@ impl MutationStrategy for OwnerStrategy {
                 continue;
             };
             account.owner = sentinel;
-            let _ = probe.set_account(candidate.pubkey, account);
+            if probe.set_account(candidate.pubkey, account).is_err() {
+                continue;
+            }
 
             if probe_matches_baseline_effects(
                 ctx,
@@ -456,7 +497,9 @@ impl MutationStrategy for TypeTagStrategy {
             for b in account.data[..disc_len].iter_mut() {
                 *b = !*b; // flip the type tag; body left intact
             }
-            let _ = probe.set_account(pubkey, account);
+            if probe.set_account(pubkey, account).is_err() {
+                continue;
+            }
 
             if probe_matches_baseline_effects(ctx, &mut probe, ctx.instructions, &[], &[pubkey]) {
                 findings.push(Finding {
@@ -617,7 +660,7 @@ fn signer_probe_ignored_accounts(
     }
 }
 
-/// CC-10: account data names an authority/delegate signer, but the instruction accepts a different
+/// CC-9: account data names an authority/delegate signer, but the instruction accepts a different
 /// valid signer. This is separate from CC-4: the replacement account still signs, so a plain
 /// `is_signer` assertion is satisfied.
 struct AuthoritySignerStrategy;
@@ -674,9 +717,9 @@ impl MutationStrategy for AuthoritySignerStrategy {
                     &[signer, attacker_pubkey],
                 ) {
                     findings.push(Finding {
-                        id: finding_id("CC-10 authority", &ctx.instructions[0]),
+                        id: finding_id("CC-9 authority", &ctx.instructions[0]),
                         message: format!(
-                            "[CC-10 authority] account {} contains authority {}, but instr {}:{} still succeeded with replacement signer {}",
+                            "[CC-9 authority] account {} contains authority {}, but instr {}:{} still succeeded with replacement signer {}",
                             source,
                             signer,
                             ctx.instructions[0].program_id,
@@ -928,6 +971,111 @@ impl MutationStrategy for TokenWrongMintStrategy {
     }
 }
 
+/// Detects code that accepts a forged token account + mint pair while canonical state still
+/// references the original mint. The token and mint remain internally consistent; only the
+/// external binding to program state is broken.
+struct TokenForgedMintPairStrategy;
+
+impl MutationStrategy for TokenForgedMintPairStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let (token_accounts, mints) = collect_token_relation_candidates(ctx.svm, ctx.instructions);
+        if token_accounts.is_empty() || mints.is_empty() || !baseline_has_non_fee_effect(ctx) {
+            return findings;
+        }
+
+        for token_account in token_accounts {
+            if !account_is_load_bearing(ctx, &token_account.pubkey) {
+                continue;
+            }
+            for mint in &mints {
+                if token_account.token.mint != mint.pubkey {
+                    continue;
+                }
+                let Some(reference_source) = canonical_mint_reference_source(ctx, mint.pubkey)
+                else {
+                    continue;
+                };
+
+                let fake_token = token_decoy_for(token_account.pubkey);
+                let fake_mint = token_decoy_for(mint.pubkey);
+                if fake_token == fake_mint {
+                    continue;
+                }
+
+                let mut spoofed_token = token_account.token.clone();
+                spoofed_token.mint = fake_mint;
+                let Some(token_data) = pack_token_account(spoofed_token) else {
+                    continue;
+                };
+                let Some(mint_account) = ctx.svm.get_account(&mint.pubkey) else {
+                    continue;
+                };
+
+                let mut probe = ctx.svm.clone();
+                let Some(mut token_state) = probe.get_account(&token_account.pubkey) else {
+                    continue;
+                };
+                token_state.data = token_data;
+                if probe.set_account(fake_token, token_state).is_err()
+                    || probe.set_account(fake_mint, mint_account).is_err()
+                {
+                    continue;
+                }
+
+                let rewritten = rewrite_account(
+                    &rewrite_account(ctx.instructions, token_account.pubkey, fake_token),
+                    mint.pubkey,
+                    fake_mint,
+                );
+                if probe_matches_baseline_effects(
+                    ctx,
+                    &mut probe,
+                    &rewritten,
+                    &[],
+                    &[token_account.pubkey, fake_token, mint.pubkey, fake_mint],
+                ) {
+                    findings.push(Finding {
+                        id: finding_id("CC-token forged-mint-pair", &ctx.instructions[0]),
+                        message: format!(
+                            "[CC-token forged-mint-pair] token account {} and mint {} substituted with forged pair {} / {} while account {} still references canonical mint {}, instr {}:{} still succeeded",
+                            token_account.pubkey,
+                            mint.pubkey,
+                            fake_token,
+                            fake_mint,
+                            reference_source,
+                            mint.pubkey,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                        ),
+                    });
+                }
+            }
+        }
+
+        findings
+    }
+}
+
+fn canonical_mint_reference_source(ctx: &ProbeCtx, mint: Pubkey) -> Option<Pubkey> {
+    instruction_account_keys_ordered(ctx.instructions)
+        .into_iter()
+        .find(|candidate| {
+            *candidate != mint
+                && ctx
+                    .svm
+                    .get_account(candidate)
+                    .map(|account| {
+                        !account.executable
+                            && !account.data.is_empty()
+                            && !is_spl_token_shape(&account)
+                            && data_contains_pubkey(&account.data, &mint)
+                            && account_is_load_bearing(ctx, candidate)
+                    })
+                    .unwrap_or(false)
+        })
+}
+
 fn collect_token_shape_candidates(
     svm: &LiteSVM,
     instructions: &[Instruction],
@@ -1099,6 +1247,10 @@ impl AccountClassIndex {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    fn class_of(&self, pubkey: &Pubkey) -> Option<&AccountClass> {
+        self.by_pubkey.get(pubkey)
+    }
+
     fn same_class_replacements(&self, pubkey: &Pubkey) -> Vec<Pubkey> {
         let Some(class) = self.by_pubkey.get(pubkey) else {
             return Vec::new();
@@ -1218,7 +1370,7 @@ impl MutationStrategy for BidirectionalFieldBindingStrategy {
                     }
                     if substitute_existing_load_bearing_account_probe(ctx, substituted, replacement)
                     {
-                        findings.push(cc83_finding(ctx, pair, substituted, replacement));
+                        findings.push(cc73_finding(ctx, pair, substituted, replacement));
                     }
                 }
             }
@@ -1249,7 +1401,7 @@ fn bidirectional_replacement_preserves_relation(
     }
 }
 
-fn cc83_finding(
+fn cc73_finding(
     ctx: &ProbeCtx,
     pair: BidirectionalRefPair,
     substituted: Pubkey,
@@ -1262,9 +1414,9 @@ fn cc83_finding(
     };
 
     Finding {
-        id: finding_id("CC-8.3 bidirectional-ref", &ctx.instructions[0]),
+        id: finding_id("CC-7.3 bidirectional-ref", &ctx.instructions[0]),
         message: format!(
-            "[CC-8.3 bidirectional-ref] accounts {} and {} are linked by {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing bidirectional/shared-root field binding check)",
+            "[CC-7.3 bidirectional-ref] accounts {} and {} are linked by {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing bidirectional/shared-root field binding check)",
             pair.left,
             pair.right,
             relation,
@@ -1376,7 +1528,7 @@ impl MutationStrategy for FieldCrossReferenceStrategy {
                     }
                     if substitute_existing_load_bearing_account_probe(ctx, edge.source, replacement)
                     {
-                        findings.push(cc8_finding(
+                        findings.push(cc7_finding(
                             ctx,
                             &class_index,
                             edge,
@@ -1396,7 +1548,7 @@ impl MutationStrategy for FieldCrossReferenceStrategy {
                 if target_data_relevant
                     && substitute_existing_load_bearing_account_probe(ctx, edge.target, replacement)
                 {
-                    findings.push(cc8_finding(
+                    findings.push(cc7_finding(
                         ctx,
                         &class_index,
                         edge,
@@ -1406,7 +1558,7 @@ impl MutationStrategy for FieldCrossReferenceStrategy {
                 } else if !target_data_relevant
                     && substitute_existing_referenced_target_probe(ctx, edge.target, replacement)
                 {
-                    findings.push(cc8_value_ref_finding(ctx, &class_index, edge, replacement));
+                    findings.push(cc7_value_ref_finding(ctx, &class_index, edge, replacement));
                 }
             }
         }
@@ -1415,7 +1567,7 @@ impl MutationStrategy for FieldCrossReferenceStrategy {
     }
 }
 
-fn cc8_finding(
+fn cc7_finding(
     ctx: &ProbeCtx,
     class_index: &AccountClassIndex,
     edge: FieldRefEdge,
@@ -1428,9 +1580,9 @@ fn cc8_finding(
         edge.source
     };
     let (class, label) = if class_index.class_count(&opposite) <= 1 {
-        ("CC-8 root-ref", "[CC-8 root-ref]")
+        ("CC-7 root-ref", "[CC-7 root-ref]")
     } else {
-        ("CC-8 field-ref", "[CC-8 field-ref]")
+        ("CC-7 field-ref", "[CC-7 field-ref]")
     };
 
     Finding {
@@ -1448,16 +1600,16 @@ fn cc8_finding(
     }
 }
 
-fn cc8_value_ref_finding(
+fn cc7_value_ref_finding(
     ctx: &ProbeCtx,
     class_index: &AccountClassIndex,
     edge: FieldRefEdge,
     replacement: Pubkey,
 ) -> Finding {
     Finding {
-        id: finding_id("CC-8 value-ref", &ctx.instructions[0]),
+        id: finding_id("CC-7 value-ref", &ctx.instructions[0]),
         message: format!(
-            "[CC-8 value-ref] account {} references {}, substituted referenced account with same-class account {} ({}), instr {}:{} still succeeded (missing referenced account binding check)",
+            "[CC-7 value-ref] account {} references {}, substituted referenced account with same-class account {} ({}), instr {}:{} still succeeded (missing referenced account binding check)",
             edge.source,
             edge.target,
             replacement,
@@ -1535,7 +1687,7 @@ impl MutationStrategy for SemanticSwapStrategy {
                 candidate.target,
                 candidate.replacement,
             ) {
-                findings.push(cc86_finding(ctx, &class_index, &candidate));
+                findings.push(cc77_finding(ctx, &class_index, &candidate));
             }
         }
 
@@ -1564,7 +1716,7 @@ fn collect_semantic_swap_candidates_for_accounts(
     class_index: &AccountClassIndex,
 ) -> Vec<SemanticSwapCandidate> {
     let current_accounts = instruction_account_keys(instructions);
-    let explained_accounts = collect_explained_cc8_accounts(svm, instructions);
+    let explained_accounts = collect_explained_cc7_accounts(svm, instructions);
     let mut targets: Vec<Pubkey> = current_accounts.iter().copied().collect();
     targets.sort_by_key(|pubkey| pubkey.to_bytes());
 
@@ -1618,7 +1770,7 @@ fn collect_semantic_swap_candidates_for_accounts(
     candidates
 }
 
-fn collect_explained_cc8_accounts(
+fn collect_explained_cc7_accounts(
     svm: &LiteSVM,
     instructions: &[Instruction],
 ) -> FastHashSet<Pubkey> {
@@ -1653,15 +1805,15 @@ fn embedded_observed_pubkeys(data: &[u8], observed_accounts: &HashSet<Pubkey>) -
     keys
 }
 
-fn cc86_finding(
+fn cc77_finding(
     ctx: &ProbeCtx,
     class_index: &AccountClassIndex,
     candidate: &SemanticSwapCandidate,
 ) -> Finding {
     Finding {
-        id: finding_id("CC-8.6 semantic-swap", &ctx.instructions[0]),
+        id: finding_id("CC-7.7 semantic-swap", &ctx.instructions[0]),
         message: format!(
-            "[CC-8.6 semantic-swap] account {} ({}) has embedded-key profile with {} observed key(s), substituted with same-class account {} with {} observed key(s), instr {}:{} still succeeded (missing semantic same-class binding check)",
+            "[CC-7.7 semantic-swap] account {} ({}) has embedded-key profile with {} observed key(s), substituted with same-class account {} with {} observed key(s), instr {}:{} still succeeded (missing semantic same-class binding check)",
             candidate.target,
             class_index.class_label(&candidate.target),
             candidate.target_keys.len(),
@@ -1670,6 +1822,187 @@ fn cc86_finding(
             ctx.instructions[0].program_id,
             disc_hex(&ctx.instructions[0]),
         ),
+    }
+}
+
+/// Structural proxy for scoped-authority bugs: two same-class accounts share a non-signer pubkey
+/// field, and the instruction still succeeds if that shared field is broken on the second account.
+struct CrossAuthorityAgreementStrategy;
+
+impl MutationStrategy for CrossAuthorityAgreementStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let class_index = AccountClassIndex::build(ctx.svm, ctx.observed_accounts, ctx.config);
+        let accounts = instruction_account_keys_ordered(ctx.instructions);
+        let signer_keys: FastHashSet<Pubkey> =
+            signer_meta_pubkeys(ctx.instructions).into_iter().collect();
+        let mut findings = Vec::new();
+
+        for (i, left) in accounts.iter().enumerate() {
+            for right in accounts.iter().skip(i + 1) {
+                if class_index.class_of(left) != class_index.class_of(right)
+                    || class_index.class_of(left).is_none()
+                    || !account_is_load_bearing(ctx, left)
+                    || !account_is_load_bearing(ctx, right)
+                {
+                    continue;
+                }
+
+                let Some(offset) =
+                    shared_non_signer_pubkey_offset(ctx, *left, *right, &signer_keys)
+                else {
+                    continue;
+                };
+                let replacement = CRUCIBLE_ATTACKER;
+                if mutate_account_pubkey_window_probe(ctx, *right, offset, replacement) {
+                    findings.push(Finding {
+                        id: finding_id("CC-9.5 cross-authority", &ctx.instructions[0]),
+                        message: format!(
+                            "[CC-9.5 cross-authority] same-class accounts {} and {} share non-signer authority field, mutated {} offset {} to {}, instr {}:{} still succeeded",
+                            left,
+                            right,
+                            right,
+                            offset,
+                            replacement,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                        ),
+                    });
+                }
+            }
+        }
+
+        findings
+    }
+}
+
+fn shared_non_signer_pubkey_offset(
+    ctx: &ProbeCtx,
+    left: Pubkey,
+    right: Pubkey,
+    signer_keys: &FastHashSet<Pubkey>,
+) -> Option<usize> {
+    let left_account = ctx.svm.get_account(&left)?;
+    let right_account = ctx.svm.get_account(&right)?;
+    let left_start = registered_discriminator(&left_account.data)
+        .map(|disc| disc.len())
+        .unwrap_or(0);
+    let right_start = registered_discriminator(&right_account.data)
+        .map(|disc| disc.len())
+        .unwrap_or(0);
+    let mut left_values = FastHashSet::default();
+    for window in left_account.data[left_start..].windows(32) {
+        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
+        if pubkey != Pubkey::default()
+            && !is_known_sysvar(&pubkey)
+            && !signer_keys.contains(&pubkey)
+        {
+            left_values.insert(pubkey);
+        }
+    }
+
+    for (relative_offset, window) in right_account.data[right_start..].windows(32).enumerate() {
+        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
+        if left_values.contains(&pubkey) {
+            return Some(right_start + relative_offset);
+        }
+    }
+
+    None
+}
+
+fn mutate_account_pubkey_window_probe(
+    ctx: &ProbeCtx,
+    target: Pubkey,
+    offset: usize,
+    replacement: Pubkey,
+) -> bool {
+    let mut probe = ctx.svm.clone();
+    let Some(mut account) = probe.get_account(&target) else {
+        return false;
+    };
+    if offset + 32 > account.data.len() {
+        return false;
+    }
+    account.data[offset..offset + 32].copy_from_slice(replacement.as_ref());
+    if probe.set_account(target, account).is_err() {
+        return false;
+    }
+    probe_matches_baseline_effects(ctx, &mut probe, ctx.instructions, &[], &[target])
+}
+
+/// Duplicate-account oracle: alias two same-class metas and report only if the aliased
+/// transaction succeeds with a materially different non-aliased outcome.
+struct DuplicateAccountStrategy;
+
+impl MutationStrategy for DuplicateAccountStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let class_index = AccountClassIndex::build(ctx.svm, ctx.observed_accounts, ctx.config);
+        let accounts = instruction_account_keys_ordered(ctx.instructions);
+        let explained = collect_explained_cc7_accounts(ctx.svm, ctx.instructions);
+        let mut findings = Vec::new();
+
+        for (i, left) in accounts.iter().enumerate() {
+            for right in accounts.iter().skip(i + 1) {
+                let Some(class) = class_index.class_of(left) else {
+                    continue;
+                };
+                if class_index.class_of(right) != Some(class)
+                    || matches!(&class.shape, AccountShape::DataLen(_))
+                    || explained.contains(left)
+                    || explained.contains(right)
+                    || account_meta_flags(ctx.instructions, *left)
+                        != account_meta_flags(ctx.instructions, *right)
+                    || !account_is_load_bearing(ctx, left)
+                    || !account_is_load_bearing(ctx, right)
+                    || same_account_state(
+                        ctx.baseline_after.get_account(left),
+                        ctx.baseline_after.get_account(right),
+                    )
+                {
+                    continue;
+                }
+
+                let rewritten = rewrite_account(ctx.instructions, *right, *left);
+                let mut probe = ctx.svm.clone();
+                if !matches!(
+                    send_probe_transaction(
+                        &mut probe,
+                        &rewritten,
+                        ctx.signers,
+                        ctx.payer,
+                        ctx.sigverify,
+                    ),
+                    Ok(Ok(_))
+                ) {
+                    continue;
+                }
+
+                if !post_state_matches(
+                    ctx.baseline_after,
+                    &probe,
+                    ctx.instructions,
+                    &rewritten,
+                    &[],
+                    &[*left, *right],
+                    ctx.payer.pubkey(),
+                ) {
+                    findings.push(Finding {
+                        id: finding_id("CC-14 duplicate-account", &ctx.instructions[0]),
+                        message: format!(
+                            "[CC-14 duplicate-account] same-class accounts {} and {} accepted when {} was aliased to {}, instr {}:{} succeeded with divergent outcome",
+                            left,
+                            right,
+                            right,
+                            left,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                        ),
+                    });
+                }
+            }
+        }
+
+        findings
     }
 }
 
@@ -1917,6 +2250,30 @@ fn instruction_account_keys(instructions: &[Instruction]) -> FastHashSet<Pubkey>
     keys
 }
 
+fn instruction_account_keys_ordered(instructions: &[Instruction]) -> Vec<Pubkey> {
+    let mut seen = FastHashSet::default();
+    let mut keys = Vec::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if seen.insert(meta.pubkey) {
+                keys.push(meta.pubkey);
+            }
+        }
+    }
+    keys
+}
+
+fn account_meta_flags(instructions: &[Instruction], pubkey: Pubkey) -> Option<(bool, bool)> {
+    for ix in instructions {
+        for meta in &ix.accounts {
+            if meta.pubkey == pubkey {
+                return Some((meta.is_writable, meta.is_signer));
+            }
+        }
+    }
+    None
+}
+
 fn same_account_state(
     a: Option<solana_account::Account>,
     b: Option<solana_account::Account>,
@@ -1978,7 +2335,9 @@ fn replacement_is_load_bearing_under_rewrite(
             continue;
         };
         account.data = data;
-        let _ = probe.set_account(replacement, account);
+        if probe.set_account(replacement, account).is_err() {
+            continue;
+        }
 
         if !matches!(
             send_probe_transaction(&mut probe, rewritten, ctx.signers, ctx.payer, ctx.sigverify),
@@ -2019,7 +2378,9 @@ fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
             continue;
         };
         account.data = data;
-        let _ = probe.set_account(*pubkey, account);
+        if probe.set_account(*pubkey, account).is_err() {
+            continue;
+        }
 
         if !matches!(
             send_probe_transaction(
@@ -2063,7 +2424,9 @@ fn account_is_lamport_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
         return false;
     };
     account.lamports = 0;
-    let _ = probe.set_account(*pubkey, account);
+    if probe.set_account(*pubkey, account).is_err() {
+        return false;
+    }
 
     !matches!(
         send_probe_transaction(
@@ -2238,8 +2601,8 @@ mod tests {
             accounts: vec![],
             data: vec![1, 2, 3, 4, 5, 6, 7, 8],
         };
-        let field_id = finding_id("CC-8 field-ref", &ix);
-        let value_id = finding_id("CC-8 value-ref", &ix);
+        let field_id = finding_id("CC-7 field-ref", &ix);
+        let value_id = finding_id("CC-7 value-ref", &ix);
         let findings = vec![
             Finding {
                 id: field_id.clone(),
@@ -2256,7 +2619,39 @@ mod tests {
             select_finding(&findings, Some(&field_id)).unwrap().id,
             field_id
         );
+        let legacy_instruction_id = finding_instruction_id(&field_id);
+        assert_eq!(
+            select_finding(&findings, Some(&legacy_instruction_id))
+                .unwrap()
+                .id,
+            field_id
+        );
         assert!(select_finding(&findings, Some("missing")).is_none());
+    }
+
+    #[test]
+    fn replay_target_bypasses_probe_key_cache() {
+        reset_probed_account_mutations();
+        let ix = Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts: vec![],
+            data: vec![1, 2, 3, 4],
+        };
+        let key = probe_key(&ix);
+
+        mark_probe_key_seen(key, false);
+        assert!(probe_key_already_seen(key, false));
+        assert!(
+            !probe_key_already_seen(key, true),
+            "replay/tmin must keep probing repeated discriminators until the expected finding is hit"
+        );
+
+        reset_probed_account_mutations();
+        mark_probe_key_seen(key, true);
+        assert!(
+            !probe_key_already_seen(key, false),
+            "replay/tmin attempts must not burn the normal fuzzing cache"
+        );
     }
 
     #[test]

@@ -805,7 +805,8 @@ fn stateful_singlecore_body(
                     if now - start_time >= timeout {
                         eprintln!("\n[STATEFUL] Timeout reached ({}s). Exiting.", timeout);
                         if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            #mod_name::write_lcov_coverage("coverage.lcov");
+                            let coverage_output = #mod_name::lcov_output_path();
+                            #mod_name::write_lcov_coverage(&coverage_output);
                         }
                         if let Some(ref __corpus_out_path) = corpus_out_dir {
                             // Context-free edge count for accurate diagnostic (singlecore).
@@ -1141,7 +1142,8 @@ fn stateful_singlecore_body(
                 // collapse to one finding. Normal invariant violations keep their
                 // full action-variant-sequence identity (distinct paths = distinct
                 // crash classes).
-                let input_hash = if let Some(__fid) = crucible_test_context::mutation_finding_id() {
+                let __mut_fid = crucible_test_context::mutation_finding_id();
+                let input_hash = if let Some(ref __fid) = __mut_fid {
                     libafl_bolts::hash_std(__fid.as_bytes())
                 } else {
                     let mut __variant_seq = state_pool.reconstruct_variant_sequence(state_idx);
@@ -1182,8 +1184,9 @@ fn stateful_singlecore_body(
                     for desc in &current_descs {
                         __full_actions.push(crucible_test_context::parse_action_desc(desc));
                     }
-                    crucible_test_context::write_crash_metadata_with_actions(
-                        &crash_dir, input_hash, Some(seed), &crash_bytes, Some(__full_actions),
+                    let __mutation_meta = __mut_fid.clone().map(|__fid| (__fid, msg.clone()));
+                    crucible_test_context::write_crash_metadata_with_actions_and_mutation(
+                        &crash_dir, input_hash, Some(seed), &crash_bytes, Some(__full_actions), __mutation_meta,
                     );
 
                     if stop_on_crash {
@@ -1848,7 +1851,7 @@ fn stateful_multicore_body(
                     // Accumulated results to flush after each batch
                     // (fingerprint, delta, depth, parent_idx, action_bytes, desc, variant, field_bytes, fixture_state, creation, novelty_bits, edge_novelty, succeeded, coverage_positions)
                     let mut pending_novel: Vec<(u64, CompactDelta, u32, Option<usize>, Vec<u8>, String, Option<u16>, Vec<u8>, Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>, std::sync::Arc<crucible_test_context::snapshot::CreationTracker>, u32, u32, bool, Option<Vec<u16>>)> = Vec::new();
-                    // Crash info: (action_variant, msg, current_action_desc, parent_state_idx, crash_bytes)
+                    // Crash info: (action_variant, msg, current_action_desc, parent_state_idx, crash_bytes, mutation_finding_id)
                     let mut pending_crashes: Vec<(u16, String, Vec<String>, usize, Vec<u8>, Option<String>)> = Vec::new();
                     // Track pending violations: state indices that need record_violation() in the flush
                     let mut pending_violations: Vec<usize> = Vec::new();
@@ -1869,7 +1872,7 @@ fn stateful_multicore_body(
                         if local_batch.is_empty() {
                             // Flush pending writes from the previous batch (one write lock)
                             // Fix 3: Collect crash outputs inside lock, write to disk outside
-                            let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>)> = Vec::new();
+                            let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>, Option<String>)> = Vec::new();
                             if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() || !pending_barren.is_empty() {
                                 if let Ok(mut pool) = pool.try_write() {
                                     for sc in pending_selects.drain(..) {
@@ -1909,7 +1912,7 @@ fn stateful_multicore_body(
                                         if pool.is_novel_crash(vh) {
                                             crashes.fetch_add(1, Ordering::Relaxed);
                                             let parent_descs = pool.reconstruct_action_descriptions(parent_idx);
-                                            __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
+                                            __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes, __mut_fid));
                                             if stop_on_crash {
                                                 eprintln!("[STATEFUL W{}] First crash found, signaling stop (--stop-on-crash).", worker_id);
                                                 stop.store(true, Ordering::Relaxed);
@@ -1927,7 +1930,7 @@ fn stateful_multicore_body(
                                 }
                             }
                             // Crash disk I/O outside write lock (Fix 3)
-                            for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
+                            for (msg, parent_descs, current_descs, vh, crash_bytes, __mut_fid) in __crash_outputs {
                                 let total = parent_descs.len() + current_descs.len();
                                 let crash_id = format!("crash_{:016x}", vh);
                                 println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
@@ -1948,8 +1951,9 @@ fn stateful_multicore_body(
                                 for desc in &current_descs {
                                     __full_actions.push(crucible_test_context::parse_action_desc(desc));
                                 }
-                                crucible_test_context::write_crash_metadata_with_actions(
-                                    &crash_dir, vh, Some(worker_seed), &crash_bytes, Some(__full_actions),
+                                let __mutation_meta = __mut_fid.map(|__fid| (__fid, msg.clone()));
+                                crucible_test_context::write_crash_metadata_with_actions_and_mutation(
+                                    &crash_dir, vh, Some(worker_seed), &crash_bytes, Some(__full_actions), __mutation_meta,
                                 );
                             }
 
@@ -2509,7 +2513,7 @@ fn stateful_multicore_body(
                     let __t_flush = if __do_profile { Some(std::time::Instant::now()) } else { None };
                     // Flush pending writes from previous batch
                     // Fix 3: Collect crash outputs inside lock, write to disk outside
-                    let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>)> = Vec::new();
+                    let mut __crash_outputs: Vec<(String, Vec<String>, Vec<String>, u64, Vec<u8>, Option<String>)> = Vec::new();
                     if !pending_novel.is_empty() || !pending_crashes.is_empty() || !pending_violations.is_empty() || !pending_selects.is_empty() || !pending_barren.is_empty() {
                         if let Ok(mut p) = pool.try_write() {
                             for sc in pending_selects.drain(..) {
@@ -2549,7 +2553,7 @@ fn stateful_multicore_body(
                                 if p.is_novel_crash(vh) {
                                     crashes.fetch_add(1, Ordering::Relaxed);
                                     let parent_descs = p.reconstruct_action_descriptions(parent_idx);
-                                    __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes));
+                                    __crash_outputs.push((msg, parent_descs, current_descs, vh, crash_bytes, __mut_fid));
                                     if stop_on_crash {
                                         eprintln!("[STATEFUL W0] First crash found, signaling stop (--stop-on-crash).");
                                         stop.store(true, Ordering::Relaxed);
@@ -2569,7 +2573,7 @@ fn stateful_multicore_body(
                         }
                     }
                     // Crash disk I/O outside write lock (Fix 3)
-                    for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
+                    for (msg, parent_descs, current_descs, vh, crash_bytes, __mut_fid) in __crash_outputs {
                         let total = parent_descs.len() + current_descs.len();
                         let crash_id = format!("crash_{:016x}", vh);
                         println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
@@ -2590,8 +2594,9 @@ fn stateful_multicore_body(
                         for desc in &current_descs {
                             __full_actions.push(crucible_test_context::parse_action_desc(desc));
                         }
-                        crucible_test_context::write_crash_metadata_with_actions(
-                            &crash_dir, vh, Some(seed), &crash_bytes, Some(__full_actions),
+                        let __mutation_meta = __mut_fid.map(|__fid| (__fid, msg.clone()));
+                        crucible_test_context::write_crash_metadata_with_actions_and_mutation(
+                            &crash_dir, vh, Some(seed), &crash_bytes, Some(__full_actions), __mutation_meta,
                         );
                     }
 
@@ -3264,7 +3269,8 @@ fn stateful_multicore_body(
         }
 
         if #mod_name::COVERAGE_ENABLED.load(Ordering::Relaxed) {
-            #mod_name::write_lcov_coverage("coverage.lcov");
+            let coverage_output = #mod_name::lcov_output_path();
+            #mod_name::write_lcov_coverage(&coverage_output);
         }
 
         if let Some(ref __corpus_out_path) = corpus_out_dir {
@@ -3349,6 +3355,15 @@ mod tests {
     }
 
     // ── Action generation (must be identical across all 3 bodies) ───────
+
+    #[test]
+    fn singlecore_uses_configured_lcov_output() {
+        let output = gen_singlecore();
+        assert!(
+            output.contains("lcov_output_path"),
+            "stateful singlecore coverage should use configured LCOV output path"
+        );
+    }
 
     #[test]
     fn singlecore_has_adaptive_chain_length() {

@@ -71,7 +71,7 @@ You should see output like:
 ```
 [COVERAGE] DWARF source map loaded: 143160 PCs resolved
 [LCOV] Source-level coverage: 133 source files
-[LCOV] Coverage written to coverage.lcov (2 programs, 23994 lines, 2166 branches)
+[LCOV] Coverage written to ./coverage/coverage.lcov (2 programs, 23994 lines, 2166 branches)
 ```
 
 ### Step 4: Generate HTML report
@@ -81,7 +81,7 @@ By default the LCOV file is written to `./coverage/coverage.lcov` (or the path p
 First, extract only your program's source files (filtering out stdlib and third-party crate paths):
 
 ```bash
-lcov --extract coverage.lcov '*/programs/<your_program>/*' -o program_coverage.lcov
+lcov --extract ./coverage/coverage.lcov '*/programs/<your_program>/*' -o program_coverage.lcov
 ```
 
 Then generate HTML:
@@ -292,7 +292,7 @@ helpers/delegate.rs: validate_delegated_amount (lines 89-102) — partial
 | `--coverage` | `FUZZ_COVERAGE` | Enable LCOV output (sets `COVERAGE_ENABLED`) |
 | `--symbols <path>` | `FUZZ_SYMBOLS` | Path to unstripped `.so` with DWARF debug info |
 | `--program-so <path>` | `FUZZ_PROGRAM_SO` | Override which `.so` litesvm loads (for coverage with different opt-level) |
-| `--lcov-out <path>` | `FUZZ_COVERAGE_OUT` | Custom LCOV output path (default: `coverage.lcov`) |
+| `--lcov-out <path>` | `FUZZ_COVERAGE_OUT` | Custom LCOV output path (default: `./coverage/coverage.lcov`) |
 | `--corpus-in <dir>` | `FUZZ_CORPUS_IN` | Load corpus for replay (with `--coverage`, triggers coverage-only mode) |
 
 **Coverage-only mode** is activated automatically when `--coverage` + `--corpus-in` are both set without `--timeout`. It replays each corpus input once and writes LCOV, then exits.

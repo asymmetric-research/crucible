@@ -1123,6 +1123,80 @@
       "args": []
     },
     {
+      "name": "read_lp_pair_no_canonical_mint_check",
+      "docs": [
+        "Pool embeds the canonical LP mint, but this path only checks the supplied token pair."
+      ],
+      "discriminator": [
+        146,
+        84,
+        196,
+        81,
+        0,
+        228,
+        184,
+        114
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool_state"
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_lp_pair_with_canonical_mint_check",
+      "docs": [
+        "Same LP pair, with the pool-state canonical mint binding checked."
+      ],
+      "discriminator": [
+        201,
+        197,
+        224,
+        162,
+        21,
+        11,
+        159,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool_state"
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "read_token_without_mint_relation_context",
       "docs": [
         "Owner is checked, but no mint account is present; the wrong-mint oracle must not run here."
@@ -1657,6 +1731,19 @@
       ]
     },
     {
+      "name": "PoolState",
+      "discriminator": [
+        247,
+        237,
+        227,
+        245,
+        215,
+        195,
+        222,
+        70
+      ]
+    },
+    {
       "name": "LinkedState",
       "discriminator": [
         178,
@@ -1863,6 +1950,22 @@
                 "fields": [
                     {
                         "name": "authority",
+                        "type": "pubkey"
+                    },
+                    {
+                        "name": "amount",
+                        "type": "u64"
+                    }
+                ]
+            }
+        },
+        {
+            "name": "PoolState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {
+                        "name": "lp_mint",
                         "type": "pubkey"
                     },
                     {

@@ -273,7 +273,8 @@ pub fn exit_handlers_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
         let default_panic = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                #mod_name::write_lcov_coverage("coverage.lcov");
+                let coverage_output = #mod_name::lcov_output_path();
+                #mod_name::write_lcov_coverage(&coverage_output);
             }
             default_panic(info);
         }));
@@ -822,6 +823,10 @@ mod tests {
             output.contains("write_lcov_coverage"),
             "should write coverage on panic"
         );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should write panic coverage to configured LCOV path"
+        );
         assert!(output.contains("ctrlc"), "should handle Ctrl+C");
     }
 
@@ -1098,6 +1103,30 @@ mod tests {
         assert!(
             output.contains("loading_from_same_dir"),
             "should check if loading from same dir"
+        );
+    }
+
+    #[test]
+    fn singlecore_mode_uses_configured_lcov_output() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("lcov_output_path"),
+            "singlecore timeout coverage should use configured LCOV output path"
         );
     }
 

@@ -333,7 +333,7 @@ pub mod owner_mutation_airdrop {
             ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
             AirdropError::WrongOwner
         );
-        let _decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        let decimals = read_mint_decimals(&ctx.accounts.mint)?;
         let (token_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
         require!(
             token_mint == ctx.accounts.mint.key(),
@@ -342,7 +342,7 @@ pub mod owner_mutation_airdrop {
         payout(
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
-            amount,
+            amount + u64::from(decimals),
         )
     }
 
@@ -355,6 +355,58 @@ pub mod owner_mutation_airdrop {
             AirdropError::WrongOwner
         );
         let (_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Pool embeds the canonical LP mint, but this path only checks the supplied token pair.
+    pub fn read_lp_pair_no_canonical_mint_check(ctx: Context<ReadLpPair>) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        require!(
+            ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let (_pool_mint, _pool_amount) = read_pool_state(&ctx.accounts.pool_state)?;
+        let decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        let (token_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        require!(
+            token_mint == ctx.accounts.mint.key(),
+            AirdropError::WrongMint
+        );
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount + u64::from(decimals),
+        )
+    }
+
+    /// Same LP pair, with the pool-state canonical mint binding checked.
+    pub fn read_lp_pair_with_canonical_mint_check(ctx: Context<ReadLpPair>) -> Result<()> {
+        require!(
+            ctx.accounts.token_account.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        require!(
+            ctx.accounts.mint.owner == &TOKEN_PROGRAM_ID,
+            AirdropError::WrongOwner
+        );
+        let (pool_mint, _pool_amount) = read_pool_state(&ctx.accounts.pool_state)?;
+        let _decimals = read_mint_decimals(&ctx.accounts.mint)?;
+        let (token_mint, amount) = read_token_account_data(&ctx.accounts.token_account)?;
+        require!(
+            token_mint == ctx.accounts.mint.key(),
+            AirdropError::WrongMint
+        );
+        require!(
+            pool_mint == ctx.accounts.mint.key(),
+            AirdropError::WrongMint
+        );
         payout(
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.recipient.to_account_info(),
@@ -534,7 +586,7 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    // ---- CC-8 / CC-10 relation checks ----
+    // ---- CC-7 / CC-9 relation checks ----
 
     /// Source embeds the expected target key, but the instruction never checks that relation.
     pub fn read_linked_no_check(ctx: Context<ReadLinked>) -> Result<()> {
@@ -630,17 +682,24 @@ pub mod owner_mutation_airdrop {
         )
     }
 
-    /// Same pair read, with both counterpart directions checked.
+    /// Same pair read, with both counterpart directions and root bindings checked.
     pub fn read_pair_bidirectional_with_check(ctx: Context<ReadPair>) -> Result<()> {
-        let (expected_right, _left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
-        let (expected_left, _right_root, right_amount) =
-            read_pair_right_state(&ctx.accounts.right)?;
+        let (expected_right, left_root, left_amount) = read_pair_left_state(&ctx.accounts.left)?;
+        let (expected_left, right_root, right_amount) = read_pair_right_state(&ctx.accounts.right)?;
         require!(
             expected_right == ctx.accounts.right.key(),
             AirdropError::WrongTarget
         );
         require!(
             expected_left == ctx.accounts.left.key(),
+            AirdropError::WrongTarget
+        );
+        require!(
+            left_root == ctx.accounts.root.key(),
+            AirdropError::WrongTarget
+        );
+        require!(
+            right_root == ctx.accounts.root.key(),
             AirdropError::WrongTarget
         );
         let root_amount = read_target_state(&ctx.accounts.root)?;
@@ -765,6 +824,81 @@ pub mod owner_mutation_airdrop {
             1,
         )
     }
+
+    // ---- CC-9.5: scoped / cross-authority ----
+
+    /// Two scoped traders, each authorizing the same `delegate` signer via their `delegate` field.
+    /// The instruction verifies the delegate but never checks that the two traders share the same
+    /// `authority` (owner). With both traders owned by the same authority in the legit baseline, a
+    /// mutation that breaks `destination.authority` while preserving the delegate reference still
+    /// succeeds — the CC-9.5 cross-authority drain shape (Phoenix #2749/#2750).
+    pub fn transfer_scoped_no_owner_check(ctx: Context<TransferScopedTraders>) -> Result<()> {
+        let (_src_authority, src_delegate, amount) =
+            read_scoped_trader_state(&ctx.accounts.source_trader)?;
+        let (_dst_authority, dst_delegate, _) =
+            read_scoped_trader_state(&ctx.accounts.destination_trader)?;
+        require!(
+            src_delegate == ctx.accounts.delegate.key()
+                && dst_delegate == ctx.accounts.delegate.key(),
+            AirdropError::WrongAuthority
+        );
+        // BUG: never checks destination.authority == source.authority.
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Same scoped transfer, with the cross-authority owner binding enforced.
+    pub fn transfer_scoped_owner_checked(ctx: Context<TransferScopedTraders>) -> Result<()> {
+        let (src_authority, src_delegate, amount) =
+            read_scoped_trader_state(&ctx.accounts.source_trader)?;
+        let (dst_authority, dst_delegate, _) =
+            read_scoped_trader_state(&ctx.accounts.destination_trader)?;
+        require!(
+            src_delegate == ctx.accounts.delegate.key()
+                && dst_delegate == ctx.accounts.delegate.key(),
+            AirdropError::WrongAuthority
+        );
+        require!(src_authority == dst_authority, AirdropError::WrongAuthority);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    // ---- CC-14: duplicate / aliasing ----
+
+    /// Borrows against two collateral accounts that must be distinct, releasing the *sum* of their
+    /// values. There is no `c1 != c2` check, so aliasing one onto the other double-counts a single
+    /// collateral position (over-borrow) — the divergent CC-14 shape.
+    pub fn borrow_against_two_collateral(ctx: Context<BorrowTwoCollateral>) -> Result<()> {
+        let first = read_collateral_value(&ctx.accounts.collateral_a)?;
+        let second = read_collateral_value(&ctx.accounts.collateral_b)?;
+        // BUG: never checks collateral_a.key() != collateral_b.key().
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            first + second,
+        )
+    }
+
+    /// Same borrow, with the distinctness check enforced.
+    pub fn borrow_against_two_collateral_checked(ctx: Context<BorrowTwoCollateral>) -> Result<()> {
+        require!(
+            ctx.accounts.collateral_a.key() != ctx.accounts.collateral_b.key(),
+            AirdropError::WrongTarget
+        );
+        let first = read_collateral_value(&ctx.accounts.collateral_a)?;
+        let second = read_collateral_value(&ctx.accounts.collateral_b)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            first + second,
+        )
+    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -815,6 +949,20 @@ fn read_token_account_data(account: &UncheckedAccount) -> Result<(Pubkey, u64)> 
             .try_into()
             .unwrap(),
     );
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((mint, amount))
+}
+
+fn read_pool_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 48, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == PoolState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let mint = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[40..48].try_into().unwrap());
     require!(amount > 0, AirdropError::InvalidAmount);
     Ok((mint, amount))
 }
@@ -962,6 +1110,34 @@ fn read_authority_state(account: &UncheckedAccount) -> Result<(Pubkey, u64)> {
     Ok((authority, amount))
 }
 
+fn read_scoped_trader_state(account: &UncheckedAccount) -> Result<(Pubkey, Pubkey, u64)> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 80, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == ScopedTraderState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let authority = Pubkey::new_from_array(data[8..40].try_into().unwrap());
+    let delegate = Pubkey::new_from_array(data[40..72].try_into().unwrap());
+    let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok((authority, delegate, amount))
+}
+
+fn read_collateral_value(account: &UncheckedAccount) -> Result<u64> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 16, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == CollateralState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    let amount = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    require!(amount > 0, AirdropError::InvalidAmount);
+    Ok(amount)
+}
+
 fn payout(vault: &AccountInfo, recipient: &AccountInfo, amount: u64) -> Result<()> {
     let vault_lamports = **vault.try_borrow_lamports()?;
     require!(vault_lamports >= amount, AirdropError::InsufficientVault);
@@ -1106,6 +1282,21 @@ pub struct ReadTokenWithMint<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ReadLpPair<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: program-owned pool state containing the canonical LP mint.
+    pub pool_state: UncheckedAccount<'info>,
+    /// CHECK: SPL token-account-shaped LP account.
+    pub token_account: UncheckedAccount<'info>,
+    /// CHECK: SPL mint-shaped LP mint.
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Withdraw<'info> {
     /// CHECK: payout destination.
     #[account(mut)]
@@ -1144,6 +1335,12 @@ pub struct AlternateConfig {
 #[account]
 pub struct TraderState {
     pub authority: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct PoolState {
+    pub lp_mint: Pubkey,
     pub amount: u64,
 }
 
@@ -1199,6 +1396,45 @@ pub struct SemanticState {
 pub struct AuthorityState {
     pub authority: Pubkey,
     pub amount: u64,
+}
+
+#[account]
+pub struct ScopedTraderState {
+    pub authority: Pubkey,
+    pub delegate: Pubkey,
+    pub amount: u64,
+}
+
+#[account]
+pub struct CollateralState {
+    pub amount: u64,
+}
+
+#[derive(Accounts)]
+pub struct TransferScopedTraders<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    pub delegate: Signer<'info>,
+    /// CHECK: individually validated in the instruction.
+    pub source_trader: UncheckedAccount<'info>,
+    /// CHECK: individually validated in the instruction.
+    pub destination_trader: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct BorrowTwoCollateral<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub collateral_a: UncheckedAccount<'info>,
+    /// CHECK: owner and discriminator checked manually.
+    pub collateral_b: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

@@ -102,8 +102,9 @@ pub fn dry_run_mode(
 
             // Write coverage if --coverage was enabled
             if coverage_enabled {
-                #mod_name::write_lcov_coverage("coverage.lcov");
-                eprintln!("[DRY-RUN] Coverage written to coverage.lcov");
+                let coverage_output = #mod_name::lcov_output_path();
+                #mod_name::write_lcov_coverage(&coverage_output);
+                eprintln!("[DRY-RUN] Coverage written to {}", coverage_output);
             }
 
             eprintln!("[DRY-RUN] Harness validation passed!");
@@ -371,14 +372,7 @@ pub fn coverage_only_mode(
             eprintln!("[COVERAGE-ONLY] Processed {} inputs ({} errors)", processed, errors);
 
             // Write coverage output
-            let coverage_output = std::env::var("FUZZ_COVERAGE_OUT")
-                .unwrap_or_else(|_| {
-                    if std::path::Path::new("./output").is_dir() {
-                        "./output/coverage.lcov".to_string()
-                    } else {
-                        "coverage.lcov".to_string()
-                    }
-                });
+            let coverage_output = #mod_name::lcov_output_path();
             #mod_name::write_lcov_coverage(&coverage_output);
 
             // Print summary
@@ -647,6 +641,14 @@ mod tests {
             output.contains("write_lcov_coverage"),
             "should write coverage on exit"
         );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should use configured LCOV output path"
+        );
+        assert!(
+            !output.contains("Coverage written to coverage.lcov"),
+            "dry-run status should not claim a hardcoded LCOV path"
+        );
     }
 
     #[test]
@@ -720,6 +722,10 @@ mod tests {
         assert!(
             output.contains("write_lcov_coverage"),
             "should write coverage output"
+        );
+        assert!(
+            output.contains("lcov_output_path"),
+            "coverage-only mode should use configured LCOV output path"
         );
     }
 

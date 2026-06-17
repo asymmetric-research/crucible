@@ -98,7 +98,8 @@ pub fn singlecore_mode(
                     if now - start_time >= timeout {
                         eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
                         if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            #mod_name::write_lcov_coverage("coverage.lcov");
+                            let coverage_output = #mod_name::lcov_output_path();
+                            #mod_name::write_lcov_coverage(&coverage_output);
                         }
                         std::process::exit(0);
                     }

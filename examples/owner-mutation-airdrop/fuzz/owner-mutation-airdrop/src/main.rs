@@ -3,7 +3,8 @@
 //! It drives the program through every positive (missing-check) and negative (check-present)
 //! instruction path. On its own it fuzzes a lamport-conservation invariant; run with
 //! `--mutate-accounts` it additionally reports seeded owner, signer, PDA, type-tag,
-//! SPL-token, and field-cross-reference bugs as account-mutation findings.
+//! sysvar, SPL-token, field-reference, bidirectional/shared-root, semantic-swap,
+//! cross-authority, and duplicate-account bugs as account-mutation findings.
 //!
 //!   crucible run owner-mutation-airdrop invariant_test --release
 //!   crucible run owner-mutation-airdrop invariant_test --release --mutate-accounts
@@ -38,6 +39,7 @@ const MINT_DECIMALS: u8 = 6;
 const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
 const ALTERNATE_CONFIG_DISCRIMINATOR: [u8; 8] = [112, 26, 206, 10, 180, 130, 5, 4];
 const TRADER_STATE_DISCRIMINATOR: [u8; 8] = [124, 33, 101, 17, 158, 79, 26, 140];
+const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
 const LINKED_STATE_DISCRIMINATOR: [u8; 8] = [178, 163, 210, 62, 47, 48, 13, 148];
 const TARGET_STATE_DISCRIMINATOR: [u8; 8] = [147, 73, 167, 190, 147, 166, 153, 37];
 const VALUE_SOURCE_STATE_DISCRIMINATOR: [u8; 8] = [54, 98, 108, 196, 246, 208, 150, 132];
@@ -73,21 +75,22 @@ struct OwnerMutationAirdropFixture {
     alternate_config: Pubkey, // valid-but-wrong type account (documented FN)
     mint: Pubkey,            // SPL mint-shaped account
     token_account: Pubkey,   // SPL token-account-shaped account
+    pool_state: Pubkey,      // pool state containing the canonical LP mint
     source_trader: Pubkey,   // custom invariant source account (documented FN)
     destination_trader: Pubkey, // custom invariant destination account (documented FN)
-    linked_source: Pubkey,   // CC-8 same-class source containing a target pubkey
-    linked_target: Pubkey,   // CC-8 same-class referenced target
-    value_source: Pubkey,    // CC-8 value-ref source containing a price account pubkey
-    price: Pubkey,           // CC-8 value-ref referenced value account
-    root: Pubkey,            // CC-8 singleton/root account containing a child pubkey
+    linked_source: Pubkey,   // CC-7 same-class source containing a target pubkey
+    linked_target: Pubkey,   // CC-7 same-class referenced target
+    value_source: Pubkey,    // CC-7 value-ref source containing a price account pubkey
+    price: Pubkey,           // CC-7 value-ref referenced value account
+    root: Pubkey,            // CC-7 singleton/root account containing a child pubkey
     root_child: Pubkey,
-    pair_root: Pubkey,        // CC-8.3 root/counterpart account
-    pair_left: Pubkey,        // CC-8.3 left side with right/root fields
-    pair_right: Pubkey,       // CC-8.3 right side with left/root fields
-    shared_left: Pubkey,      // CC-8.3 shared-root left side
-    shared_right: Pubkey,     // CC-8.3 shared-root right side
-    semantic_state: Pubkey,   // CC-8.6 same-class account with embedded semantic context
-    authority_state: Pubkey, // CC-10 state containing the expected signer pubkey
+    pair_root: Pubkey,        // CC-7.3 root/counterpart account
+    pair_left: Pubkey,        // CC-7.3 left side with right/root fields
+    pair_right: Pubkey,       // CC-7.3 right side with left/root fields
+    shared_left: Pubkey,      // CC-7.3 shared-root left side
+    shared_right: Pubkey,     // CC-7.3 shared-root right side
+    semantic_state: Pubkey,   // CC-7.7 same-class account with embedded semantic context
+    authority_state: Pubkey, // CC-9 state containing the expected signer pubkey
 }
 
 #[fuzz_fixture]
@@ -186,6 +189,12 @@ impl OwnerMutationAirdropFixture {
             .amount(TOKEN_AMOUNT)
             .create()
             .unwrap();
+
+        let pool_state = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::pool_state_data(mint, CLAIM_AMOUNT),
+        );
 
         let mut source_trader_data = TRADER_STATE_DISCRIMINATOR.to_vec();
         source_trader_data.extend_from_slice(authority.pubkey().as_ref());
@@ -359,6 +368,7 @@ impl OwnerMutationAirdropFixture {
             alternate_config,
             mint,
             token_account,
+            pool_state,
             source_trader,
             destination_trader,
             linked_source,
@@ -408,6 +418,13 @@ impl OwnerMutationAirdropFixture {
 
     fn target_state_data(amount: u64) -> Vec<u8> {
         let mut data = TARGET_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn pool_state_data(lp_mint: Pubkey, amount: u64) -> Vec<u8> {
+        let mut data = POOL_STATE_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(lp_mint.as_ref());
         data.extend_from_slice(&amount.to_le_bytes());
         data
     }
@@ -783,6 +800,40 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
+    pub fn action_read_lp_pair_no_canonical_mint_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadLpPairNoCanonicalMintCheck {})
+            .accounts(accounts::ReadLpPairNoCanonicalMintCheck {
+                recipient: self.recipient.pubkey(),
+                pool_state: self.pool_state,
+                token_account: self.token_account,
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_read_lp_pair_with_canonical_mint_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadLpPairWithCanonicalMintCheck {})
+            .accounts(accounts::ReadLpPairWithCanonicalMintCheck {
+                recipient: self.recipient.pubkey(),
+                pool_state: self.pool_state,
+                token_account: self.token_account,
+                mint: self.mint,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     pub fn action_read_token_without_mint_relation_context(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
@@ -862,7 +913,7 @@ impl OwnerMutationAirdropFixture {
             .unwrap_or(false)
     }
 
-    // ---- CC-8 / CC-10 relation paths ----
+    // ---- CC-7 / CC-9 relation paths ----
 
     pub fn action_read_linked_no_check(&mut self) -> bool {
         self.ctx

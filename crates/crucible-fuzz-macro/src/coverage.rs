@@ -721,6 +721,15 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             use std::fs::File;
             use std::io::{BufWriter, Write};
 
+            if let Some(parent) = std::path::Path::new(output_path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("[LCOV] Failed to create directory {}: {}", parent.display(), e);
+                        return;
+                    }
+                }
+            }
+
             let file = match File::create(output_path) {
                 Ok(f) => f,
                 Err(e) => {
@@ -827,6 +836,21 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 branch_outcomes.values().map(|h| h.len()).sum::<usize>());
         }
 
+        /// Resolve the configured LCOV output path.
+        ///
+        /// `crucible run --coverage` sets FUZZ_COVERAGE_OUT from `--lcov-out`
+        /// or the CLI default. Direct harness execution keeps the historical
+        /// fallback unless a remote output directory is present.
+        pub fn lcov_output_path() -> String {
+            std::env::var("FUZZ_COVERAGE_OUT").unwrap_or_else(|_| {
+                if std::path::Path::new("./output").is_dir() {
+                    "./output/coverage.lcov".to_string()
+                } else {
+                    "coverage.lcov".to_string()
+                }
+            })
+        }
+
         /// Write coverage files periodically when new coverage is discovered.
         /// Uses iteration-based pre-check (cheap modulo) and time-based throttle
         /// (write at most every 10 seconds) for live coverage viewing.
@@ -862,7 +886,8 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 LAST_WRITE_TIME.store(now, Ordering::Relaxed);
 
                 // Write LCOV when new coverage is found
-                write_lcov_coverage("coverage.lcov");
+                let output_path = lcov_output_path();
+                write_lcov_coverage(&output_path);
             }
         }
     }
@@ -1149,6 +1174,18 @@ mod tests {
         assert!(
             output.contains("maybe_write_coverage"),
             "should define maybe_write_coverage"
+        );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should define configured LCOV path helper"
+        );
+        assert!(
+            output.contains("FUZZ_COVERAGE_OUT"),
+            "should honor configured LCOV output"
+        );
+        assert!(
+            output.contains("create_dir_all"),
+            "should create explicit LCOV output parent directories"
         );
         assert!(
             output.contains("generate_source_lcov"),

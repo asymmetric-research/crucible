@@ -126,7 +126,8 @@ thread_local! {
     // Set atomically with VIOLATION so it always matches the stored (first-wins) violation.
     static VIOLATION_FROM_MUTATION: Cell<bool> = const { Cell::new(false) };
     // Stable account-mutation finding identity/message for metadata and replay. The ID omits
-    // per-run pubkeys, so replay can target the same CC class + instruction even with fresh setup keys.
+    // per-run pubkeys, so replay targets the same constraint class and instruction/action even
+    // with fresh setup keys.
     static MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
     static MUTATION_FINDING_MESSAGE: RefCell<Option<String>> = RefCell::new(None);
     static EXPECTED_MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
@@ -310,7 +311,7 @@ pub struct CrashMetadata {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mutation_finding: bool,
     /// Stable mutation finding identity: `<class>:<program_id>:<instruction-discriminator>`.
-    /// Used by replay/tmin to avoid stopping on an earlier, different mutation bug in the same input.
+    /// Used by replay/tmin to target the original probe and instruction/action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutation_finding_id: Option<String>,
     /// Human-readable finding observed when the crash was first written.
@@ -756,10 +757,63 @@ pub fn write_crash_metadata_with_actions(
     input_bytes: &[u8],
     full_actions: Option<Vec<ActionRecord>>,
 ) {
+    write_crash_metadata_with_actions_impl(
+        crash_dir,
+        input_hash,
+        seed,
+        input_bytes,
+        full_actions,
+        None,
+    )
+}
+
+/// Write crash metadata with an explicit mutation-finding override. Stateful mode queues crashes
+/// and writes them later, after the thread-local violation state may have been cleared; queued
+/// mutation crashes must carry their captured identity/message through to disk for replay.
+pub fn write_crash_metadata_with_actions_and_mutation(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+    full_actions: Option<Vec<ActionRecord>>,
+    mutation_finding: Option<(String, String)>,
+) {
+    write_crash_metadata_with_actions_impl(
+        crash_dir,
+        input_hash,
+        seed,
+        input_bytes,
+        full_actions,
+        Some(mutation_finding),
+    )
+}
+
+fn write_crash_metadata_with_actions_impl(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+    full_actions: Option<Vec<ActionRecord>>,
+    mutation_override: Option<Option<(String, String)>>,
+) {
     let crash_id = format!("crash_{:016x}", input_hash);
     let mut metadata = build_crash_metadata(seed);
     if let Some(actions) = full_actions {
         metadata.actions = actions;
+    }
+    if let Some(mutation_finding) = mutation_override {
+        match mutation_finding {
+            Some((id, message)) => {
+                metadata.mutation_finding = true;
+                metadata.mutation_finding_id = Some(id);
+                metadata.mutation_finding_message = Some(message);
+            }
+            None => {
+                metadata.mutation_finding = false;
+                metadata.mutation_finding_id = None;
+                metadata.mutation_finding_message = None;
+            }
+        }
     }
     let meta_dir = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| crash_dir.to_string());
     let meta_filename = format!("{}/{}.meta.json", meta_dir, crash_id);
@@ -3767,6 +3821,59 @@ mod tests {
     }
 
     #[test]
+    fn deferred_metadata_uses_explicit_mutation_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().to_string_lossy().into_owned();
+
+        record_mutation_violation(
+            "[stale mutation]".to_string(),
+            "CC-1 owner:stale:00".to_string(),
+        );
+        clear_iteration_state();
+
+        write_crash_metadata_with_actions_and_mutation(
+            &crash_dir,
+            0xabc,
+            Some(7),
+            b"input",
+            None,
+            Some((
+                "CC-1 owner:Program:disc".to_string(),
+                "[CC-1 owner] ...".to_string(),
+            )),
+        );
+        let meta_path = tmp.path().join("crash_0000000000000abc.meta.json");
+        let meta: CrashMetadata =
+            serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
+        assert!(meta.mutation_finding);
+        assert_eq!(
+            meta.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
+        assert_eq!(
+            meta.mutation_finding_message.as_deref(),
+            Some("[CC-1 owner] ...")
+        );
+
+        record_mutation_violation(
+            "[stale mutation]".to_string(),
+            "CC-1 owner:stale:00".to_string(),
+        );
+        write_crash_metadata_with_actions_and_mutation(
+            &crash_dir, 0xdef, None, b"input", None, None,
+        );
+        let plain_meta_path = tmp.path().join("crash_0000000000000def.meta.json");
+        let plain_meta: CrashMetadata =
+            serde_json::from_slice(&std::fs::read(plain_meta_path).unwrap()).unwrap();
+        assert!(!plain_meta.mutation_finding);
+        assert!(plain_meta.mutation_finding_id.is_none());
+        assert!(plain_meta.mutation_finding_message.is_none());
+
+        let _ = take_violation();
+        clear_iteration_state();
+    }
+
+    #[test]
     fn is_novel_mutation_finding_dedups_by_identity() {
         // Same identity reported via two different sequences (a…k, b…k) is one
         // finding: first is novel, the second is suppressed.
@@ -3779,7 +3886,7 @@ mod tests {
             !is_novel_mutation_finding(id),
             "a different sequence reaching the same finding identity is a duplicate"
         );
-        // A different identity (e.g. another constraint class on the same ix) is distinct.
+        // A different constraint class on the same instruction is distinct.
         assert!(is_novel_mutation_finding("CC-4 signer:Program:abc"));
         assert!(seen_mutation_finding_count() >= 2);
     }

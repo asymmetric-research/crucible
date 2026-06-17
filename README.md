@@ -72,6 +72,7 @@ crucible run <program_name> <test_name> --release
 | [API Reference](docs/api-reference.md) | TestContext API — program loading, accounts, transactions, RPC cloning, time, oracles |
 | [Writing Tests](docs/writing-tests.md) | Fixtures, actions, range constraints, simple & invariant fuzzing, assertion macros |
 | [CLI Reference](docs/cli-reference.md) | All `crucible` commands and execution modes |
+| [Constraint-Check Engine](docs/constraint-check-engine.md) | `--mutate-accounts` probes, finding labels, replay behavior, false-positive notes |
 | [Crash Analysis](docs/crash-analysis.md) | Listing, viewing, replaying, and minimizing crashes |
 | [Coverage Reports](docs/coverage.md) | Bytecode & source-level coverage, LCOV, genhtml |
 | [Harness Guide](docs/harness-guide.md) | In-depth guide to writing effective fuzz harnesses |

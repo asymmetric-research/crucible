@@ -580,6 +580,28 @@ fn seed_token_account(ctx: &mut TestContext, pubkey: Pubkey, mint: Pubkey, owner
         .unwrap();
 }
 
+fn seed_pool_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, lp_mint: Pubkey) {
+    let mut data = owner_mutation_airdrop::PoolState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(lp_mint.as_ref());
+    data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn expect_forged_mint_pair_finding(token_account: Pubkey, mint: Pubkey, reference_source: Pubkey) {
+    let violation = crucible_test_context::take_violation()
+        .expect("expected a CC-token forged-mint-pair finding");
+    assert!(
+        violation.contains("[CC-token forged-mint-pair]"),
+        "unexpected violation: {violation}"
+    );
+    for account in [token_account, mint, reference_source] {
+        assert!(
+            violation.contains(&account.to_string()),
+            "finding should name account {account}: {violation}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn flags_fake_mint_owner() {
@@ -711,6 +733,62 @@ fn no_finding_when_token_mint_relation_checked() {
         .call(owner_mutation_airdrop::instruction::ReadTokenWithMintCheck {})
         .accounts(owner_mutation_airdrop::accounts::ReadTokenWithMint {
             recipient: h.recipient.pubkey(),
+            token_account,
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_forged_mint_pair_when_canonical_lp_mint_unchecked() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    let pool_state = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+    seed_pool_state(&mut h.ctx, pool_state, h.program_id, mint);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLpPairNoCanonicalMintCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLpPair {
+            recipient: h.recipient.pubkey(),
+            pool_state,
+            token_account,
+            mint,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_forged_mint_pair_finding(token_account, mint, pool_state);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_canonical_lp_mint_checked() {
+    let mut h = harness();
+    let mint = Keypair::new().pubkey();
+    let token_account = Keypair::new().pubkey();
+    let pool_state = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint);
+    seed_token_account(&mut h.ctx, token_account, mint, h.recipient.pubkey());
+    seed_pool_state(&mut h.ctx, pool_state, h.program_id, mint);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLpPairWithCanonicalMintCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLpPair {
+            recipient: h.recipient.pubkey(),
+            pool_state,
             token_account,
             mint,
             vault: h.vault,
@@ -954,6 +1032,11 @@ fn register_config_schema() {
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
+                type_name: "PoolState".into(),
+                discriminator: owner_mutation_airdrop::PoolState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
                 type_name: "LinkedState".into(),
                 discriminator: owner_mutation_airdrop::LinkedState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
@@ -979,6 +1062,16 @@ fn register_config_schema() {
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
+                type_name: "PairLeftState".into(),
+                discriminator: owner_mutation_airdrop::PairLeftState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "PairRightState".into(),
+                discriminator: owner_mutation_airdrop::PairRightState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
                 type_name: "AuthorityState".into(),
                 discriminator: owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
@@ -986,6 +1079,16 @@ fn register_config_schema() {
             crucible_test_context::AccountSchema {
                 type_name: "SemanticState".into(),
                 discriminator: owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "ScopedTraderState".into(),
+                discriminator: owner_mutation_airdrop::ScopedTraderState::DISCRIMINATOR.to_vec(),
+                diff_fn: Box::new(|_, _| Vec::new()),
+            },
+            crucible_test_context::AccountSchema {
+                type_name: "CollateralState".into(),
+                discriminator: owner_mutation_airdrop::CollateralState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
         ]);
@@ -1062,6 +1165,36 @@ fn seed_root_state(
     create_data_account(ctx, pubkey, owner, &data);
 }
 
+fn seed_pair_left_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    right: Pubkey,
+    root: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::PairLeftState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(right.as_ref());
+    data.extend_from_slice(root.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_pair_right_state(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    left: Pubkey,
+    root: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::PairRightState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(left.as_ref());
+    data.extend_from_slice(root.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
 fn seed_authority_state(
     ctx: &mut TestContext,
     pubkey: Pubkey,
@@ -1084,6 +1217,27 @@ fn seed_semantic_state(
 ) {
     let mut data = owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(context.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_scoped_trader(
+    ctx: &mut TestContext,
+    pubkey: Pubkey,
+    owner: Pubkey,
+    authority: Pubkey,
+    delegate: Pubkey,
+    amount: u64,
+) {
+    let mut data = owner_mutation_airdrop::ScopedTraderState::DISCRIMINATOR.to_vec();
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(delegate.as_ref());
+    data.extend_from_slice(&amount.to_le_bytes());
+    create_data_account(ctx, pubkey, owner, &data);
+}
+
+fn seed_collateral(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
+    let mut data = owner_mutation_airdrop::CollateralState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
@@ -1230,7 +1384,7 @@ fn no_finding_for_custom_cross_account_invariant_bug() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_cc8_field_ref_when_linked_target_unchecked() {
+fn flags_cc7_field_ref_when_linked_target_unchecked() {
     register_config_schema();
     let mut h = harness();
     let source = Keypair::new().pubkey();
@@ -1261,7 +1415,7 @@ fn flags_cc8_field_ref_when_linked_target_unchecked() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-8 field-ref]", source);
+    expect_finding("[CC-7 field-ref]", source);
 }
 
 #[test]
@@ -1302,7 +1456,7 @@ fn no_finding_when_linked_target_checked() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_cc8_value_ref_when_referenced_value_unchecked() {
+fn flags_cc7_value_ref_when_referenced_value_unchecked() {
     register_config_schema();
     let mut h = harness();
     let source = Keypair::new().pubkey();
@@ -1333,7 +1487,7 @@ fn flags_cc8_value_ref_when_referenced_value_unchecked() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-8 value-ref]", price);
+    expect_finding("[CC-7 value-ref]", price);
 }
 
 #[test]
@@ -1374,7 +1528,7 @@ fn no_finding_when_referenced_value_checked() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_cc8_finding_for_singleton_classes() {
+fn no_cc7_finding_for_singleton_classes() {
     register_config_schema();
     let mut h = harness();
     let source = Keypair::new().pubkey();
@@ -1400,7 +1554,7 @@ fn no_cc8_finding_for_singleton_classes() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_cc8_root_ref_when_child_unchecked() {
+fn flags_cc7_root_ref_when_child_unchecked() {
     register_config_schema();
     let mut h = harness();
     let root = Keypair::new().pubkey();
@@ -1423,7 +1577,7 @@ fn flags_cc8_root_ref_when_child_unchecked() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-8 root-ref]", root);
+    expect_finding("[CC-7 root-ref]", root);
 }
 
 #[test]
@@ -1456,7 +1610,231 @@ fn no_finding_when_root_child_checked() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_cc86_semantic_swap_when_same_class_context_unchecked() {
+fn flags_cc73_bidirectional_ref_when_counterpart_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let root_alt = Keypair::new().pubkey();
+    let left = Keypair::new().pubkey();
+    let right = Keypair::new().pubkey();
+    let left_alt = Keypair::new().pubkey();
+    let right_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, root, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, root_alt, h.program_id, CLAIM_AMOUNT);
+    seed_pair_left_state(&mut h.ctx, left, h.program_id, right, root, CLAIM_AMOUNT);
+    seed_pair_right_state(&mut h.ctx, right, h.program_id, left, root, CLAIM_AMOUNT);
+    seed_pair_left_state(
+        &mut h.ctx,
+        left_alt,
+        h.program_id,
+        right_alt,
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right_alt,
+        h.program_id,
+        left_alt,
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPairBidirectionalNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+            recipient: h.recipient.pubkey(),
+            left,
+            right,
+            root,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-7.3 bidirectional-ref]", left);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_bidirectional_pair_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let root_alt = Keypair::new().pubkey();
+    let left = Keypair::new().pubkey();
+    let right = Keypair::new().pubkey();
+    let left_alt = Keypair::new().pubkey();
+    let right_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, root, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, root_alt, h.program_id, CLAIM_AMOUNT);
+    seed_pair_left_state(&mut h.ctx, left, h.program_id, right, root, CLAIM_AMOUNT);
+    seed_pair_right_state(&mut h.ctx, right, h.program_id, left, root, CLAIM_AMOUNT);
+    seed_pair_left_state(
+        &mut h.ctx,
+        left_alt,
+        h.program_id,
+        right_alt,
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right_alt,
+        h.program_id,
+        left_alt,
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPairBidirectionalWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+            recipient: h.recipient.pubkey(),
+            left,
+            right,
+            root,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc73_bidirectional_ref_when_shared_root_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let root_alt = Keypair::new().pubkey();
+    let left = Keypair::new().pubkey();
+    let right = Keypair::new().pubkey();
+    let left_alt = Keypair::new().pubkey();
+    let right_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, root, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, root_alt, h.program_id, CLAIM_AMOUNT);
+    seed_pair_left_state(
+        &mut h.ctx,
+        left,
+        h.program_id,
+        Pubkey::default(),
+        root,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right,
+        h.program_id,
+        Pubkey::default(),
+        root,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_left_state(
+        &mut h.ctx,
+        left_alt,
+        h.program_id,
+        Pubkey::default(),
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right_alt,
+        h.program_id,
+        Pubkey::default(),
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPairSharedRootNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+            recipient: h.recipient.pubkey(),
+            left,
+            right,
+            root,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-7.3 bidirectional-ref]", left);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_shared_root_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let root = Keypair::new().pubkey();
+    let root_alt = Keypair::new().pubkey();
+    let left = Keypair::new().pubkey();
+    let right = Keypair::new().pubkey();
+    let left_alt = Keypair::new().pubkey();
+    let right_alt = Keypair::new().pubkey();
+    seed_target_state(&mut h.ctx, root, h.program_id, CLAIM_AMOUNT);
+    seed_target_state(&mut h.ctx, root_alt, h.program_id, CLAIM_AMOUNT);
+    seed_pair_left_state(
+        &mut h.ctx,
+        left,
+        h.program_id,
+        Pubkey::default(),
+        root,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right,
+        h.program_id,
+        Pubkey::default(),
+        root,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_left_state(
+        &mut h.ctx,
+        left_alt,
+        h.program_id,
+        Pubkey::default(),
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+    seed_pair_right_state(
+        &mut h.ctx,
+        right_alt,
+        h.program_id,
+        Pubkey::default(),
+        root_alt,
+        CLAIM_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadPairSharedRootWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+            recipient: h.recipient.pubkey(),
+            left,
+            right,
+            root,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc77_semantic_swap_when_same_class_context_unchecked() {
     register_config_schema();
     let mut h = harness();
     let semantic = Keypair::new().pubkey();
@@ -1500,12 +1878,12 @@ fn flags_cc86_semantic_swap_when_same_class_context_unchecked() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-8.6 semantic-swap]", semantic);
+    expect_finding("[CC-7.7 semantic-swap]", semantic);
 }
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_cc86_finding_when_semantic_context_checked() {
+fn no_cc77_finding_when_semantic_context_checked() {
     register_config_schema();
     let mut h = harness();
     let semantic = Keypair::new().pubkey();
@@ -1554,7 +1932,7 @@ fn no_cc86_finding_when_semantic_context_checked() {
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn flags_cc10_wrong_signer_when_authority_unchecked() {
+fn flags_cc9_wrong_signer_when_authority_unchecked() {
     register_config_schema();
     let mut h = harness();
     let authority = Keypair::new();
@@ -1581,7 +1959,7 @@ fn flags_cc10_wrong_signer_when_authority_unchecked() {
         .send()
         .unwrap();
 
-    expect_finding("[CC-10 authority]", state);
+    expect_finding("[CC-9 authority]", state);
 }
 
 #[test]
@@ -1827,4 +2205,177 @@ fn owner_mutation_harness_finds_missing_airdrop_owner_check() {
 
     let config_owner = fixture.ctx.get_account(&fixture.config).unwrap().owner;
     assert_eq!(config_owner, fixture.program_id);
+}
+
+// ---- CC-9.5 cross-authority (the Phoenix #2749/#2750 shape) ----
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc95_cross_authority_when_owner_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let delegate = Keypair::new();
+    create_system_account(&mut h.ctx, delegate.pubkey());
+    let victim = Pubkey::new_unique();
+    let source_trader = Keypair::new().pubkey();
+    let destination_trader = Keypair::new().pubkey();
+    // Legit baseline: both traders owned by the same authority and delegated to the same signer.
+    seed_scoped_trader(
+        &mut h.ctx,
+        source_trader,
+        h.program_id,
+        victim,
+        delegate.pubkey(),
+        CLAIM_AMOUNT,
+    );
+    seed_scoped_trader(
+        &mut h.ctx,
+        destination_trader,
+        h.program_id,
+        victim,
+        delegate.pubkey(),
+        STATE_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::TransferScopedNoOwnerCheck {})
+        .accounts(owner_mutation_airdrop::accounts::TransferScopedTraders {
+            recipient: h.recipient.pubkey(),
+            delegate: delegate.pubkey(),
+            source_trader,
+            destination_trader,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient, &delegate])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-9.5 cross-authority]", destination_trader);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_cross_authority_owner_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let delegate = Keypair::new();
+    create_system_account(&mut h.ctx, delegate.pubkey());
+    let victim = Pubkey::new_unique();
+    let source_trader = Keypair::new().pubkey();
+    let destination_trader = Keypair::new().pubkey();
+    seed_scoped_trader(
+        &mut h.ctx,
+        source_trader,
+        h.program_id,
+        victim,
+        delegate.pubkey(),
+        CLAIM_AMOUNT,
+    );
+    seed_scoped_trader(
+        &mut h.ctx,
+        destination_trader,
+        h.program_id,
+        victim,
+        delegate.pubkey(),
+        STATE_AMOUNT,
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::TransferScopedOwnerChecked {})
+        .accounts(owner_mutation_airdrop::accounts::TransferScopedTraders {
+            recipient: h.recipient.pubkey(),
+            delegate: delegate.pubkey(),
+            source_trader,
+            destination_trader,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient, &delegate])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+// ---- CC-14 duplicate / aliasing (diverge mode) ----
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_cc14_duplicate_when_distinctness_unchecked() {
+    register_config_schema();
+    let mut h = harness();
+    let collateral_a = Keypair::new().pubkey();
+    let collateral_b = Keypair::new().pubkey();
+    // Distinct values: aliasing one onto the other over-borrows (the outcome diverges).
+    seed_collateral(&mut h.ctx, collateral_a, h.program_id, CLAIM_AMOUNT);
+    seed_collateral(&mut h.ctx, collateral_b, h.program_id, STATE_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateral {})
+        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+            recipient: h.recipient.pubkey(),
+            collateral_a,
+            collateral_b,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-14 duplicate-account]", collateral_a);
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_collateral_distinctness_checked() {
+    register_config_schema();
+    let mut h = harness();
+    let collateral_a = Keypair::new().pubkey();
+    let collateral_b = Keypair::new().pubkey();
+    seed_collateral(&mut h.ctx, collateral_a, h.program_id, CLAIM_AMOUNT);
+    seed_collateral(&mut h.ctx, collateral_b, h.program_id, STATE_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateralChecked {})
+        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+            recipient: h.recipient.pubkey(),
+            collateral_a,
+            collateral_b,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_cc14_when_collateral_identical() {
+    register_config_schema();
+    let mut h = harness();
+    let collateral_a = Keypair::new().pubkey();
+    let collateral_b = Keypair::new().pubkey();
+    // Byte-identical collateral: aliasing changes nothing (the benign no-op case).
+    seed_collateral(&mut h.ctx, collateral_a, h.program_id, CLAIM_AMOUNT);
+    seed_collateral(&mut h.ctx, collateral_b, h.program_id, CLAIM_AMOUNT);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateral {})
+        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+            recipient: h.recipient.pubkey(),
+            collateral_a,
+            collateral_b,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
 }

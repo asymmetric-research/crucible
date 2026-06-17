@@ -29,7 +29,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--seed <N>` | Random seed for reproducible fuzzing |
 | `--symbols <PATH>` | Path to debug binary with DWARF symbols (for source-level coverage) |
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
-| `--mutate-accounts` | Enable the constraint-check engine (account-mutation probes for missing security checks — see below) |
+| `--mutate-accounts` | Enable the constraint-check engine (account-mutation probes for missing security checks; see [Constraint-Check Engine](constraint-check-engine.md)) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
 | `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
 | `--stateful` | Stateful fuzzing: single action per iteration with state pool |
@@ -190,36 +190,22 @@ crucible run myproject invariant_test --release --stateful -j 4
 
 ---
 
-## Constraint-check engine (`--mutate-accounts`)
+## Constraint-Check Engine (`--mutate-accounts`)
 
-`--mutate-accounts` turns on probes for common missing account checks. Findings are reported as
-normal crashes with labels that identify the suspected missing check. Replay and tmin enable the
-same probes automatically so mutation findings reproduce.
+`--mutate-accounts` enables deterministic account-mutation probes for common
+missing account checks. During fuzzing, probes run when an action/instruction
+shape first completes, then dedupe by that shape for throughput. Findings use
+stable labels and can be inspected, replayed, and minimized with the usual
+`crucible show` and `crucible tmin` flows.
 
-Current labels:
-
-- `[CC-1 owner]` missing owner check
-- `[CC-2 sysvar]` missing sysvar identity check
-- `[CC-3 pda-spoof]` missing PDA address/owner check
-- `[CC-4 signer]` missing signer assertion
-- `[CC-5 type-tag]` missing discriminator/type-tag check
-- `[CC-8 field-ref]` same-class account accepted without checking an embedded pubkey relation
-- `[CC-8 root-ref]` child account accepted without checking a singleton/root account's embedded pubkey relation
-- `[CC-8 value-ref]` referenced same-class account accepted without checking an embedded pubkey relation
-- `[CC-8.3 bidirectional-ref]` paired accounts accepted without checking mutual or shared-root pubkey fields
-- `[CC-8.6 semantic-swap]` same-class account with a different embedded-key profile accepted
-- `[CC-10 authority]` state account accepted with a different valid signer than the embedded authority
-- `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
-- `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner
-- `[CC-token wrong-mint]` token account accepted with a mint field that does not match the mint account
-
-Token relation probes require both a token account and a separate mint account in the instruction.
+See [Constraint-Check Engine](constraint-check-engine.md) for the current probe
+table, replay behavior, crash-corpus notes, and common false positives.
 
 ```bash
 # Find missing-check bugs while fuzzing
 crucible run myproject invariant_test --release --mutate-accounts --timeout 60
 
-# Findings are normal crashes — inspect / replay / minimize as usual
+# Findings are normal crashes - inspect / replay / minimize as usual
 crucible show myproject <crash_id>
 crucible show myproject <crash_id> --replay
 ```

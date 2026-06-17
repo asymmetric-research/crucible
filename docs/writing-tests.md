@@ -96,31 +96,25 @@ pub fn action_stake(
 
 ## Account-Mutation Checks
 
-Run a harness with `--mutate-accounts` to probe common missing account checks on cloned SVM state:
+Run a harness with `--mutate-accounts` to probe common missing account checks:
 
 ```bash
 crucible run myproject invariant_test --release --mutate-accounts --timeout 60
 ```
 
-Current finding labels:
+Probes are deterministic and run when an action/instruction shape first
+completes. See [Constraint-Check Engine](constraint-check-engine.md) for the
+current label/probe table and common false-positive notes.
 
-- `[CC-1 owner]` missing owner check
-- `[CC-2 sysvar]` missing sysvar identity check
-- `[CC-3 pda-spoof]` off-curve account accepted after both address and owner change
-- `[CC-4 signer]` missing signer assertion
-- `[CC-5 type-tag]` missing discriminator/type-tag check
-- `[CC-8 field-ref]` same-class account accepted without checking an embedded pubkey relation
-- `[CC-8 root-ref]` child account accepted without checking a singleton/root account's embedded pubkey relation
-- `[CC-8 value-ref]` referenced same-class account accepted without checking an embedded pubkey relation
-- `[CC-8.3 bidirectional-ref]` paired accounts accepted without checking mutual or shared-root pubkey fields
-- `[CC-8.6 semantic-swap]` same-class account with a different embedded-key profile accepted
-- `[CC-10 authority]` state account accepted with a different valid signer than the embedded authority
-- `[CC-token fake-mint-owner]` SPL mint-shaped account accepted under a wrong owner
-- `[CC-token fake-account-owner]` SPL token-account-shaped account accepted under a wrong owner
-- `[CC-token wrong-mint]` token account accepted with a mint field that does not match the mint account
+Harness shape matters:
 
-For token relation checks, seed both the token account and the mint account in the instruction. If
-only a token account is passed, the wrong-mint probe is skipped.
+- Seed at least two valid same-class accounts for same-class relation probes.
+- Register discriminators or schemas for type-tagged accounts where possible.
+- Pass both a token account and mint account for SPL token relation probes.
+- Expect one probe per instruction shape per worker; if a bug is state-dependent,
+  drive the vulnerable state before the first successful call to that instruction.
+- Treat findings as triage inputs when the program intentionally permits
+  same-class swaps, duplicate aliases, public value reads, or redundant signers.
 
 ---
 
