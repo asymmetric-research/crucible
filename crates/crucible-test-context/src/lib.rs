@@ -972,6 +972,14 @@ pub fn register_instruction_discriminators(discriminators: &[(&str, Vec<u8>)]) {
     let _ = DISCRIMINATOR_MAP.set((disc_len, map));
 }
 
+/// Length of the registered instruction discriminator (1 for some native programs, 4 for
+/// bincode, 8 for Anchor), or `None` if no discriminators were registered. Used by the
+/// account-mutation engine to key findings on the real discriminator rather than a fixed
+/// 8-byte prefix (which would fold variable instruction arguments into the finding identity).
+pub fn instruction_discriminator_len() -> Option<usize> {
+    DISCRIMINATOR_MAP.get().map(|(len, _)| *len)
+}
+
 /// Look up instruction name from discriminator bytes at the start of instruction data.
 /// Automatically uses the correct discriminator length (4 or 8 bytes).
 /// Returns None if discriminator is not registered or if the data is too short.
@@ -1050,10 +1058,13 @@ pub fn mutation_finding_message() -> Option<String> {
 
 /// Record an account-mutation finding identity and report whether it is the
 /// first time this identity has been seen this run. The identity
-/// (`{class}:{program}:{disc}`) is determined by the final probed action, not
-/// the action-sequence prefix, so distinct sequences ending at the same probed
-/// instruction (a…k and b…k) are treated as one finding. Returns `false` for a
-/// repeat (caller should suppress the duplicate crash).
+/// (`{class}:{program}:{disc}:{role}`) is determined by the final probed action —
+/// the constraint class, program, instruction *discriminator* (registered length, not
+/// the full data, so variable arguments don't fork the identity), and mutated account
+/// role — not the action-sequence prefix. So distinct sequences ending at the same
+/// probed instruction (a…k and b…k), and the same instruction sent with different
+/// argument values, are treated as one finding. Returns `false` for a repeat (caller
+/// should suppress the duplicate crash).
 pub fn is_novel_mutation_finding(id: &str) -> bool {
     SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow_mut().insert(id.to_string()))
 }
@@ -2047,6 +2058,7 @@ impl TestContext {
                 rent_epoch: 0,
             },
             owner_unverified: false,
+            lamports_explicit: false,
         }
     }
 
@@ -2064,6 +2076,7 @@ impl TestContext {
                 rent_epoch: 0,
             },
             owner_unverified: false,
+            lamports_explicit: false,
             mint: spl_token::state::Mint {
                 mint_authority: COption::None,
                 supply: 0,
@@ -2086,6 +2099,7 @@ impl TestContext {
                 rent_epoch: 0,
             },
             owner_unverified: false,
+            lamports_explicit: false,
             token_state: spl_token::state::Account {
                 mint: Pubkey::default(),
                 owner: Pubkey::default(),
@@ -3916,6 +3930,52 @@ mod tests {
         assert_eq!(acc.lamports, 1_000_000);
         assert_eq!(acc.data.len(), 128);
         assert!(!acc.executable);
+    }
+
+    #[test]
+    fn generic_builder_defaults_to_rent_exempt_lamports() {
+        // Regression: a created account with no explicit .lamports() must be rent-exempt for its
+        // final data length, else any tx touching it as a writable account fails at commit with
+        // InsufficientFundsForRent (even though the program logic succeeded).
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_account().pubkey(pk).size(200).create().unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let expected = ctx.svm.minimum_balance_for_rent_exemption(200);
+        assert!(expected > 0);
+        assert_eq!(
+            acc.lamports, expected,
+            "generic account should default to rent-exempt lamports for its data size"
+        );
+    }
+
+    #[test]
+    fn generic_builder_explicit_lamports_override_is_preserved() {
+        // The rent-exempt default must only apply when the caller did not set .lamports(...).
+        // A deliberately non-rent-exempt account (a low, non-zero balance — a 0-lamport account
+        // does not persist in Solana) must be honored exactly, not silently bumped to rent-exempt.
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let rent_exempt = ctx.svm.minimum_balance_for_rent_exemption(200);
+
+        ctx.create_account()
+            .pubkey(pk)
+            .size(200)
+            .lamports(1)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(
+            acc.lamports, 1,
+            "explicit .lamports(1) must be preserved, not overridden by the rent-exempt default"
+        );
+        assert!(
+            acc.lamports < rent_exempt,
+            "test premise: 1 is below rent-exempt"
+        );
     }
 
     #[test]

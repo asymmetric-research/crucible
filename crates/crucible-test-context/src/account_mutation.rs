@@ -149,8 +149,9 @@ fn probe_matches_baseline_effects_with_signers(
 
 thread_local! {
     /// Instruction types whose mutation battery already ran this run (per worker). The key is
-    /// `(program_id, 8-byte discriminator)`. This persists for the whole run — it is *not*
-    /// cleared between iterations — so each instruction type is probed at most once per worker.
+    /// `(program_id, discriminator)` — the registered-length discriminator prefix, zero-padded into
+    /// a `[u8; 8]` (see `probe_key`). This persists for the whole run — it is *not* cleared between
+    /// iterations — so each instruction type is probed at most once per worker.
     static PROBED_IX_TYPES: RefCell<FastHashSet<ProbeKey>> = RefCell::new(FastHashSet::default());
 }
 
@@ -275,34 +276,70 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
     ]
 }
 
-/// `(program_id, first 8 bytes of instruction data)` — the identity used to probe each
-/// instruction type at most once. Data shorter than 8 bytes is zero-padded.
+/// Length of the instruction discriminator to key on: the IDL-registered discriminator length
+/// (1/4/8 bytes depending on framework), clamped to the available data. Falls back to 8 bytes
+/// (Anchor) when no discriminators were registered. Using the *full* instruction data here would
+/// fold variable argument values (swap amounts, order limits, …) into the instruction identity,
+/// so the same logical instruction re-keys on every argument and probing/dedup explode.
+fn ix_disc_len(ix: &Instruction) -> usize {
+    crate::instruction_discriminator_len()
+        .unwrap_or(8)
+        .min(ix.data.len())
+}
+
+/// `(program_id, discriminator)` — the identity used to probe each instruction type at most once.
+/// Keyed on the registered discriminator length (zero-padded to 8), NOT the full data.
 fn probe_key(ix: &Instruction) -> ProbeKey {
     let mut disc = [0u8; 8];
-    let n = ix.data.len().min(8);
+    let n = ix_disc_len(ix).min(8);
     disc[..n].copy_from_slice(&ix.data[..n]);
     (ix.program_id, disc)
 }
 
 fn disc_hex(ix: &Instruction) -> String {
-    let n = ix.data.len().min(8);
-    ix.data[..n].iter().map(|b| format!("{b:02x}")).collect()
+    disc_prefix_hex(&ix.data, ix_disc_len(ix))
 }
 
-fn finding_id(class: &str, ix: &Instruction) -> String {
-    format!("{class}:{}:{}", ix.program_id, disc_hex(ix))
+/// Hex of the first `len` bytes of `data`. Pulled out of [`disc_hex`] so the truncation that
+/// keeps argument bytes out of a finding's identity can be unit-tested without the process-global
+/// discriminator registry.
+fn disc_prefix_hex(data: &[u8], len: usize) -> String {
+    data[..len.min(data.len())]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
+/// Stable role identifier for the mutated account in a finding: its slot index within the
+/// instruction's ordered account list. Independent of the concrete pubkey (which varies per
+/// iteration for freshly-created accounts) and of argument values, so distinct findings on the
+/// same instruction (different account roles) stay distinct while repeats collapse.
+fn account_role(ctx: &ProbeCtx, pubkey: &Pubkey) -> String {
+    match instruction_account_keys_ordered(ctx.instructions)
+        .iter()
+        .position(|k| k == pubkey)
+    {
+        Some(i) => format!("a{i}"),
+        None => "a?".to_string(),
+    }
+}
+
+fn finding_id(class: &str, ix: &Instruction, role: &str) -> String {
+    format!("{class}:{}:{}:{}", ix.program_id, disc_hex(ix), role)
+}
+
+/// Coarse instruction-level identity `account-mutation:{program}:{disc}` derived from a full
+/// finding id `{class}:{program}:{disc}:{role}` (class and account role dropped). Lets replay/tmin
+/// match by instruction even if the precise class or mutated-account role differs. Tolerates the
+/// legacy 3-part `{class}:{program}:{disc}` form (no role).
 fn finding_instruction_id(id: &str) -> String {
     if id.starts_with("account-mutation:") {
         return id.to_string();
     }
 
-    let mut parts = id.rsplitn(3, ':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(disc), Some(program), Some(_class)) => {
-            format!("account-mutation:{program}:{disc}")
-        }
+    let parts: Vec<&str> = id.split(':').collect();
+    match parts.as_slice() {
+        [_class, program, disc, ..] => format!("account-mutation:{program}:{disc}"),
         _ => id.to_string(),
     }
 }
@@ -445,7 +482,11 @@ impl MutationStrategy for OwnerStrategy {
                 &[candidate.pubkey],
             ) {
                 findings.push(Finding {
-                    id: finding_id("CC-1 owner", &ctx.instructions[0]),
+                    id: finding_id(
+                        "CC-1 owner",
+                        &ctx.instructions[0],
+                        &account_role(ctx, &candidate.pubkey),
+                    ),
                     message: format!(
                         "[CC-1 owner] account {} owner {}->{} instr {}:{} still succeeded after owner mutation",
                         candidate.pubkey,
@@ -503,7 +544,11 @@ impl MutationStrategy for TypeTagStrategy {
 
             if probe_matches_baseline_effects(ctx, &mut probe, ctx.instructions, &[], &[pubkey]) {
                 findings.push(Finding {
-                    id: finding_id("CC-5 type-tag", &ctx.instructions[0]),
+                    id: finding_id(
+                        "CC-5 type-tag",
+                        &ctx.instructions[0],
+                        &account_role(ctx, &pubkey),
+                    ),
                     message: format!(
                         "[CC-5 type-tag] account {} discriminator bit-flipped, instr {}:{} still succeeded (missing discriminator check)",
                         pubkey,
@@ -572,7 +617,11 @@ impl MutationStrategy for SignerStrategy {
                     }
                 };
                 findings.push(Finding {
-                    id: finding_id("CC-4 signer", &ctx.instructions[0]),
+                    id: finding_id(
+                        "CC-4 signer",
+                        &ctx.instructions[0],
+                        &account_role(ctx, &candidate.pubkey),
+                    ),
                     message: format!(
                         "[CC-4 signer] account {} {}, instr {}:{} still succeeded (missing signer check)",
                         candidate.pubkey,
@@ -717,7 +766,11 @@ impl MutationStrategy for AuthoritySignerStrategy {
                     &[signer, attacker_pubkey],
                 ) {
                     findings.push(Finding {
-                        id: finding_id("CC-9 authority", &ctx.instructions[0]),
+                        id: finding_id(
+                            "CC-9 authority",
+                            &ctx.instructions[0],
+                            &account_role(ctx, &source),
+                        ),
                         message: format!(
                             "[CC-9 authority] account {} contains authority {}, but instr {}:{} still succeeded with replacement signer {}",
                             source,
@@ -791,7 +844,11 @@ impl MutationStrategy for PdaSubstitutionStrategy {
                 account.owner = spoof_owner;
             }) {
                 findings.push(Finding {
-                    id: finding_id("CC-3 pda-spoof", &ctx.instructions[0]),
+                    id: finding_id(
+                        "CC-3 pda-spoof",
+                        &ctx.instructions[0],
+                        &account_role(ctx, &target),
+                    ),
                     message: format!(
                         "[CC-3 pda-spoof] account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing PDA derivation/owner check)",
                         target,
@@ -885,7 +942,7 @@ impl MutationStrategy for TokenFakeOwnerStrategy {
                     ),
                 };
                 findings.push(Finding {
-                    id: finding_id(class, &ctx.instructions[0]),
+                    id: finding_id(class, &ctx.instructions[0], &account_role(ctx, &candidate.pubkey)),
                     message: format!(
                         "{} account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing {} owner check)",
                         label,
@@ -952,7 +1009,11 @@ impl MutationStrategy for TokenWrongMintStrategy {
                     account.data = data.clone();
                 }) {
                     findings.push(Finding {
-                        id: finding_id("CC-token wrong-mint", &ctx.instructions[0]),
+                        id: finding_id(
+                            "CC-token wrong-mint",
+                            &ctx.instructions[0],
+                            &account_role(ctx, &token_account.pubkey),
+                        ),
                         message: format!(
                             "[CC-token wrong-mint] token account {} substituted with decoy {} mint {}->{} while mint account {} was provided, instr {}:{} still succeeded",
                             token_account.pubkey,
@@ -1036,7 +1097,11 @@ impl MutationStrategy for TokenForgedMintPairStrategy {
                     &[token_account.pubkey, fake_token, mint.pubkey, fake_mint],
                 ) {
                     findings.push(Finding {
-                        id: finding_id("CC-token forged-mint-pair", &ctx.instructions[0]),
+                        id: finding_id(
+                            "CC-token forged-mint-pair",
+                            &ctx.instructions[0],
+                            &account_role(ctx, &token_account.pubkey),
+                        ),
                         message: format!(
                             "[CC-token forged-mint-pair] token account {} and mint {} substituted with forged pair {} / {} while account {} still references canonical mint {}, instr {}:{} still succeeded",
                             token_account.pubkey,
@@ -1414,7 +1479,11 @@ fn cc73_finding(
     };
 
     Finding {
-        id: finding_id("CC-7.3 bidirectional-ref", &ctx.instructions[0]),
+        id: finding_id(
+            "CC-7.3 bidirectional-ref",
+            &ctx.instructions[0],
+            &account_role(ctx, &substituted),
+        ),
         message: format!(
             "[CC-7.3 bidirectional-ref] accounts {} and {} are linked by {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing bidirectional/shared-root field binding check)",
             pair.left,
@@ -1586,7 +1655,7 @@ fn cc7_finding(
     };
 
     Finding {
-        id: finding_id(class, &ctx.instructions[0]),
+        id: finding_id(class, &ctx.instructions[0], &account_role(ctx, &substituted)),
         message: format!(
             "{} account {} references {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing field cross-reference check)",
             label,
@@ -1607,7 +1676,11 @@ fn cc7_value_ref_finding(
     replacement: Pubkey,
 ) -> Finding {
     Finding {
-        id: finding_id("CC-7 value-ref", &ctx.instructions[0]),
+        id: finding_id(
+            "CC-7 value-ref",
+            &ctx.instructions[0],
+            &account_role(ctx, &edge.target),
+        ),
         message: format!(
             "[CC-7 value-ref] account {} references {}, substituted referenced account with same-class account {} ({}), instr {}:{} still succeeded (missing referenced account binding check)",
             edge.source,
@@ -1811,7 +1884,11 @@ fn cc77_finding(
     candidate: &SemanticSwapCandidate,
 ) -> Finding {
     Finding {
-        id: finding_id("CC-7.7 semantic-swap", &ctx.instructions[0]),
+        id: finding_id(
+            "CC-7.7 semantic-swap",
+            &ctx.instructions[0],
+            &account_role(ctx, &candidate.target),
+        ),
         message: format!(
             "[CC-7.7 semantic-swap] account {} ({}) has embedded-key profile with {} observed key(s), substituted with same-class account {} with {} observed key(s), instr {}:{} still succeeded (missing semantic same-class binding check)",
             candidate.target,
@@ -1855,7 +1932,11 @@ impl MutationStrategy for CrossAuthorityAgreementStrategy {
                 let replacement = CRUCIBLE_ATTACKER;
                 if mutate_account_pubkey_window_probe(ctx, *right, offset, replacement) {
                     findings.push(Finding {
-                        id: finding_id("CC-9.5 cross-authority", &ctx.instructions[0]),
+                        id: finding_id(
+                            "CC-9.5 cross-authority",
+                            &ctx.instructions[0],
+                            &format!("{}@{}", account_role(ctx, right), offset),
+                        ),
                         message: format!(
                             "[CC-9.5 cross-authority] same-class accounts {} and {} share non-signer authority field, mutated {} offset {} to {}, instr {}:{} still succeeded",
                             left,
@@ -1987,7 +2068,11 @@ impl MutationStrategy for DuplicateAccountStrategy {
                     ctx.payer.pubkey(),
                 ) {
                     findings.push(Finding {
-                        id: finding_id("CC-14 duplicate-account", &ctx.instructions[0]),
+                        id: finding_id(
+                            "CC-14 duplicate-account",
+                            &ctx.instructions[0],
+                            &account_role(ctx, right),
+                        ),
                         message: format!(
                             "[CC-14 duplicate-account] same-class accounts {} and {} accepted when {} was aliased to {}, instr {}:{} succeeded with divergent outcome",
                             left,
@@ -2022,7 +2107,11 @@ impl MutationStrategy for SysvarSubstitutionStrategy {
             let decoy = decoy_for(target);
             if sysvar_substitution_probe(ctx, target, decoy) {
                 findings.push(Finding {
-                    id: finding_id("CC-2 sysvar", &ctx.instructions[0]),
+                    id: finding_id(
+                        "CC-2 sysvar",
+                        &ctx.instructions[0],
+                        &account_role(ctx, &target),
+                    ),
                     message: format!(
                         "[CC-2 sysvar] account {} substituted with decoy {} instr {}:{} still succeeded (missing sysvar identity check)",
                         target,
@@ -2595,14 +2684,63 @@ mod tests {
     }
 
     #[test]
+    fn disc_prefix_hex_collapses_argument_tail_to_discriminator() {
+        // A native (1-byte discriminator) instruction sent with different argument tails
+        // (e.g. swap amount_in) must share one discriminator hex, so findings dedup instead of
+        // forking on every argument value — the 919-dupes-for-13-findings bug.
+        let swap_a = vec![0x09, 0x76, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let swap_b = vec![0x09, 0x10, 0x99, 0xab, 0xcd, 0x00, 0x00, 0x00];
+        assert_eq!(disc_prefix_hex(&swap_a, 1), "09");
+        assert_eq!(disc_prefix_hex(&swap_a, 1), disc_prefix_hex(&swap_b, 1));
+        // A genuinely different instruction (discriminator byte 0x0b) stays distinct.
+        let other = vec![0x0b, 0x76, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_ne!(disc_prefix_hex(&swap_a, 1), disc_prefix_hex(&other, 1));
+        // Anchor fallback (8-byte) keeps the full discriminator and is unaffected.
+        assert_eq!(disc_prefix_hex(&swap_a, 8), "0976150000000000");
+        // Length is clamped to the available data.
+        assert_eq!(disc_prefix_hex(&[0x01, 0x02], 8), "0102");
+    }
+
+    #[test]
+    fn finding_id_keys_on_discriminator_role_not_arguments() {
+        let prog = Pubkey::new_unique();
+        // Same instruction (data[0]=9), different argument tails, with a 1-byte discriminator
+        // truncation applied by hand (disc_prefix_hex) so this is registry-independent.
+        let role = "a3";
+        let id_a = format!(
+            "CC-1 owner:{prog}:{}:{role}",
+            disc_prefix_hex(&[9, 1, 2], 1)
+        );
+        let id_b = format!(
+            "CC-1 owner:{prog}:{}:{role}",
+            disc_prefix_hex(&[9, 9, 9], 1)
+        );
+        assert_eq!(id_a, id_b, "argument tail must not fork the finding id");
+        // Different mutated account role on the same instruction stays a distinct finding.
+        let id_other_role = format!("CC-1 owner:{prog}:{}:a4", disc_prefix_hex(&[9, 1, 2], 1));
+        assert_ne!(id_a, id_other_role);
+        // finding_instruction_id strips class + role down to the coarse instruction identity.
+        assert_eq!(
+            finding_instruction_id(&id_a),
+            format!("account-mutation:{prog}:09")
+        );
+        // And it still tolerates the legacy 3-part (no-role) form.
+        let legacy = format!("CC-1 owner:{prog}:09");
+        assert_eq!(
+            finding_instruction_id(&legacy),
+            format!("account-mutation:{prog}:09")
+        );
+    }
+
+    #[test]
     fn select_finding_prefers_value_ref_unless_replay_targets_exact_id() {
         let ix = Instruction {
             program_id: Pubkey::new_unique(),
             accounts: vec![],
             data: vec![1, 2, 3, 4, 5, 6, 7, 8],
         };
-        let field_id = finding_id("CC-7 field-ref", &ix);
-        let value_id = finding_id("CC-7 value-ref", &ix);
+        let field_id = finding_id("CC-7 field-ref", &ix, "a0");
+        let value_id = finding_id("CC-7 value-ref", &ix, "a0");
         let findings = vec![
             Finding {
                 id: field_id.clone(),

@@ -1,0 +1,35 @@
+{
+  "version": "0.1.0",
+  "name": "shank_discriminant",
+  "instructions": [
+    {
+      "name": "SyncSolValue",
+      "discriminant": { "type": "u8", "value": 0 },
+      "discriminator": [0],
+      "args": [
+        { "name": "lst_index", "type": "u32" }
+      ],
+      "accounts": [
+        { "name": "lst_mint", "isMut": false, "isSigner": false }
+      ]
+    },
+    {
+      "name": "SwapExactIn",
+      "discriminant": { "type": "u8", "value": 1 },
+      "discriminator": [1],
+      "args": [
+        { "name": "amount", "type": "u64" },
+        { "name": "min_amount_out", "type": "u64" }
+      ],
+      "accounts": [
+        { "name": "signer", "isMut": false, "isSigner": true },
+        { "name": "src_lst_acc", "isMut": true, "isSigner": false }
+      ]
+    }
+  ],
+  "types": [],
+  "errors": [],
+  "metadata": {
+    "address": "11111111111111111111111111111111"
+  }
+}

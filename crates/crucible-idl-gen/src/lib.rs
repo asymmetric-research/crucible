@@ -79,6 +79,15 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
 
     let mut idl = parse_idl(&idl_str)?;
 
+    // Honor explicit instruction discriminators in the raw IDL. The legacy Anchor converter
+    // (convert_idl) recomputes every discriminator as the 8-byte sha256("global:<name>") and drops
+    // the IDL's own `"discriminator":[..]` array / shank `"discriminant":{value:N}`. Native /
+    // shank / solores programs (e.g. Sanctum) encode instructions as a 1-byte (or 4-byte) enum tag,
+    // so without this override the generated InstructionData prepends the wrong 8 bytes and every
+    // instruction is rejected with InvalidInstructionData. Additive: Anchor IDLs carry no such field
+    // and are untouched.
+    override_explicit_discriminators(&mut idl, &idl_str);
+
     // Detect and fix bincode-style discriminators.
     // Native Solana programs use 4-byte u32 LE instruction indices. IDLs may
     // represent these as 8-byte arrays with trailing zeros (e.g. [1,0,0,0,0,0,0,0]).
@@ -124,10 +133,13 @@ fn generate_program(input: &DeclareFuzzProgram) -> anyhow::Result<proc_macro2::T
             #schemas
         }
 
-        /// Auto-register account schemas at binary startup for field-level diffs.
+        /// Auto-register account schemas (field-level diffs) and instruction discriminators
+        /// (so the account-mutation engine keys findings on the real discriminator length, not a
+        /// fixed 8-byte prefix) at binary startup.
         #[::ctor::ctor]
         fn __crucible_register_schemas() {
             #module_name::register_schemas();
+            #module_name::register_discriminators();
         }
     })
 }
@@ -175,6 +187,80 @@ fn truncate_bincode_discriminators(idl: &mut Idl) {
             ix.discriminator.truncate(4);
         }
     }
+}
+
+/// Override each instruction's discriminator with the explicit bytes declared in the raw IDL JSON,
+/// when present. Anchor's `convert_idl` recomputes discriminators as sha256 and ignores both the
+/// `"discriminator":[..]` byte array and the shank `"discriminant":{type,value}` enum tag, which is
+/// wrong for native/shank/solores programs whose on-chain encoding is a short (1- or 4-byte) tag.
+///
+/// Matching is by snake-cased instruction name, so it is robust to the converter normalizing case.
+/// No-op for Codama IDLs (their converter already preserves discriminators) and for Anchor IDLs
+/// (no explicit discriminator/discriminant field).
+fn override_explicit_discriminators(idl: &mut Idl, idl_str: &str) {
+    use heck::ToSnakeCase;
+    use std::collections::HashMap;
+
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(idl_str) else {
+        return;
+    };
+    // Codama IDLs are handled by their own converter; their JSON shape differs.
+    if json.get("kind").and_then(|k| k.as_str()) == Some("rootNode") {
+        return;
+    }
+    let Some(instructions) = json.get("instructions").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    let mut by_name: HashMap<String, Vec<u8>> = HashMap::new();
+    for ix in instructions {
+        let Some(name) = ix.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if let Some(bytes) = explicit_discriminator_bytes(ix) {
+            by_name.insert(name.to_snake_case(), bytes);
+        }
+    }
+    if by_name.is_empty() {
+        return;
+    }
+
+    for ix in &mut idl.instructions {
+        if let Some(bytes) = by_name.get(&ix.name.to_snake_case()) {
+            ix.discriminator = bytes.clone();
+        }
+    }
+}
+
+/// Extract an explicit instruction discriminator from a raw IDL instruction object: either a
+/// `"discriminator":[..]` byte array, or a shank `"discriminant":{"type":"u8"|"u16"|"u32"|"u64",
+/// "value":N}` enum tag (little-endian, sized to the type; defaults to u8). Returns `None` when
+/// neither is present (an ordinary Anchor instruction).
+fn explicit_discriminator_bytes(ix: &serde_json::Value) -> Option<Vec<u8>> {
+    // An explicit byte array wins — it is the most direct statement of the on-chain bytes.
+    if let Some(arr) = ix.get("discriminator").and_then(|v| v.as_array()) {
+        let bytes: Option<Vec<u8>> = arr
+            .iter()
+            .map(|b| b.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect();
+        if let Some(bytes) = bytes {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+
+    // Shank/solores enum-tag form.
+    let disc = ix.get("discriminant")?;
+    let value = disc.get("value").and_then(|v| v.as_u64())?;
+    let width = match disc.get("type").and_then(|t| t.as_str()) {
+        Some("u8") | None => 1,
+        Some("u16") => 2,
+        Some("u32") => 4,
+        Some("u64") => 8,
+        _ => return None,
+    };
+    Some(value.to_le_bytes()[..width].to_vec())
 }
 
 #[cfg(test)]
@@ -857,6 +943,168 @@ mod tests {
         // Should stay at 8 bytes (not all padded)
         assert_eq!(idl.instructions[0].discriminator.len(), 8);
         assert_eq!(idl.instructions[1].discriminator.len(), 8);
+    }
+
+    // -----------------------------------------------------------------------
+    // Explicit discriminator override (shank/solores discriminant)
+    // -----------------------------------------------------------------------
+
+    fn idl_with_instruction_discs(instrs: &[(&str, Vec<u8>)]) -> Idl {
+        Idl {
+            address: "11111111111111111111111111111111".to_string(),
+            metadata: anchor_lang_idl::types::IdlMetadata {
+                name: "test".to_string(),
+                version: "0.1.0".to_string(),
+                spec: "0.1.0".to_string(),
+                description: None,
+                repository: None,
+                dependencies: vec![],
+                contact: None,
+                deployments: None,
+            },
+            docs: vec![],
+            instructions: instrs
+                .iter()
+                .map(|(name, disc)| anchor_lang_idl::types::IdlInstruction {
+                    name: name.to_string(),
+                    docs: vec![],
+                    discriminator: disc.clone(),
+                    accounts: vec![],
+                    args: vec![],
+                    returns: None,
+                })
+                .collect(),
+            accounts: vec![],
+            events: vec![],
+            errors: vec![],
+            types: vec![],
+            constants: vec![],
+        }
+    }
+
+    #[test]
+    fn explicit_discriminator_bytes_reads_array_discriminant_and_widths() {
+        use serde_json::json;
+        // Explicit byte array.
+        assert_eq!(
+            explicit_discriminator_bytes(&json!({"discriminator": [5]})),
+            Some(vec![5])
+        );
+        // Shank u8 discriminant.
+        assert_eq!(
+            explicit_discriminator_bytes(&json!({"discriminant": {"type": "u8", "value": 1}})),
+            Some(vec![1])
+        );
+        // u32 → 4-byte little-endian.
+        assert_eq!(
+            explicit_discriminator_bytes(&json!({"discriminant": {"type": "u32", "value": 2}})),
+            Some(vec![2, 0, 0, 0])
+        );
+        // u16 → 2-byte little-endian (258 = 0x0102).
+        assert_eq!(
+            explicit_discriminator_bytes(&json!({"discriminant": {"type": "u16", "value": 258}})),
+            Some(vec![2, 1])
+        );
+        // Missing type defaults to u8.
+        assert_eq!(
+            explicit_discriminator_bytes(&json!({"discriminant": {"value": 7}})),
+            Some(vec![7])
+        );
+        // Array wins over discriminant when both present.
+        assert_eq!(
+            explicit_discriminator_bytes(
+                &json!({"discriminator": [9], "discriminant": {"type": "u32", "value": 9}})
+            ),
+            Some(vec![9])
+        );
+        // Ordinary Anchor instruction: no explicit discriminator.
+        assert_eq!(explicit_discriminator_bytes(&json!({"name": "foo"})), None);
+    }
+
+    #[test]
+    fn override_replaces_sha256_with_shank_discriminant() {
+        // Simulates the Sanctum case: convert_idl produced an 8-byte sha256, the raw IDL declares a
+        // 1-byte u8 discriminant. Names differ in case (PascalCase raw vs snake_case parsed).
+        let mut idl = idl_with_instruction_discs(&[
+            ("sync_sol_value", vec![236, 136, 209, 1, 2, 3, 4, 5]),
+            ("swap_exact_in", vec![1, 1, 1, 1, 1, 1, 1, 1]),
+        ]);
+        let raw = r#"{
+            "version": "0.1.0", "name": "sanctum",
+            "instructions": [
+                {"name": "SyncSolValue", "discriminant": {"type": "u8", "value": 0}, "discriminator": [0]},
+                {"name": "SwapExactIn",  "discriminant": {"type": "u8", "value": 1}, "discriminator": [1]}
+            ]
+        }"#;
+        override_explicit_discriminators(&mut idl, raw);
+        assert_eq!(idl.instructions[0].discriminator, vec![0]);
+        assert_eq!(idl.instructions[1].discriminator, vec![1]);
+    }
+
+    #[test]
+    fn override_leaves_anchor_idls_untouched() {
+        // No discriminant/discriminator in the raw instructions → discriminators unchanged.
+        let original = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let mut idl = idl_with_instruction_discs(&[("do_thing", original.clone())]);
+        let raw = r#"{"instructions": [{"name": "doThing", "args": []}]}"#;
+        override_explicit_discriminators(&mut idl, raw);
+        assert_eq!(idl.instructions[0].discriminator, original);
+    }
+
+    #[test]
+    fn shank_idl_discriminator_is_dropped_by_converter_then_restored_by_override() {
+        // End-to-end through the real legacy Anchor converter (parse_idl → convert_idl), proving
+        // the actual bug: convert_idl recomputes an 8-byte sha256 and IGNORES the IDL's explicit
+        // 1-byte discriminant/discriminator. The override then restores the on-chain bytes.
+        let raw = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test-data")
+                .join("shank_discriminant.json"),
+        )
+        .unwrap();
+
+        let mut idl = parse_idl(&raw).expect("legacy IDL should parse");
+        // Before the override: the converter has replaced the disc with an 8-byte sha256.
+        assert_eq!(
+            idl.instructions[0].discriminator.len(),
+            8,
+            "convert_idl is expected to emit an 8-byte sha256, dropping the explicit discriminant"
+        );
+        assert_ne!(idl.instructions[0].discriminator, vec![0]);
+
+        override_explicit_discriminators(&mut idl, &raw);
+
+        // After: the explicit 1-byte enum tags are restored, by name regardless of case.
+        let by_name: std::collections::HashMap<_, _> = idl
+            .instructions
+            .iter()
+            .map(|ix| {
+                (
+                    heck::ToSnakeCase::to_snake_case(ix.name.as_str()),
+                    ix.discriminator.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(by_name.get("sync_sol_value"), Some(&vec![0u8]));
+        assert_eq!(by_name.get("swap_exact_in"), Some(&vec![1u8]));
+
+        // And the downstream registry codegen now emits the correct 1-byte discriminator,
+        // so instruction_discriminator_len() resolves to 1 at runtime.
+        let disc_tokens = codegen::discriminators::generate(&idl).to_string();
+        assert!(
+            disc_tokens.contains("register_instruction_discriminators"),
+            "should still generate the registry call"
+        );
+    }
+
+    #[test]
+    fn override_is_noop_for_codama_idls() {
+        let original = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let mut idl = idl_with_instruction_discs(&[("sync_sol_value", original.clone())]);
+        let raw = r#"{"kind": "rootNode",
+            "instructions": [{"name": "SyncSolValue", "discriminant": {"type": "u8", "value": 0}}]}"#;
+        override_explicit_discriminators(&mut idl, raw);
+        assert_eq!(idl.instructions[0].discriminator, original);
     }
 
     // -----------------------------------------------------------------------

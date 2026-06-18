@@ -5,16 +5,35 @@ use solana_account::Account;
 use solana_pubkey::Pubkey;
 use spl_token::solana_program::program_option::COption;
 
+/// When the caller did not fix the balance with `.lamports(...)`, default the account to the SVM's
+/// rent-exempt minimum for its **final** data length. Real Solana cannot hold a non-rent-exempt
+/// account, and litesvm rejects any transaction that leaves a touched writable account below rent
+/// at commit (`InsufficientFundsForRent`) — so a fabricated setup account must be rent-exempt by
+/// default, sized to whatever data it actually ended up with (e.g. after `.size()`/`.data()` or an
+/// SPL pack). Computed from the live rent sysvar so it tracks the SVM's actual requirement.
+fn apply_rent_exempt_default(ctx: &TestContext, account: &mut Account, lamports_explicit: bool) {
+    if !lamports_explicit {
+        account.lamports = ctx
+            .svm
+            .minimum_balance_for_rent_exemption(account.data.len());
+    }
+}
+
 pub struct GenericAccountBuilder<'a> {
     pub(crate) ctx: &'a mut TestContext,
     pub(crate) address: Pubkey,
     pub(crate) account_state: Account,
     pub(crate) owner_unverified: bool,
+    pub(crate) lamports_explicit: bool,
 }
 
 pub trait AccountBuilderBase: Sized {
     fn account_state_mut(&mut self) -> &mut Account;
     fn address_mut(&mut self) -> &mut Pubkey;
+
+    /// Set by `.lamports(...)` so `create()` knows the caller fixed the balance and must not
+    /// override it with the rent-exempt default.
+    fn lamports_explicit_mut(&mut self) -> &mut bool;
 
     fn pubkey(mut self, pk: Pubkey) -> Self {
         *self.address_mut() = pk;
@@ -38,6 +57,7 @@ pub trait AccountBuilderBase: Sized {
 
     fn lamports(mut self, amount: u64) -> Self {
         self.account_state_mut().lamports = amount;
+        *self.lamports_explicit_mut() = true;
         self
     }
 
@@ -59,6 +79,9 @@ impl AccountBuilderBase for GenericAccountBuilder<'_> {
     fn address_mut(&mut self) -> &mut Pubkey {
         &mut self.address
     }
+    fn lamports_explicit_mut(&mut self) -> &mut bool {
+        &mut self.lamports_explicit
+    }
 }
 
 impl GenericAccountBuilder<'_> {
@@ -72,11 +95,13 @@ impl GenericAccountBuilder<'_> {
         if self.address == Pubkey::default() {
             return Err(anyhow::anyhow!("Address must be set with .pubkey()"));
         }
+        let mut account_state = self.account_state;
+        apply_rent_exempt_default(self.ctx, &mut account_state, self.lamports_explicit);
         self.ctx.track_account(self.address);
         if self.owner_unverified {
             self.ctx.mark_owner_unverified(self.address);
         }
-        let _ = self.ctx.svm.set_account(self.address, self.account_state);
+        let _ = self.ctx.svm.set_account(self.address, account_state);
         Ok(self.address)
     }
 }
@@ -87,6 +112,7 @@ pub struct MintAccountBuilder<'a> {
     pub(crate) account_state: Account,
     pub(crate) mint: spl_token::state::Mint,
     pub(crate) owner_unverified: bool,
+    pub(crate) lamports_explicit: bool,
 }
 
 impl AccountBuilderBase for MintAccountBuilder<'_> {
@@ -95,6 +121,9 @@ impl AccountBuilderBase for MintAccountBuilder<'_> {
     }
     fn address_mut(&mut self) -> &mut Pubkey {
         &mut self.address
+    }
+    fn lamports_explicit_mut(&mut self) -> &mut bool {
+        &mut self.lamports_explicit
     }
 }
 
@@ -111,6 +140,7 @@ impl MintAccountBuilder<'_> {
 
         let mut account = self.account_state;
         spl_token::state::Mint::pack(self.mint, &mut account.data)?;
+        apply_rent_exempt_default(self.ctx, &mut account, self.lamports_explicit);
         self.ctx.track_account(self.address);
         if self.owner_unverified {
             self.ctx.mark_owner_unverified(self.address);
@@ -154,6 +184,7 @@ pub struct TokenAccountBuilder<'a> {
     pub(crate) account_state: Account,
     pub(crate) token_state: spl_token::state::Account,
     pub(crate) owner_unverified: bool,
+    pub(crate) lamports_explicit: bool,
 }
 
 impl AccountBuilderBase for TokenAccountBuilder<'_> {
@@ -162,6 +193,9 @@ impl AccountBuilderBase for TokenAccountBuilder<'_> {
     }
     fn address_mut(&mut self) -> &mut Pubkey {
         &mut self.address
+    }
+    fn lamports_explicit_mut(&mut self) -> &mut bool {
+        &mut self.lamports_explicit
     }
 }
 
@@ -186,6 +220,7 @@ impl TokenAccountBuilder<'_> {
 
         let mut account = self.account_state;
         spl_token::state::Account::pack(self.token_state, &mut account.data)?;
+        apply_rent_exempt_default(self.ctx, &mut account, self.lamports_explicit);
         self.ctx.track_account(self.address);
         if self.owner_unverified {
             self.ctx.mark_owner_unverified(self.address);

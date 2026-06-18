@@ -2,9 +2,15 @@
 
 `--mutate-accounts` turns on deterministic probes for common missing account
 checks. During fuzzing, probes run when an action/instruction shape first
-completes. Each worker then dedupes that shape, keyed by program id plus the
-first 8 instruction-data bytes, so later states for the same shape may not be
-probed in the same run.
+completes. Each worker dedupes findings by a stable identity
+`{class}:{program}:{discriminator}:{role}`, where `discriminator` is the
+IDL-registered instruction discriminator (1 byte for some native programs, 4 for
+bincode, 8 for Anchor — **not** a fixed 8-byte prefix, which would fold variable
+instruction arguments such as swap amounts into the identity) and `role` is the
+mutated account's slot index in the instruction's ordered account list (the
+cross-authority probe also appends `@{offset}`). So the same finding reported on
+many argument values collapses to one crash, while genuinely distinct findings on
+the same instruction stay separate.
 
 Findings are reported with labels that identify the suspected missing check.
 Replay and tmin re-enable the probes named by crash metadata and keep probing
@@ -14,6 +20,17 @@ Crash directories are append-only. If probe gates change between builds, older
 mutation crash files can remain in the corpus even when the current engine no
 longer reproduces them. Use a fresh crash directory or prune non-reproducing
 artifacts before auditing current probe behavior.
+
+> **Migration note (finding-id format change, 2026-06-17).** Mutation crashes
+> produced *before* this change carry an old-format `mutation_finding_id`
+> (`{class}:{program}:{8-byte-disc}`, no role). The current engine computes the
+> new `{class}:{program}:{registered-disc}:{role}` form, so an old crash's id no
+> longer matches on `show --replay` / `run --replay` / `tmin` (it reports
+> `reproduces: false`) — this is most visible for native programs, where the
+> discriminator width itself changed (8 bytes → 1/4). **Regenerate mutation
+> crashes after upgrading** by running a fresh `--mutate-accounts` campaign into a
+> clean `--crashes-out` directory; the new crashes are self-consistent and dedupe
+> correctly. Pre-fix crash corpora are not migrated in place.
 
 ## Current Default Probes
 
