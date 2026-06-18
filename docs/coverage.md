@@ -197,12 +197,23 @@ end_of_record
 
 ### Source-level vs bytecode-level
 
-| | Source-level (with `--symbols`) | Bytecode-level (without `--symbols`) |
+| | Source-level (with `--symbols` + DWARF) | Bytecode-level (no DWARF) |
 |---|---|---|
 | `SF:` paths | Real source files (`programs/stake/src/processor.rs`) | Synthetic (`program_2a54379117d8a106.bpf`) |
 | `DA:` line numbers | Actual source line numbers (1-based) | SBF program counter addresses |
-| `FN:` names | Demangled Rust function names | `fn_0`, `fn_25`, etc. |
+| `FN:` names | Demangled Rust function names | Demangled Rust names **if `--symbols` is set** (from the ELF symbol table); otherwise `fn_0`, `fn_25`, etc. |
 | Useful for | Gap analysis, genhtml, CI reporting | Tracking coverage growth over time |
+
+> **Symbol-table fallback (function names without DWARF).** If the `--symbols`
+> binary has a symbol table but no DWARF line info (e.g. a plain
+> `cargo build-sbf` build, or one where the SBF linker dropped `.debug_*`
+> sections), Crucible still cannot produce *source-level* LCOV — but it reads the
+> symbol table to give the bytecode-level `program_<hash>.bpf` report **real
+> demangled function names** instead of `fn_<pc>` stubs. When this happens you'll
+> see a `[LCOV] No DWARF source mapping … with N symbol-table function names`
+> warning. To get real source files and line numbers, rebuild with DWARF
+> (`opt-level = 1, debug = 2, strip = false` and platform-tools ≥ v1.51) as
+> described above.
 
 ### Generating source-level LCOV for programmatic analysis
 

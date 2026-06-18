@@ -237,6 +237,16 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         pub fn init_dwarf_source_maps(maps: HashMap<u64, crucible_test_context::DwarfSourceMap>) {
             let _ = DWARF_SOURCE_MAP.set(maps);
         }
+
+        // Static storage for ELF symbol-table function names (PC -> demangled name),
+        // used to give bytecode-level LCOV real function names when DWARF is absent.
+        pub static SYMBOL_NAME_MAP: std::sync::OnceLock<
+            HashMap<u64, HashMap<usize, String>>
+        > = std::sync::OnceLock::new();
+
+        pub fn init_symbol_name_maps(maps: HashMap<u64, HashMap<usize, String>>) {
+            let _ = SYMBOL_NAME_MAP.set(maps);
+        }
     }
 }
 
@@ -754,6 +764,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             let edge_totals = PROGRAM_TOTALS.get();
             let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
             let dwarf_maps = DWARF_SOURCE_MAP.get();
+            let symbol_maps = SYMBOL_NAME_MAP.get();
 
             let mut programs_written = 0usize;
 
@@ -804,6 +815,26 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 let total_branches = total_edges / 2;
                 let total_instructions = instr_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
 
+                let symbol_names = symbol_maps.and_then(|m| m.get(&prog_hash));
+
+                // Make the degraded output explicit: the LCOV for this program will
+                // use PC pseudo-lines in `program_<hash>.bpf`, not real source files.
+                match symbol_names {
+                    Some(names) => eprintln!(
+                        "[LCOV] No DWARF source mapping for {} — emitting bytecode-level LCOV \
+                        (PC pseudo-lines in {}.bpf) with {} symbol-table function names. \
+                        Rebuild with DWARF line info for source-level coverage.",
+                        program_name, program_name, names.len()
+                    ),
+                    None => eprintln!(
+                        "[LCOV] No DWARF source mapping and no symbol table for {} — emitting \
+                        bytecode-level LCOV ({}.bpf) with fn_<pc> placeholder names. Pass \
+                        --symbols <unstripped.so> and rebuild with DWARF line info for \
+                        source-level coverage.",
+                        program_name, program_name
+                    ),
+                }
+
                 if let Err(e) = crucible_test_context::generate_bytecode_lcov(
                     &mut writer,
                     &program_name,
@@ -812,6 +843,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                     &functions,
                     total_instructions,
                     total_branches,
+                    symbol_names,
                 ) {
                     eprintln!("[LCOV] Error writing coverage for {}: {}", program_name, e);
                 } else {

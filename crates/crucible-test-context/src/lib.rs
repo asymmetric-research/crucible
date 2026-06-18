@@ -59,7 +59,7 @@ pub use coverage::{
     build_cached_analysis, extract_functions, generate_bytecode_lcov, generate_coverage_html,
     generate_coverage_html_cached, generate_source_lcov,
 };
-pub use coverage::{build_dwarf_source_map, DwarfSourceMap, SourceLocation};
+pub use coverage::{build_dwarf_source_map, build_symbol_name_map, DwarfSourceMap, SourceLocation};
 pub use coverage::{
     CachedFunctionInfo, CachedProgramAnalysis, CoverageStats, CoverageWriteStats, FunctionInfo,
     ReachableAnalysis,

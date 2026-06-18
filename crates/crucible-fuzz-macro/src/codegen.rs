@@ -50,10 +50,27 @@ pub fn init_dwarf_maps(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                     dwarf_maps.insert(program_hash, source_map.clone());
                 }
             } else {
-                eprintln!("[COVERAGE] Warning: {} has no DWARF debug info. \
-                    Build with [profile.release] debug = true", symbols_path);
+                eprintln!("[COVERAGE] Warning: {} has no DWARF debug info (no source-level \
+                    coverage). Rebuild the program with DWARF line info — e.g. \
+                    [profile.release] debug = true, strip = false — for per-file/per-line LCOV. \
+                    Falling back to bytecode-level LCOV.", symbols_path);
             }
             #mod_name::init_dwarf_source_maps(dwarf_maps);
+
+            // Always build the symbol-table name map from symbols.so (independent of
+            // DWARF). When DWARF is absent this is what gives the bytecode-level LCOV
+            // real demangled function names instead of fn_<pc> stubs.
+            let mut symbol_maps = std::collections::HashMap::new();
+            if let Some(name_map) = crucible_test_context::build_symbol_name_map(&debug_binary) {
+                eprintln!("[COVERAGE] Symbol-table function names loaded: {} functions", name_map.len());
+                for (pubkey, _) in template_fixture.ctx.get_program_coverage_totals() {
+                    let program_hash = u64::from_le_bytes(
+                        pubkey.to_bytes()[0..8].try_into().unwrap()
+                    );
+                    symbol_maps.insert(program_hash, name_map.clone());
+                }
+            }
+            #mod_name::init_symbol_name_maps(symbol_maps);
         }
     }
 }
