@@ -899,6 +899,136 @@ pub mod owner_mutation_airdrop {
             first + second,
         )
     }
+
+    // ---- T4 state-conditional: owner check gated by another account's flag ----
+    // Demonstrates the probe-once-single-state blindspot (account_constraints.md J.1#1). The CC-1
+    // owner check on `config` is present only when `gate.fast_path == 0`. In the first-reached state
+    // (fast_path = 0) the check holds and a mutated owner is rejected, so the old engine — which
+    // probed each instruction type in exactly one state — burned its single probe here and reported
+    // nothing. The `set_gate_fast_path` toggle drives the gate to fast_path = 1, a state where the
+    // check is dropped and a mutated owner survives; the state-keyed probe re-probes that state and
+    // reports the CC-1 finding the old probe-once gate missed.
+    pub fn read_gated_config(ctx: Context<ReadGatedConfig>) -> Result<()> {
+        let fast_path = read_gate_flag(&ctx.accounts.gate)?;
+        let cfg = ctx.accounts.config.try_borrow_data()?;
+        require!(cfg.len() >= 16, AirdropError::InvalidConfig);
+        require!(
+            &cfg[0..8] == GatedConfigState::DISCRIMINATOR,
+            AirdropError::InvalidConfig
+        );
+        if !fast_path {
+            // Slow path keeps the CC-1 owner check; fast path drops it (the bug).
+            require!(
+                ctx.accounts.config.owner == &crate::ID,
+                AirdropError::WrongOwner
+            );
+        }
+        let amount = u64::from_le_bytes(cfg[8..16].try_into().unwrap());
+        require!(amount > 0, AirdropError::InvalidAmount);
+        drop(cfg);
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    /// Toggle action: flips the gate's `fast_path` flag so the fuzzer can drive `read_gated_config`
+    /// through both states. The gate is always program-owned and discriminator-checked here.
+    pub fn set_gate_fast_path(ctx: Context<SetGate>, fast_path: u8) -> Result<()> {
+        require!(
+            ctx.accounts.gate.owner == &crate::ID,
+            AirdropError::WrongOwner
+        );
+        let mut data = ctx.accounts.gate.try_borrow_mut_data()?;
+        require!(data.len() >= 9, AirdropError::InvalidConfig);
+        require!(
+            &data[0..8] == GateState::DISCRIMINATOR,
+            AirdropError::InvalidConfig
+        );
+        data[8] = fast_path;
+        Ok(())
+    }
+
+    // ---- CC-13: forward an account into a downstream CPI without validating it ----
+
+    /// Forwards `dest` into a system-program transfer CPI WITHOUT validating it (the bug): a wrong
+    /// `dest` is passed straight through to the CPI.
+    pub fn forward_to_cpi_no_check(ctx: Context<ForwardToCpi>) -> Result<()> {
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &ctx.accounts.payer.key(),
+            &ctx.accounts.dest.key(),
+            1,
+        );
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.dest.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Same forward, but validates the forwarded account's owner before the CPI (the fix).
+    pub fn forward_to_cpi_with_check(ctx: Context<ForwardToCpi>) -> Result<()> {
+        require!(
+            ctx.accounts.dest.owner == &anchor_lang::solana_program::system_program::ID,
+            AirdropError::WrongOwner
+        );
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &ctx.accounts.payer.key(),
+            &ctx.accounts.dest.key(),
+            1,
+        );
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.dest.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    // ---- FP-1 reachability: loader-owned (program) account, owner not attacker-settable ----
+
+    /// Reads a loader-owned account's data without an owner check. Shaped like the CC-1 bug, but
+    /// the account is a *program* (owner is a BPF loader). The owner-mutation engine's
+    /// reachability gate must skip it: a program's owner cannot be changed on mainnet, so an
+    /// owner mutation that "still succeeds" is a false positive. (Covers a cloned program account
+    /// that arrives with its `executable` flag unset, which the plain `executable` filter misses.)
+    pub fn read_loader_owned_program_account_no_check(
+        ctx: Context<ReadLoaderOwned>,
+    ) -> Result<()> {
+        let amount = read_u64(&ctx.accounts.program_account)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            amount,
+        )
+    }
+
+    // ---- FP-5 field-semantics: SPL non-authority window must not look like a shared authority --
+
+    /// Reads two SPL token accounts (making both load-bearing) but enforces no cross-authority
+    /// relationship between them. With both delegates empty, the only 32-byte window the two
+    /// share lands inside the delegate COption payload + state byte (offset 77) — a non-authority
+    /// region. The CC-9.5 cross-authority engine must NOT mistake that shared window for a shared
+    /// signing authority and report a finding.
+    pub fn transfer_two_token_accounts_offset77_no_authority(
+        ctx: Context<TransferTwoTokenAccounts>,
+    ) -> Result<()> {
+        let (_mint_a, _amount_a) = read_token_account_data(&ctx.accounts.token_a)?;
+        let (_mint_b, _amount_b) = read_token_account_data(&ctx.accounts.token_b)?;
+        payout(
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.recipient.to_account_info(),
+            1,
+        )
+    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -1123,6 +1253,17 @@ fn read_scoped_trader_state(account: &UncheckedAccount) -> Result<(Pubkey, Pubke
     let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
     require!(amount > 0, AirdropError::InvalidAmount);
     Ok((authority, delegate, amount))
+}
+
+fn read_gate_flag(account: &UncheckedAccount) -> Result<bool> {
+    require!(account.owner == &crate::ID, AirdropError::WrongOwner);
+    let data = account.try_borrow_data()?;
+    require!(data.len() >= 9, AirdropError::InvalidConfig);
+    require!(
+        &data[0..8] == GateState::DISCRIMINATOR,
+        AirdropError::InvalidConfig
+    );
+    Ok(data[8] != 0)
 }
 
 fn read_collateral_value(account: &UncheckedAccount) -> Result<u64> {
@@ -1410,6 +1551,48 @@ pub struct CollateralState {
     pub amount: u64,
 }
 
+#[account]
+pub struct GateState {
+    pub fast_path: u8,
+}
+
+#[account]
+pub struct GatedConfigState {
+    pub amount: u64,
+}
+
+#[derive(Accounts)]
+pub struct ReadGatedConfig<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: program-owned gate holding the fast_path flag.
+    pub gate: UncheckedAccount<'info>,
+    /// CHECK: program-owned config; owner checked only on the slow path.
+    pub config: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetGate<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: program-owned gate; the fast_path flag is mutated in place.
+    #[account(mut)]
+    pub gate: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ForwardToCpi<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: forwarded into the system-transfer CPI; validated only in the with-check variant.
+    #[account(mut)]
+    pub dest: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
 #[derive(Accounts)]
 pub struct TransferScopedTraders<'info> {
     #[account(mut)]
@@ -1557,6 +1740,30 @@ pub struct ReadClock<'info> {
     pub recipient: Signer<'info>,
     /// CHECK: clock sysvar; its key is unchecked in the no-check variant.
     pub clock: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ReadLoaderOwned<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: loader-owned (program) account, read without an owner check.
+    pub program_account: UncheckedAccount<'info>,
+    /// CHECK: program-owned vault.
+    #[account(mut)]
+    pub vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct TransferTwoTokenAccounts<'info> {
+    #[account(mut)]
+    pub recipient: Signer<'info>,
+    /// CHECK: SPL token-account-shaped; read for mint/amount.
+    pub token_a: UncheckedAccount<'info>,
+    /// CHECK: SPL token-account-shaped; read for mint/amount.
+    pub token_b: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

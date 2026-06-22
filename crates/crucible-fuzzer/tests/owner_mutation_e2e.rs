@@ -29,6 +29,10 @@ const MINT_DECIMALS: u8 = 6;
 const INITIAL_RECIPIENT_BALANCE: u64 = 1_000_000;
 const INITIAL_VAULT_BALANCE: u64 = 1_000_000_000;
 
+/// A BPF loader program id — owner of a deployed program account. Used to model a cloned
+/// program account (executable flag unset) for the FP-1 reachability gate.
+const BPF_LOADER_2: Pubkey = solana_pubkey::pubkey!("BPFLoader2111111111111111111111111111111111");
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -90,6 +94,7 @@ struct Harness {
 
 fn harness() -> Harness {
     let _ = crucible_test_context::take_violation();
+    let _ = crucible_test_context::take_demoted_findings();
     crucible_test_context::reset_probed_account_mutations();
 
     let mut ctx = TestContext::new();
@@ -155,6 +160,19 @@ fn expect_no_finding() {
         !crucible_test_context::has_violation(),
         "unexpected finding: {:?}",
         crucible_test_context::take_violation()
+    );
+}
+
+/// Assert a deterministic FP gate demoted a would-be finding with a reason containing
+/// `reason_substr` (drains the demotion set). Used to prove a suppression was *visible*, not
+/// silently dropped.
+fn expect_demotion(reason_substr: &str) {
+    let demotions = crucible_test_context::take_demoted_findings();
+    assert!(
+        demotions
+            .iter()
+            .any(|(_, reason)| reason.contains(reason_substr)),
+        "expected a demotion whose reason contains {reason_substr:?}, got: {demotions:?}"
     );
 }
 
@@ -557,6 +575,86 @@ fn flags_missing_owner_check_on_writable_config() {
         .send()
         .unwrap();
 
+    expect_owner_finding(config);
+}
+
+// ---- T4: state-conditional owner check is re-probed across states (J.1#1) ----
+
+const GATE_STATE_DISCRIMINATOR: [u8; 8] = [70, 225, 126, 160, 254, 17, 57, 176];
+const GATED_CONFIG_STATE_DISCRIMINATOR: [u8; 8] = [31, 236, 184, 163, 59, 200, 22, 213];
+
+fn gate_data(fast_path: u8) -> Vec<u8> {
+    let mut data = GATE_STATE_DISCRIMINATOR.to_vec();
+    data.push(fast_path);
+    data
+}
+
+fn gated_config_data(amount: u64) -> Vec<u8> {
+    let mut data = GATED_CONFIG_STATE_DISCRIMINATOR.to_vec();
+    data.extend_from_slice(&amount.to_le_bytes());
+    data
+}
+
+fn read_gated_config(h: &mut Harness, gate: Pubkey, config: Pubkey) {
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadGatedConfig {})
+        .accounts(owner_mutation_airdrop::accounts::ReadGatedConfig {
+            recipient: h.recipient.pubkey(),
+            gate,
+            config,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+}
+
+fn set_gate_fast_path(h: &mut Harness, gate: Pubkey, fast_path: u8) {
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::SetGateFastPath { fast_path })
+        .accounts(owner_mutation_airdrop::accounts::SetGate {
+            recipient: h.recipient.pubkey(),
+            gate,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+}
+
+/// The missing CC-1 owner check on `read_gated_config` is reachable only in the gate's fast-path
+/// state. The old probe-once engine probed each instruction type in a single state, so it burned
+/// its only probe in the slow-path state (check present, nothing flagged) and never re-probed the
+/// fast-path state where the bug lives. The state-keyed probe (J.1#1 fix) re-probes once the gate's
+/// data — and therefore the instruction's pre-state signature — changes, and flags the surviving
+/// owner mutation. With the old behavior the final `expect_owner_finding` would fail.
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn reprobes_state_conditional_owner_check_after_gate_toggle() {
+    let mut h = harness();
+    let gate = Keypair::new().pubkey();
+    let config = Keypair::new().pubkey();
+    create_data_account(&mut h.ctx, gate, h.program_id, &gate_data(0));
+    create_data_account(
+        &mut h.ctx,
+        config,
+        h.program_id,
+        &gated_config_data(CLAIM_AMOUNT),
+    );
+
+    // Slow-path state (fast_path = 0): owner check present -> mutation rejected -> no finding. The
+    // old engine burned its only probe for this instruction type right here.
+    read_gated_config(&mut h, gate, config);
+    expect_no_finding();
+
+    // Toggle the gate to the fast path. A different instruction type; it does not flag.
+    set_gate_fast_path(&mut h, gate, 1);
+    expect_no_finding();
+
+    // Fast-path state (fast_path = 1): owner check gone. The gate's changed data gives the read a
+    // new pre-state signature, so the state-keyed probe re-probes and flags the surviving CC-1.
+    read_gated_config(&mut h, gate, config);
     expect_owner_finding(config);
 }
 
@@ -1994,9 +2092,14 @@ fn no_finding_when_authority_relation_checked() {
     expect_no_finding();
 }
 
+/// Before the J.1#1 fix, the probe-once cache spent this instruction's only probe on the first
+/// (placeholder / no-op) state and then hid the real bug in the later present-account state. The
+/// state-keyed probe gives the materially different present-account state — different owner, data
+/// length and data window — its own probe, so the missing CC-1 owner check is now found rather than
+/// hidden. (This test previously asserted the bug stayed hidden; the assertion flipped with the fix.)
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_when_first_success_cache_hides_later_present_account_bug() {
+fn state_keyed_probe_finds_later_present_account_bug() {
     let mut h = harness();
     let placeholder = Keypair::new().pubkey();
     create_data_account(&mut h.ctx, placeholder, system_program::id(), &[]);
@@ -2034,7 +2137,7 @@ fn no_finding_when_first_success_cache_hides_later_present_account_bug() {
         .send()
         .unwrap();
 
-    expect_no_finding();
+    expect_owner_finding(present);
 }
 
 // ---- CC-2 sysvar substitution ----
@@ -2087,6 +2190,57 @@ fn no_finding_when_sysvar_identity_checked() {
             recipient: h.recipient.pubkey(),
             clock,
             vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
+// ---- CC-13: account forwarded into a downstream CPI without validation ----
+
+/// `forward_to_cpi_no_check` passes `dest` straight into a system-transfer CPI without validating
+/// it. The engine forges `dest` (wrong owner); because the program never checks it, the tx still
+/// succeeds and moves lamports, so CC-13 flags the unvalidated forwarded account.
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn flags_forwarded_account_not_validated_before_cpi() {
+    let mut h = harness();
+    let dest = Keypair::new().pubkey();
+    create_data_account(&mut h.ctx, dest, system_program::id(), &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ForwardToCpiNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ForwardToCpi {
+            payer: h.recipient.pubkey(),
+            dest,
+            system_program: system_program::id(),
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_finding("[CC-13 forwarded-account]", dest);
+}
+
+/// `forward_to_cpi_with_check` validates the forwarded account's owner before the CPI, so the forged
+/// (wrong-owner) `dest` is rejected and nothing is reported.
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_when_forwarded_account_validated_before_cpi() {
+    let mut h = harness();
+    let dest = Keypair::new().pubkey();
+    create_data_account(&mut h.ctx, dest, system_program::id(), &[]);
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ForwardToCpiWithCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ForwardToCpi {
+            payer: h.recipient.pubkey(),
+            dest,
+            system_program: system_program::id(),
         })
         .signers(&[&h.fee_payer, &h.recipient])
         .send()
@@ -2377,5 +2531,91 @@ fn no_finding_for_cc14_when_collateral_identical() {
         .send()
         .unwrap();
 
+    expect_no_finding();
+}
+
+// ---- FP-1 reachability gate: loader-owned (program) account ----
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_loader_owned_program_account() {
+    register_config_schema();
+    let mut h = harness();
+    let program_account = Keypair::new().pubkey();
+    // A (cloned) program account: owner is a BPF loader, data read without an owner check, and
+    // its executable flag is unset (as cloned accounts often are). The CC-1 owner-mutation gate
+    // must skip it — a program's owner is not attacker-settable — and record a visible demotion.
+    create_data_account(
+        &mut h.ctx,
+        program_account,
+        BPF_LOADER_2,
+        &CLAIM_AMOUNT.to_le_bytes(),
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ReadLoaderOwnedProgramAccountNoCheck {})
+        .accounts(owner_mutation_airdrop::accounts::ReadLoaderOwned {
+            recipient: h.recipient.pubkey(),
+            program_account,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+    expect_demotion("loader-owned");
+}
+
+// ---- FP-5 field-semantics gate: SPL non-authority window (offset 77) ----
+
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn no_finding_for_spl_token_accounts_sharing_only_empty_delegate() {
+    register_config_schema();
+    let mut h = harness();
+    let mint_a = Keypair::new().pubkey();
+    let mint_b = Keypair::new().pubkey();
+    seed_mint(&mut h.ctx, mint_a);
+    seed_mint(&mut h.ctx, mint_b);
+    let token_a = Keypair::new().pubkey();
+    let token_b = Keypair::new().pubkey();
+    // Different mints, owners, and amounts; both delegates empty. The only 32-byte window the two
+    // share is the empty-delegate COption payload + state byte (offset 77) — NOT an authority.
+    h.ctx
+        .create_token_account()
+        .pubkey(token_a)
+        .mint(mint_a)
+        .token_owner(Pubkey::new_unique())
+        .amount(CLAIM_AMOUNT)
+        .create()
+        .unwrap();
+    h.ctx
+        .create_token_account()
+        .pubkey(token_b)
+        .mint(mint_b)
+        .token_owner(Pubkey::new_unique())
+        .amount(STATE_AMOUNT)
+        .create()
+        .unwrap();
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::TransferTwoTokenAccountsOffset77NoAuthority {})
+        .accounts(owner_mutation_airdrop::accounts::TransferTwoTokenAccounts {
+            recipient: h.recipient.pubkey(),
+            token_a,
+            token_b,
+            vault: h.vault,
+        })
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    // Integration smoke: the engine must not emit a CC-9.5 cross-authority finding from the
+    // shared empty-delegate window. The deterministic proof of the gate logic (blanket scan
+    // matches offset 77, canonical authority-only scan does not) lives in the unit test
+    // `account_mutation::tests::cross_authority_scan_demotes_shared_empty_delegate_window`.
     expect_no_finding();
 }

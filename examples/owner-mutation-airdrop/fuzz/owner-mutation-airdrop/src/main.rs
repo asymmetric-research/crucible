@@ -49,6 +49,8 @@ const AUTHORITY_STATE_DISCRIMINATOR: [u8; 8] = [217, 219, 18, 179, 143, 126, 98,
 const PAIR_LEFT_STATE_DISCRIMINATOR: [u8; 8] = [139, 52, 59, 189, 192, 91, 80, 216];
 const PAIR_RIGHT_STATE_DISCRIMINATOR: [u8; 8] = [67, 248, 77, 163, 40, 119, 172, 151];
 const SEMANTIC_STATE_DISCRIMINATOR: [u8; 8] = [35, 220, 247, 206, 91, 179, 102, 198];
+const GATE_STATE_DISCRIMINATOR: [u8; 8] = [70, 225, 126, 160, 254, 17, 57, 176];
+const GATED_CONFIG_STATE_DISCRIMINATOR: [u8; 8] = [31, 236, 184, 163, 59, 200, 22, 213];
 const EXPECTED_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x86; 32]);
 const ALT_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x87; 32]);
 
@@ -91,6 +93,9 @@ struct OwnerMutationAirdropFixture {
     shared_right: Pubkey,     // CC-7.3 shared-root right side
     semantic_state: Pubkey,   // CC-7.7 same-class account with embedded semantic context
     authority_state: Pubkey, // CC-9 state containing the expected signer pubkey
+    gate: Pubkey,            // T4 gate holding the fast_path flag (toggled to drive states)
+    gated_config: Pubkey,    // T4 config whose CC-1 owner check is skipped on the fast path
+    cpi_dest: Pubkey,        // CC-13 account forwarded into a system-transfer CPI
 }
 
 #[fuzz_fixture]
@@ -338,6 +343,27 @@ impl OwnerMutationAirdropFixture {
             &Self::authority_state_data(authority.pubkey(), CLAIM_AMOUNT),
         );
 
+        // T4: gate starts on the slow path (fast_path = 0), so the first time `read_gated_config`
+        // is probed the CC-1 owner check is present and a mutated owner is rejected — the old
+        // probe-once gate burned its single probe here. `action_set_gate_fast_path` flips the flag
+        // to reach the fast-path state where the check is dropped and the mutation survives.
+        let gate = Self::new_data(&mut ctx, program_id, &Self::gate_state_data(0));
+        let gated_config = Self::new_data(
+            &mut ctx,
+            program_id,
+            &Self::gated_config_state_data(CLAIM_AMOUNT),
+        );
+
+        // CC-13: a system-owned account forwarded into a system-transfer CPI.
+        let cpi_dest = Keypair::new().pubkey();
+        ctx.create_account()
+            .pubkey(cpi_dest)
+            .lamports(1_000_000)
+            .owner(system_program::id())
+            .owner_unverified()
+            .create()
+            .unwrap();
+
         let vault = Keypair::new().pubkey();
         ctx.create_account()
             .pubkey(vault)
@@ -384,6 +410,9 @@ impl OwnerMutationAirdropFixture {
             shared_right,
             semantic_state,
             authority_state,
+            gate,
+            gated_config,
+            cpi_dest,
         }
     }
 
@@ -475,6 +504,18 @@ impl OwnerMutationAirdropFixture {
     fn authority_state_data(authority: Pubkey, amount: u64) -> Vec<u8> {
         let mut data = AUTHORITY_STATE_DISCRIMINATOR.to_vec();
         data.extend_from_slice(authority.as_ref());
+        data.extend_from_slice(&amount.to_le_bytes());
+        data
+    }
+
+    fn gate_state_data(fast_path: u8) -> Vec<u8> {
+        let mut data = GATE_STATE_DISCRIMINATOR.to_vec();
+        data.push(fast_path);
+        data
+    }
+
+    fn gated_config_state_data(amount: u64) -> Vec<u8> {
+        let mut data = GATED_CONFIG_STATE_DISCRIMINATOR.to_vec();
         data.extend_from_slice(&amount.to_le_bytes());
         data
     }
@@ -1228,6 +1269,75 @@ impl OwnerMutationAirdropFixture {
         self.send_raw(data, accounts, &[&*fee_payer, &*authority, &*cosigner])
     }
 
+    // ---- T4 state-conditional owner check: probe-once decouple demo (J.1#1) ----
+    // `read_gated_config`'s CC-1 owner check on `config` is present only while the gate's fast_path
+    // flag is 0. The fuzzer first reaches it in the slow-path state (check present, mutated owner
+    // rejected) — the old single-state probe burned its slot there. `set_gate_fast_path` flips the
+    // gate, changing the instruction's pre-state signature so the state-keyed probe re-probes the
+    // fast-path state, where the owner check is gone and the CC-1 mutation survives.
+
+    pub fn action_read_gated_config(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ReadGatedConfig {})
+            .accounts(accounts::ReadGatedConfig {
+                recipient: self.recipient.pubkey(),
+                gate: self.gate,
+                config: self.gated_config,
+                vault: self.vault,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_set_gate_fast_path(&mut self, fast_path: u8) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::SetGateFastPath { fast_path })
+            .accounts(accounts::SetGateFastPath {
+                recipient: self.recipient.pubkey(),
+                gate: self.gate,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    // ---- CC-13: forward an account into a downstream CPI ----
+
+    pub fn action_forward_to_cpi_no_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ForwardToCpiNoCheck {})
+            .accounts(accounts::ForwardToCpiNoCheck {
+                payer: self.recipient.pubkey(),
+                dest: self.cpi_dest,
+                system_program: system_program::ID,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
+    pub fn action_forward_to_cpi_with_check(&mut self) -> bool {
+        self.ctx
+            .program(self.program_id)
+            .call(instruction::ForwardToCpiWithCheck {})
+            .accounts(accounts::ForwardToCpiWithCheck {
+                payer: self.recipient.pubkey(),
+                dest: self.cpi_dest,
+                system_program: system_program::ID,
+            })
+            .signers(&[&*self.fee_payer, &*self.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false)
+    }
+
     fn send_raw(&mut self, data: Vec<u8>, accounts: Vec<AccountMeta>, signers: &[&Keypair]) -> bool {
         self.ctx
             .raw_call(Instruction {
@@ -1301,5 +1411,64 @@ mod tests {
             .send()
             .unwrap();
         assert!(result.is_success(), "{result:?}");
+    }
+
+    /// CC-13: forwarding `dest` into a system-transfer CPI without validating it is flagged; the
+    /// with-check variant (validates `dest.owner` first) is not.
+    #[test]
+    fn forward_to_cpi_flags_unvalidated_forwarded_account() {
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        fixture.ctx.enable_account_mutation();
+        crucible_test_context::reset_probed_account_mutations();
+        let _ = crucible_test_context::take_violation();
+
+        assert!(fixture.action_forward_to_cpi_no_check());
+        let violation = crucible_test_context::take_violation()
+            .expect("expected a CC-13 forwarded-account finding");
+        assert!(
+            violation.contains("[CC-13 forwarded-account]"),
+            "unexpected violation: {violation}"
+        );
+
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        fixture.ctx.enable_account_mutation();
+        crucible_test_context::reset_probed_account_mutations();
+        let _ = crucible_test_context::take_violation();
+
+        assert!(fixture.action_forward_to_cpi_with_check());
+        assert!(
+            !crucible_test_context::has_violation(),
+            "with-check must not flag: {:?}",
+            crucible_test_context::take_violation()
+        );
+    }
+
+    /// T4: the missing owner check on `read_gated_config` is reachable only in the gate's fast-path
+    /// state. The state-keyed probe burns no slot — toggling the gate re-probes the new state and
+    /// flags the CC-1 owner bug that the old probe-once gate would have missed.
+    #[test]
+    fn read_gated_config_reprobed_after_fast_path_toggle() {
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        fixture.ctx.enable_account_mutation();
+        crucible_test_context::reset_probed_account_mutations();
+        let _ = crucible_test_context::take_violation();
+
+        // Slow path: owner check present -> nothing flagged.
+        assert!(fixture.action_read_gated_config());
+        assert!(
+            !crucible_test_context::has_violation(),
+            "slow-path read should not flag: {:?}",
+            crucible_test_context::take_violation()
+        );
+
+        // Toggle to the fast path, then re-probe: the owner check is gone -> CC-1 finding.
+        assert!(fixture.action_set_gate_fast_path(1));
+        assert!(fixture.action_read_gated_config());
+        let violation = crucible_test_context::take_violation()
+            .expect("expected a CC-1 owner finding in the fast-path state");
+        assert!(
+            violation.contains("[CC-1 owner]"),
+            "unexpected violation: {violation}"
+        );
     }
 }

@@ -460,6 +460,11 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         }
                     });
 
+                    // Account-mutation probe: feed the same edge id to the probe's edge-trace sink
+                    // (a no-op unless a probe is actively capturing). Lets the probe dedup on the
+                    // executed path instead of an account-state hash.
+                    crucible_test_context::record_probe_edge(edge_id);
+
                     // Multi-core mode: batch updates to shared bitmaps
                     // Edge bitmap is split into two halves:
                     // - First half (bits 0..256K): edge presence (counted for display)

@@ -1,8 +1,9 @@
 # Constraint-Check Engine
 
 `--mutate-accounts` turns on deterministic probes for common missing account
-checks. During fuzzing, probes run when an action/instruction shape first
-completes. Each worker dedupes findings by a stable identity
+checks. During fuzzing, an instruction is probed once per distinct executed path
+(its baseline edge trace, so state-conditional checks are still reached). Each
+worker dedupes findings by a stable identity
 `{class}:{program}:{discriminator}:{role}`, where `discriminator` is the
 IDL-registered instruction discriminator (1 byte for some native programs, 4 for
 bincode, 8 for Anchor — **not** a fixed 8-byte prefix, which would fold variable
@@ -11,6 +12,11 @@ mutated account's slot index in the instruction's ordered account list (the
 cross-authority probe also appends `@{offset}`). So the same finding reported on
 many argument values collapses to one crash, while genuinely distinct findings on
 the same instruction stay separate.
+
+> **When to run it.** `--mutate-accounts` is a thoroughness pass, not a long-run
+> mode. Use it once normal fuzzing has saturated the corpus (coverage plateaued):
+> probing runs an extra baseline transaction per success and hashes its edge trace,
+> so throughput drops while the flag is on. Plain fuzzing (no flag) is unaffected.
 
 Findings are reported with labels that identify the suspected missing check.
 Replay and tmin re-enable the probes named by crash metadata and keep probing
@@ -53,3 +59,4 @@ artifacts before auditing current probe behavior.
 | `[CC-token wrong-mint]` | SPL token mint relation | Mutates a token account so its `mint` field does not match the mint account passed to the instruction. | Requires both the token account and mint account in the instruction metas. |
 | `[CC-token forged-mint-pair]` | Forged matching token+mint pair | Substitutes a token account and mint that match each other while canonical state still references the original mint. | Narrow by design; indirect or cross-instruction mint bindings remain out of scope. |
 | `[CC-14 duplicate-account]` | Duplicate account aliasing | Replays with two same-class account metas aliased to the same pubkey and reports divergent outcomes. | Benign aliasing, self-transfers, and idempotent closes need triage; byte-identical pairs are skipped. |
+| `[CC-13 forwarded-account]` | Account forwarded into a downstream CPI without validation | Targets accounts the program passed into a CPI in the baseline (resolved from inner instructions); forges a malformed version (wrong owner, then corrupted data) and replays. Fires when the tx still succeeds and does work — the malformed account flowed through unvalidated. | A validating program/CPI rejects the forgery (no finding). Residual FP: a forwarded account whose owner/data genuinely don't matter to the callee (e.g. a by-design-arbitrary transfer recipient); may co-fire with CC-1/CC-5 under a distinct label. |

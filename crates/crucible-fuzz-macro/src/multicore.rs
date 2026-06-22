@@ -82,6 +82,13 @@ pub fn multicore_mode(
             let crash_dir = crashes_dir_env.clone().unwrap_or_else(|| format!("crashes/{}", #feature_name));
             std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
 
+            // LibAFL's solutions (objective) corpus is the fuzzer's own bookkeeping (hex-named
+            // inputs + per-entry `.metadata` + refcount markers). Keep it in a hidden subdir so the
+            // crash dir holds ONLY crucible's canonical `crash_<id>` + `.meta.json` artifacts.
+            let crash_corpus_dir = format!("{}/.crash_corpus", crash_dir);
+            std::fs::create_dir_all(&crash_corpus_dir)
+                .expect("failed to create crash corpus directory");
+
             if verbose { eprintln!("[FUZZ] Initializing program analysis..."); }
 
             // =====================================================================
@@ -526,7 +533,7 @@ pub fn multicore_mode(
                 let rand = StdRand::with_seed(seed.wrapping_add(_client_desc.core_id().0 as u64));
                 let corpus = CachedOnDiskCorpus::<BytesInput>::no_meta(&shared_corpus_dir_for_client, 1000)
                     .expect("failed to create cached on-disk corpus");
-                let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
+                let solutions = OnDiskCorpus::new(&crash_corpus_dir).expect("failed to create crash corpus");
 
                 let mut state = state.unwrap_or_else(|| {
                     StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)

@@ -1688,6 +1688,135 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "read_gated_config",
+      "docs": [
+        "T4: CC-1 owner check on config is skipped when gate.fast_path is set (state-conditional)."
+      ],
+      "discriminator": [
+        255,
+        81,
+        119,
+        235,
+        28,
+        95,
+        191,
+        115
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "gate"
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_gate_fast_path",
+      "docs": [
+        "T4 toggle: flips the gate fast_path flag to drive read_gated_config through states."
+      ],
+      "discriminator": [
+        12,
+        167,
+        124,
+        203,
+        159,
+        107,
+        43,
+        132
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "gate",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "fast_path",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "forward_to_cpi_no_check",
+      "docs": [
+        "CC-13: forwards dest into a system-transfer CPI without validating it (the bug)."
+      ],
+      "discriminator": [
+        81,
+        55,
+        29,
+        242,
+        84,
+        137,
+        196,
+        75
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "dest",
+          "writable": true
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "forward_to_cpi_with_check",
+      "docs": [
+        "CC-13: validates the forwarded account's owner before the CPI (the fix)."
+      ],
+      "discriminator": [
+        200,
+        77,
+        246,
+        52,
+        199,
+        41,
+        231,
+        139
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "dest",
+          "writable": true
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": []
     }
   ],
   "accounts": [
@@ -1859,6 +1988,32 @@
         98,
         123
       ]
+    },
+    {
+      "name": "GateState",
+      "discriminator": [
+        70,
+        225,
+        126,
+        160,
+        254,
+        17,
+        57,
+        176
+      ]
+    },
+    {
+      "name": "GatedConfigState",
+      "discriminator": [
+        31,
+        236,
+        184,
+        163,
+        59,
+        200,
+        22,
+        213
+      ]
     }
   ],
   "errors": [
@@ -1919,205 +2074,229 @@
     }
   ],
   "types": [
-        {
-            "name": "Config",
-            "type": {
-                "kind": "struct",
-                "fields": [
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
             "name": "amount",
             "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "AlternateConfig",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "TraderState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "authority",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "PoolState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "lp_mint",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "LinkedState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "target",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "TargetState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "ValueSourceState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "price",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "PriceState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "price",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "RootState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "child",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "PairLeftState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "right",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "root",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "PairRightState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "left",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "root",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "SemanticState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "context",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        },
-        {
-            "name": "AuthorityState",
-            "type": {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "authority",
-                        "type": "pubkey"
-                    },
-                    {
-                        "name": "amount",
-                        "type": "u64"
-                    }
-                ]
-            }
-        }
-    ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "AlternateConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TraderState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoolState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "lp_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LinkedState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "target",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TargetState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ValueSourceState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "price",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PriceState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "price",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "child",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PairLeftState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "right",
+            "type": "pubkey"
+          },
+          {
+            "name": "root",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PairRightState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "left",
+            "type": "pubkey"
+          },
+          {
+            "name": "root",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SemanticState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "context",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorityState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GateState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fast_path",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GatedConfigState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
 }

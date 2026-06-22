@@ -211,6 +211,15 @@ pub fn singlecore_mode(
         let crash_dir = crashes_dir_env.unwrap_or_else(|| format!("crashes/{}", #feature_name));
         std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
 
+        // LibAFL's solutions (objective) corpus is the fuzzer's own bookkeeping — hex-named
+        // inputs, 1-byte refcount markers, and per-entry `.metadata`. Keep it in a hidden subdir
+        // so the crash dir holds ONLY crucible's canonical `crash_<id>` + `.meta.json` artifacts
+        // (the triageable, replayable ones) instead of being polluted with LibAFL internals that
+        // look like empty crashes and don't carry the mutation-finding metadata for replay.
+        let crash_corpus_dir = format!("{}/.crash_corpus", crash_dir);
+        std::fs::create_dir_all(&crash_corpus_dir)
+            .expect("failed to create crash corpus directory");
+
         // Internal macro to avoid code duplication between corpus modes
         // This works around Rust's type system (StdState is generic over corpus type)
         macro_rules! run_fuzz_loop {
@@ -219,7 +228,7 @@ pub fn singlecore_mode(
                 #observer_feedback_setup
 
                 let rand = StdRand::with_seed(seed);
-                let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
+                let solutions = OnDiskCorpus::new(&crash_corpus_dir).expect("failed to create crash corpus");
                 let mut state = StdState::new(rand, $corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 

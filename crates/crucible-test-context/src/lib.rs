@@ -24,7 +24,10 @@ pub use crate::account_builders::AccountBuilderBase;
 pub use crate::account_builders::GenericAccountBuilder;
 pub use crate::account_builders::MintAccountBuilder;
 pub use crate::account_builders::TokenAccountBuilder;
-pub use crate::account_mutation::{reset_probed_account_mutations, AccountMutationConfig};
+pub use crate::account_mutation::{
+    probe_edge_capture_begin, probe_edge_capture_take, record_probe_edge,
+    reset_probed_account_mutations, AccountMutationConfig,
+};
 pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::mock_oracles::{
     MockPythOracleBuilder, PriceFeedMessage, PriceUpdateV2, VerificationLevel,
@@ -137,6 +140,11 @@ thread_local! {
     // sequences that reach the same probed instruction collapse to one finding.
     static SEEN_MUTATION_FINDINGS: RefCell<std::collections::HashSet<String>> =
         RefCell::new(std::collections::HashSet::new());
+    // Account-mutation findings the deterministic FP gates demoted (suppressed as a probable
+    // false positive) instead of emitting as a crash. Deduped by id, value is the reason.
+    // Never deleted silently — surfaced via the run summary / stderr (see fp_analysis.md §5-D).
+    static DEMOTED_FINDINGS: RefCell<std::collections::HashMap<String, String>> =
+        RefCell::new(std::collections::HashMap::new());
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -1072,6 +1080,31 @@ pub fn is_novel_mutation_finding(id: &str) -> bool {
 /// Number of distinct account-mutation findings reported this run.
 pub fn seen_mutation_finding_count() -> usize {
     SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().len())
+}
+
+/// Record a finding the deterministic FP gates demoted (suppressed as a probable false
+/// positive) instead of emitting it as a crash. Deduped by `id`. On the first time an id is
+/// seen this run, the demotion is echoed to stderr so suppressions stay visible — they are
+/// never silently deleted (see `~/Desktop/crucible-plan.md` §5-D). The reason explains which
+/// deterministic gate fired (loader-owned program account, SPL non-authority window, ...).
+pub(crate) fn record_demoted_finding(id: &str, reason: &str) {
+    DEMOTED_FINDINGS.with(|d| {
+        let mut guard = d.borrow_mut();
+        if !guard.contains_key(id) {
+            guard.insert(id.to_string(), reason.to_string());
+            eprintln!("[FUZZ][demoted] {id} — {reason}");
+        }
+    });
+}
+
+/// Number of distinct findings demoted by the deterministic FP gates this run (per thread).
+pub fn demoted_finding_count() -> usize {
+    DEMOTED_FINDINGS.with(|d| d.borrow().len())
+}
+
+/// Drain the demoted findings as `(id, reason)` pairs (used by tests and the run summary).
+pub fn take_demoted_findings() -> Vec<(String, String)> {
+    DEMOTED_FINDINGS.with(|d| d.borrow_mut().drain().collect())
 }
 
 /// Restrict replay/tmin to the original account-mutation finding identity.

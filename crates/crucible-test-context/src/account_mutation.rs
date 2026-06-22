@@ -148,31 +148,118 @@ fn probe_matches_baseline_effects_with_signers(
 }
 
 thread_local! {
-    /// Instruction types whose mutation battery already ran this run (per worker). The key is
-    /// `(program_id, discriminator)` — the registered-length discriminator prefix, zero-padded into
-    /// a `[u8; 8]` (see `probe_key`). This persists for the whole run — it is *not* cleared between
-    /// iterations — so each instruction type is probed at most once per worker.
-    static PROBED_IX_TYPES: RefCell<FastHashSet<ProbeKey>> = RefCell::new(FastHashSet::default());
+    /// Distinct `(instruction-type, state-signature)` pairs whose mutation battery already ran this
+    /// run (per worker). Keying on the state signature — not just the instruction type — lets the
+    /// same instruction be re-probed once per materially different pre-state instead of only in the
+    /// first state reached (account_constraints.md J.1#1: the probe-once-single-state blindspot that
+    /// drove the dominant false-positive/false-negative class, e.g. the klend value-ref FPs and the
+    /// Phoenix #2749 miss). Persists for the whole run; not cleared between iterations.
+    static PROBED_IX_STATES: RefCell<FastHashSet<(ProbeBaseKey, u64)>> =
+        RefCell::new(FastHashSet::default());
+    /// Per-instruction-type probe count, capping total probes for one `(program, disc)` regardless
+    /// of how many distinct state signatures it produces. Without this bound a noisy signature
+    /// (accounts embedding fresh per-iteration pubkeys in the data window) would re-probe every
+    /// iteration and collapse throughput / flood the crash dir.
+    static PROBED_IX_COUNTS: RefCell<FastHashMap<ProbeBaseKey, u32>> =
+        RefCell::new(FastHashMap::default());
 }
 
-type ProbeKey = (Pubkey, [u8; 8]);
+/// `(program_id, discriminator)` — the registered-length discriminator prefix, zero-padded into a
+/// `[u8; 8]` (see [`probe_key`]). Identifies an instruction type independent of its pre-state.
+type ProbeBaseKey = (Pubkey, [u8; 8]);
 
-/// Reset the per-run probed-instruction set. Intended for in-process tests that drive several
+/// Max distinct-state probes per instruction type before its slot is treated as exhausted. Override
+/// with `FUZZ_MUTATE_PROBE_CAP`. Bounds the cost of state-keyed re-probing (J.1#1 fix).
+const DEFAULT_PROBE_CAP_PER_IX: u32 = 8;
+
+fn probe_cap_per_ix() -> u32 {
+    std::env::var("FUZZ_MUTATE_PROBE_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_PROBE_CAP_PER_IX)
+}
+
+/// Reset the per-run probed-instruction state. Intended for in-process tests that drive several
 /// harness runs within one process; the fuzzer itself starts each worker process fresh.
 pub fn reset_probed_account_mutations() {
-    PROBED_IX_TYPES.with(|s| s.borrow_mut().clear());
+    PROBED_IX_STATES.with(|s| s.borrow_mut().clear());
+    PROBED_IX_COUNTS.with(|c| c.borrow_mut().clear());
 }
 
-fn probe_key_already_seen(key: ProbeKey, replay_target_active: bool) -> bool {
-    !replay_target_active && PROBED_IX_TYPES.with(|s| s.borrow().contains(&key))
-}
-
-fn mark_probe_key_seen(key: ProbeKey, replay_target_active: bool) {
-    if !replay_target_active {
-        PROBED_IX_TYPES.with(|s| {
-            s.borrow_mut().insert(key);
-        });
+/// Skip the probe when this exact `(instruction-type, state)` already ran, or when the instruction
+/// type has exhausted its per-type probe budget. Replay/tmin (an expected finding is set) never
+/// skips — a serialized sequence can re-reach the discriminator before the state that produced the
+/// finding, so the cache must not burn the replay target early.
+fn probe_state_already_seen(base: ProbeBaseKey, sig: u64, replay_target_active: bool) -> bool {
+    if replay_target_active {
+        return false;
     }
+    PROBED_IX_STATES.with(|s| s.borrow().contains(&(base, sig)))
+        || PROBED_IX_COUNTS.with(|c| c.borrow().get(&base).copied().unwrap_or(0))
+            >= probe_cap_per_ix()
+}
+
+/// Cheap pre-baseline gate: true once an instruction type has spent its whole per-type probe
+/// budget. Lets `maybe_probe` skip a hot instruction without running its baseline at all (the full
+/// `(base, sig)` dedup still needs the baseline to compute the path signature). Replay/tmin never
+/// caps.
+fn probe_base_cap_reached(base: ProbeBaseKey, replay_target_active: bool) -> bool {
+    !replay_target_active
+        && PROBED_IX_COUNTS.with(|c| c.borrow().get(&base).copied().unwrap_or(0)) >= probe_cap_per_ix()
+}
+
+fn mark_probe_state_seen(base: ProbeBaseKey, sig: u64, replay_target_active: bool) {
+    if replay_target_active {
+        return;
+    }
+    PROBED_IX_STATES.with(|s| {
+        s.borrow_mut().insert((base, sig));
+    });
+    PROBED_IX_COUNTS.with(|c| {
+        *c.borrow_mut().entry(base).or_insert(0) += 1;
+    });
+}
+
+thread_local! {
+    /// Edge trace of the in-flight probe baseline, when capture is active. The harness coverage
+    /// callback (generated `coverage.rs`, which lives above this crate) pushes each executed edge id
+    /// here via [`record_probe_edge`]; the probe brackets its baseline `send` with
+    /// [`probe_edge_capture_begin`] / [`probe_edge_capture_take`] to read the path the successful
+    /// unmutated transaction took. `None` when no probe is capturing (so normal fuzzing pays only a
+    /// thread-local read per edge) and whenever no coverage callback is attached.
+    static PROBE_EDGE_CAPTURE: RefCell<Option<FastHashSet<u64>>> = const { RefCell::new(None) };
+}
+
+/// Begin capturing edges for the next probe baseline run. Clears any prior set.
+pub fn probe_edge_capture_begin() {
+    PROBE_EDGE_CAPTURE.with(|s| *s.borrow_mut() = Some(FastHashSet::default()));
+}
+
+/// Record one executed edge id. Called from the harness coverage callback for every edge; a cheap
+/// no-op unless a probe is actively capturing, so it never perturbs normal fuzzing coverage.
+pub fn record_probe_edge(edge_id: u64) {
+    PROBE_EDGE_CAPTURE.with(|s| {
+        if let Some(set) = s.borrow_mut().as_mut() {
+            set.insert(edge_id);
+        }
+    });
+}
+
+/// Take and disable the captured edge set. `None` if capture was never begun or no trace was
+/// produced (e.g. `--no-tracing`, or a harness with no coverage callback attached).
+pub fn probe_edge_capture_take() -> Option<FastHashSet<u64>> {
+    PROBE_EDGE_CAPTURE.with(|s| s.borrow_mut().take())
+}
+
+/// Order-independent hash of an executed-edge set, used as the probe dedup signature. Edge ids are
+/// sorted before hashing so the (unordered) set yields a stable key with low collision risk.
+fn edge_trace_signature(edges: &FastHashSet<u64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<u64> = edges.iter().copied().collect();
+    sorted.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Debug)]
@@ -242,6 +329,8 @@ struct ProbeCtx<'a> {
     svm: &'a LiteSVM,
     baseline_after: &'a LiteSVM,
     observed_accounts: &'a HashSet<Pubkey>,
+    /// Accounts the program forwarded into a downstream CPI in the baseline run (CC-13 targets).
+    forwarded_accounts: &'a FastHashSet<Pubkey>,
     instructions: &'a [Instruction],
     signers: &'a [&'a Keypair],
     payer: &'a Keypair,
@@ -273,6 +362,7 @@ fn enabled_strategies(_config: &AccountMutationConfig) -> Vec<Box<dyn MutationSt
         Box::new(SemanticSwapStrategy),
         Box::new(CrossAuthorityAgreementStrategy),
         Box::new(DuplicateAccountStrategy),
+        Box::new(ForwardedAccountValidationStrategy),
     ]
 }
 
@@ -289,11 +379,39 @@ fn ix_disc_len(ix: &Instruction) -> usize {
 
 /// `(program_id, discriminator)` — the identity used to probe each instruction type at most once.
 /// Keyed on the registered discriminator length (zero-padded to 8), NOT the full data.
-fn probe_key(ix: &Instruction) -> ProbeKey {
+fn probe_key(ix: &Instruction) -> ProbeBaseKey {
     let mut disc = [0u8; 8];
     let n = ix_disc_len(ix).min(8);
     disc[..n].copy_from_slice(&ix.data[..n]);
     (ix.program_id, disc)
+}
+
+/// Coarse signature of the pre-transaction state the probe will observe, so one instruction type is
+/// re-probed once per materially different state rather than only in the first state reached
+/// (account_constraints.md J.1#1). Per account meta, in instruction order, mixes: owner, data
+/// length, lamports-nonzero, and a bounded 32-byte data-window digest — structural identity plus
+/// enough data to separate intra-account value conditionals (init state, status/flag bytes, stale
+/// markers) without the unbounded cardinality of hashing full data. Deliberately excludes pubkeys
+/// so freshly-created accounts (varying keys, identical logical state) hash the same; the data
+/// window can still carry per-iteration embedded pubkeys, so the per-type probe cap bounds churn.
+fn instruction_state_signature(svm: &LiteSVM, instructions: &[Instruction]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for ix in instructions {
+        for meta in &ix.accounts {
+            match svm.get_account(&meta.pubkey) {
+                Some(account) => {
+                    1u8.hash(&mut hasher);
+                    account.owner.hash(&mut hasher);
+                    (account.data.len() as u64).hash(&mut hasher);
+                    (account.lamports > 0).hash(&mut hasher);
+                    account.data[..account.data.len().min(32)].hash(&mut hasher);
+                }
+                None => 0u8.hash(&mut hasher),
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn disc_hex(ix: &Instruction) -> String {
@@ -386,31 +504,64 @@ pub(crate) fn maybe_probe_account_mutation(
 
     let expected = crate::expected_mutation_finding_id();
 
-    // Probe each instruction type only once per run. Multi-instruction transactions are keyed by
-    // their first instruction. Replay/tmin with an expected finding is the exception: a serialized
-    // sequence can contain the same discriminator before the state that originally produced the
-    // mutation finding, so the cache must not burn that replay target early.
-    let key = probe_key(&instructions[0]);
+    let base = probe_key(&instructions[0]);
     let replay_target_active = expected.is_some();
-    if probe_key_already_seen(key, replay_target_active) {
+
+    // Cheap pre-gate: once an instruction type has spent its probe budget, skip without even
+    // running the baseline. Bounds the cost of running the baseline-before-dedup (below) on hot
+    // instructions; the full path-signature dedup still needs the baseline.
+    if probe_base_cap_reached(base, replay_target_active) {
         return;
     }
 
     // Baseline gate: the unmutated transaction must succeed first, otherwise a surviving mutation
-    // tells us nothing. Run it on a clone so the live SVM is untouched.
+    // tells us nothing. We run it before the dedup gate because the baseline run is also where we
+    // observe the path the instruction took — the same instruction completing via two different
+    // edge traces is two materially different behaviors and each deserves a probe (the J.1#1
+    // probe-once blindspot was keying on instruction type alone). Capture the baseline's edge trace
+    // around the send; run on a clone so the live SVM is untouched.
     let mut baseline = svm.clone();
-    match send_probe_transaction(&mut baseline, instructions, signers, payer, sigverify) {
-        Ok(Ok(_)) => {}
-        // Don't burn the key on a failed baseline — a later occurrence (in a different state) may
-        // have a succeeding baseline and deserve a probe.
+    probe_edge_capture_begin();
+    let baseline_result =
+        send_probe_transaction(&mut baseline, instructions, signers, payer, sigverify);
+    let baseline_edges = probe_edge_capture_take();
+    // Don't burn the slot on a failed baseline — a later occurrence (in a different state) may
+    // have a succeeding baseline and deserve a probe. Read `inner_instructions` straight off the
+    // metadata rather than via `tx_result_to_outcome`, which has a `set_last_error_code` TLS side
+    // effect we must not trigger from a probe.
+    let baseline_meta = match baseline_result {
+        Ok(Ok(meta)) => meta,
         _ => return,
+    };
+
+    // Accounts the program forwards into a downstream CPI (CC-13 targets): resolved from the
+    // baseline's inner instructions.
+    let forwarded_accounts = forwarded_accounts_from_baseline(
+        &baseline_meta.inner_instructions,
+        instructions,
+        &payer.pubkey(),
+    );
+
+    // Dedup on the executed path when a trace is available (coverage callback attached). The path is
+    // a direct "did the program behave differently" signal: it re-probes a value flag that flips a
+    // branch (which a fixed-window state hash can miss) and collapses byte differences the program
+    // never branches on (which the state hash would churn-re-probe). Fall back to the coarse
+    // account-state signature when no trace exists (--no-tracing, or harnesses with no coverage
+    // callback). Replay/tmin still bypasses the gate; the per-type cap still bounds total probes.
+    let sig = match &baseline_edges {
+        Some(edges) if !edges.is_empty() => edge_trace_signature(edges),
+        _ => instruction_state_signature(svm, instructions),
+    };
+    if probe_state_already_seen(base, sig, replay_target_active) {
+        return;
     }
-    mark_probe_key_seen(key, replay_target_active);
+    mark_probe_state_seen(base, sig, replay_target_active);
 
     let ctx = ProbeCtx {
         svm,
         baseline_after: &baseline,
         observed_accounts,
+        forwarded_accounts: &forwarded_accounts,
         instructions,
         signers,
         payer,
@@ -1219,6 +1370,23 @@ fn is_token_program_owner(owner: &Pubkey) -> bool {
     *owner == spl_token::id() || *owner == TOKEN_2022_PROGRAM
 }
 
+/// Program-loader IDs. A real deployed program account is always owned by one of these, so an
+/// account whose owner is a loader is a program — its `.owner` is not attacker-settable on
+/// mainnet. Used by the CC-1 owner-mutation gate to skip program accounts even when a cloned
+/// account arrives with its `executable` flag unset (the `account.executable` check misses that).
+const BPF_LOADER_UPGRADEABLE: Pubkey =
+    solana_pubkey::pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
+const BPF_LOADER_V2: Pubkey = solana_pubkey::pubkey!("BPFLoader2111111111111111111111111111111111");
+const BPF_LOADER_V1: Pubkey = solana_pubkey::pubkey!("BPFLoader1111111111111111111111111111111111");
+const NATIVE_LOADER: Pubkey = solana_pubkey::pubkey!("NativeLoader1111111111111111111111111111111");
+
+fn is_loader_owned(owner: &Pubkey) -> bool {
+    *owner == BPF_LOADER_UPGRADEABLE
+        || *owner == BPF_LOADER_V2
+        || *owner == BPF_LOADER_V1
+        || *owner == NATIVE_LOADER
+}
+
 fn is_spl_token_shape(account: &solana_account::Account) -> bool {
     is_token_program_owner(&account.owner)
         && (unpack_mint(&account.data).is_some() || unpack_token_account(&account.data).is_some())
@@ -1229,6 +1397,134 @@ fn unpack_mint(data: &[u8]) -> Option<spl_token::state::Mint> {
         return None;
     }
     spl_token::state::Mint::unpack(data).ok()
+}
+
+/// Read an SPL `COption` 4-byte little-endian discriminant tag at `offset` (0 = None, 1 = Some).
+fn read_coption_tag(data: &[u8], offset: usize) -> Option<u32> {
+    data.get(offset..offset + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+}
+
+/// Canonical *authority* pubkey offsets present in a known SPL layout, or `None` if the account
+/// is not SPL-shaped (caller then fails open and scans every 32-byte window). This restricts the
+/// CC-9.5 cross-authority scan to fields that are actually signing/authority pubkeys, so a shared
+/// 32-byte window that merely lands on a `delegate` COption payload + state byte (offset 77, the
+/// documented FP) — or any non-authority region — is not mistaken for a shared authority.
+///
+/// Note: `mint`/`owner`-as-identity windows that are not authorities are deliberately excluded
+/// (e.g. the token `mint` at 0..32), since two same-class accounts sharing a mint is benign.
+fn spl_authority_offsets(account: &solana_account::Account) -> Option<Vec<usize>> {
+    if !is_token_program_owner(&account.owner) {
+        return None;
+    }
+    let data = &account.data;
+    if unpack_token_account(data).is_some() {
+        // mint[0..32] owner[32..64] amount[64..72] delegate COption[72..108] (tag@72,key@76)
+        // state[108] is_native COption[109..121] delegated_amount[121..129]
+        // close_authority COption[129..165] (tag@129,key@133)
+        let mut offsets = vec![32]; // owner — the transfer authority
+        if read_coption_tag(data, 72) == Some(1) {
+            offsets.push(76); // delegate, only when present
+        }
+        if read_coption_tag(data, 129) == Some(1) {
+            offsets.push(133); // close_authority, only when present
+        }
+        return Some(offsets);
+    }
+    if unpack_mint(data).is_some() {
+        // mint_authority COption[0..36] (tag@0,key@4) supply[36..44] decimals[44]
+        // is_initialized[45] freeze_authority COption[46..82] (tag@46,key@50)
+        let mut offsets = Vec::new();
+        if read_coption_tag(data, 0) == Some(1) {
+            offsets.push(4); // mint_authority, only when present
+        }
+        if read_coption_tag(data, 46) == Some(1) {
+            offsets.push(50); // freeze_authority, only when present
+        }
+        return Some(offsets);
+    }
+    None
+}
+
+/// Collect the candidate authority pubkeys carried by `account`, skipping default/sysvar/signer
+/// keys. When `offsets` is `Some`, only those canonical offsets are read (known SPL layout);
+/// when `None`, every 32-byte window after the registered discriminator is scanned (fail open).
+fn collect_window_pubkeys(
+    account: &solana_account::Account,
+    offsets: Option<&[usize]>,
+    signer_keys: &FastHashSet<Pubkey>,
+) -> FastHashSet<Pubkey> {
+    let mut values = FastHashSet::default();
+    let data = &account.data;
+    let mut consider = |window: &[u8]| {
+        if let Ok(arr) = <[u8; 32]>::try_from(window) {
+            let pubkey = Pubkey::new_from_array(arr);
+            if pubkey != Pubkey::default()
+                && !is_known_sysvar(&pubkey)
+                && !signer_keys.contains(&pubkey)
+            {
+                values.insert(pubkey);
+            }
+        }
+    };
+    match offsets {
+        Some(offsets) => {
+            for &offset in offsets {
+                if let Some(window) = data.get(offset..offset + 32) {
+                    consider(window);
+                }
+            }
+        }
+        None => {
+            let start = registered_discriminator(data)
+                .map(|disc| disc.len())
+                .unwrap_or(0);
+            for window in data[start..].windows(32) {
+                consider(window);
+            }
+        }
+    }
+    values
+}
+
+/// Find an offset in `account` whose 32-byte window matches one of `left_values`. When `offsets`
+/// is `Some`, only canonical offsets are checked (known SPL layout); when `None`, every window
+/// after the registered discriminator is scanned (fail open). Returns the absolute byte offset.
+fn find_shared_pubkey_offset(
+    account: &solana_account::Account,
+    offsets: Option<&[usize]>,
+    left_values: &FastHashSet<Pubkey>,
+) -> Option<usize> {
+    let data = &account.data;
+    let matches = |window: &[u8]| -> bool {
+        <[u8; 32]>::try_from(window)
+            .ok()
+            .map(|arr| left_values.contains(&Pubkey::new_from_array(arr)))
+            .unwrap_or(false)
+    };
+    match offsets {
+        Some(offsets) => {
+            for &offset in offsets {
+                if let Some(window) = data.get(offset..offset + 32) {
+                    if matches(window) {
+                        return Some(offset);
+                    }
+                }
+            }
+            None
+        }
+        None => {
+            let start = registered_discriminator(data)
+                .map(|disc| disc.len())
+                .unwrap_or(0);
+            for (relative, window) in data[start..].windows(32).enumerate() {
+                if matches(window) {
+                    return Some(start + relative);
+                }
+            }
+            None
+        }
+    }
 }
 
 fn unpack_token_account(data: &[u8]) -> Option<spl_token::state::Account> {
@@ -1964,27 +2260,38 @@ fn shared_non_signer_pubkey_offset(
 ) -> Option<usize> {
     let left_account = ctx.svm.get_account(&left)?;
     let right_account = ctx.svm.get_account(&right)?;
-    let left_start = registered_discriminator(&left_account.data)
-        .map(|disc| disc.len())
-        .unwrap_or(0);
-    let right_start = registered_discriminator(&right_account.data)
-        .map(|disc| disc.len())
-        .unwrap_or(0);
-    let mut left_values = FastHashSet::default();
-    for window in left_account.data[left_start..].windows(32) {
-        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
-        if pubkey != Pubkey::default()
-            && !is_known_sysvar(&pubkey)
-            && !signer_keys.contains(&pubkey)
-        {
-            left_values.insert(pubkey);
-        }
+
+    // Canonical authority offsets when the layout is known (SPL token/mint); `None` => unknown
+    // layout => fail open (scan every window). This is the FP-5 gate: it confines the match to
+    // real authority fields so non-authority windows (e.g. offset 77 on an SPL token account)
+    // are not mistaken for a shared authority.
+    let left_offsets = spl_authority_offsets(&left_account);
+    let right_offsets = spl_authority_offsets(&right_account);
+    let layout_known = left_offsets.is_some() || right_offsets.is_some();
+
+    let left_values = collect_window_pubkeys(&left_account, left_offsets.as_deref(), signer_keys);
+    if let Some(offset) =
+        find_shared_pubkey_offset(&right_account, right_offsets.as_deref(), &left_values)
+    {
+        return Some(offset);
     }
 
-    for (relative_offset, window) in right_account.data[right_start..].windows(32).enumerate() {
-        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
-        if left_values.contains(&pubkey) {
-            return Some(right_start + relative_offset);
+    // FP-5 demotion: if the layout-blind scan *would* have matched a window that the canonical
+    // scan rejected, a non-authority SPL field (delegate payload, state byte, padding, ...) was
+    // suppressed. Record it so the suppression stays visible rather than vanishing silently.
+    if layout_known {
+        let blanket_left = collect_window_pubkeys(&left_account, None, signer_keys);
+        if let Some(offset) = find_shared_pubkey_offset(&right_account, None, &blanket_left) {
+            crate::record_demoted_finding(
+                &finding_id(
+                    "CC-9.5 cross-authority",
+                    &ctx.instructions[0],
+                    &format!("{}@{}", account_role(ctx, &right), offset),
+                ),
+                &format!(
+                    "CC-9.5: SPL non-authority window (offset {offset}) on {right}, not a canonical authority field"
+                ),
+            );
         }
     }
 
@@ -2083,6 +2390,106 @@ impl MutationStrategy for DuplicateAccountStrategy {
                             disc_hex(&ctx.instructions[0]),
                         ),
                     });
+                }
+            }
+        }
+
+        findings
+    }
+}
+
+/// CC-13: an account the program forwards into a downstream CPI without validating it. Targets are
+/// `ctx.forwarded_accounts` — the relevance signal is "passed to a CPI", which lets this reach
+/// accounts the parent's own logic never reads (so the generic load-bearing gate would skip them).
+/// For each forwarded account, replace it with a malformed version (wrong owner, then corrupted
+/// data) and replay from the pre-tx state. Oracle (per design): if the tx still SUCCEEDS *and*
+/// changes state other than the forged account itself, the malformed account flowed through the CPI
+/// unvalidated. A program — or the callee CPI — that validates the account rejects the forgery, so
+/// the tx fails and nothing is reported. The "changed state (excluding the forged account + fee)"
+/// check rules out no-op successes.
+///
+/// Residual false positives (accepted; `--mutate-accounts` is opt-in and findings are triaged):
+/// a forwarded account whose owner/data genuinely don't matter to the CPI — e.g. a by-design
+/// arbitrary transfer recipient — is reported. May also co-fire with CC-1/CC-5 on the same account
+/// under a distinct label; the forwarded targeting is what makes it CC-13.
+struct ForwardedAccountValidationStrategy;
+
+impl MutationStrategy for ForwardedAccountValidationStrategy {
+    fn probe(&self, ctx: &ProbeCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+
+        for target in instruction_account_keys_ordered(ctx.instructions) {
+            if !ctx.forwarded_accounts.contains(&target) {
+                continue;
+            }
+            let Some(original) = ctx.svm.get_account(&target) else {
+                continue;
+            };
+
+            // Malformed variants: wrong owner (keep data), then corrupted data (keep owner). The
+            // first tolerated forgery that still does work is reported.
+            let mut forgeries: Vec<solana_account::Account> = Vec::new();
+            let mut wrong_owner = original.clone();
+            wrong_owner.owner = if original.owner == CRUCIBLE_ATTACKER {
+                CRUCIBLE_ATTACKER_ALT
+            } else {
+                CRUCIBLE_ATTACKER
+            };
+            forgeries.push(wrong_owner);
+            for data in data_corruption_variants(&original.data) {
+                let mut corrupted = original.clone();
+                corrupted.data = data;
+                forgeries.push(corrupted);
+            }
+
+            for forged in forgeries {
+                let mut probe = ctx.svm.clone();
+                if probe.set_account(target, forged).is_err() {
+                    continue;
+                }
+                if !matches!(
+                    send_probe_transaction(
+                        &mut probe,
+                        ctx.instructions,
+                        ctx.signers,
+                        ctx.payer,
+                        ctx.sigverify,
+                    ),
+                    Ok(Ok(_))
+                ) {
+                    // Forgery rejected => the account is validated before/at the CPI. Not a finding.
+                    continue;
+                }
+
+                // Did the tx do real work despite the malformed forwarded account? Compare the
+                // post-tx state to the pre-tx initial state, ignoring only the account we forged
+                // (we changed it ourselves — including its CPI effect, e.g. lamports it received).
+                // A validating program rejects the forgery so the tx fails and never reaches here;
+                // this check just rules out the rare no-op success.
+                let changed_state = !post_state_matches(
+                    ctx.svm,
+                    &probe,
+                    ctx.instructions,
+                    ctx.instructions,
+                    &[],
+                    &[target],
+                    ctx.payer.pubkey(),
+                );
+                if changed_state {
+                    findings.push(Finding {
+                        id: finding_id(
+                            "CC-13 forwarded-account",
+                            &ctx.instructions[0],
+                            &account_role(ctx, &target),
+                        ),
+                        message: format!(
+                            "[CC-13 forwarded-account] account {} forwarded into a downstream CPI was replaced with a malformed account, instr {}:{} still succeeded and changed state (forwarded account not validated before the CPI)",
+                            target,
+                            ctx.instructions[0].program_id,
+                            disc_hex(&ctx.instructions[0]),
+                        ),
+                    });
+                    break;
                 }
             }
         }
@@ -2246,6 +2653,18 @@ fn collect_owner_candidates(
                 continue;
             };
             if account.executable || account.data.is_empty() {
+                continue;
+            }
+            // Reachability gate (FP-1): a loader-owned account is a deployed program; its
+            // `.owner` is not attacker-settable on mainnet, so an owner mutation that "still
+            // succeeds" is a false positive. This catches cloned program accounts that arrive
+            // with the `executable` flag unset (which the check above misses). Demote, don't
+            // emit — and keep it visible.
+            if is_loader_owned(&account.owner) {
+                crate::record_demoted_finding(
+                    &format!("CC-1 owner:{}", meta.pubkey),
+                    "CC-1: loader-owned program account — owner not attacker-settable",
+                );
                 continue;
             }
             candidates.push(OwnerCandidate {
@@ -2593,6 +3012,50 @@ fn send_probe_transaction(
     Ok(svm.send_transaction(tx))
 }
 
+/// Accounts the program forwarded into a downstream CPI during the baseline run — the CC-13
+/// targets. Every account referenced by an inner instruction (a CPI the program issued), resolved
+/// against the transaction message's account-key ordering (Solana's signer/writable order, the
+/// index space the inner `CompiledInstruction`s use — NOT first-seen instruction order), minus the
+/// CPI target program ids and well-known program/sysvar accounts. The strategy filters further
+/// (same-class candidates, parent-inert, etc.).
+fn forwarded_accounts_from_baseline(
+    inner: &solana_message::inner_instruction::InnerInstructionsList,
+    instructions: &[Instruction],
+    payer: &Pubkey,
+) -> FastHashSet<Pubkey> {
+    let message = Message::new(instructions, Some(payer));
+    let keys = &message.account_keys;
+    let key_at = |i: u8| keys.get(i as usize).copied();
+
+    // CPI target program ids are referenced by inner instructions but are not forwarded *accounts*.
+    let mut program_ids = FastHashSet::default();
+    for group in inner {
+        for ix in group {
+            if let Some(p) = key_at(ix.instruction.program_id_index) {
+                program_ids.insert(p);
+            }
+        }
+    }
+
+    let mut forwarded = FastHashSet::default();
+    for group in inner {
+        for ix in group {
+            for &account_index in &ix.instruction.accounts {
+                if let Some(key) = key_at(account_index) {
+                    if program_ids.contains(&key)
+                        || is_known_sysvar(&key)
+                        || key == system_program::ID
+                    {
+                        continue;
+                    }
+                    forwarded.insert(key);
+                }
+            }
+        }
+    }
+    forwarded
+}
+
 #[allow(deprecated)]
 fn is_known_sysvar(pubkey: &Pubkey) -> bool {
     *pubkey == Clock::id()
@@ -2732,6 +3195,143 @@ mod tests {
         );
     }
 
+    fn packed_token_account_with_delegate(
+        mint: Pubkey,
+        owner: Pubkey,
+        delegate: COption<Pubkey>,
+    ) -> Vec<u8> {
+        let mut data = vec![0; spl_token::state::Account::LEN];
+        spl_token::state::Account::pack(
+            spl_token::state::Account {
+                mint,
+                owner,
+                amount: 1,
+                delegate,
+                state: spl_token::state::AccountState::Initialized,
+                is_native: COption::None,
+                delegated_amount: 0,
+                close_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        data
+    }
+
+    #[test]
+    fn read_coption_tag_reads_le_discriminant() {
+        let mut data = vec![0u8; 8];
+        assert_eq!(read_coption_tag(&data, 0), Some(0));
+        data[0] = 1;
+        assert_eq!(read_coption_tag(&data, 0), Some(1));
+        assert_eq!(read_coption_tag(&data, 100), None); // out of range
+    }
+
+    #[test]
+    fn spl_authority_offsets_token_account_excludes_non_authority_windows() {
+        // FP-5: a token account with an empty delegate exposes ONLY the owner @ 32 as an
+        // authority. Offset 77 (the documented FP — inside the delegate COption payload + state
+        // byte) must NOT be a candidate, so a shared empty-delegate window cannot masquerade as
+        // a shared authority.
+        let acct = make_account(
+            spl_token::id(),
+            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 5),
+        );
+        let offsets = spl_authority_offsets(&acct).expect("SPL token account is a known layout");
+        assert_eq!(offsets, vec![32], "only owner is an authority when delegate is None");
+        assert!(!offsets.contains(&77), "offset 77 must never be a candidate authority field");
+    }
+
+    #[test]
+    fn spl_authority_offsets_includes_present_delegate() {
+        let acct = make_account(
+            spl_token::id(),
+            packed_token_account_with_delegate(
+                Pubkey::new_unique(),
+                on_curve_pubkey(),
+                COption::Some(Pubkey::new_unique()),
+            ),
+        );
+        let offsets = spl_authority_offsets(&acct).unwrap();
+        assert!(offsets.contains(&32), "owner is always an authority");
+        assert!(offsets.contains(&76), "a present delegate is a candidate authority");
+    }
+
+    #[test]
+    fn spl_authority_offsets_mint_includes_present_authorities_only() {
+        // Default packed mint has both authorities None -> no candidate offsets.
+        let none_mint = make_account(spl_token::id(), packed_mint(6));
+        assert_eq!(spl_authority_offsets(&none_mint), Some(vec![]));
+
+        let mut data = vec![0; spl_token::state::Mint::LEN];
+        spl_token::state::Mint::pack(
+            spl_token::state::Mint {
+                mint_authority: COption::Some(Pubkey::new_unique()),
+                supply: 0,
+                decimals: 6,
+                is_initialized: true,
+                freeze_authority: COption::None,
+            },
+            &mut data,
+        )
+        .unwrap();
+        let with_auth = make_account(spl_token::id(), data);
+        assert_eq!(
+            spl_authority_offsets(&with_auth),
+            Some(vec![4]),
+            "only the present mint_authority @ 4 is a candidate"
+        );
+    }
+
+    #[test]
+    fn cross_authority_scan_demotes_shared_empty_delegate_window() {
+        // Two SPL token accounts with different mint/owner/amount but both delegates empty: the
+        // only shared 32-byte window is the empty-delegate payload + state byte (offset 77).
+        let left = make_account(
+            spl_token::id(),
+            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 10_000),
+        );
+        let right = make_account(
+            spl_token::id(),
+            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 5_000),
+        );
+        let signers = FastHashSet::default();
+
+        // Canonical (authority-only) scan: owners differ -> no shared authority -> None.
+        let left_offsets = spl_authority_offsets(&left);
+        let right_offsets = spl_authority_offsets(&right);
+        let canonical_left = collect_window_pubkeys(&left, left_offsets.as_deref(), &signers);
+        assert_eq!(
+            find_shared_pubkey_offset(&right, right_offsets.as_deref(), &canonical_left),
+            None,
+            "owners differ, so there is no shared authority field"
+        );
+
+        // Layout-blind scan: it DOES find the shared empty-delegate/state window — this is the
+        // false positive the gate must demote.
+        let blanket_left = collect_window_pubkeys(&left, None, &signers);
+        let blanket = find_shared_pubkey_offset(&right, None, &blanket_left);
+        assert_eq!(
+            blanket,
+            Some(77),
+            "the layout-blind scan matches the shared empty-delegate window at offset 77"
+        );
+    }
+
+    #[test]
+    fn spl_authority_offsets_none_for_non_spl_account() {
+        // Unknown layout -> None -> caller fails open (scans every window). A program-owned
+        // state account is not narrowed by the SPL gate.
+        let acct = make_account(Pubkey::new_unique(), vec![7u8; 200]);
+        assert_eq!(spl_authority_offsets(&acct), None);
+        // Right length but wrong owner is still not SPL-shaped.
+        let wrong_owner = make_account(
+            Pubkey::new_unique(),
+            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 1),
+        );
+        assert_eq!(spl_authority_offsets(&wrong_owner), None);
+    }
+
     #[test]
     fn select_finding_prefers_value_ref_unless_replay_targets_exact_id() {
         let ix = Instruction {
@@ -2768,27 +3368,144 @@ mod tests {
     }
 
     #[test]
-    fn replay_target_bypasses_probe_key_cache() {
+    fn replay_target_bypasses_probe_state_cache() {
         reset_probed_account_mutations();
         let ix = Instruction {
             program_id: Pubkey::new_unique(),
             accounts: vec![],
             data: vec![1, 2, 3, 4],
         };
-        let key = probe_key(&ix);
+        let base = probe_key(&ix);
+        let sig = 0u64;
 
-        mark_probe_key_seen(key, false);
-        assert!(probe_key_already_seen(key, false));
+        mark_probe_state_seen(base, sig, false);
+        assert!(probe_state_already_seen(base, sig, false));
         assert!(
-            !probe_key_already_seen(key, true),
+            !probe_state_already_seen(base, sig, true),
             "replay/tmin must keep probing repeated discriminators until the expected finding is hit"
         );
 
         reset_probed_account_mutations();
-        mark_probe_key_seen(key, true);
+        mark_probe_state_seen(base, sig, true);
         assert!(
-            !probe_key_already_seen(key, false),
+            !probe_state_already_seen(base, sig, false),
             "replay/tmin attempts must not burn the normal fuzzing cache"
+        );
+    }
+
+    #[test]
+    fn edge_trace_signature_is_order_independent_and_path_sensitive() {
+        let set = |ids: &[u64]| ids.iter().copied().collect::<FastHashSet<u64>>();
+        // Same edges in any insertion order hash identically (set, not sequence).
+        assert_eq!(
+            edge_trace_signature(&set(&[1, 2, 3])),
+            edge_trace_signature(&set(&[3, 1, 2]))
+        );
+        // A different path (one edge differs) yields a different signature.
+        assert_ne!(
+            edge_trace_signature(&set(&[1, 2, 3])),
+            edge_trace_signature(&set(&[1, 2, 9]))
+        );
+        // A strict superset (extra branch taken) is also distinct.
+        assert_ne!(
+            edge_trace_signature(&set(&[1, 2, 3])),
+            edge_trace_signature(&set(&[1, 2, 3, 4]))
+        );
+    }
+
+    #[test]
+    fn probe_edge_capture_records_only_while_active() {
+        let _ = probe_edge_capture_take(); // clear any leftover state on this thread
+        record_probe_edge(99); // inactive -> dropped
+        probe_edge_capture_begin();
+        record_probe_edge(1);
+        record_probe_edge(2);
+        record_probe_edge(1); // duplicate -> set semantics
+        let captured = probe_edge_capture_take().expect("active capture returns a set");
+        assert_eq!(captured.len(), 2);
+        assert!(captured.contains(&1) && captured.contains(&2));
+        assert!(!captured.contains(&99), "edges before begin must not be captured");
+        record_probe_edge(3); // after take -> inactive -> dropped
+        assert!(
+            probe_edge_capture_take().is_none(),
+            "capture is disabled after take"
+        );
+    }
+
+    #[test]
+    fn forwarded_accounts_resolves_inner_indices_excluding_programs_and_sysvars() {
+        use anchor_lang::solana_program::instruction::AccountMeta;
+        use solana_message::compiled_instruction::CompiledInstruction;
+        use solana_message::inner_instruction::{InnerInstruction, InnerInstructionsList};
+
+        let payer = Pubkey::new_unique();
+        let forwarded = Pubkey::new_unique(); // forwarded into the CPI
+        let other = Pubkey::new_unique(); // a top-level meta NOT forwarded
+        let cpi_program = Pubkey::new_unique(); // the downstream CPI target
+        let clock = Clock::id();
+
+        let ix = Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts: vec![
+                AccountMeta::new(forwarded, false),
+                AccountMeta::new_readonly(other, false),
+                AccountMeta::new_readonly(cpi_program, false),
+                AccountMeta::new_readonly(clock, false),
+                AccountMeta::new_readonly(system_program::ID, false),
+            ],
+            data: vec![1, 2, 3],
+        };
+        let instructions = vec![ix];
+
+        // The inner instruction's indices are into the message account-key order — resolve via the
+        // same Message the helper builds, so the test doesn't hardcode Solana's ordering.
+        let message = Message::new(&instructions, Some(&payer));
+        let idx = |k: &Pubkey| message.account_keys.iter().position(|x| x == k).unwrap() as u8;
+
+        let inner: InnerInstructionsList = vec![vec![InnerInstruction {
+            instruction: CompiledInstruction {
+                program_id_index: idx(&cpi_program),
+                accounts: vec![idx(&forwarded), idx(&clock), idx(&system_program::ID)],
+                data: vec![],
+            },
+            stack_height: 2,
+        }]];
+
+        let result = forwarded_accounts_from_baseline(&inner, &instructions, &payer);
+        assert!(result.contains(&forwarded), "forwarded account must be detected");
+        assert!(!result.contains(&clock), "sysvar must be excluded");
+        assert!(!result.contains(&system_program::ID), "system program excluded");
+        assert!(!result.contains(&cpi_program), "CPI target program id excluded");
+        assert!(!result.contains(&other), "a non-forwarded top-level meta is not flagged");
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn distinct_states_reprobe_until_per_type_cap() {
+        reset_probed_account_mutations();
+        let base = (Pubkey::new_unique(), [7u8; 8]);
+
+        // The same instruction type in a *different* state earns its own probe (J.1#1 fix); the
+        // identical state is skipped on repeat.
+        mark_probe_state_seen(base, 1, false);
+        assert!(
+            probe_state_already_seen(base, 1, false),
+            "the same instruction type in the same state must be skipped"
+        );
+        assert!(
+            !probe_state_already_seen(base, 2, false),
+            "a materially different state (new signature) must be probed, not skipped"
+        );
+
+        // Spend the rest of the per-type budget on distinct signatures; once exhausted, even a
+        // brand-new state is skipped so re-probing cannot run away.
+        for sig in 2..=(DEFAULT_PROBE_CAP_PER_IX as u64) {
+            assert!(!probe_state_already_seen(base, sig, false));
+            mark_probe_state_seen(base, sig, false);
+        }
+        assert!(
+            probe_state_already_seen(base, 999, false),
+            "a fresh state must be skipped once the per-type probe cap is exhausted"
         );
     }
 
