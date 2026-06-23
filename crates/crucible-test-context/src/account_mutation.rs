@@ -205,7 +205,8 @@ fn probe_state_already_seen(base: ProbeBaseKey, sig: u64, replay_target_active: 
 /// caps.
 fn probe_base_cap_reached(base: ProbeBaseKey, replay_target_active: bool) -> bool {
     !replay_target_active
-        && PROBED_IX_COUNTS.with(|c| c.borrow().get(&base).copied().unwrap_or(0)) >= probe_cap_per_ix()
+        && PROBED_IX_COUNTS.with(|c| c.borrow().get(&base).copied().unwrap_or(0))
+            >= probe_cap_per_ix()
 }
 
 fn mark_probe_state_seen(base: ProbeBaseKey, sig: u64, replay_target_active: bool) {
@@ -267,6 +268,10 @@ pub struct AccountMutationConfig {
     enabled: bool,
     skip_pda_candidates: bool,
     unverified_accounts: FastHashSet<Pubkey>,
+    /// Instruction types `(program, discriminator)` excluded from account-mutation probing — for
+    /// instructions a harness author knows only produce false positives. A single early gate in
+    /// `maybe_probe_account_mutation` honors this, so the skip is blanket (all constraint classes).
+    skip_instructions: FastHashSet<ProbeBaseKey>,
 }
 
 impl Default for AccountMutationConfig {
@@ -275,6 +280,7 @@ impl Default for AccountMutationConfig {
             enabled: false,
             skip_pda_candidates: DEFAULT_SKIP_PDA_CANDIDATES,
             unverified_accounts: FastHashSet::default(),
+            skip_instructions: FastHashSet::default(),
         }
     }
 }
@@ -294,6 +300,18 @@ impl AccountMutationConfig {
 
     pub fn mark_unverified(&mut self, pubkey: Pubkey) {
         self.unverified_accounts.insert(pubkey);
+    }
+
+    /// Exclude an instruction type from account-mutation probing (keyed by `(program, disc)`, the
+    /// same key the engine probes on). Blanket: every constraint class is skipped for this
+    /// instruction, on every send (including `send_batch`). For known-false-positive instructions.
+    pub fn skip_instruction(&mut self, ix: &Instruction) {
+        self.skip_instructions.insert(probe_key(ix));
+    }
+
+    /// Whether `ix`'s instruction type was excluded via [`skip_instruction`].
+    pub fn is_instruction_skipped(&self, ix: &Instruction) -> bool {
+        self.skip_instructions.contains(&probe_key(ix))
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -329,8 +347,10 @@ struct ProbeCtx<'a> {
     svm: &'a LiteSVM,
     baseline_after: &'a LiteSVM,
     observed_accounts: &'a HashSet<Pubkey>,
-    /// Accounts the program forwarded into a downstream CPI in the baseline run (CC-13 targets).
-    forwarded_accounts: &'a FastHashSet<Pubkey>,
+    /// Per-account CPI path observed in the baseline run: a forwarded account maps to the
+    /// `(downstream program, stack_height)` hops it was passed into. Keys are the CC-13 targets;
+    /// values drive the finding trace.
+    cpi_traces: &'a FastHashMap<Pubkey, Vec<(Pubkey, u8)>>,
     instructions: &'a [Instruction],
     signers: &'a [&'a Keypair],
     payer: &'a Keypair,
@@ -384,6 +404,35 @@ fn probe_key(ix: &Instruction) -> ProbeBaseKey {
     let n = ix_disc_len(ix).min(8);
     disc[..n].copy_from_slice(&ix.data[..n]);
     (ix.program_id, disc)
+}
+
+/// The ComputeBudget program. Its instructions carry no account metas and are commonly *prepended*
+/// to a transaction, so they must not be treated as the transaction's real instruction for keying
+/// or finding attribution.
+const COMPUTE_BUDGET_PROGRAM: Pubkey =
+    solana_pubkey::pubkey!("ComputeBudget111111111111111111111111111111");
+
+/// The instruction that represents the transaction's real action, used for probe keying: the first
+/// instruction whose program is not a known no-op prelude (ComputeBudget), falling back to the
+/// first instruction. Without this, a harness that prepends a ComputeBudget instruction keys every
+/// transaction type to `(ComputeBudget, …)`, collapsing the per-type probe cap across all real
+/// instructions.
+fn primary_instruction(instructions: &[Instruction]) -> &Instruction {
+    instructions
+        .iter()
+        .find(|ix| ix.program_id != COMPUTE_BUDGET_PROGRAM)
+        .unwrap_or(&instructions[0])
+}
+
+/// The instruction that actually owns `target` — the first whose account metas reference it. A
+/// mutated/substituted account is attributed to the instruction that passes it, not necessarily
+/// `instructions[0]` (a ComputeBudget prelude in many harnesses, which carries no accounts at all).
+/// Falls back to the primary instruction when no instruction references the target.
+fn owning_instruction<'a>(instructions: &'a [Instruction], target: &Pubkey) -> &'a Instruction {
+    instructions
+        .iter()
+        .find(|ix| ix.accounts.iter().any(|m| m.pubkey == *target))
+        .unwrap_or_else(|| primary_instruction(instructions))
 }
 
 /// Coarse signature of the pre-transaction state the probe will observe, so one instruction type is
@@ -442,14 +491,37 @@ fn account_role(ctx: &ProbeCtx, pubkey: &Pubkey) -> String {
     }
 }
 
-fn finding_id(class: &str, ix: &Instruction, role: &str) -> String {
-    format!("{class}:{}:{}:{}", ix.program_id, disc_hex(ix), role)
+/// A human-readable CPI path for the mutated account, when it crossed a downstream CPI in the
+/// baseline run: ` [forwarded → <program>@<depth> → …]`. Empty for accounts used only at the top
+/// level (so it can be appended to any finding message harmlessly). The top-level program is
+/// already shown in the message via the owning instruction, so this shows only the downstream hops.
+fn account_trace(ctx: &ProbeCtx, target: &Pubkey) -> String {
+    match ctx.cpi_traces.get(target) {
+        Some(hops) if !hops.is_empty() => {
+            let chain: Vec<String> = hops
+                .iter()
+                .map(|(program, depth)| format!("{program}@{depth}"))
+                .collect();
+            format!(" [forwarded → {}]", chain.join(" → "))
+        }
+        _ => String::new(),
+    }
 }
 
-/// Coarse instruction-level identity `account-mutation:{program}:{disc}` derived from a full
-/// finding id `{class}:{program}:{disc}:{role}` (class and account role dropped). Lets replay/tmin
-/// match by instruction even if the precise class or mutated-account role differs. Tolerates the
-/// legacy 3-part `{class}:{program}:{disc}` form (no role).
+fn finding_id(class: &str, ix: &Instruction, _role: &str) -> String {
+    // Dedup identity is per (class, instruction) — the mutated-account role/offset is intentionally
+    // NOT part of it. The same probe class firing on different account slots, at different field
+    // offsets, or via different executed paths collapses to a single finding (so e.g. an instruction
+    // that trips CC-7.7 and CC-9.5 yields 2 findings, not one-per-(role,path)). The specific account
+    // and offset are still reported in the finding *message* for triage; only the identity is coarse.
+    // `_role` is kept in the signature so call sites stay unchanged.
+    format!("{class}:{}:{}", ix.program_id, disc_hex(ix))
+}
+
+/// Coarse instruction-level identity `account-mutation:{program}:{disc}` derived from a finding id
+/// `{class}:{program}:{disc}` (class dropped). Lets replay/tmin match by instruction even if the
+/// precise class differs. Also tolerates the legacy 4-part `{class}:{program}:{disc}:{role}` form
+/// from crashes produced before the identity was made role-independent.
 fn finding_instruction_id(id: &str) -> String {
     if id.starts_with("account-mutation:") {
         return id.to_string();
@@ -473,9 +545,17 @@ fn select_finding<'a>(findings: &'a [Finding], expected: Option<&str>) -> Option
         Some(id) => findings
             .iter()
             .find(|finding| finding_matches_expected(&finding.id, id)),
+        // Normal fuzzing: pick the highest-priority finding that has *not* already been reported.
+        // An instruction is probed up to once per distinct executed path, so the same instruction is
+        // probed many times across a campaign; without this filter the single top-priority finding
+        // would be reported on the first probe and then dedup-suppressed on every later probe,
+        // permanently masking the other distinct findings on that instruction. Skipping already-seen
+        // ids lets each later probe surface the next novel finding. When every finding is already
+        // seen this returns `None` (the duplicate is suppressed here instead of at the macro).
         None => findings
             .iter()
             .enumerate()
+            .filter(|(_, finding)| !crate::mutation_finding_seen(&finding.id))
             .min_by_key(|(index, finding)| (finding_priority(finding), *index))
             .map(|(_, finding)| finding),
     }
@@ -504,8 +584,15 @@ pub(crate) fn maybe_probe_account_mutation(
 
     let expected = crate::expected_mutation_finding_id();
 
-    let base = probe_key(&instructions[0]);
+    let base = probe_key(primary_instruction(instructions));
     let replay_target_active = expected.is_some();
+
+    // Harness-author opt-out: an instruction type explicitly excluded via `.skip_account_mutation()`
+    // is never probed. This single gate (before any strategy runs) makes the skip blanket across all
+    // constraint classes. Replay/tmin honors it too — a skipped instruction has no mutation crashes.
+    if config.skip_instructions.contains(&base) {
+        return;
+    }
 
     // Cheap pre-gate: once an instruction type has spent its probe budget, skip without even
     // running the baseline. Bounds the cost of running the baseline-before-dedup (below) on hot
@@ -534,9 +621,9 @@ pub(crate) fn maybe_probe_account_mutation(
         _ => return,
     };
 
-    // Accounts the program forwards into a downstream CPI (CC-13 targets): resolved from the
-    // baseline's inner instructions.
-    let forwarded_accounts = forwarded_accounts_from_baseline(
+    // Per-account CPI paths (CC-13 targets + their forwarding trace): resolved from the baseline's
+    // inner instructions.
+    let cpi_traces = cpi_forwarded_traces(
         &baseline_meta.inner_instructions,
         instructions,
         &payer.pubkey(),
@@ -561,7 +648,7 @@ pub(crate) fn maybe_probe_account_mutation(
         svm,
         baseline_after: &baseline,
         observed_accounts,
-        forwarded_accounts: &forwarded_accounts,
+        cpi_traces: &cpi_traces,
         instructions,
         signers,
         payer,
@@ -632,19 +719,16 @@ impl MutationStrategy for OwnerStrategy {
                 &[],
                 &[candidate.pubkey],
             ) {
+                let oix = owning_instruction(ctx.instructions, &candidate.pubkey);
                 findings.push(Finding {
-                    id: finding_id(
-                        "CC-1 owner",
-                        &ctx.instructions[0],
-                        &account_role(ctx, &candidate.pubkey),
-                    ),
+                    id: finding_id("CC-1 owner", oix, &account_role(ctx, &candidate.pubkey)),
                     message: format!(
                         "[CC-1 owner] account {} owner {}->{} instr {}:{} still succeeded after owner mutation",
                         candidate.pubkey,
                         candidate.original_owner,
                         sentinel,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                     ),
                 });
             }
@@ -694,17 +778,14 @@ impl MutationStrategy for TypeTagStrategy {
             }
 
             if probe_matches_baseline_effects(ctx, &mut probe, ctx.instructions, &[], &[pubkey]) {
+                let oix = owning_instruction(ctx.instructions, &pubkey);
                 findings.push(Finding {
-                    id: finding_id(
-                        "CC-5 type-tag",
-                        &ctx.instructions[0],
-                        &account_role(ctx, &pubkey),
-                    ),
+                    id: finding_id("CC-5 type-tag", oix, &account_role(ctx, &pubkey)),
                     message: format!(
                         "[CC-5 type-tag] account {} discriminator bit-flipped, instr {}:{} still succeeded (missing discriminator check)",
                         pubkey,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                     ),
                 });
             }
@@ -767,18 +848,15 @@ impl MutationStrategy for SignerStrategy {
                         "signer keypair supplied but account meta was not signer"
                     }
                 };
+                let oix = owning_instruction(ctx.instructions, &candidate.pubkey);
                 findings.push(Finding {
-                    id: finding_id(
-                        "CC-4 signer",
-                        &ctx.instructions[0],
-                        &account_role(ctx, &candidate.pubkey),
-                    ),
+                    id: finding_id("CC-4 signer", oix, &account_role(ctx, &candidate.pubkey)),
                     message: format!(
                         "[CC-4 signer] account {} {}, instr {}:{} still succeeded (missing signer check)",
                         candidate.pubkey,
                         detail,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                     ),
                 });
             }
@@ -916,18 +994,15 @@ impl MutationStrategy for AuthoritySignerStrategy {
                     &[],
                     &[signer, attacker_pubkey],
                 ) {
+                    let oix = owning_instruction(ctx.instructions, &source);
                     findings.push(Finding {
-                        id: finding_id(
-                            "CC-9 authority",
-                            &ctx.instructions[0],
-                            &account_role(ctx, &source),
-                        ),
+                        id: finding_id("CC-9 authority", oix, &account_role(ctx, &source)),
                         message: format!(
                             "[CC-9 authority] account {} contains authority {}, but instr {}:{} still succeeded with replacement signer {}",
                             source,
                             signer,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
                             attacker_pubkey,
                         ),
                     });
@@ -994,20 +1069,17 @@ impl MutationStrategy for PdaSubstitutionStrategy {
             if substitute_mutated_account_probe(ctx, target, decoy, |account| {
                 account.owner = spoof_owner;
             }) {
+                let oix = owning_instruction(ctx.instructions, &target);
                 findings.push(Finding {
-                    id: finding_id(
-                        "CC-3 pda-spoof",
-                        &ctx.instructions[0],
-                        &account_role(ctx, &target),
-                    ),
+                    id: finding_id("CC-3 pda-spoof", oix, &account_role(ctx, &target)),
                     message: format!(
                         "[CC-3 pda-spoof] account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing PDA derivation/owner check)",
                         target,
                         decoy,
                         account.owner,
                         spoof_owner,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                     ),
                 });
             }
@@ -1092,8 +1164,9 @@ impl MutationStrategy for TokenFakeOwnerStrategy {
                         "SPL token-account-shaped",
                     ),
                 };
+                let oix = owning_instruction(ctx.instructions, &candidate.pubkey);
                 findings.push(Finding {
-                    id: finding_id(class, &ctx.instructions[0], &account_role(ctx, &candidate.pubkey)),
+                    id: finding_id(class, oix, &account_role(ctx, &candidate.pubkey)),
                     message: format!(
                         "{} account {} substituted with decoy {} owner {}->{} instr {}:{} still succeeded (missing {} owner check)",
                         label,
@@ -1101,8 +1174,8 @@ impl MutationStrategy for TokenFakeOwnerStrategy {
                         decoy,
                         candidate.owner,
                         spoof_owner,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                         detail,
                     ),
                 });
@@ -1159,12 +1232,9 @@ impl MutationStrategy for TokenWrongMintStrategy {
                 if substitute_mutated_account_probe(ctx, token_account.pubkey, decoy, |account| {
                     account.data = data.clone();
                 }) {
+                    let oix = owning_instruction(ctx.instructions, &token_account.pubkey);
                     findings.push(Finding {
-                        id: finding_id(
-                            "CC-token wrong-mint",
-                            &ctx.instructions[0],
-                            &account_role(ctx, &token_account.pubkey),
-                        ),
+                        id: finding_id("CC-token wrong-mint", oix, &account_role(ctx, &token_account.pubkey)),
                         message: format!(
                             "[CC-token wrong-mint] token account {} substituted with decoy {} mint {}->{} while mint account {} was provided, instr {}:{} still succeeded",
                             token_account.pubkey,
@@ -1172,8 +1242,8 @@ impl MutationStrategy for TokenWrongMintStrategy {
                             mint.pubkey,
                             wrong_mint,
                             mint.pubkey,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
                         ),
                     });
                 }
@@ -1247,12 +1317,9 @@ impl MutationStrategy for TokenForgedMintPairStrategy {
                     &[],
                     &[token_account.pubkey, fake_token, mint.pubkey, fake_mint],
                 ) {
+                    let oix = owning_instruction(ctx.instructions, &token_account.pubkey);
                     findings.push(Finding {
-                        id: finding_id(
-                            "CC-token forged-mint-pair",
-                            &ctx.instructions[0],
-                            &account_role(ctx, &token_account.pubkey),
-                        ),
+                        id: finding_id("CC-token forged-mint-pair", oix, &account_role(ctx, &token_account.pubkey)),
                         message: format!(
                             "[CC-token forged-mint-pair] token account {} and mint {} substituted with forged pair {} / {} while account {} still references canonical mint {}, instr {}:{} still succeeded",
                             token_account.pubkey,
@@ -1261,8 +1328,8 @@ impl MutationStrategy for TokenForgedMintPairStrategy {
                             fake_mint,
                             reference_source,
                             mint.pubkey,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
                         ),
                     });
                 }
@@ -1370,23 +1437,6 @@ fn is_token_program_owner(owner: &Pubkey) -> bool {
     *owner == spl_token::id() || *owner == TOKEN_2022_PROGRAM
 }
 
-/// Program-loader IDs. A real deployed program account is always owned by one of these, so an
-/// account whose owner is a loader is a program — its `.owner` is not attacker-settable on
-/// mainnet. Used by the CC-1 owner-mutation gate to skip program accounts even when a cloned
-/// account arrives with its `executable` flag unset (the `account.executable` check misses that).
-const BPF_LOADER_UPGRADEABLE: Pubkey =
-    solana_pubkey::pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
-const BPF_LOADER_V2: Pubkey = solana_pubkey::pubkey!("BPFLoader2111111111111111111111111111111111");
-const BPF_LOADER_V1: Pubkey = solana_pubkey::pubkey!("BPFLoader1111111111111111111111111111111111");
-const NATIVE_LOADER: Pubkey = solana_pubkey::pubkey!("NativeLoader1111111111111111111111111111111");
-
-fn is_loader_owned(owner: &Pubkey) -> bool {
-    *owner == BPF_LOADER_UPGRADEABLE
-        || *owner == BPF_LOADER_V2
-        || *owner == BPF_LOADER_V1
-        || *owner == NATIVE_LOADER
-}
-
 fn is_spl_token_shape(account: &solana_account::Account) -> bool {
     is_token_program_owner(&account.owner)
         && (unpack_mint(&account.data).is_some() || unpack_token_account(&account.data).is_some())
@@ -1397,134 +1447,6 @@ fn unpack_mint(data: &[u8]) -> Option<spl_token::state::Mint> {
         return None;
     }
     spl_token::state::Mint::unpack(data).ok()
-}
-
-/// Read an SPL `COption` 4-byte little-endian discriminant tag at `offset` (0 = None, 1 = Some).
-fn read_coption_tag(data: &[u8], offset: usize) -> Option<u32> {
-    data.get(offset..offset + 4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-}
-
-/// Canonical *authority* pubkey offsets present in a known SPL layout, or `None` if the account
-/// is not SPL-shaped (caller then fails open and scans every 32-byte window). This restricts the
-/// CC-9.5 cross-authority scan to fields that are actually signing/authority pubkeys, so a shared
-/// 32-byte window that merely lands on a `delegate` COption payload + state byte (offset 77, the
-/// documented FP) — or any non-authority region — is not mistaken for a shared authority.
-///
-/// Note: `mint`/`owner`-as-identity windows that are not authorities are deliberately excluded
-/// (e.g. the token `mint` at 0..32), since two same-class accounts sharing a mint is benign.
-fn spl_authority_offsets(account: &solana_account::Account) -> Option<Vec<usize>> {
-    if !is_token_program_owner(&account.owner) {
-        return None;
-    }
-    let data = &account.data;
-    if unpack_token_account(data).is_some() {
-        // mint[0..32] owner[32..64] amount[64..72] delegate COption[72..108] (tag@72,key@76)
-        // state[108] is_native COption[109..121] delegated_amount[121..129]
-        // close_authority COption[129..165] (tag@129,key@133)
-        let mut offsets = vec![32]; // owner — the transfer authority
-        if read_coption_tag(data, 72) == Some(1) {
-            offsets.push(76); // delegate, only when present
-        }
-        if read_coption_tag(data, 129) == Some(1) {
-            offsets.push(133); // close_authority, only when present
-        }
-        return Some(offsets);
-    }
-    if unpack_mint(data).is_some() {
-        // mint_authority COption[0..36] (tag@0,key@4) supply[36..44] decimals[44]
-        // is_initialized[45] freeze_authority COption[46..82] (tag@46,key@50)
-        let mut offsets = Vec::new();
-        if read_coption_tag(data, 0) == Some(1) {
-            offsets.push(4); // mint_authority, only when present
-        }
-        if read_coption_tag(data, 46) == Some(1) {
-            offsets.push(50); // freeze_authority, only when present
-        }
-        return Some(offsets);
-    }
-    None
-}
-
-/// Collect the candidate authority pubkeys carried by `account`, skipping default/sysvar/signer
-/// keys. When `offsets` is `Some`, only those canonical offsets are read (known SPL layout);
-/// when `None`, every 32-byte window after the registered discriminator is scanned (fail open).
-fn collect_window_pubkeys(
-    account: &solana_account::Account,
-    offsets: Option<&[usize]>,
-    signer_keys: &FastHashSet<Pubkey>,
-) -> FastHashSet<Pubkey> {
-    let mut values = FastHashSet::default();
-    let data = &account.data;
-    let mut consider = |window: &[u8]| {
-        if let Ok(arr) = <[u8; 32]>::try_from(window) {
-            let pubkey = Pubkey::new_from_array(arr);
-            if pubkey != Pubkey::default()
-                && !is_known_sysvar(&pubkey)
-                && !signer_keys.contains(&pubkey)
-            {
-                values.insert(pubkey);
-            }
-        }
-    };
-    match offsets {
-        Some(offsets) => {
-            for &offset in offsets {
-                if let Some(window) = data.get(offset..offset + 32) {
-                    consider(window);
-                }
-            }
-        }
-        None => {
-            let start = registered_discriminator(data)
-                .map(|disc| disc.len())
-                .unwrap_or(0);
-            for window in data[start..].windows(32) {
-                consider(window);
-            }
-        }
-    }
-    values
-}
-
-/// Find an offset in `account` whose 32-byte window matches one of `left_values`. When `offsets`
-/// is `Some`, only canonical offsets are checked (known SPL layout); when `None`, every window
-/// after the registered discriminator is scanned (fail open). Returns the absolute byte offset.
-fn find_shared_pubkey_offset(
-    account: &solana_account::Account,
-    offsets: Option<&[usize]>,
-    left_values: &FastHashSet<Pubkey>,
-) -> Option<usize> {
-    let data = &account.data;
-    let matches = |window: &[u8]| -> bool {
-        <[u8; 32]>::try_from(window)
-            .ok()
-            .map(|arr| left_values.contains(&Pubkey::new_from_array(arr)))
-            .unwrap_or(false)
-    };
-    match offsets {
-        Some(offsets) => {
-            for &offset in offsets {
-                if let Some(window) = data.get(offset..offset + 32) {
-                    if matches(window) {
-                        return Some(offset);
-                    }
-                }
-            }
-            None
-        }
-        None => {
-            let start = registered_discriminator(data)
-                .map(|disc| disc.len())
-                .unwrap_or(0);
-            for (relative, window) in data[start..].windows(32).enumerate() {
-                if matches(window) {
-                    return Some(start + relative);
-                }
-            }
-            None
-        }
-    }
 }
 
 fn unpack_token_account(data: &[u8]) -> Option<spl_token::state::Account> {
@@ -1774,12 +1696,9 @@ fn cc73_finding(
         "mutual counterpart keys".to_string()
     };
 
+    let oix = owning_instruction(ctx.instructions, &substituted);
     Finding {
-        id: finding_id(
-            "CC-7.3 bidirectional-ref",
-            &ctx.instructions[0],
-            &account_role(ctx, &substituted),
-        ),
+        id: finding_id("CC-7.3 bidirectional-ref", oix, &account_role(ctx, &substituted)),
         message: format!(
             "[CC-7.3 bidirectional-ref] accounts {} and {} are linked by {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing bidirectional/shared-root field binding check)",
             pair.left,
@@ -1787,8 +1706,8 @@ fn cc73_finding(
             relation,
             substituted,
             replacement,
-            ctx.instructions[0].program_id,
-            disc_hex(&ctx.instructions[0]),
+            oix.program_id,
+            disc_hex(oix),
         ),
     }
 }
@@ -1950,8 +1869,9 @@ fn cc7_finding(
         ("CC-7 field-ref", "[CC-7 field-ref]")
     };
 
+    let oix = owning_instruction(ctx.instructions, &substituted);
     Finding {
-        id: finding_id(class, &ctx.instructions[0], &account_role(ctx, &substituted)),
+        id: finding_id(class, oix, &account_role(ctx, &substituted)),
         message: format!(
             "{} account {} references {}, substituted {} with same-class account {}, instr {}:{} still succeeded (missing field cross-reference check)",
             label,
@@ -1959,8 +1879,8 @@ fn cc7_finding(
             edge.target,
             substituted,
             replacement,
-            ctx.instructions[0].program_id,
-            disc_hex(&ctx.instructions[0]),
+            oix.program_id,
+            disc_hex(oix),
         ),
     }
 }
@@ -1971,20 +1891,17 @@ fn cc7_value_ref_finding(
     edge: FieldRefEdge,
     replacement: Pubkey,
 ) -> Finding {
+    let oix = owning_instruction(ctx.instructions, &edge.target);
     Finding {
-        id: finding_id(
-            "CC-7 value-ref",
-            &ctx.instructions[0],
-            &account_role(ctx, &edge.target),
-        ),
+        id: finding_id("CC-7 value-ref", oix, &account_role(ctx, &edge.target)),
         message: format!(
             "[CC-7 value-ref] account {} references {}, substituted referenced account with same-class account {} ({}), instr {}:{} still succeeded (missing referenced account binding check)",
             edge.source,
             edge.target,
             replacement,
             class_index.class_label(&replacement),
-            ctx.instructions[0].program_id,
-            disc_hex(&ctx.instructions[0]),
+            oix.program_id,
+            disc_hex(oix),
         ),
     }
 }
@@ -2179,12 +2096,9 @@ fn cc77_finding(
     class_index: &AccountClassIndex,
     candidate: &SemanticSwapCandidate,
 ) -> Finding {
+    let oix = owning_instruction(ctx.instructions, &candidate.target);
     Finding {
-        id: finding_id(
-            "CC-7.7 semantic-swap",
-            &ctx.instructions[0],
-            &account_role(ctx, &candidate.target),
-        ),
+        id: finding_id("CC-7.7 semantic-swap", oix, &account_role(ctx, &candidate.target)),
         message: format!(
             "[CC-7.7 semantic-swap] account {} ({}) has embedded-key profile with {} observed key(s), substituted with same-class account {} with {} observed key(s), instr {}:{} still succeeded (missing semantic same-class binding check)",
             candidate.target,
@@ -2192,8 +2106,8 @@ fn cc77_finding(
             candidate.target_keys.len(),
             candidate.replacement,
             candidate.replacement_keys.len(),
-            ctx.instructions[0].program_id,
-            disc_hex(&ctx.instructions[0]),
+            oix.program_id,
+            disc_hex(oix),
         ),
     }
 }
@@ -2227,10 +2141,11 @@ impl MutationStrategy for CrossAuthorityAgreementStrategy {
                 };
                 let replacement = CRUCIBLE_ATTACKER;
                 if mutate_account_pubkey_window_probe(ctx, *right, offset, replacement) {
+                    let oix = owning_instruction(ctx.instructions, right);
                     findings.push(Finding {
                         id: finding_id(
                             "CC-9.5 cross-authority",
-                            &ctx.instructions[0],
+                            oix,
                             &format!("{}@{}", account_role(ctx, right), offset),
                         ),
                         message: format!(
@@ -2240,8 +2155,8 @@ impl MutationStrategy for CrossAuthorityAgreementStrategy {
                             right,
                             offset,
                             replacement,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
                         ),
                     });
                 }
@@ -2260,38 +2175,27 @@ fn shared_non_signer_pubkey_offset(
 ) -> Option<usize> {
     let left_account = ctx.svm.get_account(&left)?;
     let right_account = ctx.svm.get_account(&right)?;
-
-    // Canonical authority offsets when the layout is known (SPL token/mint); `None` => unknown
-    // layout => fail open (scan every window). This is the FP-5 gate: it confines the match to
-    // real authority fields so non-authority windows (e.g. offset 77 on an SPL token account)
-    // are not mistaken for a shared authority.
-    let left_offsets = spl_authority_offsets(&left_account);
-    let right_offsets = spl_authority_offsets(&right_account);
-    let layout_known = left_offsets.is_some() || right_offsets.is_some();
-
-    let left_values = collect_window_pubkeys(&left_account, left_offsets.as_deref(), signer_keys);
-    if let Some(offset) =
-        find_shared_pubkey_offset(&right_account, right_offsets.as_deref(), &left_values)
-    {
-        return Some(offset);
+    let left_start = registered_discriminator(&left_account.data)
+        .map(|disc| disc.len())
+        .unwrap_or(0);
+    let right_start = registered_discriminator(&right_account.data)
+        .map(|disc| disc.len())
+        .unwrap_or(0);
+    let mut left_values = FastHashSet::default();
+    for window in left_account.data[left_start..].windows(32) {
+        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
+        if pubkey != Pubkey::default()
+            && !is_known_sysvar(&pubkey)
+            && !signer_keys.contains(&pubkey)
+        {
+            left_values.insert(pubkey);
+        }
     }
 
-    // FP-5 demotion: if the layout-blind scan *would* have matched a window that the canonical
-    // scan rejected, a non-authority SPL field (delegate payload, state byte, padding, ...) was
-    // suppressed. Record it so the suppression stays visible rather than vanishing silently.
-    if layout_known {
-        let blanket_left = collect_window_pubkeys(&left_account, None, signer_keys);
-        if let Some(offset) = find_shared_pubkey_offset(&right_account, None, &blanket_left) {
-            crate::record_demoted_finding(
-                &finding_id(
-                    "CC-9.5 cross-authority",
-                    &ctx.instructions[0],
-                    &format!("{}@{}", account_role(ctx, &right), offset),
-                ),
-                &format!(
-                    "CC-9.5: SPL non-authority window (offset {offset}) on {right}, not a canonical authority field"
-                ),
-            );
+    for (relative_offset, window) in right_account.data[right_start..].windows(32).enumerate() {
+        let pubkey = Pubkey::new_from_array(window.try_into().ok()?);
+        if left_values.contains(&pubkey) {
+            return Some(right_start + relative_offset);
         }
     }
 
@@ -2374,20 +2278,17 @@ impl MutationStrategy for DuplicateAccountStrategy {
                     &[*left, *right],
                     ctx.payer.pubkey(),
                 ) {
+                    let oix = owning_instruction(ctx.instructions, right);
                     findings.push(Finding {
-                        id: finding_id(
-                            "CC-14 duplicate-account",
-                            &ctx.instructions[0],
-                            &account_role(ctx, right),
-                        ),
+                        id: finding_id("CC-14 duplicate-account", oix, &account_role(ctx, right)),
                         message: format!(
                             "[CC-14 duplicate-account] same-class accounts {} and {} accepted when {} was aliased to {}, instr {}:{} succeeded with divergent outcome",
                             left,
                             right,
                             right,
                             left,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
                         ),
                     });
                 }
@@ -2399,7 +2300,7 @@ impl MutationStrategy for DuplicateAccountStrategy {
 }
 
 /// CC-13: an account the program forwards into a downstream CPI without validating it. Targets are
-/// `ctx.forwarded_accounts` — the relevance signal is "passed to a CPI", which lets this reach
+/// `ctx.cpi_traces` keys — the relevance signal is "passed to a CPI", which lets this reach
 /// accounts the parent's own logic never reads (so the generic load-bearing gate would skip them).
 /// For each forwarded account, replace it with a malformed version (wrong owner, then corrupted
 /// data) and replay from the pre-tx state. Oracle (per design): if the tx still SUCCEEDS *and*
@@ -2419,7 +2320,7 @@ impl MutationStrategy for ForwardedAccountValidationStrategy {
         let mut findings = Vec::new();
 
         for target in instruction_account_keys_ordered(ctx.instructions) {
-            if !ctx.forwarded_accounts.contains(&target) {
+            if !ctx.cpi_traces.contains_key(&target) {
                 continue;
             }
             let Some(original) = ctx.svm.get_account(&target) else {
@@ -2476,17 +2377,15 @@ impl MutationStrategy for ForwardedAccountValidationStrategy {
                     ctx.payer.pubkey(),
                 );
                 if changed_state {
+                    let oix = owning_instruction(ctx.instructions, &target);
                     findings.push(Finding {
-                        id: finding_id(
-                            "CC-13 forwarded-account",
-                            &ctx.instructions[0],
-                            &account_role(ctx, &target),
-                        ),
+                        id: finding_id("CC-13 forwarded-account", oix, &account_role(ctx, &target)),
                         message: format!(
-                            "[CC-13 forwarded-account] account {} forwarded into a downstream CPI was replaced with a malformed account, instr {}:{} still succeeded and changed state (forwarded account not validated before the CPI)",
+                            "[CC-13 forwarded-account] account {} forwarded into a downstream CPI was replaced with a malformed account, instr {}:{} still succeeded and changed state (forwarded account not validated before the CPI){}",
                             target,
-                            ctx.instructions[0].program_id,
-                            disc_hex(&ctx.instructions[0]),
+                            oix.program_id,
+                            disc_hex(oix),
+                            account_trace(ctx, &target),
                         ),
                     });
                     break;
@@ -2513,18 +2412,15 @@ impl MutationStrategy for SysvarSubstitutionStrategy {
             }
             let decoy = decoy_for(target);
             if sysvar_substitution_probe(ctx, target, decoy) {
+                let oix = owning_instruction(ctx.instructions, &target);
                 findings.push(Finding {
-                    id: finding_id(
-                        "CC-2 sysvar",
-                        &ctx.instructions[0],
-                        &account_role(ctx, &target),
-                    ),
+                    id: finding_id("CC-2 sysvar", oix, &account_role(ctx, &target)),
                     message: format!(
                         "[CC-2 sysvar] account {} substituted with decoy {} instr {}:{} still succeeded (missing sysvar identity check)",
                         target,
                         decoy,
-                        ctx.instructions[0].program_id,
-                        disc_hex(&ctx.instructions[0]),
+                        oix.program_id,
+                        disc_hex(oix),
                     ),
                 });
             }
@@ -2653,18 +2549,6 @@ fn collect_owner_candidates(
                 continue;
             };
             if account.executable || account.data.is_empty() {
-                continue;
-            }
-            // Reachability gate (FP-1): a loader-owned account is a deployed program; its
-            // `.owner` is not attacker-settable on mainnet, so an owner mutation that "still
-            // succeeds" is a false positive. This catches cloned program accounts that arrive
-            // with the `executable` flag unset (which the check above misses). Demote, don't
-            // emit — and keep it visible.
-            if is_loader_owned(&account.owner) {
-                crate::record_demoted_finding(
-                    &format!("CC-1 owner:{}", meta.pubkey),
-                    "CC-1: loader-owned program account — owner not attacker-settable",
-                );
                 continue;
             }
             candidates.push(OwnerCandidate {
@@ -3012,17 +2896,18 @@ fn send_probe_transaction(
     Ok(svm.send_transaction(tx))
 }
 
-/// Accounts the program forwarded into a downstream CPI during the baseline run — the CC-13
-/// targets. Every account referenced by an inner instruction (a CPI the program issued), resolved
-/// against the transaction message's account-key ordering (Solana's signer/writable order, the
-/// index space the inner `CompiledInstruction`s use — NOT first-seen instruction order), minus the
-/// CPI target program ids and well-known program/sysvar accounts. The strategy filters further
-/// (same-class candidates, parent-inert, etc.).
-fn forwarded_accounts_from_baseline(
+/// For each account the program forwarded into a downstream CPI during the baseline run (the CC-13
+/// targets), the ordered list of `(downstream program, stack_height)` of the inner instructions
+/// that reference it — the CPI path the account took. Account indices are resolved against the
+/// transaction message's account-key ordering (Solana's signer/writable order, the index space the
+/// inner `CompiledInstruction`s use — NOT first-seen instruction order), minus the CPI target
+/// program ids and well-known program/sysvar accounts. The map's keys are the forwarded-account
+/// set; the values drive the finding trace (see [`account_trace`]).
+fn cpi_forwarded_traces(
     inner: &solana_message::inner_instruction::InnerInstructionsList,
     instructions: &[Instruction],
     payer: &Pubkey,
-) -> FastHashSet<Pubkey> {
+) -> FastHashMap<Pubkey, Vec<(Pubkey, u8)>> {
     let message = Message::new(instructions, Some(payer));
     let keys = &message.account_keys;
     let key_at = |i: u8| keys.get(i as usize).copied();
@@ -3037,9 +2922,12 @@ fn forwarded_accounts_from_baseline(
         }
     }
 
-    let mut forwarded = FastHashSet::default();
+    let mut traces: FastHashMap<Pubkey, Vec<(Pubkey, u8)>> = FastHashMap::default();
     for group in inner {
         for ix in group {
+            let Some(program) = key_at(ix.instruction.program_id_index) else {
+                continue;
+            };
             for &account_index in &ix.instruction.accounts {
                 if let Some(key) = key_at(account_index) {
                     if program_ids.contains(&key)
@@ -3048,12 +2936,15 @@ fn forwarded_accounts_from_baseline(
                     {
                         continue;
                     }
-                    forwarded.insert(key);
+                    traces
+                        .entry(key)
+                        .or_default()
+                        .push((program, ix.stack_height));
                 }
             }
         }
     }
-    forwarded
+    traces
 }
 
 #[allow(deprecated)]
@@ -3147,6 +3038,80 @@ mod tests {
     }
 
     #[test]
+    fn keying_and_attribution_skip_compute_budget_prelude() {
+        use anchor_lang::solana_program::instruction::AccountMeta;
+        let real_program = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        // A ComputeBudget prelude (no account metas) prepended before the real instruction.
+        let compute_budget = Instruction {
+            program_id: COMPUTE_BUDGET_PROGRAM,
+            accounts: vec![],
+            data: vec![2, 0x40, 0x42, 0x0f, 0x00],
+        };
+        let real = Instruction {
+            program_id: real_program,
+            accounts: vec![
+                AccountMeta::new(target, false),
+                AccountMeta::new_readonly(other, false),
+            ],
+            data: vec![9, 9, 9, 9, 9, 9, 9, 9],
+        };
+        let instructions = vec![compute_budget.clone(), real];
+
+        // Keying uses the real instruction, not the ComputeBudget prelude (which would collapse the
+        // per-type probe cap across every real instruction).
+        assert_eq!(primary_instruction(&instructions).program_id, real_program);
+        // A finding's target is attributed to the instruction that actually passes the account.
+        assert_eq!(
+            owning_instruction(&instructions, &target).program_id,
+            real_program
+        );
+        // An account not in any instruction falls back to the primary instruction, not [0].
+        assert_eq!(
+            owning_instruction(&instructions, &Pubkey::new_unique()).program_id,
+            real_program
+        );
+        // All-ComputeBudget degenerates to instructions[0].
+        assert_eq!(
+            primary_instruction(&[compute_budget]).program_id,
+            COMPUTE_BUDGET_PROGRAM
+        );
+    }
+
+    #[test]
+    fn skip_instruction_excludes_by_program_and_discriminator() {
+        let prog = Pubkey::new_unique();
+        let ix = Instruction {
+            program_id: prog,
+            accounts: vec![],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let mut config = AccountMutationConfig::default();
+        assert!(!config.is_instruction_skipped(&ix));
+
+        config.skip_instruction(&ix);
+        assert!(config.is_instruction_skipped(&ix));
+
+        // Same instruction type with a different argument tail is still skipped (keyed on the
+        // discriminator, not the argument bytes).
+        let same_type_diff_args = Instruction {
+            program_id: prog,
+            accounts: vec![],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8, 99, 99],
+        };
+        assert!(config.is_instruction_skipped(&same_type_diff_args));
+
+        // A different instruction (different discriminator) is not skipped.
+        let other = Instruction {
+            program_id: prog,
+            accounts: vec![],
+            data: vec![9, 9, 9, 9, 9, 9, 9, 9],
+        };
+        assert!(!config.is_instruction_skipped(&other));
+    }
+
+    #[test]
     fn disc_prefix_hex_collapses_argument_tail_to_discriminator() {
         // A native (1-byte discriminator) instruction sent with different argument tails
         // (e.g. swap amount_in) must share one discriminator hex, so findings dedup instead of
@@ -3165,171 +3130,40 @@ mod tests {
     }
 
     #[test]
-    fn finding_id_keys_on_discriminator_role_not_arguments() {
+    fn finding_id_keys_on_class_and_instruction_not_role() {
         let prog = Pubkey::new_unique();
-        // Same instruction (data[0]=9), different argument tails, with a 1-byte discriminator
-        // truncation applied by hand (disc_prefix_hex) so this is registry-independent.
-        let role = "a3";
-        let id_a = format!(
-            "CC-1 owner:{prog}:{}:{role}",
-            disc_prefix_hex(&[9, 1, 2], 1)
+        let ix = Instruction {
+            program_id: prog,
+            accounts: vec![],
+            data: vec![9, 1, 2],
+        };
+        let id_a = finding_id("CC-1 owner", &ix, "a3");
+        // The mutated-account role is NOT part of the identity: the same class on a different account
+        // slot collapses to the same finding (so a class fires at most once per instruction).
+        assert_eq!(
+            id_a,
+            finding_id("CC-1 owner", &ix, "a4"),
+            "role must not fork the finding id"
         );
-        let id_b = format!(
-            "CC-1 owner:{prog}:{}:{role}",
-            disc_prefix_hex(&[9, 9, 9], 1)
+        // The CC-9.5 role+offset form (`a4@77`) likewise collapses — offset is not part of identity.
+        assert_eq!(
+            id_a,
+            finding_id("CC-1 owner", &ix, "a4@77"),
+            "field offset must not fork the finding id"
         );
-        assert_eq!(id_a, id_b, "argument tail must not fork the finding id");
-        // Different mutated account role on the same instruction stays a distinct finding.
-        let id_other_role = format!("CC-1 owner:{prog}:{}:a4", disc_prefix_hex(&[9, 1, 2], 1));
-        assert_ne!(id_a, id_other_role);
-        // finding_instruction_id strips class + role down to the coarse instruction identity.
+        // A different class on the same instruction IS a distinct finding.
+        assert_ne!(id_a, finding_id("CC-4 signer", &ix, "a3"));
+        // finding_instruction_id strips the class down to the coarse instruction identity.
         assert_eq!(
             finding_instruction_id(&id_a),
-            format!("account-mutation:{prog}:09")
+            format!("account-mutation:{prog}:{}", disc_hex(&ix))
         );
-        // And it still tolerates the legacy 3-part (no-role) form.
-        let legacy = format!("CC-1 owner:{prog}:09");
+        // And it still tolerates the legacy 4-part (with-role) form from older crashes.
+        let legacy = format!("CC-1 owner:{prog}:09:a3");
         assert_eq!(
             finding_instruction_id(&legacy),
             format!("account-mutation:{prog}:09")
         );
-    }
-
-    fn packed_token_account_with_delegate(
-        mint: Pubkey,
-        owner: Pubkey,
-        delegate: COption<Pubkey>,
-    ) -> Vec<u8> {
-        let mut data = vec![0; spl_token::state::Account::LEN];
-        spl_token::state::Account::pack(
-            spl_token::state::Account {
-                mint,
-                owner,
-                amount: 1,
-                delegate,
-                state: spl_token::state::AccountState::Initialized,
-                is_native: COption::None,
-                delegated_amount: 0,
-                close_authority: COption::None,
-            },
-            &mut data,
-        )
-        .unwrap();
-        data
-    }
-
-    #[test]
-    fn read_coption_tag_reads_le_discriminant() {
-        let mut data = vec![0u8; 8];
-        assert_eq!(read_coption_tag(&data, 0), Some(0));
-        data[0] = 1;
-        assert_eq!(read_coption_tag(&data, 0), Some(1));
-        assert_eq!(read_coption_tag(&data, 100), None); // out of range
-    }
-
-    #[test]
-    fn spl_authority_offsets_token_account_excludes_non_authority_windows() {
-        // FP-5: a token account with an empty delegate exposes ONLY the owner @ 32 as an
-        // authority. Offset 77 (the documented FP — inside the delegate COption payload + state
-        // byte) must NOT be a candidate, so a shared empty-delegate window cannot masquerade as
-        // a shared authority.
-        let acct = make_account(
-            spl_token::id(),
-            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 5),
-        );
-        let offsets = spl_authority_offsets(&acct).expect("SPL token account is a known layout");
-        assert_eq!(offsets, vec![32], "only owner is an authority when delegate is None");
-        assert!(!offsets.contains(&77), "offset 77 must never be a candidate authority field");
-    }
-
-    #[test]
-    fn spl_authority_offsets_includes_present_delegate() {
-        let acct = make_account(
-            spl_token::id(),
-            packed_token_account_with_delegate(
-                Pubkey::new_unique(),
-                on_curve_pubkey(),
-                COption::Some(Pubkey::new_unique()),
-            ),
-        );
-        let offsets = spl_authority_offsets(&acct).unwrap();
-        assert!(offsets.contains(&32), "owner is always an authority");
-        assert!(offsets.contains(&76), "a present delegate is a candidate authority");
-    }
-
-    #[test]
-    fn spl_authority_offsets_mint_includes_present_authorities_only() {
-        // Default packed mint has both authorities None -> no candidate offsets.
-        let none_mint = make_account(spl_token::id(), packed_mint(6));
-        assert_eq!(spl_authority_offsets(&none_mint), Some(vec![]));
-
-        let mut data = vec![0; spl_token::state::Mint::LEN];
-        spl_token::state::Mint::pack(
-            spl_token::state::Mint {
-                mint_authority: COption::Some(Pubkey::new_unique()),
-                supply: 0,
-                decimals: 6,
-                is_initialized: true,
-                freeze_authority: COption::None,
-            },
-            &mut data,
-        )
-        .unwrap();
-        let with_auth = make_account(spl_token::id(), data);
-        assert_eq!(
-            spl_authority_offsets(&with_auth),
-            Some(vec![4]),
-            "only the present mint_authority @ 4 is a candidate"
-        );
-    }
-
-    #[test]
-    fn cross_authority_scan_demotes_shared_empty_delegate_window() {
-        // Two SPL token accounts with different mint/owner/amount but both delegates empty: the
-        // only shared 32-byte window is the empty-delegate payload + state byte (offset 77).
-        let left = make_account(
-            spl_token::id(),
-            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 10_000),
-        );
-        let right = make_account(
-            spl_token::id(),
-            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 5_000),
-        );
-        let signers = FastHashSet::default();
-
-        // Canonical (authority-only) scan: owners differ -> no shared authority -> None.
-        let left_offsets = spl_authority_offsets(&left);
-        let right_offsets = spl_authority_offsets(&right);
-        let canonical_left = collect_window_pubkeys(&left, left_offsets.as_deref(), &signers);
-        assert_eq!(
-            find_shared_pubkey_offset(&right, right_offsets.as_deref(), &canonical_left),
-            None,
-            "owners differ, so there is no shared authority field"
-        );
-
-        // Layout-blind scan: it DOES find the shared empty-delegate/state window — this is the
-        // false positive the gate must demote.
-        let blanket_left = collect_window_pubkeys(&left, None, &signers);
-        let blanket = find_shared_pubkey_offset(&right, None, &blanket_left);
-        assert_eq!(
-            blanket,
-            Some(77),
-            "the layout-blind scan matches the shared empty-delegate window at offset 77"
-        );
-    }
-
-    #[test]
-    fn spl_authority_offsets_none_for_non_spl_account() {
-        // Unknown layout -> None -> caller fails open (scans every window). A program-owned
-        // state account is not narrowed by the SPL gate.
-        let acct = make_account(Pubkey::new_unique(), vec![7u8; 200]);
-        assert_eq!(spl_authority_offsets(&acct), None);
-        // Right length but wrong owner is still not SPL-shaped.
-        let wrong_owner = make_account(
-            Pubkey::new_unique(),
-            packed_token_account(Pubkey::new_unique(), on_curve_pubkey(), 1),
-        );
-        assert_eq!(spl_authority_offsets(&wrong_owner), None);
     }
 
     #[test]
@@ -3365,6 +3199,45 @@ mod tests {
             field_id
         );
         assert!(select_finding(&findings, Some("missing")).is_none());
+    }
+
+    #[test]
+    fn select_finding_surfaces_each_distinct_finding_once_across_probes() {
+        // Two genuinely different missing-check findings on the same instruction. Across the
+        // instruction's repeated probes, selection must surface each once (the first probe reports
+        // the higher-priority one; a later probe, with that id already seen, reports the other),
+        // and once both are seen it must report nothing rather than re-emit a duplicate.
+        let ix = Instruction {
+            program_id: Pubkey::new_unique(),
+            accounts: vec![],
+            data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let owner_id = finding_id("CC-1 owner", &ix, "a0");
+        let forwarded_id = finding_id("CC-13 forwarded-account", &ix, "a1");
+        let findings = vec![
+            Finding {
+                id: owner_id.clone(),
+                message: "owner".to_string(),
+            },
+            Finding {
+                id: forwarded_id.clone(),
+                message: "forwarded".to_string(),
+            },
+        ];
+
+        // Same-priority findings tie-break on order, so the first probe selects the first finding.
+        let first = select_finding(&findings, None).unwrap().id.clone();
+        assert_eq!(first, owner_id);
+        // The macro records this finding once it crashes; simulate that side effect.
+        assert!(crate::is_novel_mutation_finding(&first));
+
+        // The next probe of the same instruction now surfaces the *other* finding, not a repeat.
+        let second = select_finding(&findings, None).unwrap().id.clone();
+        assert_eq!(second, forwarded_id);
+        assert!(crate::is_novel_mutation_finding(&second));
+
+        // Both seen ⇒ nothing left to report (no duplicate crash).
+        assert!(select_finding(&findings, None).is_none());
     }
 
     #[test]
@@ -3424,7 +3297,10 @@ mod tests {
         let captured = probe_edge_capture_take().expect("active capture returns a set");
         assert_eq!(captured.len(), 2);
         assert!(captured.contains(&1) && captured.contains(&2));
-        assert!(!captured.contains(&99), "edges before begin must not be captured");
+        assert!(
+            !captured.contains(&99),
+            "edges before begin must not be captured"
+        );
         record_probe_edge(3); // after take -> inactive -> dropped
         assert!(
             probe_edge_capture_take().is_none(),
@@ -3471,12 +3347,25 @@ mod tests {
             stack_height: 2,
         }]];
 
-        let result = forwarded_accounts_from_baseline(&inner, &instructions, &payer);
-        assert!(result.contains(&forwarded), "forwarded account must be detected");
-        assert!(!result.contains(&clock), "sysvar must be excluded");
-        assert!(!result.contains(&system_program::ID), "system program excluded");
-        assert!(!result.contains(&cpi_program), "CPI target program id excluded");
-        assert!(!result.contains(&other), "a non-forwarded top-level meta is not flagged");
+        let result = cpi_forwarded_traces(&inner, &instructions, &payer);
+        assert_eq!(
+            result.get(&forwarded),
+            Some(&vec![(cpi_program, 2u8)]),
+            "forwarded account maps to its (downstream program, depth) trace"
+        );
+        assert!(!result.contains_key(&clock), "sysvar must be excluded");
+        assert!(
+            !result.contains_key(&system_program::ID),
+            "system program excluded"
+        );
+        assert!(
+            !result.contains_key(&cpi_program),
+            "CPI target program id excluded"
+        );
+        assert!(
+            !result.contains_key(&other),
+            "a non-forwarded top-level meta is not flagged"
+        );
         assert_eq!(result.len(), 1);
     }
 

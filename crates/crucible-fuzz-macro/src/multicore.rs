@@ -703,8 +703,10 @@ pub fn multicore_mode(
                     #ctx_swap_back
                     // fixture is dropped here (cheap: only empty SVM + small fields)
 
-                    // On panic: resume unwinding so the default panic handler prints
-                    // the message with file/line, then the process exits naturally
+                    // On panic: resume unwinding. As in single-core, a harness panic is handled by
+                    // our panic hook (installed before the executor via `arm_harness_panic_handler`)
+                    // which LibAFL chains as its `old_hook` and calls before libc::_exit — that hook
+                    // alerts and stops the run, so this branch does not run for harness panics.
                     if let Err(__panic_payload) = __panic_result {
                         std::panic::resume_unwind(__panic_payload);
                     }
@@ -749,6 +751,26 @@ pub fn multicore_mode(
 
                 let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
                 let timeout = Duration::from_millis(10000);
+
+                // Install our panic hook BEFORE the executor so LibAFL chains it as `old_hook` and
+                // runs it first. A bare panic in the harness/invariant is a HARNESS BUG: instead of
+                // letting LibAFL save it as an objective and restart this worker (which restart-loops
+                // and inflates the crash counter), we alert the author, signal all workers to stop
+                // (the stop-signal file), and exit. The `false` branch passes the framework's own
+                // shutdown panics through to the worker's existing hook (installed above).
+                crucible_test_context::arm_harness_panic_handler(Some(
+                    stop_signal_for_harness.to_string_lossy().to_string(),
+                ));
+                {
+                    let __prev_hook = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(move |info| {
+                        if crucible_test_context::harness_panic_alert(&info.to_string()) {
+                            std::process::exit(70);
+                        }
+                        __prev_hook(info);
+                    }));
+                }
+
                 let mut executor = InProcessExecutor::with_timeout(
                     &mut harness_wrapper,
                     tuple_list!(edges_observer, time_observer),

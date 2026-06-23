@@ -29,10 +29,6 @@ const MINT_DECIMALS: u8 = 6;
 const INITIAL_RECIPIENT_BALANCE: u64 = 1_000_000;
 const INITIAL_VAULT_BALANCE: u64 = 1_000_000_000;
 
-/// A BPF loader program id — owner of a deployed program account. Used to model a cloned
-/// program account (executable flag unset) for the FP-1 reachability gate.
-const BPF_LOADER_2: Pubkey = solana_pubkey::pubkey!("BPFLoader2111111111111111111111111111111111");
-
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -94,7 +90,6 @@ struct Harness {
 
 fn harness() -> Harness {
     let _ = crucible_test_context::take_violation();
-    let _ = crucible_test_context::take_demoted_findings();
     crucible_test_context::reset_probed_account_mutations();
 
     let mut ctx = TestContext::new();
@@ -160,19 +155,6 @@ fn expect_no_finding() {
         !crucible_test_context::has_violation(),
         "unexpected finding: {:?}",
         crucible_test_context::take_violation()
-    );
-}
-
-/// Assert a deterministic FP gate demoted a would-be finding with a reason containing
-/// `reason_substr` (drains the demotion set). Used to prove a suppression was *visible*, not
-/// silently dropped.
-fn expect_demotion(reason_substr: &str) {
-    let demotions = crucible_test_context::take_demoted_findings();
-    assert!(
-        demotions
-            .iter()
-            .any(|(_, reason)| reason.contains(reason_substr)),
-        "expected a demotion whose reason contains {reason_substr:?}, got: {demotions:?}"
     );
 }
 
@@ -2198,6 +2180,39 @@ fn no_finding_when_sysvar_identity_checked() {
     expect_no_finding();
 }
 
+// ---- Per-instruction skip: .skip_account_mutation() excludes an instruction from probing ----
+
+/// `ClaimAirdrop` normally fires `[CC-1 owner]` (see `flags_missing_owner_check_on_program_config`).
+/// Calling `.skip_account_mutation()` excludes that instruction type from probing entirely, so no
+/// finding is produced.
+#[test]
+#[ignore = "requires cargo-build-sbf / Solana platform tools"]
+fn skip_account_mutation_excludes_instruction_from_probes() {
+    let mut h = harness();
+    let config = Keypair::new().pubkey();
+    create_data_account(
+        &mut h.ctx,
+        config,
+        h.program_id,
+        &CLAIM_AMOUNT.to_le_bytes(),
+    );
+
+    h.ctx
+        .program(h.program_id)
+        .call(owner_mutation_airdrop::instruction::ClaimAirdrop {})
+        .accounts(owner_mutation_airdrop::accounts::ClaimAirdrop {
+            recipient: h.recipient.pubkey(),
+            config,
+            vault: h.vault,
+        })
+        .skip_account_mutation()
+        .signers(&[&h.fee_payer, &h.recipient])
+        .send()
+        .unwrap();
+
+    expect_no_finding();
+}
+
 // ---- CC-13: account forwarded into a downstream CPI without validation ----
 
 /// `forward_to_cpi_no_check` passes `dest` straight into a system-transfer CPI without validating
@@ -2531,91 +2546,5 @@ fn no_finding_for_cc14_when_collateral_identical() {
         .send()
         .unwrap();
 
-    expect_no_finding();
-}
-
-// ---- FP-1 reachability gate: loader-owned (program) account ----
-
-#[test]
-#[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_for_loader_owned_program_account() {
-    register_config_schema();
-    let mut h = harness();
-    let program_account = Keypair::new().pubkey();
-    // A (cloned) program account: owner is a BPF loader, data read without an owner check, and
-    // its executable flag is unset (as cloned accounts often are). The CC-1 owner-mutation gate
-    // must skip it — a program's owner is not attacker-settable — and record a visible demotion.
-    create_data_account(
-        &mut h.ctx,
-        program_account,
-        BPF_LOADER_2,
-        &CLAIM_AMOUNT.to_le_bytes(),
-    );
-
-    h.ctx
-        .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLoaderOwnedProgramAccountNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLoaderOwned {
-            recipient: h.recipient.pubkey(),
-            program_account,
-            vault: h.vault,
-        })
-        .signers(&[&h.fee_payer, &h.recipient])
-        .send()
-        .unwrap();
-
-    expect_no_finding();
-    expect_demotion("loader-owned");
-}
-
-// ---- FP-5 field-semantics gate: SPL non-authority window (offset 77) ----
-
-#[test]
-#[ignore = "requires cargo-build-sbf / Solana platform tools"]
-fn no_finding_for_spl_token_accounts_sharing_only_empty_delegate() {
-    register_config_schema();
-    let mut h = harness();
-    let mint_a = Keypair::new().pubkey();
-    let mint_b = Keypair::new().pubkey();
-    seed_mint(&mut h.ctx, mint_a);
-    seed_mint(&mut h.ctx, mint_b);
-    let token_a = Keypair::new().pubkey();
-    let token_b = Keypair::new().pubkey();
-    // Different mints, owners, and amounts; both delegates empty. The only 32-byte window the two
-    // share is the empty-delegate COption payload + state byte (offset 77) — NOT an authority.
-    h.ctx
-        .create_token_account()
-        .pubkey(token_a)
-        .mint(mint_a)
-        .token_owner(Pubkey::new_unique())
-        .amount(CLAIM_AMOUNT)
-        .create()
-        .unwrap();
-    h.ctx
-        .create_token_account()
-        .pubkey(token_b)
-        .mint(mint_b)
-        .token_owner(Pubkey::new_unique())
-        .amount(STATE_AMOUNT)
-        .create()
-        .unwrap();
-
-    h.ctx
-        .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::TransferTwoTokenAccountsOffset77NoAuthority {})
-        .accounts(owner_mutation_airdrop::accounts::TransferTwoTokenAccounts {
-            recipient: h.recipient.pubkey(),
-            token_a,
-            token_b,
-            vault: h.vault,
-        })
-        .signers(&[&h.fee_payer, &h.recipient])
-        .send()
-        .unwrap();
-
-    // Integration smoke: the engine must not emit a CC-9.5 cross-authority finding from the
-    // shared empty-delegate window. The deterministic proof of the gate logic (blanket scan
-    // matches offset 77, canonical authority-only scan does not) lives in the unit test
-    // `account_mutation::tests::cross_authority_scan_demotes_shared_empty_delegate_window`.
     expect_no_finding();
 }

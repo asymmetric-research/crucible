@@ -12,6 +12,7 @@ pub struct ProgramBuilder<'a> {
     pub(crate) instruction: Instruction,
     pub(crate) signers: Vec<Keypair>,
     pub(crate) fee_payer: Option<Keypair>,
+    pub(crate) skip_mutation: bool,
 }
 
 impl ProgramBuilder<'_> {
@@ -55,6 +56,14 @@ impl ProgramBuilder<'_> {
         self
     }
 
+    /// Exclude this instruction type from `--mutate-accounts` probing (blanket: all constraint
+    /// classes). Use for an instruction a harness author knows only produces false positives.
+    /// Registers the instruction type, so every send of it (including via `send_batch`) is skipped.
+    pub fn skip_account_mutation(mut self) -> Self {
+        self.skip_mutation = true;
+        self
+    }
+
     pub fn send(self) -> Result<TxOutcome> {
         // Resolve fee payer: explicit > first signer > Pubkey::default (for dirty tracking)
         let fee_payer_pubkey = self
@@ -86,6 +95,12 @@ impl ProgramBuilder<'_> {
         let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
+
+        // Harness-author opt-out: register this instruction type as skipped so the probe (and all
+        // future sends, incl. send_batch) excludes it.
+        if self.skip_mutation {
+            self.ctx.skip_account_mutation_for(&self.instruction);
+        }
 
         // Account-mutation probe runs on a cloned SVM and never replaces the real outcome.
         self.ctx

@@ -1471,4 +1471,35 @@ mod tests {
             "unexpected violation: {violation}"
         );
     }
+
+    /// `.skip_account_mutation()` excludes an instruction from probing: `claim_airdrop` normally
+    /// fires `[CC-1 owner]`, but with the flag set no finding is produced.
+    #[test]
+    fn skip_account_mutation_suppresses_a_findings_instruction() {
+        let mut fixture = OwnerMutationAirdropFixture::setup();
+        fixture.ctx.enable_account_mutation();
+        crucible_test_context::reset_probed_account_mutations();
+        let _ = crucible_test_context::take_violation();
+
+        let ok = fixture
+            .ctx
+            .program(fixture.program_id)
+            .call(instruction::ClaimAirdrop {})
+            .accounts(accounts::ClaimAirdrop {
+                recipient: fixture.recipient.pubkey(),
+                config: fixture.program_config,
+                vault: fixture.vault,
+            })
+            .skip_account_mutation()
+            .signers(&[&*fixture.fee_payer, &*fixture.recipient])
+            .send()
+            .map(|o| o.is_success())
+            .unwrap_or(false);
+        assert!(ok, "claim_airdrop should succeed");
+        assert!(
+            !crucible_test_context::has_violation(),
+            "a skipped instruction must not be probed: {:?}",
+            crucible_test_context::take_violation()
+        );
+    }
 }

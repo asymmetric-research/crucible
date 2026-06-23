@@ -994,41 +994,6 @@ pub mod owner_mutation_airdrop {
     }
 
     // ---- FP-1 reachability: loader-owned (program) account, owner not attacker-settable ----
-
-    /// Reads a loader-owned account's data without an owner check. Shaped like the CC-1 bug, but
-    /// the account is a *program* (owner is a BPF loader). The owner-mutation engine's
-    /// reachability gate must skip it: a program's owner cannot be changed on mainnet, so an
-    /// owner mutation that "still succeeds" is a false positive. (Covers a cloned program account
-    /// that arrives with its `executable` flag unset, which the plain `executable` filter misses.)
-    pub fn read_loader_owned_program_account_no_check(
-        ctx: Context<ReadLoaderOwned>,
-    ) -> Result<()> {
-        let amount = read_u64(&ctx.accounts.program_account)?;
-        payout(
-            &ctx.accounts.vault.to_account_info(),
-            &ctx.accounts.recipient.to_account_info(),
-            amount,
-        )
-    }
-
-    // ---- FP-5 field-semantics: SPL non-authority window must not look like a shared authority --
-
-    /// Reads two SPL token accounts (making both load-bearing) but enforces no cross-authority
-    /// relationship between them. With both delegates empty, the only 32-byte window the two
-    /// share lands inside the delegate COption payload + state byte (offset 77) — a non-authority
-    /// region. The CC-9.5 cross-authority engine must NOT mistake that shared window for a shared
-    /// signing authority and report a finding.
-    pub fn transfer_two_token_accounts_offset77_no_authority(
-        ctx: Context<TransferTwoTokenAccounts>,
-    ) -> Result<()> {
-        let (_mint_a, _amount_a) = read_token_account_data(&ctx.accounts.token_a)?;
-        let (_mint_b, _amount_b) = read_token_account_data(&ctx.accounts.token_b)?;
-        payout(
-            &ctx.accounts.vault.to_account_info(),
-            &ctx.accounts.recipient.to_account_info(),
-            1,
-        )
-    }
 }
 
 fn read_u64(account: &UncheckedAccount) -> Result<u64> {
@@ -1740,30 +1705,6 @@ pub struct ReadClock<'info> {
     pub recipient: Signer<'info>,
     /// CHECK: clock sysvar; its key is unchecked in the no-check variant.
     pub clock: UncheckedAccount<'info>,
-    /// CHECK: program-owned vault.
-    #[account(mut)]
-    pub vault: UncheckedAccount<'info>,
-}
-
-#[derive(Accounts)]
-pub struct ReadLoaderOwned<'info> {
-    #[account(mut)]
-    pub recipient: Signer<'info>,
-    /// CHECK: loader-owned (program) account, read without an owner check.
-    pub program_account: UncheckedAccount<'info>,
-    /// CHECK: program-owned vault.
-    #[account(mut)]
-    pub vault: UncheckedAccount<'info>,
-}
-
-#[derive(Accounts)]
-pub struct TransferTwoTokenAccounts<'info> {
-    #[account(mut)]
-    pub recipient: Signer<'info>,
-    /// CHECK: SPL token-account-shaped; read for mint/amount.
-    pub token_a: UncheckedAccount<'info>,
-    /// CHECK: SPL token-account-shaped; read for mint/amount.
-    pub token_b: UncheckedAccount<'info>,
     /// CHECK: program-owned vault.
     #[account(mut)]
     pub vault: UncheckedAccount<'info>,

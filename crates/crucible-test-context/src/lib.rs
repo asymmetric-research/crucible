@@ -140,11 +140,6 @@ thread_local! {
     // sequences that reach the same probed instruction collapse to one finding.
     static SEEN_MUTATION_FINDINGS: RefCell<std::collections::HashSet<String>> =
         RefCell::new(std::collections::HashSet::new());
-    // Account-mutation findings the deterministic FP gates demoted (suppressed as a probable
-    // false positive) instead of emitting as a crash. Deduped by id, value is the reason.
-    // Never deleted silently — surfaced via the run summary / stderr (see fp_analysis.md §5-D).
-    static DEMOTED_FINDINGS: RefCell<std::collections::HashMap<String, String>> =
-        RefCell::new(std::collections::HashMap::new());
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -1077,34 +1072,18 @@ pub fn is_novel_mutation_finding(id: &str) -> bool {
     SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow_mut().insert(id.to_string()))
 }
 
+/// Whether an account-mutation finding identity has already been reported this run, without
+/// recording it (peek, unlike [`is_novel_mutation_finding`]). The probe selector consults this so
+/// that across the repeated probes of one instruction it surfaces each *distinct* finding once,
+/// rather than letting the single highest-priority finding mask the others (it would be reported
+/// on the first probe and then dedup-suppressed on every later probe, hiding the rest).
+pub fn mutation_finding_seen(id: &str) -> bool {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().contains(id))
+}
+
 /// Number of distinct account-mutation findings reported this run.
 pub fn seen_mutation_finding_count() -> usize {
     SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().len())
-}
-
-/// Record a finding the deterministic FP gates demoted (suppressed as a probable false
-/// positive) instead of emitting it as a crash. Deduped by `id`. On the first time an id is
-/// seen this run, the demotion is echoed to stderr so suppressions stay visible — they are
-/// never silently deleted (see `~/Desktop/crucible-plan.md` §5-D). The reason explains which
-/// deterministic gate fired (loader-owned program account, SPL non-authority window, ...).
-pub(crate) fn record_demoted_finding(id: &str, reason: &str) {
-    DEMOTED_FINDINGS.with(|d| {
-        let mut guard = d.borrow_mut();
-        if !guard.contains_key(id) {
-            guard.insert(id.to_string(), reason.to_string());
-            eprintln!("[FUZZ][demoted] {id} — {reason}");
-        }
-    });
-}
-
-/// Number of distinct findings demoted by the deterministic FP gates this run (per thread).
-pub fn demoted_finding_count() -> usize {
-    DEMOTED_FINDINGS.with(|d| d.borrow().len())
-}
-
-/// Drain the demoted findings as `(id, reason)` pairs (used by tests and the run summary).
-pub fn take_demoted_findings() -> Vec<(String, String)> {
-    DEMOTED_FINDINGS.with(|d| d.borrow_mut().drain().collect())
 }
 
 /// Restrict replay/tmin to the original account-mutation finding identity.
@@ -1152,6 +1131,62 @@ pub fn take_violation() -> Option<String> {
 /// Check if a violation has been recorded (without consuming it)
 pub fn has_violation() -> bool {
     VIOLATION.with(|v| v.borrow().is_some())
+}
+
+// Harness-panic handling: a bare panic in the harness/invariant is a HARNESS BUG, not a finding.
+//
+// A panic raised by a raw `assert!`/`unwrap()`/arithmetic overflow does NOT reach the harness's
+// `catch_unwind`/`take_violation` path: LibAFL's InProcessExecutor installs a panic hook that, at
+// panic time, saves the input to its hidden solutions corpus, bumps the objective counter, and
+// calls `libc::_exit` — unwinding never returns to the harness. That is wrong twice over: such a
+// panic is a bug in the *test code*, not a discovery about the program, and silently saving it as a
+// crash (and, in multi-core, restart-looping on it) buries a harness bug as a phantom finding.
+//
+// Proper invariant violations go through `fuzz_assert!`/`record_violation` (those stay real
+// crashes). Anything that bare-panics we treat as a fatal harness bug: alert loudly and stop the
+// run so the author fixes it — no crash file, no objective recorded.
+//
+// Mechanism: LibAFL's hook calls the previous hook (`old_hook(panic_info)`) FIRST, before `_exit`.
+// So the harness installs its hook BEFORE creating the executor; LibAFL chains it as `old_hook` and
+// runs it first. Our hook calls [`harness_panic_alert`]; if that returns `true` (a real harness
+// panic) the harness `std::process::exit`s immediately — before LibAFL can save/count it.
+thread_local! {
+    /// Path to the multi-core stop-signal file, so a panic in one worker halts the whole run.
+    /// `None` in single-core (the panic exits the only process).
+    static HARNESS_PANIC_STOP_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Arm harness-panic handling for this worker. Call once, before the LibAFL executor is created
+/// (so LibAFL chains our hook). `stop_signal_path` is the multi-core stop-signal file (or `None`).
+pub fn arm_harness_panic_handler(stop_signal_path: Option<String>) {
+    HARNESS_PANIC_STOP_PATH.with(|p| *p.borrow_mut() = stop_signal_path);
+}
+
+/// Report a harness panic. Called from the harness's panic hook with the formatted panic message
+/// (location + payload). Returns `true` when this is a genuine harness panic the caller should stop
+/// on (after printing a prominent alert and signaling other workers to stop); returns `false` for
+/// the framework's own intentional shutdown panics (stop-signal / timeout), which must pass through
+/// to the normal shutdown path untouched.
+pub fn harness_panic_alert(message: &str) -> bool {
+    // The fuzzer stops workers by panicking with these messages — not harness bugs; ignore them.
+    if message.contains("Stop signal") || message.contains("Timeout reached") {
+        return false;
+    }
+    let summary = message.replace('\n', " ");
+    eprintln!("\n[HARNESS PANIC] The harness/invariant code panicked: {summary}");
+    eprintln!(
+        "[HARNESS PANIC] This is a bug in the harness, not a finding about the program. \
+         Express invariant checks with `fuzz_assert!`/`record_violation` (which become crashes); \
+         a bare panic/assert!/unwrap()/overflow is treated as a fatal harness bug. Stopping the run."
+    );
+    print_action_sequence();
+    // Multi-core: signal all workers to stop so the run halts instead of restart-looping.
+    HARNESS_PANIC_STOP_PATH.with(|p| {
+        if let Some(path) = p.borrow().as_ref() {
+            let _ = std::fs::write(path, b"stop");
+        }
+    });
+    true
 }
 
 /// Assert a condition is true
@@ -1959,6 +1994,15 @@ impl TestContext {
         self
     }
 
+    /// Exclude an instruction type from `--mutate-accounts` probing (blanket: all constraint
+    /// classes). Keyed by the instruction's `(program, discriminator)`, so every send of it —
+    /// including via `send_batch` — is skipped. Use for an instruction a harness author knows only
+    /// produces false positives. The per-call builder form is `…call(ix).skip_account_mutation()`.
+    pub fn skip_account_mutation_for(&mut self, ix: &Instruction) -> &mut Self {
+        self.account_mutation.skip_instruction(ix);
+        self
+    }
+
     pub(crate) fn maybe_probe_account_mutation(
         &self,
         instructions: &[Instruction],
@@ -2457,6 +2501,7 @@ impl TestContext {
             instruction,
             signers: vec![],
             fee_payer: None,
+            skip_mutation: false,
         }
     }
 
@@ -2471,6 +2516,7 @@ impl TestContext {
             },
             signers: vec![],
             fee_payer: None, // Use first signer by default
+            skip_mutation: false,
         }
     }
 
@@ -3936,6 +3982,38 @@ mod tests {
         // A different constraint class on the same instruction is distinct.
         assert!(is_novel_mutation_finding("CC-4 signer:Program:abc"));
         assert!(seen_mutation_finding_count() >= 2);
+    }
+
+    #[test]
+    fn harness_panic_alert_signals_stop_and_ignores_shutdown_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = dir.path().join("STOP");
+        arm_harness_panic_handler(Some(stop.to_str().unwrap().to_string()));
+
+        // A genuine harness panic ⇒ handled (caller stops) and the stop signal is written.
+        assert!(harness_panic_alert(
+            "panicked at src/foo.rs:1:1:\nattempt to subtract with overflow"
+        ));
+        assert!(
+            stop.exists(),
+            "a harness panic must signal other workers to stop"
+        );
+        // It must NOT write any crash artifact — a harness bug is not a finding.
+        let crash_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("crash_"))
+            .collect();
+        assert!(
+            crash_files.is_empty(),
+            "harness panic must not write a crash file"
+        );
+
+        // The framework's intentional shutdown panics are not harness bugs ⇒ pass through.
+        assert!(!harness_panic_alert("Stop signal received"));
+        assert!(!harness_panic_alert("Timeout reached, stopping"));
+
+        arm_harness_panic_handler(None);
     }
 
     // =========================================================================

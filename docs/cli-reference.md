@@ -205,7 +205,9 @@ replayed, and minimized with the usual `crucible show` and `crucible tmin` flows
 > unaffected.
 
 See [Constraint-Check Engine](constraint-check-engine.md) for the current probe
-table, replay behavior, crash-corpus notes, and common false positives.
+table, replay behavior, crash-corpus notes, common false positives, and how to
+exclude a known-false-positive instruction from probing via
+`.skip_account_mutation()`.
 
 ```bash
 # Find missing-check bugs while fuzzing

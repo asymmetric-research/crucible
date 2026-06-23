@@ -1173,6 +1173,96 @@ mod tests {
         );
     }
 
+    // ── Panic capture: panics become canonical crashes (not just LibAFL objectives) ──
+
+    #[test]
+    fn singlecore_mode_alerts_and_stops_on_harness_panic() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        // A bare harness panic is alerted-and-stopped via our panic hook (LibAFL chains it before
+        // its own objective save / _exit), not saved as a crash. The hook must be armed and
+        // installed before the executor, and must exit on a genuine harness panic.
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "should arm harness-panic handling before the executor"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "panic hook should alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "panic hook should stop the run on a genuine harness panic"
+        );
+        // It must be installed before InProcessExecutor is created (so LibAFL chains it).
+        let arm_pos = output
+            .find("arm_harness_panic_handler")
+            .expect("arm_harness_panic_handler present");
+        let exec_pos = output
+            .find("InProcessExecutor")
+            .expect("InProcessExecutor present");
+        assert!(
+            arm_pos < exec_pos,
+            "panic hook must be installed before the InProcessExecutor is created"
+        );
+    }
+
+    #[test]
+    fn multicore_mode_alerts_and_stops_on_harness_panic() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "should arm harness-panic handling before the executor"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "panic hook should alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "panic hook should stop the run on a genuine harness panic"
+        );
+        let arm_pos = output
+            .find("arm_harness_panic_handler")
+            .expect("arm_harness_panic_handler present");
+        let exec_pos = output
+            .find("InProcessExecutor")
+            .expect("InProcessExecutor present");
+        assert!(
+            arm_pos < exec_pos,
+            "panic hook must be installed before the InProcessExecutor is created"
+        );
+    }
+
     // ── C1: Multicore % 64 batch flush ─────────────────────────────────
 
     #[test]
