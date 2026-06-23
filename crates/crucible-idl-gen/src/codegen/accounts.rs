@@ -140,7 +140,9 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
                     // Anchor 0.30+ resolves optional accounts positionally: an
                     // absent optional must still occupy its slot, passed as the
                     // program ID (non-signer, non-writable). Omitting it would
-                    // shift every later account's position.
+                    // shift every later account's position. Mirrors anchor's
+                    // to_account_metas:
+                    // https://github.com/otter-sec/anchor/blob/4ca8e91a24c543bdd122f01f39b575bbd6f16cc3/lang/syn/src/codegen/accounts/to_account_metas.rs#L29
                     quote! {
                         if let Some(key) = &self.#field_name {
                             account_metas.push(AccountMeta {
@@ -1014,13 +1016,22 @@ mod tests {
         let meta_body = &generated[meta_fn_start..];
         let pushes: Vec<&str> = meta_body.split("account_metas . push").skip(1).collect();
 
-        // plain, vault, optional_reserve (if + else placeholder), rent (fixed)
-        // = 5 pushes
+        // plain, vault, optional_reserve (if-let Some + else placeholder),
+        // rent (fixed) = 5 push *statements* in the generated source. The
+        // optional account emits two pushes (only one fires at runtime).
         assert_eq!(
             pushes.len(),
             5,
-            "should have 5 account pushes, got {}",
+            "should have 5 account push statements, got {}",
             pushes.len()
+        );
+
+        // optional_reserve's `else` arm (index 3) should fall back to the
+        // program ID as a non-signer, non-writable placeholder.
+        assert!(
+            pushes[3].contains("pubkey : super :: ID"),
+            "absent optional account should use program ID placeholder, got: {}",
+            pushes[3]
         );
 
         // vault (index 1) should be writable, not signer
