@@ -58,7 +58,7 @@ pub fn multicore_mode(
             // Uses LibAFL Launcher with fork() and LLMP for parallel fuzzing
             use std::collections::HashSet;
             use libafl_bolts::shmem::{ShMem, ShMemProvider, StdShMemProvider};
-            use libafl_bolts::core_affinity::Cores;
+            use libafl_bolts::core_affinity::{Cores, get_core_ids};
             use libafl::events::{EventConfig, Launcher, ClientDescription};
             use libafl::monitors::MultiMonitor;
             use libafl::Error as LibAflError;
@@ -799,7 +799,26 @@ pub fn multicore_mode(
             };
 
             // Build and launch the multi-core fuzzer
-            let cores = Cores::from((0..num_cores).collect::<Vec<_>>());
+            //
+            // Pin to cores this process can actually be scheduled on (respects
+            // sched_getaffinity / cgroup cpuset), not raw host CPU indices 0..N.
+            // Hardcoding 0..N here means every concurrent instance of the harness
+            // on a shared host (e.g. multiple containers with a CPU quota/shares
+            // limit but no cpuset) picks the identical physical cores, turning
+            // "N cores each" into severe cross-instance contention instead of
+            // parallelism. Querying available cores makes this a no-op wherever
+            // the process is unconstrained (the common case), and correct
+            // wherever it's cpuset-restricted.
+            let available_cores = get_core_ids()
+                .unwrap_or_else(|e| panic!("[FUZZ] Failed to query available CPU cores: {}", e));
+            if available_cores.len() < num_cores {
+                eprintln!(
+                    "[FUZZ] Warning: FUZZ_CORES={} requested but only {} core(s) are schedulable; using {}.",
+                    num_cores, available_cores.len(), available_cores.len()
+                );
+            }
+            let selected: Vec<usize> = available_cores.into_iter().take(num_cores).map(|c| c.0).collect();
+            let cores = Cores::from(selected);
 
             // Set up panic hook for Launcher to suppress expected shutdown panics
             let default_hook = std::panic::take_hook();
