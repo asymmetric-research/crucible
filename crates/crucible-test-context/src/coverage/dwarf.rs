@@ -12,6 +12,18 @@ pub struct SourceLocation {
     pub line: u32,
 }
 
+/// Optional on-disk root for resolving relative DWARF file paths, read from the
+/// explicit `FUZZ_SOURCE_ROOT` env var.
+///
+/// This is intentionally explicit. It must NOT be inferred from `FUZZ_SYMBOLS`
+/// (which the earlier implementation did by splitting at "/target/"): a symbols
+/// binary staged under any `.../target/...` path — e.g. a fuzzcorp bundle at
+/// `<bundle>/target/deploy/prog.debug.so` — would yield the wrong root and corrupt
+/// source-path resolution, producing an LCOV with zero resolvable source files.
+fn coverage_source_root() -> Option<String> {
+    std::env::var("FUZZ_SOURCE_ROOT").ok()
+}
+
 /// Pre-computed PC-to-source mapping, built once from a debug binary.
 ///
 /// All PCs are eagerly resolved at init time to avoid lifetime issues
@@ -68,11 +80,21 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
     let dwarf = gimli::Dwarf::load(&load_section).ok()?;
     let context = addr2line::Context::from_dwarf(dwarf).ok()?;
 
-    // Infer workspace root from FUZZ_SYMBOLS for resolving relative DWARF paths.
-    // e.g. "/home/user/project/target/sbpf-.../release/prog.so" → "/home/user/project"
-    let source_root: Option<String> = std::env::var("FUZZ_SYMBOLS")
-        .ok()
-        .and_then(|p| p.find("/target/").map(|idx| p[..idx].to_string()));
+    // Optional source root for resolving relative DWARF paths to on-disk files.
+    // This is a convenience for the local `crucible run --coverage` + genhtml flow,
+    // opt-in via the FUZZ_SOURCE_ROOT env var.
+    //
+    // It is deliberately NOT inferred from the FUZZ_SYMBOLS path. The previous code
+    // derived it by splitting FUZZ_SYMBOLS at "/target/", which is a latent trap:
+    // whenever the symbols binary is staged under any ".../target/..." path (e.g. a
+    // fuzzcorp bundle at `<bundle>/target/deploy/prog.debug.so`), the split yields
+    // the bundle root instead of the build workspace and corrupts path resolution —
+    // producing an LCOV with zero resolvable source files even though the DWARF is
+    // fully intact (which then fails the downstream lcov→fcov conversion). The
+    // emitted path must depend only on the DWARF contents, never on where the
+    // symbols file happens to sit; consumers remap the build prefix to wherever the
+    // sources are actually staged.
+    let source_root = coverage_source_root();
 
     // Resolve a DWARF file path to an absolute path.
     // Tries canonicalize first (works if CWD matches), then prepends source_root.
@@ -229,4 +251,29 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
         fn_map,
         executable_lines,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coverage_source_root;
+
+    /// Regression: the coverage source root must come only from the explicit
+    /// FUZZ_SOURCE_ROOT env var, never inferred from FUZZ_SYMBOLS. Inferring it by
+    /// splitting FUZZ_SYMBOLS at "/target/" corrupted source-path resolution whenever
+    /// the symbols binary was staged under a ".../target/..." path (e.g. a bundle),
+    /// yielding an LCOV with zero resolvable source files.
+    #[test]
+    fn source_root_is_explicit_not_inferred_from_symbols() {
+        // A FUZZ_SYMBOLS path under ".../target/..." must have no effect.
+        std::env::remove_var("FUZZ_SOURCE_ROOT");
+        std::env::set_var("FUZZ_SYMBOLS", "/some/bundle/target/deploy/prog.debug.so");
+        assert_eq!(coverage_source_root(), None);
+
+        // Only the explicit env var is honored.
+        std::env::set_var("FUZZ_SOURCE_ROOT", "/explicit/root");
+        assert_eq!(coverage_source_root(), Some("/explicit/root".to_string()));
+
+        std::env::remove_var("FUZZ_SOURCE_ROOT");
+        std::env::remove_var("FUZZ_SYMBOLS");
+    }
 }
