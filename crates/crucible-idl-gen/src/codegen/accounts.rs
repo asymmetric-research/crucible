@@ -145,6 +145,16 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
                                 is_writable: #is_writable,
                             });
                         }
+
+                        // If it's an optional type that is not included, then provide the PROGRAM ID as the account key. 
+                        // https://github.com/otter-sec/anchor/blob/4ca8e91a24c543bdd122f01f39b575bbd6f16cc3/lang/syn/src/codegen/accounts/to_account_metas.rs#L29
+                        else {
+                            account_metas.push(AccountMeta {
+                                pubkey: ID,
+                                is_signer: false,
+                                is_writable: false,
+                            });
+                        }
                     }
                 } else {
                     quote! {
@@ -930,12 +940,22 @@ mod tests {
         let meta_body = &generated[meta_fn_start..];
         let pushes: Vec<&str> = meta_body.split("account_metas . push").skip(1).collect();
 
-        // plain, vault, optional_reserve (if-let), rent (fixed) = 4 pushes
+        // plain, vault, optional_reserve (if-let Some + else placeholder),
+        // rent (fixed) = 5 push *statements* in the generated source. The
+        // optional account emits two pushes (only one fires at runtime).
         assert_eq!(
             pushes.len(),
-            4,
-            "should have 4 account pushes, got {}",
+            5,
+            "should have 5 account push statements, got {}",
             pushes.len()
+        );
+
+        // optional_reserve's `else` arm (index 3) should fall back to the
+        // program ID as a non-signer, non-writable placeholder.
+        assert!(
+            pushes[3].contains("pubkey : ID"),
+            "absent optional account should use program ID placeholder, got: {}",
+            pushes[3]
         );
 
         // vault (index 1) should be writable, not signer
