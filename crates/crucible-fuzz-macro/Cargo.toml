@@ -1,6 +1,6 @@
 [package]
 name = "crucible-fuzz-macro"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license.workspace = true
 description = "Fuzzing macros for crucible-fuzzer"
@@ -12,4 +12,4 @@ proc-macro = true
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-crucible-macro-utils = { path = "../crucible-macro-utils", version = "0.2.0" }
+crucible-macro-utils = { path = "../crucible-macro-utils", version = "0.2.1" }

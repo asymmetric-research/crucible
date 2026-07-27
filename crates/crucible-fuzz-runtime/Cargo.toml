@@ -1,6 +1,6 @@
 [package]
 name = "crucible-fuzz-runtime"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license.workspace = true
 description = "Runtime support for structured fuzzing with crucible-fuzzer"

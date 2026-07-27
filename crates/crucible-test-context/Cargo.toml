@@ -1,6 +1,6 @@
 [package]
 name = "crucible-test-context"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license.workspace = true
 description = "LiteSVM-backed test context used by crucible-fuzzer"
