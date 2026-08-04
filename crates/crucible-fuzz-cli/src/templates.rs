@@ -1,6 +1,7 @@
 pub fn generate_cargo_toml(program_name: &str) -> String {
-    let repo = "https://github.com/asymmetric-research/crucible";
-    let branch = "main";
+    // Pin the harness to the same crucible version as the CLI that generated it,
+    // so pushes to main can't break generated or existing harnesses.
+    let version = env!("CARGO_PKG_VERSION");
 
     format!(
         r#"[package]
@@ -13,9 +14,9 @@ edition = "2021"
 
 [dependencies]
 # Fuzzing framework
-crucible-fuzzer = {{ git = "{repo}", branch = "{branch}" }}
-crucible-test-context = {{ git = "{repo}", branch = "{branch}" }}
-crucible-idl-gen = {{ git = "{repo}", branch = "{branch}" }}
+crucible-fuzzer = "{version}"
+crucible-test-context = "{version}"
+crucible-idl-gen = "{version}"
 
 anchor-lang = "1.0.1"
 
