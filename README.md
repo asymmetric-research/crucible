@@ -12,7 +12,9 @@
 
 ---
 
-Crucible enables property-based testing and stateful invariant checking for Solana programs through randomly generated action sequences. Define your program's actions, write invariants, and let the fuzzer find violations.
+Many serious Solana bugs are not caused by a single malformed input. They come from valid sequences of valid instructions that leave a program in an invalid state, and unit and integration tests rarely reach them. A five-instruction "phantom stake" bug sat in Solana's native Stake program for years: delegation weight that kept counting after the SOL backing it had been withdrawn. Crucible is a Solana fuzzing tool that looks for this kind of bug by mutating instruction sequences and their typed parameters under coverage-guided feedback. It rediscovered the phantom stake bug from scratch in seconds.
+
+Crucible enables property-based testing and stateful invariant checking for Solana programs through randomly generated action sequences. Define your program's actions, write invariants, and let the fuzzer find violations. See [how it works](https://blog.asymmetric.re/introducing-crucible-an-invariant-fuzzing-framework-for-solana/).
 
 ## Performance
 
@@ -75,6 +77,18 @@ crucible run <program_name> <test_name> --release
 | [Crash Analysis](docs/crash-analysis.md) | Listing, viewing, replaying, and minimizing crashes |
 | [Coverage Reports](docs/coverage.md) | Bytecode & source-level coverage, LCOV, genhtml |
 | [Harness Guide](docs/harness-guide.md) | In-depth guide to writing effective fuzz harnesses |
+
+---
+
+## Found with Crucible
+
+- **Phantom stake in Solana's native Stake program.** A five-instruction sequence left delegation weight in place after its backing SOL was withdrawn, which unit and integration tests did not catch. [Write-up](https://blog.asymmetric.re/introducing-crucible-an-invariant-fuzzing-framework-for-solana/)
+
+---
+
+## Why we built it
+
+We build and run Crucible inside our security work at Asymmetric Research. Existing byte-level fuzzers were a poor fit for Solana, where the structure that matters is the order of instructions and the typed parameters of each one. We wanted a fuzzer that worked at that level, so we built one, used it on real programs, and released it. The design is written up here: [Introducing Crucible](https://blog.asymmetric.re/introducing-crucible-an-invariant-fuzzing-framework-for-solana/).
 
 ---
 
