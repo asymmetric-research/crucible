@@ -12,7 +12,7 @@
 
 ---
 
-Many serious Solana bugs are not caused by a single malformed input. They come from valid sequences of valid instructions that leave a program in an invalid state, and unit and integration tests rarely reach them. A five-instruction "phantom stake" bug sat in Solana's native Stake program for years: delegation weight that kept counting after the SOL backing it had been withdrawn. Crucible looks for this kind of bug by mutating instruction sequences and their typed parameters under coverage feedback. It rediscovered the phantom stake bug from scratch in seconds.
+Many serious Solana bugs are not caused by a single malformed input. They come from valid sequences of valid instructions that leave a program in an invalid state, and unit and integration tests rarely reach them. A five-instruction "phantom stake" bug sat in Solana's native Stake program for years: delegation weight that kept counting after the SOL backing it had been withdrawn. Crucible is a Solana fuzzing tool that looks for this kind of bug by mutating instruction sequences and their typed parameters under coverage-guided feedback. It rediscovered the phantom stake bug from scratch in seconds.
 
 Crucible enables property-based testing and stateful invariant checking for Solana programs through randomly generated action sequences. Define your program's actions, write invariants, and let the fuzzer find violations. See [how it works](https://blog.asymmetric.re/introducing-crucible-an-invariant-fuzzing-framework-for-solana/).
 
