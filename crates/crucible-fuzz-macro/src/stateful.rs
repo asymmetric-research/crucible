@@ -1462,9 +1462,19 @@ fn stateful_singlecore_body(
                 };
                 let __show_stats = std::env::var("FUZZ_STATS").is_ok();
                 let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
+                // Color only a live terminal; piped output (parsed by action_health.py /
+                // scout doctor) stays byte-identical because the codes are empty strings.
+                let (tag, rate, crash, rst): (&str, &str, &str, &str) =
+                    if std::io::IsTerminal::is_terminal(&std::io::stderr())
+                        && std::env::var_os("NO_COLOR").is_none() {
+                        ("\u{1b}[38;2;255;138;61m", "\u{1b}[1;38;2;255;180;84m",
+                         "\u{1b}[38;2;224;96;63m", "\u{1b}[0m")
+                    } else {
+                        ("", "", "", "")
+                    };
                 eprintln!(
-                    "[FUZZ_PULSE] [{:02}:{:02}] iter: {}, iter/sec: {:.0}, pool: {}/{}k ({:.1}%), \
-                     crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}{}",
+                    "{tag}[FUZZ_PULSE]{rst} [{:02}:{:02}] iter: {}, iter/sec: {rate}{:.0}{rst}, pool: {}/{}k ({:.1}%), \
+                     crashes: {crash}{}{rst}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}{}",
                     mins, secs,
                     iteration, iter_sec,
                     state_pool.len(), pool_capacity / 1024, pool_pct,
@@ -3167,9 +3177,19 @@ fn stateful_multicore_body(
                     };
                     let __show_stats = std::env::var("FUZZ_STATS").is_ok();
                     let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
+                    // Color only a live terminal; piped output (parsed by action_health.py /
+                    // scout doctor) stays byte-identical because the codes are empty strings.
+                    let (tag, rate, crash, rst): (&str, &str, &str, &str) =
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr())
+                            && std::env::var_os("NO_COLOR").is_none() {
+                            ("\u{1b}[38;2;255;138;61m", "\u{1b}[1;38;2;255;180;84m",
+                             "\u{1b}[38;2;224;96;63m", "\u{1b}[0m")
+                        } else {
+                            ("", "", "", "")
+                        };
                     eprintln!(
-                        "[FUZZ_PULSE] [{:02}:{:02}] iter: {}, iter/sec: {:.0}, pool: {}/{}k ({:.1}%), \
-                         crashes: {}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}, workers: {}{}",
+                        "{tag}[FUZZ_PULSE]{rst} [{:02}:{:02}] iter: {}, iter/sec: {rate}{:.0}{rst}, pool: {}/{}k ({:.1}%), \
+                         crashes: {crash}{}{rst}, ok: {}/{} ({:.1}%), discovered: {}/{} actions, edges: {}/{} ({:.1}%), branches: {}/{}, workers: {}{}",
                         mins, secs,
                         total_iters, iter_sec,
                         cached_pool_len, pool_capacity / 1024, pool_pct,

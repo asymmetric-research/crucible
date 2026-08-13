@@ -546,8 +546,40 @@ fn fuzz_run(
         cmd
     };
 
-    println!(
-        r#"
+    {
+        use std::io::IsTerminal;
+        let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        if color {
+            // Ember gradient, deep orange (top) to light amber (bottom).
+            const RST: &str = "\u{1b}[0m";
+            let banner: [(&str, &str); 6] = [
+                ("\u{1b}[38;2;229;86;27m", "  ______"),
+                (
+                    "\u{1b}[38;2;242;106;34m",
+                    r"  ╲    ╱   ___ ___ _   _  ___ ___ ___ _    ___",
+                ),
+                (
+                    "\u{1b}[38;2;255;138;61m",
+                    r"   ╲╱╲╱   / __| _ \ | | |/ __|_ _| _ ) |  | __|",
+                ),
+                (
+                    "\u{1b}[38;2;255;157;71m",
+                    r"   ╱╲╱╲  | (__|   / |_| | (__ | || _ \ |__| _|",
+                ),
+                (
+                    "\u{1b}[38;2;255;171;79m",
+                    r"  ╱    ╲  \___|_|_\\___/ \___|___|___/____|___|",
+                ),
+                ("\u{1b}[38;2;255;180;84m", "  ▔▔▔▔▔▔"),
+            ];
+            println!();
+            for (c, l) in banner {
+                println!("{c}{l}{RST}");
+            }
+            println!();
+        } else {
+            println!(
+                r#"
   ______
   ╲    ╱   ___ ___ _   _  ___ ___ ___ _    ___
    ╲╱╲╱   / __| _ \ | | |/ __|_ _| _ ) |  | __|
@@ -555,7 +587,9 @@ fn fuzz_run(
   ╱    ╲  \___|_|_\\___/ \___|___|___/____|___|
   ▔▔▔▔▔▔
 "#
-    );
+            );
+        }
+    }
 
     if let Some(timeout_secs) = timeout {
         cmd.env("FUZZ_TIMEOUT_SECS", timeout_secs.to_string());
