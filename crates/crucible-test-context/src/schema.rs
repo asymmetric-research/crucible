@@ -32,6 +32,16 @@ pub struct AccountSchema {
 
 static SCHEMA_REGISTRY: OnceLock<Vec<AccountSchema>> = OnceLock::new();
 
+/// All account-type discriminators from the IDL (borsh *and* zero-copy), for type-tag length
+/// lookup. Separate from `SCHEMA_REGISTRY` (which only holds the zero-copy accounts that have a
+/// field-diff function), so the diff feature is unaffected.
+static ACCOUNT_DISCRIMINATORS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+
+/// Register every account type's discriminator. Call once at harness startup (generated code).
+pub fn register_account_discriminators(discriminators: Vec<Vec<u8>>) {
+    let _ = ACCOUNT_DISCRIMINATORS.set(discriminators);
+}
+
 /// Register account schemas for semantic diffs.
 /// Call once at harness startup (e.g., from generated `register_schemas()`).
 /// Subsequent calls are ignored (OnceLock).
@@ -67,6 +77,75 @@ pub fn lookup_type_name(data: &[u8]) -> Option<&str> {
     None
 }
 
+const DEFAULT_TYPE_TAG_LEN: usize = 8;
+
+/// Look up the discriminator length for an account by prefix match.
+///
+/// Returns the matched (non-empty) discriminator's length, or `None` if no registered schema matches
+/// the start of `data`. Framework-agnostic: the length is whatever the IDL recorded — 8 for Anchor,
+/// 4 for native bincode, variable for Codama. If no registry exists at all, closed-source harnesses
+/// fall back to `FUZZ_TYPE_TAG_LEN` or 8 bytes. Set `FUZZ_TYPE_TAG_LEN=0` to disable the fallback.
+pub fn lookup_discriminator_len(data: &[u8]) -> Option<usize> {
+    if let Some(n) = lookup_registered_discriminator_len(data) {
+        return Some(n);
+    }
+    if has_discriminator_registry() {
+        None
+    } else {
+        fallback_discriminator_len(data)
+    }
+}
+
+/// Look up only discriminator lengths that were explicitly registered from an IDL.
+///
+/// Unlike `lookup_discriminator_len`, this never falls back to an arbitrary
+/// type-tag length. Use it when raw account bytes may contain nondeterministic
+/// values (for example fresh pubkeys) and only real discriminator bytes are safe
+/// to include in a stable identity hash.
+pub fn lookup_registered_discriminator_len(data: &[u8]) -> Option<usize> {
+    // Prefer the complete account-discriminator registry; fall back to the diff-schema registry.
+    if let Some(discs) = ACCOUNT_DISCRIMINATORS.get() {
+        if let Some(n) = match_len(discs.iter().map(Vec::as_slice), data) {
+            return Some(n);
+        }
+    }
+    if let Some(schemas) = SCHEMA_REGISTRY.get() {
+        if let Some(n) = match_len(schemas.iter().map(|s| s.discriminator.as_slice()), data) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn has_discriminator_registry() -> bool {
+    ACCOUNT_DISCRIMINATORS
+        .get()
+        .map(|discs| !discs.is_empty())
+        .unwrap_or(false)
+        || SCHEMA_REGISTRY
+            .get()
+            .map(|schemas| !schemas.is_empty())
+            .unwrap_or(false)
+}
+
+fn match_len<'a>(discriminators: impl Iterator<Item = &'a [u8]>, data: &[u8]) -> Option<usize> {
+    discriminators
+        .filter_map(|disc| {
+            let n = disc.len();
+            (n > 0 && data.len() >= n && data[..n] == disc[..]).then_some(n)
+        })
+        .max()
+}
+
+pub(crate) fn fallback_discriminator_len(data: &[u8]) -> Option<usize> {
+    let n = match std::env::var("FUZZ_TYPE_TAG_LEN") {
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("off") => return None,
+        Ok(value) => value.parse().unwrap_or(DEFAULT_TYPE_TAG_LEN),
+        Err(_) => DEFAULT_TYPE_TAG_LEN,
+    };
+    (n > 0 && data.len() >= n).then_some(n)
+}
+
 /// Check whether any schemas have been registered.
 pub fn has_schemas() -> bool {
     SCHEMA_REGISTRY
@@ -91,5 +170,38 @@ mod tests {
         let result = lookup_diff_fn(&[0u8; 16]);
         // Either None (no registry) or None (no match) — both are correct
         assert!(result.is_none() || result.is_some());
+    }
+
+    #[test]
+    fn discriminator_len_is_framework_agnostic() {
+        // Native (4-byte) and Anchor (8-byte) discriminators resolve to their actual lengths.
+        let native: Vec<u8> = vec![1, 0, 0, 0];
+        let anchor: Vec<u8> = vec![9, 8, 7, 6, 5, 4, 3, 2];
+        let discs = [native.clone(), anchor.clone()];
+        let slices = || discs.iter().map(Vec::as_slice);
+
+        let mut native_data = native.clone();
+        native_data.extend_from_slice(&[0xAB; 12]);
+        assert_eq!(match_len(slices(), &native_data), Some(4));
+
+        let mut anchor_data = anchor.clone();
+        anchor_data.extend_from_slice(&[0xCD; 20]);
+        assert_eq!(match_len(slices(), &anchor_data), Some(8));
+
+        // No registered discriminator matches → None when a registry exists.
+        assert_eq!(match_len(slices(), &[0xFF; 16]), None);
+        // Data shorter than the discriminator → no match.
+        assert_eq!(match_len(slices(), &[1, 0]), None);
+    }
+
+    #[test]
+    fn discriminator_len_prefers_longest_prefix_match() {
+        let short = vec![1, 2, 3, 4];
+        let long = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let discs = [short, long.clone()];
+        let mut data = long;
+        data.extend_from_slice(&[0xAB; 8]);
+
+        assert_eq!(match_len(discs.iter().map(Vec::as_slice), &data), Some(8));
     }
 }

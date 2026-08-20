@@ -102,8 +102,9 @@ pub fn dry_run_mode(
 
             // Write coverage if --coverage was enabled
             if coverage_enabled {
-                #mod_name::write_lcov_coverage("coverage.lcov");
-                eprintln!("[DRY-RUN] Coverage written to coverage.lcov");
+                let coverage_output = #mod_name::lcov_output_path();
+                #mod_name::write_lcov_coverage(&coverage_output);
+                eprintln!("[DRY-RUN] Coverage written to {}", coverage_output);
             }
 
             eprintln!("[DRY-RUN] Harness validation passed!");
@@ -220,6 +221,7 @@ pub fn replay_mode(
 
             // Compute crash_id from input_bytes BEFORE the deser block moves it
             let crash_id = format!("crash_{:016x}", libafl_bolts::hash_std(&input_bytes));
+            crucible_test_context::load_expected_mutation_finding_id_from_metadata(input_path);
 
             // Parse input and run test
             #deser_block
@@ -370,14 +372,7 @@ pub fn coverage_only_mode(
             eprintln!("[COVERAGE-ONLY] Processed {} inputs ({} errors)", processed, errors);
 
             // Write coverage output
-            let coverage_output = std::env::var("FUZZ_COVERAGE_OUT")
-                .unwrap_or_else(|_| {
-                    if std::path::Path::new("./output").is_dir() {
-                        "./output/coverage.lcov".to_string()
-                    } else {
-                        "coverage.lcov".to_string()
-                    }
-                });
+            let coverage_output = #mod_name::lcov_output_path();
             #mod_name::write_lcov_coverage(&coverage_output);
 
             // Print summary
@@ -508,6 +503,7 @@ pub fn tmin_mode(
             let crashes = |actions: &[#action_ty], template: &#fixture_name| -> bool {
                 let mut fixture = template.clone();
                 crucible_test_context::clear_iteration_state();
+                crucible_test_context::reset_probed_account_mutations();
                 let _ = crucible_test_context::take_violation();
                 with_stderr_suppressed(|| #fn_name(&mut fixture, actions.to_vec()));
                 crucible_test_context::has_violation()
@@ -535,6 +531,7 @@ pub fn tmin_mode(
                     continue;
                 }
                 eprint!("[TMIN] {} actions", original_count);
+                crucible_test_context::load_expected_mutation_finding_id_from_metadata(tmin_file);
 
                 // Verify crash reproduces
                 let mut actions = fuzz_input.actions;
@@ -585,6 +582,7 @@ pub fn tmin_mode(
 
                     // Update .meta.json — re-execute to capture clean action history
                     crucible_test_context::clear_iteration_state();
+                    crucible_test_context::reset_probed_account_mutations();
                     {
                         let mut fixture = template_fixture.clone();
                         with_stderr_suppressed(|| #fn_name(&mut fixture, actions));
@@ -642,6 +640,14 @@ mod tests {
         assert!(
             output.contains("write_lcov_coverage"),
             "should write coverage on exit"
+        );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should use configured LCOV output path"
+        );
+        assert!(
+            !output.contains("Coverage written to coverage.lcov"),
+            "dry-run status should not claim a hardcoded LCOV path"
         );
     }
 
@@ -716,6 +722,10 @@ mod tests {
         assert!(
             output.contains("write_lcov_coverage"),
             "should write coverage output"
+        );
+        assert!(
+            output.contains("lcov_output_path"),
+            "coverage-only mode should use configured LCOV output path"
         );
     }
 
@@ -803,6 +813,25 @@ mod tests {
             "should suppress stderr during trials"
         );
         assert!(output.contains("dev/null"), "should redirect to /dev/null");
+    }
+
+    #[test]
+    fn tmin_resets_account_mutation_probe_cache_between_trials() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("reset_probed_account_mutations"),
+            "mutation-only crashes must reproduce independently for every tmin trial"
+        );
     }
 
     #[test]

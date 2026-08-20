@@ -29,11 +29,12 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--seed <N>` | Random seed for reproducible fuzzing |
 | `--symbols <PATH>` | Path to debug binary with DWARF symbols (for source-level coverage) |
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
+| `--mutate-accounts` | Enable the constraint-check engine (account-mutation probes for missing security checks; see [Constraint-Check Engine](constraint-check-engine.md)) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
 | `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
 | `--stateful` | Stateful fuzzing: single action per iteration with state pool |
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
-| `--pool-size <N>` | State pool capacity in stateful mode (default: 256000) |
+| `--pool-size <N>` | State pool capacity in stateful mode (default: 256000). Also scales the fingerprint-dedup keyspace, so a larger pool raises the distinct-state ceiling |
 | `--program-so <PATH>` | Override the program `.so` loaded by the harness |
 | `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
 | `--lcov-out <PATH>` | Custom LCOV coverage output file path |
@@ -185,6 +186,36 @@ crucible run myproject invariant_test --release --stateful --max-depth 50
 
 # Multi-core stateful
 crucible run myproject invariant_test --release --stateful -j 4
+```
+
+---
+
+## Constraint-Check Engine (`--mutate-accounts`)
+
+`--mutate-accounts` enables deterministic account-mutation probes for common
+missing account checks. During fuzzing, an instruction is probed once per distinct
+executed path (its baseline edge trace), so a check that only applies in some
+states is still exercised. Findings use stable labels and can be inspected,
+replayed, and minimized with the usual `crucible show` and `crucible tmin` flows.
+
+> **When to use it.** `--mutate-accounts` is a thoroughness pass, not a mode for
+> long campaigns. Run it after normal fuzzing has saturated the corpus (coverage
+> plateaued): every successful transaction runs an extra baseline probe and hashes
+> its edge trace, so throughput drops. Normal fuzzing (without the flag) is
+> unaffected.
+
+See [Constraint-Check Engine](constraint-check-engine.md) for the current probe
+table, replay behavior, crash-corpus notes, common false positives, and how to
+exclude a known-false-positive instruction from probing via
+`.skip_account_mutation()`.
+
+```bash
+# Find missing-check bugs while fuzzing
+crucible run myproject invariant_test --release --mutate-accounts --timeout 60
+
+# Findings are normal crashes - inspect / replay / minimize as usual
+crucible show myproject <crash_id>
+crucible show myproject <crash_id> --replay
 ```
 
 ---

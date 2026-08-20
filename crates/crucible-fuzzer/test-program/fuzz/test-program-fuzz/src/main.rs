@@ -201,6 +201,13 @@ impl StakingFixture {
 /// The staking program has a known bug (reward_debt calculated with old staked_amount)
 #[invariant_test]
 fn invariant_test(fixture: &mut StakingFixture) {
+    // Test hook: a raw `assert!` (not `fuzz_assert!`) panics, exercising the harness's panic-capture
+    // path. The panic unwinds past the normal violation/take_violation flow, so the loop must still
+    // write a canonical crash_<id>/.meta.json for it. Gated by an env var so normal runs are clean.
+    if std::env::var("CRUCIBLE_TEST_FORCE_PANIC").is_ok() {
+        assert!(false, "forced test panic for panic-capture e2e");
+    }
+
     let current_slot = fixture.ctx.slot();
 
     let mut total_stake_time = 0u128;

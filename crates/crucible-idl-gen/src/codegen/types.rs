@@ -5,7 +5,7 @@ use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 
 use super::generics::{generic_params_decl, generic_params_use, type_generic_bounds};
-use super::{array_len_to_usize, idl_type_to_tokens};
+use super::{array_len_to_usize, fields_serde_serializable, idl_type_to_tokens};
 
 /// Generate custom type definitions from IDL types section
 pub fn generate(idl: &Idl, use_bincode: bool) -> proc_macro2::TokenStream {
@@ -35,17 +35,37 @@ fn generate_type_def(
     // Check if this is a zero-copy type (repr: C)
     let is_zero_copy = matches!(&typedef.repr, Some(IdlRepr::C(_)));
 
+    // Bincode programs can still benefit from serde derives for defined types
+    // that are serializable as a whole. Guard: serde has no Serialize impl for
+    // arrays > 32 elements, so those types rely on instruction field-wise
+    // encoding instead of deriving serde.
+    let derive_serde = use_bincode
+        && typedef.generics.is_empty()
+        && typedef_serde_serializable(typedef, all_types);
+
     match &typedef.ty {
         IdlTypeDefTy::Struct { fields } => {
             if is_zero_copy {
-                generate_zero_copy_struct(&name, fields, &typedef.name, generics)
+                generate_zero_copy_struct(&name, fields, &typedef.name, generics, derive_serde)
             } else {
-                generate_struct(&name, fields, &typedef.name, all_types, generics)
+                generate_struct(
+                    &name,
+                    fields,
+                    &typedef.name,
+                    all_types,
+                    generics,
+                    derive_serde,
+                )
             }
         }
-        IdlTypeDefTy::Enum { variants } => {
-            generate_enum(&name, variants, all_types, use_bincode, generics)
-        }
+        IdlTypeDefTy::Enum { variants } => generate_enum(
+            &name,
+            variants,
+            all_types,
+            use_bincode,
+            generics,
+            derive_serde,
+        ),
         IdlTypeDefTy::Type { alias } => {
             let alias_ty = idl_type_to_tokens(alias);
             let decl = generic_params_decl(generics);
@@ -62,8 +82,10 @@ fn generate_struct(
     type_name: &str,
     all_types: &[IdlTypeDef],
     generics: &[IdlTypeDefGeneric],
+    derive_serde: bool,
 ) -> proc_macro2::TokenStream {
     let decl = generic_params_decl(generics);
+    let serde_derive = serde_serialize_derive(derive_serde);
     let fields_tokens = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
             let field_tokens = named_fields.iter().map(|f| {
@@ -84,6 +106,7 @@ fn generate_struct(
             };
             return quote! {
                 #derives
+                #serde_derive
                 pub struct #name #decl (#(pub #field_tokens),*);
             };
         }
@@ -143,12 +166,39 @@ fn generate_struct(
 
     quote! {
         #derives
+        #serde_derive
         pub struct #name #decl {
             #fields_tokens
         }
 
         #default_impl
         #extra_impls
+    }
+}
+
+/// Emit an extra `#[derive(serde::Serialize)]` attribute for bincode programs.
+fn serde_serialize_derive(derive_serde: bool) -> proc_macro2::TokenStream {
+    if derive_serde {
+        quote! { #[derive(serde::Serialize)] }
+    } else {
+        quote! {}
+    }
+}
+
+/// Whether a typedef's body is fully serde-serializable (no arrays > 32, no
+/// unresolvable type references).
+fn typedef_serde_serializable(typedef: &IdlTypeDef, all_types: &[IdlTypeDef]) -> bool {
+    match &typedef.ty {
+        IdlTypeDefTy::Struct { fields } => fields
+            .as_ref()
+            .map_or(true, |f| fields_serde_serializable(f, all_types)),
+        IdlTypeDefTy::Enum { variants } => variants.iter().all(|v| {
+            v.fields
+                .as_ref()
+                .map_or(true, |f| fields_serde_serializable(f, all_types))
+        }),
+        // Plain aliases don't emit a derive at all
+        IdlTypeDefTy::Type { .. } => false,
     }
 }
 
@@ -159,11 +209,13 @@ fn generate_zero_copy_struct(
     fields: &Option<IdlDefinedFields>,
     type_name: &str,
     generics: &[IdlTypeDefGeneric],
+    derive_serde: bool,
 ) -> proc_macro2::TokenStream {
     let decl = generic_params_decl(generics);
     let use_ = generic_params_use(generics);
     let pod_bound = type_generic_bounds(generics, quote! { bytemuck::Pod });
     let zeroable_bound = type_generic_bounds(generics, quote! { bytemuck::Zeroable });
+    let serde_derive = serde_serialize_derive(derive_serde);
     let fields_tokens = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
             let field_tokens = named_fields.iter().map(|f| {
@@ -178,6 +230,7 @@ fn generate_zero_copy_struct(
             // Tuple struct - zero-copy
             return quote! {
                 #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)]
+                #serde_derive
                 #[repr(C)]
                 pub struct #name #decl (#(pub #field_tokens),*);
 
@@ -216,6 +269,7 @@ fn generate_zero_copy_struct(
 
     quote! {
         #derives
+        #serde_derive
         #[repr(C)]
         pub struct #name #decl {
             #fields_tokens
@@ -235,6 +289,7 @@ fn generate_enum(
     all_types: &[IdlTypeDef],
     use_bincode: bool,
     generics: &[IdlTypeDefGeneric],
+    derive_serde: bool,
 ) -> proc_macro2::TokenStream {
     let decl = generic_params_decl(generics);
     // Check if all variants are unit variants (no fields)
@@ -328,8 +383,14 @@ fn generate_enum(
         quote! {}
     };
 
+    // Data-carrying enums in bincode programs derive serde::Serialize when
+    // possible; instruction args also have a field-wise fallback for types that
+    // cannot derive serde because they contain large fixed arrays.
+    let serde_derive = serde_serialize_derive(derive_serde);
+
     quote! {
         #derives
+        #serde_derive
         #[repr(u8)]
         pub enum #name #decl {
             #(#variants_tokens),*
@@ -380,7 +441,7 @@ fn generate_bincode_unit_enum(
     let name_str = name.to_string();
 
     quote! {
-        #[derive(Clone, Copy, Default, PartialEq, Eq)]
+        #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
         #[repr(u32)]
         pub enum #name #decl {
             #(#variant_defs),*
@@ -1038,6 +1099,68 @@ mod tests {
         assert!(
             output.contains("from_le_bytes"),
             "should use from_le_bytes for deserialization"
+        );
+    }
+
+    #[test]
+    fn test_bincode_struct_derives_serde() {
+        let output = gen(
+            vec![make_struct(
+                "LockupArgs",
+                vec![
+                    make_field("unixTimestamp", IdlType::I64),
+                    make_field("custodian", IdlType::Option(Box::new(IdlType::Pubkey))),
+                ],
+            )],
+            true, // bincode mode
+        );
+        assert!(
+            output.contains("serde :: Serialize"),
+            "bincode-program structs should derive serde::Serialize, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_borsh_struct_no_serde() {
+        let output = gen(
+            vec![make_struct("Plain", vec![make_field("x", IdlType::U64)])],
+            false, // borsh mode
+        );
+        assert!(
+            !output.contains("serde"),
+            "borsh-program structs should not derive serde::Serialize"
+        );
+    }
+
+    #[test]
+    fn test_bincode_struct_with_large_array_no_serde() {
+        // serde lacks Serialize impls for arrays > 32 elements — the derive
+        // would not compile, so it is skipped (borsh fallback covers encoding).
+        let output = gen(
+            vec![make_struct(
+                "BigBlob",
+                vec![make_field(
+                    "data",
+                    IdlType::Array(Box::new(IdlType::U8), IdlArrayLen::Value(64)),
+                )],
+            )],
+            true, // bincode mode
+        );
+        assert!(
+            !output.contains("serde"),
+            "structs with arrays > 32 must not derive serde::Serialize, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_bincode_unit_enum_derives_serde() {
+        let output = gen(
+            vec![make_unit_enum("StakeAuthorize", &["Staker", "Withdrawer"])],
+            true, // bincode mode
+        );
+        assert!(
+            output.contains("serde :: Serialize"),
+            "bincode unit enums should derive serde::Serialize, got: {output}"
         );
     }
 

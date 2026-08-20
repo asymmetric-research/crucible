@@ -237,6 +237,16 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         pub fn init_dwarf_source_maps(maps: HashMap<u64, crucible_test_context::DwarfSourceMap>) {
             let _ = DWARF_SOURCE_MAP.set(maps);
         }
+
+        // Static storage for ELF symbol-table function names (PC -> demangled name),
+        // used to give bytecode-level LCOV real function names when DWARF is absent.
+        pub static SYMBOL_NAME_MAP: std::sync::OnceLock<
+            HashMap<u64, HashMap<usize, String>>
+        > = std::sync::OnceLock::new();
+
+        pub fn init_symbol_name_maps(maps: HashMap<u64, HashMap<usize, String>>) {
+            let _ = SYMBOL_NAME_MAP.set(maps);
+        }
     }
 }
 
@@ -450,6 +460,11 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         }
                     });
 
+                    // Account-mutation probe: feed the same edge id to the probe's edge-trace sink
+                    // (a no-op unless a probe is actively capturing). Lets the probe dedup on the
+                    // executed path instead of an account-state hash.
+                    crucible_test_context::record_probe_edge(edge_id);
+
                     // Multi-core mode: batch updates to shared bitmaps
                     // Edge bitmap is split into two halves:
                     // - First half (bits 0..256K): edge presence (counted for display)
@@ -562,8 +577,7 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                 if COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
                     let program_outcomes = state.branch_outcomes.entry(program_hash).or_default();
                     for &(pc, target_pc) in branch_edges {
-                        // taken = jump target is not the fall-through (pc + 8)
-                        let taken = target_pc != pc + 8;
+                        let taken = crucible_test_context::coverage::branch_was_taken(pc, target_pc);
                         *program_outcomes.entry((pc, taken)).or_insert(0) += 1;
                     }
 
@@ -584,15 +598,20 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
         impl crucible_test_context::InvocationInspectCallback for FuzzCallback {
             fn before_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
                 _tx: &crucible_test_context::fuzz_types::SanitizedTransaction,
                 _program_indices: &[crucible_test_context::fuzz_types::IndexOfAccount],
-                _invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
+                _invoke_context: &mut crucible_test_context::fuzz_types::InvokeContext,
+                _register_tracing_enabled: bool,
             ) {
                 // No-op: coverage tracked in after_invocation
             }
 
             fn after_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
+                _tx: &crucible_test_context::fuzz_types::SanitizedTransaction,
+                _program_indices: &[crucible_test_context::fuzz_types::IndexOfAccount],
                 invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
                 register_tracing_enabled: bool,
             ) {
@@ -628,12 +647,11 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
 
                                     let insn = ebpf::get_insn_unchecked(program, pc);
 
-                                    // Only conditional branches
-                                    let is_jmp_class = insn.opc & 7 == ebpf::BPF_JMP;
-                                    if !is_jmp_class { continue; }
-
-                                    let opc = insn.opc;
-                                    if opc == 0x05 || opc == 0x85 || opc == 0x8d || opc == 0x95 { continue; }
+                                    // SBPF 0.21 has both 32-bit and 64-bit
+                                    // conditional jump classes.
+                                    if !crucible_test_context::coverage::is_conditional_branch_opcode(insn.opc) {
+                                        continue;
+                                    }
 
                                     let target_pc = register_trace[i + 1][11] as usize;
                                     branch_edges.push((pc, target_pc));
@@ -721,6 +739,15 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             use std::fs::File;
             use std::io::{BufWriter, Write};
 
+            if let Some(parent) = std::path::Path::new(output_path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("[LCOV] Failed to create directory {}: {}", parent.display(), e);
+                        return;
+                    }
+                }
+            }
+
             let file = match File::create(output_path) {
                 Ok(f) => f,
                 Err(e) => {
@@ -745,6 +772,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             let edge_totals = PROGRAM_TOTALS.get();
             let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
             let dwarf_maps = DWARF_SOURCE_MAP.get();
+            let symbol_maps = SYMBOL_NAME_MAP.get();
 
             let mut programs_written = 0usize;
 
@@ -795,6 +823,26 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 let total_branches = total_edges / 2;
                 let total_instructions = instr_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
 
+                let symbol_names = symbol_maps.and_then(|m| m.get(&prog_hash));
+
+                // Make the degraded output explicit: the LCOV for this program will
+                // use PC pseudo-lines in `program_<hash>.bpf`, not real source files.
+                match symbol_names {
+                    Some(names) => eprintln!(
+                        "[LCOV] No DWARF source mapping for {} — emitting bytecode-level LCOV \
+                        (PC pseudo-lines in {}.bpf) with {} symbol-table function names. \
+                        Rebuild with DWARF line info for source-level coverage.",
+                        program_name, program_name, names.len()
+                    ),
+                    None => eprintln!(
+                        "[LCOV] No DWARF source mapping and no symbol table for {} — emitting \
+                        bytecode-level LCOV ({}.bpf) with fn_<pc> placeholder names. Pass \
+                        --symbols <unstripped.so> and rebuild with DWARF line info for \
+                        source-level coverage.",
+                        program_name, program_name
+                    ),
+                }
+
                 if let Err(e) = crucible_test_context::generate_bytecode_lcov(
                     &mut writer,
                     &program_name,
@@ -803,6 +851,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                     &functions,
                     total_instructions,
                     total_branches,
+                    symbol_names,
                 ) {
                     eprintln!("[LCOV] Error writing coverage for {}: {}", program_name, e);
                 } else {
@@ -825,6 +874,21 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 programs_written,
                 pc_hits.values().map(|h| h.len()).sum::<usize>(),
                 branch_outcomes.values().map(|h| h.len()).sum::<usize>());
+        }
+
+        /// Resolve the configured LCOV output path.
+        ///
+        /// `crucible run --coverage` sets FUZZ_COVERAGE_OUT from `--lcov-out`
+        /// or the CLI default. Direct harness execution keeps the historical
+        /// fallback unless a remote output directory is present.
+        pub fn lcov_output_path() -> String {
+            std::env::var("FUZZ_COVERAGE_OUT").unwrap_or_else(|_| {
+                if std::path::Path::new("./output").is_dir() {
+                    "./output/coverage.lcov".to_string()
+                } else {
+                    "coverage.lcov".to_string()
+                }
+            })
         }
 
         /// Write coverage files periodically when new coverage is discovered.
@@ -862,7 +926,8 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 LAST_WRITE_TIME.store(now, Ordering::Relaxed);
 
                 // Write LCOV when new coverage is found
-                write_lcov_coverage("coverage.lcov");
+                let output_path = lcov_output_path();
+                write_lcov_coverage(&output_path);
             }
         }
     }
@@ -1086,6 +1151,10 @@ mod tests {
             output.contains("count_shared_bits"),
             "should have count_shared_bits method"
         );
+        assert!(
+            output.contains("branch_was_taken"),
+            "should classify fallthrough using instruction indexes"
+        );
     }
 
     #[test]
@@ -1117,8 +1186,8 @@ mod tests {
             "should use register trace"
         );
         assert!(
-            output.contains("BPF_JMP"),
-            "should filter for JMP instructions"
+            output.contains("is_conditional_branch_opcode"),
+            "should use the shared SBPF conditional-branch classifier"
         );
     }
 
@@ -1149,6 +1218,18 @@ mod tests {
         assert!(
             output.contains("maybe_write_coverage"),
             "should define maybe_write_coverage"
+        );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should define configured LCOV path helper"
+        );
+        assert!(
+            output.contains("FUZZ_COVERAGE_OUT"),
+            "should honor configured LCOV output"
+        );
+        assert!(
+            output.contains("create_dir_all"),
+            "should create explicit LCOV output parent directories"
         );
         assert!(
             output.contains("generate_source_lcov"),

@@ -12,6 +12,7 @@ pub struct ProgramBuilder<'a> {
     pub(crate) instruction: Instruction,
     pub(crate) signers: Vec<Keypair>,
     pub(crate) fee_payer: Option<Keypair>,
+    pub(crate) skip_mutation: bool,
 }
 
 impl ProgramBuilder<'_> {
@@ -55,6 +56,14 @@ impl ProgramBuilder<'_> {
         self
     }
 
+    /// Exclude this instruction type from `--mutate-accounts` probing (blanket: all constraint
+    /// classes). Use for an instruction a harness author knows only produces false positives.
+    /// Registers the instruction type, so every send of it (including via `send_batch`) is skipped.
+    pub fn skip_account_mutation(mut self) -> Self {
+        self.skip_mutation = true;
+        self
+    }
+
     pub fn send(self) -> Result<TxOutcome> {
         // Resolve fee payer: explicit > first signer > Pubkey::default (for dirty tracking)
         let fee_payer_pubkey = self
@@ -64,15 +73,6 @@ impl ProgramBuilder<'_> {
             .or_else(|| self.signers.first().map(|kp| kp.pubkey()))
             .unwrap_or_default();
 
-        let ixs = std::slice::from_ref(&self.instruction);
-
-        // Pre-tx: dirty tracking
-        let __t_pre = std::time::Instant::now();
-        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
-        crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
-
-        // SVM execution — pass all signers, including fee payer
-        let __t_svm = std::time::Instant::now();
         let mut all_signers = self.signers;
         if let Some(ref fp) = self.fee_payer {
             if !all_signers.iter().any(|k| k.pubkey() == fp.pubkey()) {
@@ -88,10 +88,30 @@ impl ProgramBuilder<'_> {
                     .context("At least one signer required")?,
             )
             .insecure_clone();
-        let result = instruction_builder::send_instruction(
+        let signer_refs: Vec<&Keypair> = all_signers.iter().collect();
+        let ixs = std::slice::from_ref(&self.instruction);
+
+        // Pre-tx: dirty tracking
+        let __t_pre = std::time::Instant::now();
+        self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
+        crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
+
+        // Harness-author opt-out: register this instruction type as skipped so the probe (and all
+        // future sends, incl. send_batch) excludes it.
+        if self.skip_mutation {
+            self.ctx.skip_account_mutation_for(&self.instruction);
+        }
+
+        // Account-mutation probe runs on a cloned SVM and never replaces the real outcome.
+        self.ctx
+            .maybe_probe_account_mutation(ixs, &signer_refs, &payer);
+
+        // SVM execution — pass all signers, including fee payer
+        let __t_svm = std::time::Instant::now();
+        let result = instruction_builder::send_transaction(
             &mut self.ctx.svm,
-            self.instruction,
-            &all_signers,
+            vec![self.instruction],
+            &signer_refs,
             &payer,
             self.ctx.sigverify,
         )?;

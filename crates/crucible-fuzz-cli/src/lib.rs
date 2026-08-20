@@ -82,6 +82,9 @@ pub enum FuzzCmd {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
+        /// Enable account-mutation probes for missing account checks
+        #[arg(long)]
+        mutate_accounts: bool,
         /// Stateful fuzzing: single action per iteration with state pool
         #[arg(long)]
         stateful: bool,
@@ -184,6 +187,12 @@ struct CrashMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
     actions: Vec<ActionRecord>,
+    #[serde(default)]
+    mutation_finding: bool,
+    #[serde(default)]
+    mutation_finding_id: Option<String>,
+    #[serde(default)]
+    mutation_finding_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,6 +229,7 @@ pub fn run(cli: Cli) -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            mutate_accounts,
             stateful,
             max_depth,
             pool_size,
@@ -247,6 +257,7 @@ pub fn run(cli: Cli) -> Result<()> {
             stop_on_crash,
             max_actions,
             no_tracing,
+            mutate_accounts,
             stateful,
             max_depth,
             pool_size,
@@ -440,6 +451,7 @@ fn fuzz_run(
     stop_on_crash: bool,
     max_actions: Option<usize>,
     no_tracing: bool,
+    mutate_accounts: bool,
     stateful: bool,
     max_depth: Option<u32>,
     pool_size: Option<u64>,
@@ -620,6 +632,13 @@ fn fuzz_run(
             }
         };
         cmd.env("FUZZ_INPUT_FILE", &resolved_path);
+        // Enable account probes on replay only when the crash is itself a
+        // mutation finding (so it reproduces); otherwise probes stay opt-in via
+        // --mutate-accounts. Avoids running probes on unrelated replays.
+        let meta_dir = meta_out.as_ref().map(|p| resolve_path(&cwd, p));
+        if mutate_accounts || crash_is_mutation_finding(&resolved_path, meta_dir.as_deref()) {
+            cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
+        }
         println!("[FUZZ] Replaying input: {}", resolved_path.display());
     }
 
@@ -646,6 +665,11 @@ fn fuzz_run(
     if no_tracing {
         cmd.env("FUZZ_NO_TRACING", "1");
         println!("[FUZZ] Tracing disabled: no coverage guidance, maximum throughput");
+    }
+
+    if mutate_accounts {
+        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
+        println!("[FUZZ] Account mutation enabled (account constraint probes)");
     }
 
     if stats {
@@ -1192,6 +1216,15 @@ fn show_crash_metadata(
         if let Some(seed) = meta.seed {
             println!("Seed: {}", seed);
         }
+        if meta.mutation_finding {
+            println!("Mutation finding: yes");
+            if let Some(id) = &meta.mutation_finding_id {
+                println!("Mutation finding id: {}", id);
+            }
+            if let Some(message) = &meta.mutation_finding_message {
+                println!("Mutation finding message: {}", message);
+            }
+        }
 
         println!("\n=== Action Sequence ({} actions) ===", meta.actions.len());
         for (i, action) in meta.actions.iter().enumerate() {
@@ -1408,6 +1441,48 @@ fn replay_crash_directory(fuzz_dir: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn configure_crash_replay_env(
+    cmd: &mut Command,
+    crash_path: &Path,
+    crashes_dir: Option<&Path>,
+    meta_dir: Option<&Path>,
+) {
+    cmd.env("FUZZ_INPUT_FILE", crash_path);
+    // Enable account probes only when this crash is itself a mutation finding,
+    // so it reproduces; non-mutation replays don't run probes.
+    if crash_is_mutation_finding(crash_path, meta_dir) {
+        cmd.env("FUZZ_MUTATE_ACCOUNTS", "1");
+    }
+    if let Some(dir) = crashes_dir {
+        cmd.env("FUZZ_CRASHES_DIR", dir);
+    }
+    if let Some(dir) = meta_dir {
+        cmd.env("FUZZ_META_DIR", dir);
+    }
+}
+
+/// Whether the crash at `crash_path` is an account-mutation finding, per its
+/// `.meta.json` (`mutation_finding: true`). Used to enable account probes on
+/// replay/tmin ONLY for crashes that need them to reproduce — so probes stay
+/// opt-in (`--mutate-accounts`) for everything else. Missing/unreadable
+/// metadata is treated as "not a mutation finding".
+fn crash_is_mutation_finding(crash_path: &Path, meta_dir: Option<&Path>) -> bool {
+    let mut candidates = Vec::new();
+    if let (Some(dir), Some(name)) = (meta_dir, crash_path.file_name()) {
+        candidates.push(dir.join(format!("{}.meta.json", name.to_string_lossy())));
+    }
+    candidates.push(PathBuf::from(format!("{}.meta.json", crash_path.display())));
+    for path in candidates {
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(meta) = serde_json::from_str::<CrashMetadata>(&content) {
+            return meta.mutation_finding;
+        }
+    }
+    false
+}
+
 /// Find a single crash file by name in the crashes directory tree.
 fn find_crash_file(
     crashes_dir: &Path,
@@ -1572,13 +1647,11 @@ fn build_and_find_replay_binary(fuzz_dir: &Path, test_feature: Option<&str>) -> 
 fn run_replay(binary_path: &Path, fuzz_dir: &Path, crash_path: &Path) -> Result<ExitStatus> {
     // Canonicalize crash path so it works regardless of the binary's working directory
     let abs_crash = crash_path.canonicalize().context("Crash file not found")?;
-    Command::new(binary_path)
-        .current_dir(fuzz_dir)
-        .env("FUZZ_INPUT_FILE", &abs_crash)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("Failed to run replay")
+    let mut cmd = Command::new(binary_path);
+    cmd.current_dir(fuzz_dir);
+    configure_crash_replay_env(&mut cmd, &abs_crash, None, None);
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    cmd.status().context("Failed to run replay")
 }
 
 fn print_replay_result(status: &ExitStatus) {
@@ -1715,11 +1788,21 @@ fn fuzz_tmin(
             "[TMIN] Minimizing all {} crashes in a single process...",
             crash_files.len()
         );
-        let status = Command::new(&binary_path)
+        let mut tmin_all = Command::new(&binary_path);
+        tmin_all
             .current_dir(&fuzz_dir)
             .env("FUZZ_TMIN_ALL_DIR", &crashes_dir)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
-            .env("FUZZ_META_DIR", &meta_dir)
+            .env("FUZZ_META_DIR", &meta_dir);
+        // One process minimizes every crash, so enable account probes if any
+        // crash is a mutation finding (others don't need them).
+        let any_mutation = crash_files
+            .iter()
+            .any(|(_, path)| crash_is_mutation_finding(path, Some(&meta_dir)));
+        if any_mutation {
+            tmin_all.env("FUZZ_MUTATE_ACCOUNTS", "1");
+        }
+        let status = tmin_all
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -1733,12 +1816,19 @@ fn fuzz_tmin(
         let (crash_id, crash_path) = &crash_files[0];
         println!("\n[TMIN] Minimizing: {}", crash_id);
 
-        let status = Command::new(&binary_path)
+        let mut tmin_one = Command::new(&binary_path);
+        tmin_one
             .current_dir(&fuzz_dir)
             .env("FUZZ_TMIN_FILE", crash_path)
             .env("FUZZ_TMIN_CRASH_ID", crash_id)
             .env("FUZZ_CRASHES_DIR", &crashes_dir)
-            .env("FUZZ_META_DIR", &meta_dir)
+            .env("FUZZ_META_DIR", &meta_dir);
+        // Enable account probes only when this crash is a mutation finding, so
+        // it still reproduces while minimizing.
+        if crash_is_mutation_finding(crash_path, Some(&meta_dir)) {
+            tmin_one.env("FUZZ_MUTATE_ACCOUNTS", "1");
+        }
+        let status = tmin_one
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
@@ -1824,14 +1914,10 @@ fn regen_crashes(
             print!("[REGEN] {}/{} {}... ", idx + 1, crash_files.len(), crash_id);
 
             let meta_test_dir = meta_dir.join(test_name);
-            let status = Command::new(&binary_path)
-                .current_dir(fuzz_dir)
-                .env("FUZZ_INPUT_FILE", crash_path)
-                .env("FUZZ_CRASHES_DIR", &test_dir)
-                .env("FUZZ_META_DIR", &meta_test_dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let mut cmd = Command::new(&binary_path);
+            cmd.current_dir(fuzz_dir);
+            configure_crash_replay_env(&mut cmd, crash_path, Some(&test_dir), Some(&meta_test_dir));
+            let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
 
             match status {
                 Ok(s) => {
@@ -2151,6 +2237,89 @@ mod tests {
         let abs = tmp.canonicalize().unwrap();
         assert!(abs.is_absolute());
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    fn env_value(cmd: &Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    fn write_crash_meta(dir: &Path, name: &str, mutation_finding: bool) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let crash_path = dir.join(name);
+        std::fs::write(&crash_path, b"crashbytes").unwrap();
+        let meta = serde_json::json!({
+            "test_name": "invariant_test",
+            "timestamp": "0",
+            "iteration": 1u64,
+            "actions": [],
+            "mutation_finding": mutation_finding,
+        });
+        std::fs::write(
+            dir.join(format!("{name}.meta.json")),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        crash_path
+    }
+
+    #[test]
+    fn test_crash_replay_env_passes_through_paths() {
+        let mut cmd = Command::new("dummy");
+        let crash_path = Path::new("/tmp/crash_abc");
+        let crashes_dir = Path::new("/tmp/crashes/invariant_test");
+        let meta_dir = Path::new("/tmp/meta/invariant_test");
+
+        configure_crash_replay_env(&mut cmd, crash_path, Some(crashes_dir), Some(meta_dir));
+
+        assert_eq!(
+            env_value(&cmd, "FUZZ_INPUT_FILE").as_deref(),
+            Some("/tmp/crash_abc")
+        );
+        assert_eq!(
+            env_value(&cmd, "FUZZ_CRASHES_DIR").as_deref(),
+            Some("/tmp/crashes/invariant_test")
+        );
+        assert_eq!(
+            env_value(&cmd, "FUZZ_META_DIR").as_deref(),
+            Some("/tmp/meta/invariant_test")
+        );
+    }
+
+    #[test]
+    fn test_replay_gates_account_mutation_on_crash_metadata() {
+        let base = std::env::temp_dir().join("crucible_test_replay_gating");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Non-mutation crash → probes stay off.
+        let plain = write_crash_meta(&base, "crash_plain", false);
+        let mut cmd_plain = Command::new("dummy");
+        configure_crash_replay_env(&mut cmd_plain, &plain, None, Some(&base));
+        assert_eq!(
+            env_value(&cmd_plain, "FUZZ_MUTATE_ACCOUNTS"),
+            None,
+            "replaying a non-mutation crash must not enable account probes"
+        );
+
+        // Mutation-finding crash → probes enabled so it reproduces.
+        let mutated = write_crash_meta(&base, "crash_mut", true);
+        let mut cmd_mut = Command::new("dummy");
+        configure_crash_replay_env(&mut cmd_mut, &mutated, None, Some(&base));
+        assert_eq!(
+            env_value(&cmd_mut, "FUZZ_MUTATE_ACCOUNTS").as_deref(),
+            Some("1"),
+            "replaying a mutation finding must enable account probes"
+        );
+
+        // Helper agrees on both.
+        assert!(crash_is_mutation_finding(&mutated, Some(&base)));
+        assert!(!crash_is_mutation_finding(&plain, Some(&base)));
+        // Missing metadata → not a mutation finding.
+        assert!(!crash_is_mutation_finding(&base.join("nope"), Some(&base)));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // === Regression: crash dir must not fallback to ./output ===

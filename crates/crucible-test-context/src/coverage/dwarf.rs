@@ -253,6 +253,54 @@ pub fn build_dwarf_source_map(debug_binary: &[u8]) -> Option<DwarfSourceMap> {
     })
 }
 
+/// Build a PC -> demangled-function-name map from an ELF symbol table.
+///
+/// Unlike [`build_dwarf_source_map`], this does **not** require any `.debug_*`
+/// sections — it only reads the symbol table. This is the fallback used when a
+/// program is built without DWARF line info (e.g. plain `cargo build-sbf`):
+/// the stripped program loaded into the SVM yields only `fn_<pc>` names, but the
+/// unstripped `symbols.so` still carries ~hundreds of real (mangled) function
+/// symbols. We map each text-section function symbol to its instruction index
+/// `pc = (addr - text_vaddr) / 8` and demangle the Rust name, so bytecode-level
+/// LCOV can report real function names instead of `fn_<pc>` stubs.
+///
+/// Returns `None` if the binary has no usable text section or no function
+/// symbols within it.
+pub fn build_symbol_name_map(binary: &[u8]) -> Option<HashMap<usize, String>> {
+    use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
+
+    let object_file = object::File::parse(binary).ok()?;
+    let text_section = object_file.section_by_name(".text")?;
+    let text_vaddr = text_section.address();
+    let text_end = text_vaddr + text_section.size();
+
+    let mut map: HashMap<usize, String> = HashMap::new();
+    for sym in object_file.symbols() {
+        // Only named function symbols inside .text are useful here.
+        if sym.kind() != SymbolKind::Text {
+            continue;
+        }
+        let addr = sym.address();
+        if addr < text_vaddr || addr >= text_end {
+            continue;
+        }
+        let raw = match sym.name() {
+            Ok(n) if !n.is_empty() => n,
+            _ => continue,
+        };
+        let pc = ((addr - text_vaddr) / 8) as usize;
+        let name = rustc_demangle::demangle(raw).to_string();
+        // First symbol at a PC wins (matches DWARF fn_map insertion order).
+        map.entry(pc).or_insert(name);
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::coverage_source_root;

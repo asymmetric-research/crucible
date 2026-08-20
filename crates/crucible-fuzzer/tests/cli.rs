@@ -2838,6 +2838,19 @@ fn test_init_cargo_toml_has_features() {
         content.contains("invariant_test"),
         "should have invariant_test feature"
     );
+    assert!(
+        content.contains("rust-version = \"1.89\""),
+        "generated harnesses should declare the LiteSVM 0.15 MSRV"
+    );
+    assert!(
+        content.contains("solana-keypair = \"3.1.2\"")
+            && content.contains("solana-signer = \"3.0.1\""),
+        "generated harnesses should use the compatible client facade versions"
+    );
+    assert!(
+        !content.contains("litesvm =") && !content.contains("Solana v3.x"),
+        "generated harnesses should not retain obsolete runtime dependencies or guidance"
+    );
 }
 
 // =============================================================================
