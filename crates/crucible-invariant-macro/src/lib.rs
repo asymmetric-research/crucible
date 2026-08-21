@@ -800,6 +800,21 @@ pub fn fuzz_fixture(_args: TokenStream, item: TokenStream) -> TokenStream {
             let action_name = &method_name[7..];
             let action_ident = format_ident!("{}", to_pascal_case(action_name));
 
+            // A method may legitimately exist as TWO cfg-gated variants sharing the same name --
+            // e.g. `#[cfg(feature = "admin_actions")]` and `#[cfg(not(feature = "admin_actions"))]`
+            // implementations of the same `action_*` fn, exactly one of which survives cfg-stripping
+            // in any given build. This macro runs on the raw, PRE-cfg-stripped item list, so both
+            // are visible here -- without deduping, the SAME action name gets pushed twice, and the
+            // generated dispatch enum/match ends up with a duplicate variant (E0428) even though at
+            // most one method body is ever actually compiled in. Any of the cfg-alternate methods
+            // resolves the same generated `self.#method_ident(...)` call site identically (they
+            // share the same fn name and are meant to be interchangeable), so keeping just the
+            // first-seen one for enum/param-constraint purposes is correct -- this is deliberately
+            // NOT a "cfg says this one wins" choice, just "one entry per distinct action identity".
+            if actions.iter().any(|(id, _, _)| id == &action_ident) {
+                return;
+            }
+
             let mut params = Vec::new();
             for arg in &mut method.sig.inputs {
                 if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg {

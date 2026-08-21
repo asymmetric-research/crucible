@@ -50,10 +50,27 @@ pub fn init_dwarf_maps(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
                     dwarf_maps.insert(program_hash, source_map.clone());
                 }
             } else {
-                eprintln!("[COVERAGE] Warning: {} has no DWARF debug info. \
-                    Build with [profile.release] debug = true", symbols_path);
+                eprintln!("[COVERAGE] Warning: {} has no DWARF debug info (no source-level \
+                    coverage). Rebuild the program with DWARF line info — e.g. \
+                    [profile.release] debug = true, strip = false — for per-file/per-line LCOV. \
+                    Falling back to bytecode-level LCOV.", symbols_path);
             }
             #mod_name::init_dwarf_source_maps(dwarf_maps);
+
+            // Always build the symbol-table name map from symbols.so (independent of
+            // DWARF). When DWARF is absent this is what gives the bytecode-level LCOV
+            // real demangled function names instead of fn_<pc> stubs.
+            let mut symbol_maps = std::collections::HashMap::new();
+            if let Some(name_map) = crucible_test_context::build_symbol_name_map(&debug_binary) {
+                eprintln!("[COVERAGE] Symbol-table function names loaded: {} functions", name_map.len());
+                for (pubkey, _) in template_fixture.ctx.get_program_coverage_totals() {
+                    let program_hash = u64::from_le_bytes(
+                        pubkey.to_bytes()[0..8].try_into().unwrap()
+                    );
+                    symbol_maps.insert(program_hash, name_map.clone());
+                }
+            }
+            #mod_name::init_symbol_name_maps(symbol_maps);
         }
     }
 }
@@ -273,7 +290,8 @@ pub fn exit_handlers_setup(mod_name: &syn::Ident) -> proc_macro2::TokenStream {
         let default_panic = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                #mod_name::write_lcov_coverage("coverage.lcov");
+                let coverage_output = #mod_name::lcov_output_path();
+                #mod_name::write_lcov_coverage(&coverage_output);
             }
             default_panic(info);
         }));
@@ -379,11 +397,19 @@ pub fn contexts_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
         .map(|(i, field)| {
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
+            let fast_template = quote::format_ident!("__fast_svm_template_{}", i);
             quote! {
-                let #pristine = std::cell::RefCell::new(template_fixture.#field.svm.clone());
+                let mut #fast_template = if std::env::var("FUZZ_NO_TRACING").is_ok() {
+                    Some(template_fixture.#field.fresh_svm(false))
+                } else {
+                    None
+                };
+                let #pristine = std::cell::RefCell::new(
+                    crucible_test_context::clone_svm_preserving_config(&template_fixture.#field.svm)
+                );
                 let #saved = std::cell::RefCell::new(std::mem::replace(
                     &mut template_fixture.#field.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::default(),
                 ));
             }
         })
@@ -400,7 +426,9 @@ pub fn contexts_reset_check(contexts: &[syn::Ident]) -> proc_macro2::TokenStream
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
             quote! {
-                *#saved.borrow_mut() = #pristine.borrow().clone();
+                *#saved.borrow_mut() = crucible_test_context::clone_svm_preserving_config(
+                    &#pristine.borrow()
+                );
             }
         })
         .collect();
@@ -487,16 +515,18 @@ pub fn contexts_no_tracing_switch(
         .map(|(i, field)| {
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
+            let fast_template = quote::format_ident!("__fast_svm_template_{}", i);
             quote! {
                 {
-                    let mut __fast_svm = crucible_test_context::litesvm::LiteSVM::new()
-                        .with_transaction_history(0)
-                        .with_sigverify(false)
-                        .with_blockhash_check(false);
+                    let mut __fast_svm = #fast_template
+                        .take()
+                        .expect("fast SVM template must exist in no-tracing mode")
+                        ;
                     if let Some(ref __snap) = template_fixture.#field.snapshot {
                         __snap.restore_full(&mut __fast_svm);
                     }
-                    *#pristine.borrow_mut() = __fast_svm.clone();
+                    *#pristine.borrow_mut() =
+                        crucible_test_context::clone_svm_preserving_config(&__fast_svm);
                     *#saved.borrow_mut() = __fast_svm;
                 }
             }
@@ -538,7 +568,7 @@ pub fn stateful_extra_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStr
             quote! {
                 let mut #svm_name = std::mem::replace(
                     &mut template_fixture.#field.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::default(),
                 );
             }
         })
@@ -822,6 +852,10 @@ mod tests {
             output.contains("write_lcov_coverage"),
             "should write coverage on panic"
         );
+        assert!(
+            output.contains("lcov_output_path"),
+            "should write panic coverage to configured LCOV path"
+        );
         assert!(output.contains("ctrlc"), "should handle Ctrl+C");
     }
 
@@ -876,8 +910,12 @@ mod tests {
             "should use RefCell for swap trick"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
+            output.contains("LiteSVM :: default"),
             "should replace with empty SVM"
+        );
+        assert!(
+            output.contains("fresh_svm"),
+            "should preserve runtime configuration for a fast SVM"
         );
     }
 
@@ -963,8 +1001,8 @@ mod tests {
             "should restore accounts from template snapshot into the fast SVM"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
-            "should build a fresh non-debuggable LiteSVM"
+            output.contains("__fast_svm_template_0") && output.contains("take"),
+            "should move the preconfigured non-debuggable LiteSVM"
         );
         assert!(
             output.contains("__pristine_svm_0"),
@@ -1016,7 +1054,7 @@ mod tests {
             "should not create __extra_svm_0 (primary handled separately)"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
+            output.contains("LiteSVM :: default"),
             "should replace with empty SVM"
         );
     }
@@ -1102,6 +1140,30 @@ mod tests {
     }
 
     #[test]
+    fn singlecore_mode_uses_configured_lcov_output() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("lcov_output_path"),
+            "singlecore timeout coverage should use configured LCOV output path"
+        );
+    }
+
+    #[test]
     fn multicore_mode_cleans_corpus_dir() {
         let mod_name = format_ident!("__fuzz_mod");
         let fixture = format_ident!("TestFixture");
@@ -1124,6 +1186,96 @@ mod tests {
         assert!(
             output.contains("loading_from_same_dir"),
             "should check if loading from same dir"
+        );
+    }
+
+    // ── Panic capture: panics become canonical crashes (not just LibAFL objectives) ──
+
+    #[test]
+    fn singlecore_mode_alerts_and_stops_on_harness_panic() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::singlecore::singlecore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        // A bare harness panic is alerted-and-stopped via our panic hook (LibAFL chains it before
+        // its own objective save / _exit), not saved as a crash. The hook must be armed and
+        // installed before the executor, and must exit on a genuine harness panic.
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "should arm harness-panic handling before the executor"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "panic hook should alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "panic hook should stop the run on a genuine harness panic"
+        );
+        // It must be installed before InProcessExecutor is created (so LibAFL chains it).
+        let arm_pos = output
+            .find("arm_harness_panic_handler")
+            .expect("arm_harness_panic_handler present");
+        let exec_pos = output
+            .find("InProcessExecutor")
+            .expect("InProcessExecutor present");
+        assert!(
+            arm_pos < exec_pos,
+            "panic hook must be installed before the InProcessExecutor is created"
+        );
+    }
+
+    #[test]
+    fn multicore_mode_alerts_and_stops_on_harness_panic() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let output = ts(crate::multicore::multicore_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            &[],
+            &[],
+            false,
+            None,
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "should arm harness-panic handling before the executor"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "panic hook should alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "panic hook should stop the run on a genuine harness panic"
+        );
+        let arm_pos = output
+            .find("arm_harness_panic_handler")
+            .expect("arm_harness_panic_handler present");
+        let exec_pos = output
+            .find("InProcessExecutor")
+            .expect("InProcessExecutor present");
+        assert!(
+            arm_pos < exec_pos,
+            "panic hook must be installed before the InProcessExecutor is created"
         );
     }
 
@@ -1417,6 +1569,47 @@ mod tests_new {
         assert!(
             output.contains("only supports structured"),
             "should reject non-structured mode"
+        );
+    }
+
+    #[test]
+    fn stateful_arms_the_harness_panic_handler() {
+        // The singlecore and multicore paths have armed this since the alert-and-stop work, and
+        // both have tests above -- but the STATEFUL bodies never did, so a stateful harness panic
+        // escaped as a bare Rust panic (exit 101) with no `[HARNESS PANIC]` banner, no action
+        // sequence, and no stop signal. It read like a program crash and hid a real harness bug.
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(crate::stateful::stateful_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            true,
+            Some(&action_ty),
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "stateful must arm harness-panic handling"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "stateful panic hook must alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "stateful panic hook must stop the run on a genuine harness panic"
+        );
+        // Both stateful bodies (singlecore + multicore) are emitted, so it must appear twice.
+        assert_eq!(
+            output.matches("arm_harness_panic_handler").count(),
+            2,
+            "both the singlecore and multicore stateful bodies must arm it"
         );
     }
 

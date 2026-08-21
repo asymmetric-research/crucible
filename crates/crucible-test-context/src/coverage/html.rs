@@ -23,7 +23,6 @@ pub fn generate_coverage_html<W: Write>(
     pc_hits: &HashMap<usize, u64>,
     stats: Option<&CoverageWriteStats>,
 ) -> std::io::Result<()> {
-    use solana_sbpf::ebpf;
     use solana_sbpf::elf::Executable;
     use solana_sbpf::program::BuiltinProgram;
     use solana_sbpf::static_analysis::Analysis;
@@ -34,6 +33,11 @@ pub fn generate_coverage_html<W: Write>(
         fn consume(&mut self, _amount: u64) {}
         fn get_remaining(&self) -> u64 {
             0
+        }
+        fn active_mapping_ptr(
+            &mut self,
+        ) -> std::ptr::NonNull<solana_sbpf::memory_region::MemoryMapping> {
+            unreachable!("static ELF analysis never executes the VM")
         }
     }
 
@@ -88,13 +92,7 @@ pub fn generate_coverage_html<W: Write>(
                         }
 
                         // Count branches
-                        let is_jmp = insn.opc & 7 == ebpf::BPF_JMP;
-                        let is_conditional = is_jmp
-                            && insn.opc != 0x05
-                            && insn.opc != 0x85
-                            && insn.opc != 0x8d
-                            && insn.opc != 0x95;
-                        if is_conditional {
+                        if crate::coverage::is_conditional_branch_opcode(insn.opc) {
                             stats.total_branches += 1;
                             if pc_hits.get(&insn.ptr).copied().unwrap_or(0) > 0 {
                                 stats.hit_branches += 1;
@@ -818,6 +816,11 @@ pub fn build_cached_analysis(
         fn consume(&mut self, _amount: u64) {}
         fn get_remaining(&self) -> u64 {
             0
+        }
+        fn active_mapping_ptr(
+            &mut self,
+        ) -> std::ptr::NonNull<solana_sbpf::memory_region::MemoryMapping> {
+            unreachable!("static ELF analysis never executes the VM")
         }
     }
 

@@ -192,10 +192,9 @@ impl<'a> AccountCloner<'a> {
             ..Default::default()
         };
 
-        #[allow(deprecated)] // new API returns UI types, we need Account
         let keyed_accounts = self
             .rpc
-            .get_program_accounts_with_config(program_id, config)
+            .get_program_ui_accounts_with_config(program_id, config)
             .context("RPC getProgramAccounts failed")?;
 
         if keyed_accounts.len() > self.max_program_accounts {
@@ -214,10 +213,13 @@ impl<'a> AccountCloner<'a> {
         );
 
         let mut pubkeys = Vec::with_capacity(keyed_accounts.len());
-        for (pk, account) in &keyed_accounts {
-            self.write_cache(pk, account)?;
-            self.load_account(pk, account)?;
-            pubkeys.push(*pk);
+        for (pk, ui_account) in keyed_accounts {
+            let account = ui_account.to_account().with_context(|| {
+                format!("RPC returned undecodable binary account data for {pk}")
+            })?;
+            self.write_cache(&pk, &account)?;
+            self.load_account(&pk, &account)?;
+            pubkeys.push(pk);
         }
 
         Ok(pubkeys)
@@ -254,7 +256,8 @@ impl<'a> AccountCloner<'a> {
     // ========================================================================
 
     /// Read an account from the disk cache. Returns `None` on cache miss.
-    fn read_cache(&self, pubkey: &Pubkey) -> Result<Option<Account>> {
+    #[doc(hidden)]
+    pub fn read_cache(&self, pubkey: &Pubkey) -> Result<Option<Account>> {
         let key_str = pubkey.to_string();
         let meta_path = self.cache_dir.join(format!("{}.json", key_str));
         let data_path = self.cache_dir.join(format!("{}.bin", key_str));
@@ -274,7 +277,8 @@ impl<'a> AccountCloner<'a> {
     }
 
     /// Write an account to the disk cache.
-    fn write_cache(&self, pubkey: &Pubkey, account: &Account) -> Result<()> {
+    #[doc(hidden)]
+    pub fn write_cache(&self, pubkey: &Pubkey, account: &Account) -> Result<()> {
         fs::create_dir_all(&self.cache_dir)
             .with_context(|| format!("failed to create cache dir {}", self.cache_dir.display()))?;
 

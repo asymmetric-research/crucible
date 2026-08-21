@@ -3,7 +3,6 @@ use anchor_lang::solana_program::instruction::Instruction;
 use anyhow::{Context, Result};
 use solana_keypair::Keypair;
 use solana_message::{legacy::Message, VersionedMessage};
-use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -12,6 +11,7 @@ pub struct InstructionBuilder<'a> {
     pub(crate) instruction: Instruction,
     pub(crate) signers: Vec<Keypair>,
     pub(crate) fee_payer: Option<Keypair>,
+    pub(crate) skip_mutation: bool,
 }
 
 impl InstructionBuilder<'_> {
@@ -22,6 +22,13 @@ impl InstructionBuilder<'_> {
 
     pub fn fee_payer(mut self, fee_payer: &Keypair) -> Self {
         self.fee_payer = Some(fee_payer.insecure_clone());
+        self
+    }
+
+    /// Exclude this instruction type from `--mutate-accounts` probing (blanket: all constraint
+    /// classes). Use for an instruction a harness author knows only produces false positives.
+    pub fn skip_account_mutation(mut self) -> Self {
+        self.skip_mutation = true;
         self
     }
 
@@ -45,18 +52,29 @@ impl InstructionBuilder<'_> {
             .first()
             .context("At least one signer required")?
             .insecure_clone();
+        let signer_refs: Vec<&Keypair> = all_signers.iter().collect();
 
         // Pre-tx: dirty tracking
         let __t_pre = std::time::Instant::now();
         self.ctx.dirty_tracker.record_tx(ixs, &fee_payer_pubkey);
         crate::SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
 
+        // Harness-author opt-out: register this instruction type as skipped so the probe (and all
+        // future sends) excludes it.
+        if self.skip_mutation {
+            self.ctx.skip_account_mutation_for(&self.instruction);
+        }
+
+        // Account-mutation probe runs on a cloned SVM and never replaces the real outcome.
+        self.ctx
+            .maybe_probe_account_mutation(ixs, &signer_refs, &fee_payer);
+
         // SVM execution
         let __t_svm = std::time::Instant::now();
-        let result = send_instruction(
+        let result = send_transaction(
             &mut self.ctx.svm,
-            self.instruction,
-            &all_signers,
+            vec![self.instruction],
+            &signer_refs,
             &fee_payer,
             self.ctx.sigverify,
         )?;
@@ -81,17 +99,6 @@ impl InstructionBuilder<'_> {
         self.ctx.pending_signers.extend(self.signers);
         Ok(())
     }
-}
-
-pub fn send_instruction(
-    svm: &mut litesvm::LiteSVM,
-    instruction: Instruction,
-    signers: &[Keypair],
-    payer: &Keypair,
-    sigverify: bool,
-) -> Result<litesvm::types::TransactionResult> {
-    let signer_refs: Vec<&Keypair> = signers.iter().collect();
-    send_transaction(svm, vec![instruction], &signer_refs, payer, sigverify)
 }
 
 pub fn send_transaction(

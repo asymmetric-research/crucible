@@ -454,22 +454,22 @@ fn advance_slots_fingerprint_discrimination() {
 
     // Fingerprint after advance_slots(100)
     svm.warp_to_slot(100);
-    let fp_100 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_100 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial, &crate::snapshot::CreationTracker::new());
 
     // Reset and fingerprint after advance_slots(1000)
     initial.restore_full(&mut svm);
     svm.warp_to_slot(1000);
-    let fp_1000 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_1000 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial, &crate::snapshot::CreationTracker::new());
 
     // Reset and fingerprint after advance_slots(3000)
     initial.restore_full(&mut svm);
     svm.warp_to_slot(3000);
-    let fp_3000 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_3000 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial, &crate::snapshot::CreationTracker::new());
 
     // Reset and fingerprint after advance_slots(54520)
     initial.restore_full(&mut svm);
     svm.warp_to_slot(54520);
-    let fp_54520 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_54520 = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial, &crate::snapshot::CreationTracker::new());
 
     eprintln!("[diag] fingerprints:");
     eprintln!("[diag]   advance(100):   {:#018x}", fp_100);

@@ -82,6 +82,13 @@ pub fn multicore_mode(
             let crash_dir = crashes_dir_env.clone().unwrap_or_else(|| format!("crashes/{}", #feature_name));
             std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
 
+            // LibAFL's solutions (objective) corpus is the fuzzer's own bookkeeping (hex-named
+            // inputs + per-entry `.metadata` + refcount markers). Keep it in a hidden subdir so the
+            // crash dir holds ONLY crucible's canonical `crash_<id>` + `.meta.json` artifacts.
+            let crash_corpus_dir = format!("{}/.crash_corpus", crash_dir);
+            std::fs::create_dir_all(&crash_corpus_dir)
+                .expect("failed to create crash corpus directory");
+
             if verbose { eprintln!("[FUZZ] Initializing program analysis..."); }
 
             // =====================================================================
@@ -526,7 +533,7 @@ pub fn multicore_mode(
                 let rand = StdRand::with_seed(seed.wrapping_add(_client_desc.core_id().0 as u64));
                 let corpus = CachedOnDiskCorpus::<BytesInput>::no_meta(&shared_corpus_dir_for_client, 1000)
                     .expect("failed to create cached on-disk corpus");
-                let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
+                let solutions = OnDiskCorpus::new(&crash_corpus_dir).expect("failed to create crash corpus");
 
                 let mut state = state.unwrap_or_else(|| {
                     StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
@@ -696,14 +703,31 @@ pub fn multicore_mode(
                     #ctx_swap_back
                     // fixture is dropped here (cheap: only empty SVM + small fields)
 
-                    // On panic: resume unwinding so the default panic handler prints
-                    // the message with file/line, then the process exits naturally
+                    // On panic: resume unwinding. As in single-core, a harness panic is handled by
+                    // our panic hook (installed before the executor via `arm_harness_panic_handler`)
+                    // which LibAFL chains as its `old_hook` and calls before libc::_exit — that hook
+                    // alerts and stops the run, so this branch does not run for harness panics.
                     if let Err(__panic_payload) = __panic_result {
                         std::panic::resume_unwind(__panic_payload);
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
-                        let input_hash = hash_std(slice);
+                        // Account-mutation findings dedup on the finding identity
+                        // (fixed by the final probed action). Naming the crash
+                        // artifact by the finding-id hash makes different sequences
+                        // reaching the same probed instruction (a…k, b…k) collide on
+                        // one shared file across workers instead of N copies.
+                        let __mut_fid = crucible_test_context::mutation_finding_id();
+                        if let Some(ref __fid) = __mut_fid {
+                            if !crucible_test_context::is_novel_mutation_finding(__fid) {
+                                // Already reported in this worker — suppress duplicate.
+                                return ExitKind::Ok;
+                            }
+                        }
+                        let input_hash = match __mut_fid {
+                            Some(ref __fid) => hash_std(__fid.as_bytes()),
+                            None => hash_std(slice),
+                        };
                         let crash_id = format!("crash_{:016x}", input_hash);
                         println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
                         eprintln!("[FUZZ_FINDING] {}: {}", crash_id, msg);
@@ -727,6 +751,26 @@ pub fn multicore_mode(
 
                 let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
                 let timeout = Duration::from_millis(10000);
+
+                // Install our panic hook BEFORE the executor so LibAFL chains it as `old_hook` and
+                // runs it first. A bare panic in the harness/invariant is a HARNESS BUG: instead of
+                // letting LibAFL save it as an objective and restart this worker (which restart-loops
+                // and inflates the crash counter), we alert the author, signal all workers to stop
+                // (the stop-signal file), and exit. The `false` branch passes the framework's own
+                // shutdown panics through to the worker's existing hook (installed above).
+                crucible_test_context::arm_harness_panic_handler(Some(
+                    stop_signal_for_harness.to_string_lossy().to_string(),
+                ));
+                {
+                    let __prev_hook = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(move |info| {
+                        if crucible_test_context::harness_panic_alert(&info.to_string()) {
+                            std::process::exit(70);
+                        }
+                        __prev_hook(info);
+                    }));
+                }
+
                 let mut executor = InProcessExecutor::with_timeout(
                     &mut harness_wrapper,
                     tuple_list!(edges_observer, time_observer),

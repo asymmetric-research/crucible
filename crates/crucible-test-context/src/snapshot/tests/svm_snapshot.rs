@@ -787,7 +787,12 @@ fn test_fingerprint_empty_dirty_set() {
         sysvars: clock_to_sysvars(&svm.get_sysvar::<Clock>()),
     };
     assert_eq!(
-        compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial),
+        compute_state_fingerprint_from_snapshot(
+            &svm,
+            &dirty,
+            &initial,
+            &crate::snapshot::CreationTracker::new()
+        ),
         0
     );
 }
@@ -811,13 +816,23 @@ fn test_fingerprint_changes_with_data() {
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk);
 
-    let fp1 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
+    let fp1 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
     assert_ne!(fp1, 0); // non-zero because pubkey + lamports also contribute
 
     // [1,0,0,0,0,0,0,0] → u64 LE = 1 → bucket 1 (different from bucket 0)
     svm.set_account(pk, make_account(1000, &[1, 0, 0, 0, 0, 0, 0, 0]))
         .unwrap();
-    let fp2 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
+    let fp2 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     assert_ne!(
         fp1, fp2,
@@ -827,10 +842,20 @@ fn test_fingerprint_changes_with_data() {
     // Also test lamports bucket boundary:
     // lamports=1 (diff from 0 = 1 → bucket 1) vs lamports=u64::MAX (diff from 0 = MAX → overflow bucket)
     svm.set_account(pk, make_account(1, &[0; 8])).unwrap();
-    let fp3 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
+    let fp3 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
     svm.set_account(pk, make_account(u64::MAX, &[0; 8]))
         .unwrap();
-    let fp4 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
+    let fp4 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
     assert_ne!(
         fp3, fp4,
         "lamports crossing bucket boundary should change fingerprint"
@@ -851,8 +876,18 @@ fn test_fingerprint_deterministic() {
     let mut dirty = DirtyTracker::new();
     dirty.mark_account_dirty(&pk);
 
-    let fp1 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
-    let fp2 = compute_state_fingerprint_from_snapshot(&svm, &dirty, &initial);
+    let fp1 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
+    let fp2 = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &dirty,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
     assert_eq!(fp1, fp2, "same state should produce same fingerprint");
 }
 
@@ -1589,12 +1624,22 @@ fn test_fingerprint_changes_with_different_states() {
         s
     });
 
-    let fp_a = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_a = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &tracker,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     // State B: 10000 lamports (different magnitude)
     svm.set_account(pk, make_account(10000, &[0u8; 16]))
         .unwrap();
-    let fp_b = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_b = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &tracker,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     assert_ne!(
         fp_a, fp_b,
@@ -1603,7 +1648,12 @@ fn test_fingerprint_changes_with_different_states() {
 
     // State C: same as A (150 lamports, same magnitude)
     svm.set_account(pk, make_account(150, &[0u8; 16])).unwrap();
-    let fp_c = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_c = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &tracker,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     // fp_a and fp_c might collide (same bucket) — that's expected by design.
     // Just verify fp_b is different from fp_c.
@@ -1847,14 +1897,24 @@ fn test_fingerprint_new_accounts_different_data() {
     data_a[0..4].copy_from_slice(&[10, 20, 30, 40]);
     data_a[8..16].copy_from_slice(&1u64.to_le_bytes());
     svm.set_account(pk, make_account(5000, &data_a)).unwrap();
-    let fp_a = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_a = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &tracker,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     // State B: same lamports/length, different data
     let mut data_b = vec![0u8; 16];
     data_b[0..4].copy_from_slice(&[10, 20, 30, 40]);
     data_b[8..16].copy_from_slice(&999_999u64.to_le_bytes());
     svm.set_account(pk, make_account(5000, &data_b)).unwrap();
-    let fp_b = compute_state_fingerprint_from_snapshot(&svm, &tracker, &initial);
+    let fp_b = compute_state_fingerprint_from_snapshot(
+        &svm,
+        &tracker,
+        &initial,
+        &crate::snapshot::CreationTracker::new(),
+    );
 
     assert_ne!(fp_a, fp_b,
         "new accounts with same lamports/length but different data should have different fingerprints");

@@ -2,6 +2,7 @@
 name = "crucible-fuzz-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "CLI for Crucible - Solana smart contract fuzzing framework"
 

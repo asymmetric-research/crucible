@@ -86,6 +86,89 @@ pub fn idl_type_to_tokens(ty: &anchor_lang_idl::types::IdlType) -> proc_macro2::
     }
 }
 
+/// Whether a type can derive `serde::Serialize`.
+///
+/// serde only implements `Serialize` for fixed arrays up to 32 elements, so
+/// any type containing a longer array (directly or through a defined type)
+/// cannot get the derive. Used by generated type definitions in bincode
+/// programs; instruction args are encoded field-wise and do not rely on the
+/// arg struct deriving serde.
+pub(crate) fn is_serde_serializable(
+    ty: &anchor_lang_idl::types::IdlType,
+    all_types: &[anchor_lang_idl::types::IdlTypeDef],
+) -> bool {
+    use anchor_lang_idl::types::{IdlType, IdlTypeDefTy};
+
+    match ty {
+        IdlType::Bool
+        | IdlType::U8
+        | IdlType::I8
+        | IdlType::U16
+        | IdlType::I16
+        | IdlType::U32
+        | IdlType::I32
+        | IdlType::F32
+        | IdlType::U64
+        | IdlType::I64
+        | IdlType::F64
+        | IdlType::U128
+        | IdlType::I128
+        | IdlType::Pubkey
+        | IdlType::String
+        | IdlType::Bytes => true,
+        // U256/I256 are emitted as [u8; 32] — within serde's array limit
+        IdlType::U256 | IdlType::I256 => true,
+        IdlType::Option(inner) | IdlType::Vec(inner) => is_serde_serializable(inner, all_types),
+        IdlType::Array(inner, IdlArrayLen::Value(n)) => {
+            *n <= 32 && is_serde_serializable(inner, all_types)
+        }
+        // Generic-length arrays — unknown at codegen time, be conservative
+        IdlType::Array(_, IdlArrayLen::Generic(_)) => false,
+        IdlType::Defined { name, generics } => {
+            // Generic instantiations would require seeing through the typedef
+            // body with substitution — conservative.
+            if !generics.is_empty() {
+                return false;
+            }
+            let Some(typedef) = all_types.iter().find(|t| &t.name == name) else {
+                return false;
+            };
+            if !typedef.generics.is_empty() {
+                return false;
+            }
+            match &typedef.ty {
+                IdlTypeDefTy::Struct { fields } => fields
+                    .as_ref()
+                    .map_or(true, |f| fields_serde_serializable(f, all_types)),
+                IdlTypeDefTy::Enum { variants } => variants.iter().all(|v| {
+                    v.fields
+                        .as_ref()
+                        .map_or(true, |f| fields_serde_serializable(f, all_types))
+                }),
+                IdlTypeDefTy::Type { alias } => is_serde_serializable(alias, all_types),
+            }
+        }
+        // Type-param references — depend on the instantiation, be conservative
+        IdlType::Generic(_) => false,
+        _ => false,
+    }
+}
+
+/// Whether every field in a fields list can derive `serde::Serialize`.
+pub(crate) fn fields_serde_serializable(
+    fields: &anchor_lang_idl::types::IdlDefinedFields,
+    all_types: &[anchor_lang_idl::types::IdlTypeDef],
+) -> bool {
+    use anchor_lang_idl::types::IdlDefinedFields;
+
+    match fields {
+        IdlDefinedFields::Named(named) => named
+            .iter()
+            .all(|f| is_serde_serializable(&f.ty, all_types)),
+        IdlDefinedFields::Tuple(types) => types.iter().all(|t| is_serde_serializable(t, all_types)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

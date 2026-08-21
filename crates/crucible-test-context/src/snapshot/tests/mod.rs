@@ -1,5 +1,7 @@
 mod account_diff;
 mod adversarial;
+mod compact_delta;
+mod creation_identity;
 mod dirty_tracker;
 mod edge_cases;
 mod helpers;

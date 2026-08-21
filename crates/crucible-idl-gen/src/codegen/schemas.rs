@@ -69,21 +69,50 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
         })
         .collect();
 
-    if entries.is_empty() {
+    // Every account type's discriminator (borsh *and* zero-copy) — used for the type-tag (CC-5)
+    // length lookup, independent of whether the account has a field-diff function.
+    let all_discriminators: Vec<_> = idl
+        .accounts
+        .iter()
+        .map(|acc| {
+            let disc = &acc.discriminator;
+            quote! { vec![#(#disc),*] }
+        })
+        .collect();
+
+    if entries.is_empty() && all_discriminators.is_empty() {
         return quote! {
-            /// Register account schemas for semantic field-level diffs.
-            /// No zero-copy accounts found in IDL — this is a no-op.
+            /// Register account schemas — no accounts in IDL, so this is a no-op.
             pub fn register_schemas() {}
         };
     }
 
-    quote! {
-        /// Register account schemas for semantic field-level diffs.
-        /// Call this once at harness initialization (e.g., in setup()).
-        pub fn register_schemas() {
+    let schema_registration = if entries.is_empty() {
+        quote! {}
+    } else {
+        quote! {
             crucible_test_context::register_account_schemas(vec![
                 #(#entries),*
             ]);
+        }
+    };
+
+    let discriminator_registration = if all_discriminators.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            crucible_test_context::register_account_discriminators(vec![
+                #(#all_discriminators),*
+            ]);
+        }
+    };
+
+    quote! {
+        /// Register account schemas (zero-copy field diffs) and all account discriminators.
+        /// Call this once at harness initialization (e.g., in setup()).
+        pub fn register_schemas() {
+            #schema_registration
+            #discriminator_registration
         }
     }
 }

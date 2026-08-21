@@ -1,5 +1,9 @@
 # Getting Started
 
+Crucible requires Rust 1.89 or newer and uses LiteSVM 0.15.2. Existing harnesses upgrading from
+an older LiteSVM release should read the [migration guide](litesvm-0.15-migration.md) before
+regenerating their lockfile.
+
 ## Setup & Running
 
 ### Initialize a fuzz project

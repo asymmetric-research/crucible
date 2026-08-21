@@ -1,0 +1,2302 @@
+{
+  "address": "2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b",
+  "metadata": {
+    "name": "account_mutations_examples",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Minimal airdrop program with a seeded missing-owner-check bug"
+  },
+  "instructions": [
+    {
+      "name": "claim_airdrop",
+      "docs": [
+        "Program-owned config, missing owner check (the canonical bug)."
+      ],
+      "discriminator": [
+        137,
+        50,
+        122,
+        111,
+        89,
+        254,
+        8,
+        20
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claim_with_owner_check",
+      "docs": [
+        "Program-owned config *with* the owner check present."
+      ],
+      "discriminator": [
+        196,
+        120,
+        14,
+        124,
+        101,
+        203,
+        107,
+        165
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_clock_no_check",
+      "docs": [
+        "Reads the clock's `unix_timestamp` from the passed account without verifying its key — a",
+        "program that trusts a sysvar by position (the Wormhole class)."
+      ],
+      "discriminator": [
+        110,
+        145,
+        146,
+        222,
+        253,
+        225,
+        4,
+        128
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "clock"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_clock_with_check",
+      "docs": [
+        "Same read, but verifies the account is the real Clock sysvar."
+      ],
+      "discriminator": [
+        204,
+        214,
+        76,
+        240,
+        144,
+        209,
+        173,
+        61
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "clock"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_linked_no_check",
+      "docs": [
+        "Source embeds the expected target key, but the instruction never checks that relation."
+      ],
+      "discriminator": [
+        141,
+        28,
+        241,
+        22,
+        95,
+        132,
+        31,
+        253
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "target"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_linked_with_check",
+      "docs": [
+        "Same linked-source read, with `source.target == target.key()` checked."
+      ],
+      "discriminator": [
+        200,
+        156,
+        240,
+        115,
+        40,
+        250,
+        18,
+        39
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "target"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_price_ref_no_check",
+      "docs": [
+        "Source embeds the expected price/value account key, but the instruction accepts any",
+        "same-class price account. The price is read but does not affect this test's post-state,",
+        "matching economic-value inputs whose byte corruption is a weak relevance signal."
+      ],
+      "discriminator": [
+        192,
+        165,
+        40,
+        139,
+        148,
+        227,
+        183,
+        184
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "price"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_price_ref_with_check",
+      "docs": [
+        "Same price/value read, with `source.price == price.key()` checked."
+      ],
+      "discriminator": [
+        115,
+        242,
+        172,
+        177,
+        141,
+        42,
+        124,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "source"
+        },
+        {
+          "name": "price"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_root_child_no_check",
+      "docs": [
+        "Singleton/root account embeds a child key, but the instruction accepts a wrong child."
+      ],
+      "discriminator": [
+        173,
+        221,
+        180,
+        76,
+        111,
+        7,
+        146,
+        251
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "child"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_root_child_with_check",
+      "docs": [
+        "Same root-child read, with `root.child == child.key()` checked."
+      ],
+      "discriminator": [
+        131,
+        223,
+        101,
+        68,
+        67,
+        25,
+        227,
+        77
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "child"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_bidirectional_no_check",
+      "docs": [
+        "Pair accounts each carry their expected counterpart, but the instruction never verifies the",
+        "bidirectional binding."
+      ],
+      "discriminator": [
+        93,
+        190,
+        54,
+        65,
+        169,
+        95,
+        116,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_bidirectional_with_check",
+      "docs": [
+        "Same pair read, with both counterpart directions checked."
+      ],
+      "discriminator": [
+        150,
+        99,
+        206,
+        14,
+        115,
+        220,
+        63,
+        131
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_shared_root_no_check",
+      "docs": [
+        "Both accounts point at a root/counterpart, but the instruction never verifies that the root",
+        "fields match the provided root."
+      ],
+      "discriminator": [
+        59,
+        56,
+        178,
+        144,
+        34,
+        233,
+        160,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pair_shared_root_with_check",
+      "docs": [
+        "Same shared-root read, with both root fields checked against the provided root account."
+      ],
+      "discriminator": [
+        180,
+        77,
+        159,
+        186,
+        101,
+        3,
+        22,
+        95
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "left"
+        },
+        {
+          "name": "right"
+        },
+        {
+          "name": "root"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "consume_semantic_no_check",
+      "docs": [
+        "Semantic account has an embedded context key, but the instruction accepts any same-class",
+        "account and consumes it."
+      ],
+      "discriminator": [
+        93,
+        197,
+        193,
+        73,
+        47,
+        57,
+        141,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "semantic",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "consume_semantic_with_check",
+      "docs": [
+        "Same consume path, with the expected semantic context checked before mutation."
+      ],
+      "discriminator": [
+        43,
+        164,
+        195,
+        252,
+        30,
+        147,
+        243,
+        37
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "semantic",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_foreign_owned_no_check",
+      "docs": [
+        "Account expected to be owned by a *foreign* program (token/oracle flavor), missing check."
+      ],
+      "discriminator": [
+        221,
+        244,
+        35,
+        187,
+        246,
+        48,
+        200,
+        140
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_foreign_owned_with_check",
+      "docs": [
+        "Foreign-owned config *with* the owner check present."
+      ],
+      "discriminator": [
+        203,
+        221,
+        177,
+        40,
+        83,
+        122,
+        89,
+        137
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_no_check",
+      "docs": [
+        "Reads a PDA config without verifying its derivation or owner."
+      ],
+      "discriminator": [
+        199,
+        151,
+        149,
+        130,
+        183,
+        124,
+        82,
+        27
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_singleton_pda_with_owner_type_check_no_derivation_check",
+      "docs": [
+        "Singleton-style PDA with owner/type checks but no key check."
+      ],
+      "discriminator": [
+        98,
+        233,
+        130,
+        0,
+        5,
+        253,
+        103,
+        49
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_with_pda_check_no_owner_check",
+      "docs": [
+        "Verifies the PDA address but omits the owner check. The owner-mutation engine skips",
+        "key-pinned PDAs by default because an attacker cannot normally create this wrong-owner state."
+      ],
+      "discriminator": [
+        122,
+        179,
+        181,
+        50,
+        190,
+        114,
+        37,
+        179
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_pda_config_with_owner_and_pda_check",
+      "docs": [
+        "Same read, but verifies both the expected `[b\"config\"]` PDA and its owner."
+      ],
+      "discriminator": [
+        228,
+        85,
+        136,
+        255,
+        14,
+        101,
+        193,
+        22
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_no_check",
+      "docs": [
+        "Uses a PDA-like authority account without reading data and without verifying its address."
+      ],
+      "discriminator": [
+        230,
+        85,
+        201,
+        74,
+        43,
+        70,
+        164,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_with_check",
+      "docs": [
+        "Same authority path, but verifies the PDA address."
+      ],
+      "discriminator": [
+        126,
+        21,
+        200,
+        116,
+        142,
+        176,
+        75,
+        193
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "use_pda_authority_key_no_check",
+      "docs": [
+        "Uses the PDA account's key as the intended authority but never verifies it. This is a",
+        "key-only PDA bug: no data or lamports are semantically relevant, so the account mutator's",
+        "relevance gates intentionally miss it."
+      ],
+      "discriminator": [
+        182,
+        213,
+        189,
+        46,
+        154,
+        254,
+        243,
+        187
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "with_inert_pda_account",
+      "docs": [
+        "Passes an empty PDA account that the instruction never reads. The CC-3 relevance gate should",
+        "suppress this instead of treating every successful substitution as a missing derivation check."
+      ],
+      "discriminator": [
+        196,
+        17,
+        68,
+        123,
+        74,
+        248,
+        89,
+        225
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inert_pda"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_state_no_check",
+      "docs": [
+        "A second program-owned account in a different role, same missing-owner-check class."
+      ],
+      "discriminator": [
+        145,
+        63,
+        188,
+        59,
+        227,
+        237,
+        67,
+        58
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_tiny_config_no_check",
+      "docs": [
+        "Tiny (<= 8 byte) config read without an owner check (exercises the relevance-gate",
+        "small-account path)."
+      ],
+      "discriminator": [
+        170,
+        88,
+        204,
+        120,
+        9,
+        59,
+        92,
+        27
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_mint_no_owner_check",
+      "docs": [
+        "Reads mint-shaped data without verifying the account is owned by the token program."
+      ],
+      "discriminator": [
+        60,
+        69,
+        99,
+        166,
+        149,
+        153,
+        248,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_mint_with_owner_check",
+      "docs": [
+        "Same mint read, with the token-program owner check present."
+      ],
+      "discriminator": [
+        15,
+        191,
+        217,
+        4,
+        128,
+        68,
+        175,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_account_no_owner_check",
+      "docs": [
+        "Reads token-account-shaped data without verifying the token-program owner."
+      ],
+      "discriminator": [
+        248,
+        142,
+        93,
+        111,
+        212,
+        30,
+        131,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_account_with_owner_check",
+      "docs": [
+        "Same token-account read, with the token-program owner check present."
+      ],
+      "discriminator": [
+        227,
+        156,
+        181,
+        36,
+        57,
+        67,
+        33,
+        204
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_with_mint_no_mint_check",
+      "docs": [
+        "Receives a token account and mint but never checks `token_account.mint == mint.key()`."
+      ],
+      "discriminator": [
+        25,
+        74,
+        145,
+        109,
+        87,
+        63,
+        218,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_with_mint_check",
+      "docs": [
+        "Same pair, with the token-account-to-mint relation checked."
+      ],
+      "discriminator": [
+        26,
+        41,
+        8,
+        176,
+        36,
+        142,
+        109,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_lp_pair_no_canonical_mint_check",
+      "docs": [
+        "Pool embeds the canonical LP mint, but this path only checks the supplied token pair."
+      ],
+      "discriminator": [
+        146,
+        84,
+        196,
+        81,
+        0,
+        228,
+        184,
+        114
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool_state"
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_lp_pair_with_canonical_mint_check",
+      "docs": [
+        "Same LP pair, with the pool-state canonical mint binding checked."
+      ],
+      "discriminator": [
+        201,
+        197,
+        224,
+        162,
+        21,
+        11,
+        159,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool_state"
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_token_without_mint_relation_context",
+      "docs": [
+        "Owner is checked, but no mint account is present; the wrong-mint oracle must not run here."
+      ],
+      "discriminator": [
+        81,
+        99,
+        110,
+        222,
+        128,
+        73,
+        184,
+        120
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "token_account"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_typed_no_check",
+      "docs": [
+        "Reads a typed `Config` via `UncheckedAccount`: verifies the owner but trusts the data layout",
+        "without checking the 8-byte discriminator (missing type-tag check)."
+      ],
+      "discriminator": [
+        141,
+        179,
+        74,
+        1,
+        35,
+        225,
+        98,
+        54
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_optional_typed_config",
+      "docs": [
+        "Optional-account pattern: a valid `Config` pays out, but a malformed/placeholder account is",
+        "deliberately treated as absent. A discriminator flip should not be reported as exploitable",
+        "because the mutated execution no-ops instead of matching the baseline effects."
+      ],
+      "discriminator": [
+        154,
+        148,
+        7,
+        59,
+        208,
+        88,
+        91,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_allowed_type_no_expected_type_check",
+      "docs": [
+        "Checks that the account has *some* valid known type, but not the expected type. A bit-flip",
+        "probe is rejected, while a real `AlternateConfig` is incorrectly accepted."
+      ],
+      "discriminator": [
+        142,
+        96,
+        132,
+        120,
+        50,
+        137,
+        225,
+        228
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_maybe_config_no_owner_check",
+      "docs": [
+        "Optional-present path with a missing owner check. If the instruction is first observed with",
+        "an empty placeholder, the per-instruction probe cache suppresses the later present-account bug."
+      ],
+      "discriminator": [
+        121,
+        202,
+        193,
+        17,
+        217,
+        206,
+        113,
+        23
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "transfer_between_traders_no_cross_check",
+      "docs": [
+        "Both trader accounts are individually valid and signer authorization is checked, but the",
+        "destination trader is not required to belong to the same authority. This is the custom",
+        "invariant class: valid-but-wrong counterpart accounts must be constructed by the harness."
+      ],
+      "discriminator": [
+        217,
+        54,
+        99,
+        86,
+        226,
+        104,
+        89,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "source_trader"
+        },
+        {
+          "name": "destination_trader"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_typed_with_check",
+      "docs": [
+        "Same read via `Account<'info, Config>`, which verifies the discriminator (and owner)."
+      ],
+      "discriminator": [
+        38,
+        89,
+        201,
+        214,
+        168,
+        132,
+        157,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_writable_config_no_check",
+      "docs": [
+        "Reads a *writable* config without an owner check. The account is only read, so owner mutation",
+        "can still produce a conclusive finding even though the meta is writable."
+      ],
+      "discriminator": [
+        78,
+        184,
+        4,
+        171,
+        15,
+        242,
+        187,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "with_inert_account",
+      "docs": [
+        "Pays a fixed amount and never reads the `inert` account passed alongside. The inert",
+        "account is a data account with no influence on execution, so the relevance gate must skip",
+        "it instead of reporting a (non-exploitable) missing owner check."
+      ],
+      "discriminator": [
+        183,
+        159,
+        114,
+        6,
+        148,
+        120,
+        138,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inert"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_multisig_one_unchecked",
+      "docs": [
+        "Two declared signers, but only `admin` is checked — `cosigner`'s signature is never",
+        "enforced, so the engine must flag the co-signer (and not the admin)."
+      ],
+      "discriminator": [
+        234,
+        58,
+        197,
+        123,
+        44,
+        124,
+        80,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "admin"
+        },
+        {
+          "name": "cosigner"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_authority_no_authority_check",
+      "docs": [
+        "State embeds the required authority, but any signer is accepted."
+      ],
+      "discriminator": [
+        179,
+        212,
+        168,
+        238,
+        110,
+        67,
+        133,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_authority_with_authority_check",
+      "docs": [
+        "Same authority-state read, with `state.authority == authority.key()` checked."
+      ],
+      "discriminator": [
+        133,
+        165,
+        118,
+        49,
+        78,
+        57,
+        116,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "state"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_redundant_cosigner",
+      "docs": [
+        "`cosigner` is intentionally redundant metadata. The account mutator will still report a",
+        "missing signer check because it cannot infer that this signer is not an authority boundary."
+      ],
+      "discriminator": [
+        246,
+        58,
+        95,
+        96,
+        211,
+        212,
+        12,
+        106
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "admin"
+        },
+        {
+          "name": "cosigner"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_no_signer_check",
+      "docs": [
+        "Pays out without verifying that the `authority` actually signed (missing signer check)."
+      ],
+      "discriminator": [
+        40,
+        248,
+        218,
+        135,
+        90,
+        169,
+        20,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw_with_signer_check",
+      "docs": [
+        "Same payout, but with the signer check present."
+      ],
+      "discriminator": [
+        124,
+        188,
+        33,
+        211,
+        25,
+        158,
+        75,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true
+        },
+        {
+          "name": "authority"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "read_gated_config",
+      "docs": [
+        "T4: CC-1 owner check on config is skipped when gate.fast_path is set (state-conditional)."
+      ],
+      "discriminator": [
+        255,
+        81,
+        119,
+        235,
+        28,
+        95,
+        191,
+        115
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "gate"
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_gate_fast_path",
+      "docs": [
+        "T4 toggle: flips the gate fast_path flag to drive read_gated_config through states."
+      ],
+      "discriminator": [
+        12,
+        167,
+        124,
+        203,
+        159,
+        107,
+        43,
+        132
+      ],
+      "accounts": [
+        {
+          "name": "recipient",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "gate",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "fast_path",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "forward_to_cpi_no_check",
+      "docs": [
+        "CC-13: forwards dest into a system-transfer CPI without validating it (the bug)."
+      ],
+      "discriminator": [
+        81,
+        55,
+        29,
+        242,
+        84,
+        137,
+        196,
+        75
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "dest",
+          "writable": true
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "forward_to_cpi_with_check",
+      "docs": [
+        "CC-13: validates the forwarded account's owner before the CPI (the fix)."
+      ],
+      "discriminator": [
+        200,
+        77,
+        246,
+        52,
+        199,
+        41,
+        231,
+        139
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "dest",
+          "writable": true
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "AlternateConfig",
+      "discriminator": [
+        112,
+        26,
+        206,
+        10,
+        180,
+        130,
+        5,
+        4
+      ]
+    },
+    {
+      "name": "TraderState",
+      "discriminator": [
+        124,
+        33,
+        101,
+        17,
+        158,
+        79,
+        26,
+        140
+      ]
+    },
+    {
+      "name": "PoolState",
+      "discriminator": [
+        247,
+        237,
+        227,
+        245,
+        215,
+        195,
+        222,
+        70
+      ]
+    },
+    {
+      "name": "LinkedState",
+      "discriminator": [
+        178,
+        163,
+        210,
+        62,
+        47,
+        48,
+        13,
+        148
+      ]
+    },
+    {
+      "name": "TargetState",
+      "discriminator": [
+        147,
+        73,
+        167,
+        190,
+        147,
+        166,
+        153,
+        37
+      ]
+    },
+    {
+      "name": "ValueSourceState",
+      "discriminator": [
+        54,
+        98,
+        108,
+        196,
+        246,
+        208,
+        150,
+        132
+      ]
+    },
+    {
+      "name": "PriceState",
+      "discriminator": [
+        202,
+        40,
+        37,
+        157,
+        73,
+        117,
+        152,
+        251
+      ]
+    },
+    {
+      "name": "RootState",
+      "discriminator": [
+        168,
+        212,
+        194,
+        223,
+        236,
+        239,
+        59,
+        86
+      ]
+    },
+    {
+      "name": "PairLeftState",
+      "discriminator": [
+        139,
+        52,
+        59,
+        189,
+        192,
+        91,
+        80,
+        216
+      ]
+    },
+    {
+      "name": "PairRightState",
+      "discriminator": [
+        67,
+        248,
+        77,
+        163,
+        40,
+        119,
+        172,
+        151
+      ]
+    },
+    {
+      "name": "SemanticState",
+      "discriminator": [
+        35,
+        220,
+        247,
+        206,
+        91,
+        179,
+        102,
+        198
+      ]
+    },
+    {
+      "name": "AuthorityState",
+      "discriminator": [
+        217,
+        219,
+        18,
+        179,
+        143,
+        126,
+        98,
+        123
+      ]
+    },
+    {
+      "name": "GateState",
+      "discriminator": [
+        70,
+        225,
+        126,
+        160,
+        254,
+        17,
+        57,
+        176
+      ]
+    },
+    {
+      "name": "GatedConfigState",
+      "discriminator": [
+        31,
+        236,
+        184,
+        163,
+        59,
+        200,
+        22,
+        213
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidConfig",
+      "msg": "Invalid config"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidAmount",
+      "msg": "Invalid amount"
+    },
+    {
+      "code": 6002,
+      "name": "InsufficientVault",
+      "msg": "Insufficient vault balance"
+    },
+    {
+      "code": 6003,
+      "name": "WrongOwner",
+      "msg": "Wrong owner"
+    },
+    {
+      "code": 6004,
+      "name": "MissingSigner",
+      "msg": "Missing required signer"
+    },
+    {
+      "code": 6005,
+      "name": "WrongPda",
+      "msg": "Wrong PDA"
+    },
+    {
+      "code": 6006,
+      "name": "WrongSysvar",
+      "msg": "Wrong sysvar"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidClock",
+      "msg": "Invalid clock"
+    },
+    {
+      "code": 6008,
+      "name": "WrongAuthority",
+      "msg": "Wrong authority"
+    },
+    {
+      "code": 6009,
+      "name": "WrongMint",
+      "msg": "Wrong mint"
+    },
+    {
+      "code": 6010,
+      "name": "WrongTarget",
+      "msg": "Wrong target"
+    }
+  ],
+  "types": [
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AlternateConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TraderState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoolState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "lp_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LinkedState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "target",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TargetState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ValueSourceState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "price",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PriceState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "price",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RootState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "child",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PairLeftState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "right",
+            "type": "pubkey"
+          },
+          {
+            "name": "root",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PairRightState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "left",
+            "type": "pubkey"
+          },
+          {
+            "name": "root",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SemanticState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "context",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorityState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GateState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fast_path",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GatedConfigState",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}

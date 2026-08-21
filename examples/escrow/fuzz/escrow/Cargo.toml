@@ -2,6 +2,7 @@
 name = "escrow_fuzz"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 
 [workspace]
 

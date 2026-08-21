@@ -21,6 +21,23 @@ impl MyFixture {
 }
 ```
 
+`TestContext::new()` starts at slot `0` with all features enabled. When the fixture needs a
+specific initial Clock, set it before creating accounts or loading programs:
+
+```rust
+let mut ctx = TestContext::builder()
+    .initial_slot(250_000_000)
+    .build();
+
+// Or use the mainnet feature-activation slot bundled with LiteSVM 0.15.2.
+let mut ctx = TestContext::builder().mainnet_slot().build();
+```
+
+The mainnet-slot convenience changes the Clock, not Crucible's all-features-enabled policy. Use
+`advance_slots` or `warp_to_slot` for later time changes. Programs that query epoch stake should
+also configure `set_epoch_stake`/`set_epoch_stakes` during `setup()` so the value is captured for
+every fuzzing SVM. See the [LiteSVM 0.15.2 migration guide](litesvm-0.15-migration.md).
+
 ---
 
 ## Action Naming Convention
@@ -91,6 +108,30 @@ pub fn action_stake(
     #[range(0..1_000_000)] amount: u64,
 ) { }
 ```
+
+---
+
+## Account-Mutation Checks
+
+Run a harness with `--mutate-accounts` to probe common missing account checks:
+
+```bash
+crucible run myproject invariant_test --release --mutate-accounts --timeout 60
+```
+
+Probes are deterministic and run when an action/instruction shape first
+completes. See [Constraint-Check Engine](constraint-check-engine.md) for the
+current label/probe table and common false-positive notes.
+
+Harness shape matters:
+
+- Seed at least two valid same-class accounts for same-class relation probes.
+- Register discriminators or schemas for type-tagged accounts where possible.
+- Pass both a token account and mint account for SPL token relation probes.
+- Expect one probe per instruction shape per worker; if a bug is state-dependent,
+  drive the vulnerable state before the first successful call to that instruction.
+- Treat findings as triage inputs when the program intentionally permits
+  same-class swaps, duplicate aliases, public value reads, or redundant signers.
 
 ---
 
