@@ -24,7 +24,7 @@ anchor-lang = "1.0.1"
 anchor-spl = { version = "1.0.1", features = ["token_2022"] }
 # LiteSVM 0.15 uses Agave's 4.1 runtime while the compatible client facade
 # crates remain on their independently versioned 3.x/4.x release lines.
-agave-feature-set = "4.1.1"
+agave-feature-set = "~4.1.1"
 solana-pubkey = { version = "3.0", features = ["curve25519"] }
 solana-keypair = "3.1.2"
 solana-signer = "3.0.1"
@@ -32,7 +32,7 @@ solana-signature = "3.4.1"
 solana-account = "4.3.0"
 solana-transaction = "4.1.5"
 solana-message = "4.2.4"
-solana-program-runtime = "4.1.1"
+solana-program-runtime = "~4.1.1"
 solana-transaction-context = "4.1.1"
 solana-transaction-error = "3.3.1"
 solana-sbpf = "0.21.0"
