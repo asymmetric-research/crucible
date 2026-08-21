@@ -21,6 +21,11 @@ pub fn extract_functions(program_data: &[u8]) -> Option<Vec<FunctionInfo>> {
         fn get_remaining(&self) -> u64 {
             0
         }
+        fn active_mapping_ptr(
+            &mut self,
+        ) -> std::ptr::NonNull<solana_sbpf::memory_region::MemoryMapping> {
+            unreachable!("static ELF analysis never executes the VM")
+        }
     }
 
     let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());

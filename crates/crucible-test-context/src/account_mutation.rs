@@ -1,4 +1,4 @@
-use crate::{record_mutation_violation, FastHashMap, FastHashSet};
+use crate::{clone_svm_preserving_config, record_mutation_violation, FastHashMap, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
 use anchor_lang::solana_program::instruction::Instruction;
@@ -79,7 +79,7 @@ fn substitute_mutated_account_probe(
     decoy: Pubkey,
     mut mutate: impl FnMut(&mut solana_account::Account),
 ) -> bool {
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let Some(mut account) = probe.get_account(&target) else {
         return false;
     };
@@ -96,7 +96,7 @@ fn substitute_existing_load_bearing_account_probe(
     target: Pubkey,
     replacement: Pubkey,
 ) -> bool {
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let rewritten = rewrite_account(ctx.instructions, target, replacement);
     if !probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[], &[target, replacement]) {
         return false;
@@ -110,7 +110,7 @@ fn substitute_existing_referenced_target_probe(
     target: Pubkey,
     replacement: Pubkey,
 ) -> bool {
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let rewritten = rewrite_account(ctx.instructions, target, replacement);
     probe_matches_baseline_effects(ctx, &mut probe, &rewritten, &[], &[target, replacement])
 }
@@ -607,7 +607,7 @@ pub(crate) fn maybe_probe_account_mutation(
     // edge traces is two materially different behaviors and each deserves a probe (the J.1#1
     // probe-once blindspot was keying on instruction type alone). Capture the baseline's edge trace
     // around the send; run on a clone so the live SVM is untouched.
-    let mut baseline = svm.clone();
+    let mut baseline = clone_svm_preserving_config(svm);
     probe_edge_capture_begin();
     let baseline_result =
         send_probe_transaction(&mut baseline, instructions, signers, payer, sigverify);
@@ -703,7 +703,7 @@ impl MutationStrategy for OwnerStrategy {
             }
 
             let sentinel = wrong_owner(candidate.original_owner);
-            let mut probe = ctx.svm.clone();
+            let mut probe = clone_svm_preserving_config(&ctx.svm);
             let Some(mut account) = probe.get_account(&candidate.pubkey) else {
                 continue;
             };
@@ -760,7 +760,7 @@ impl MutationStrategy for TypeTagStrategy {
             if !account_is_load_bearing(ctx, &pubkey) {
                 continue;
             }
-            let mut probe = ctx.svm.clone();
+            let mut probe = clone_svm_preserving_config(&ctx.svm);
             let Some(mut account) = probe.get_account(&pubkey) else {
                 continue;
             };
@@ -839,7 +839,7 @@ impl MutationStrategy for SignerStrategy {
                 continue;
             }
             let flipped = clear_signer(ctx.instructions, candidate.pubkey);
-            let mut probe = ctx.svm.clone();
+            let mut probe = clone_svm_preserving_config(&ctx.svm);
             let ignored = signer_probe_ignored_accounts(ctx.instructions, &flipped, payer);
             if probe_matches_baseline_effects(ctx, &mut probe, &flipped, &[], &ignored) {
                 let detail = match candidate.kind {
@@ -974,7 +974,7 @@ impl MutationStrategy for AuthoritySignerStrategy {
 
                 let attacker = Keypair::new();
                 let attacker_pubkey = attacker.pubkey();
-                let mut probe = ctx.svm.clone();
+                let mut probe = clone_svm_preserving_config(&ctx.svm);
                 if probe
                     .set_account(attacker_pubkey, system_signer_account())
                     .is_err()
@@ -1036,7 +1036,7 @@ fn account_has_signer_meta(instructions: &[Instruction], pubkey: Pubkey) -> bool
 
 fn signer_is_load_bearing(ctx: &ProbeCtx, signer: Pubkey) -> bool {
     let flipped = clear_signer(ctx.instructions, signer);
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let ignored = signer_probe_ignored_accounts(ctx.instructions, &flipped, ctx.payer.pubkey());
     !probe_matches_baseline_effects(ctx, &mut probe, &flipped, &[], &ignored)
 }
@@ -1294,7 +1294,7 @@ impl MutationStrategy for TokenForgedMintPairStrategy {
                     continue;
                 };
 
-                let mut probe = ctx.svm.clone();
+                let mut probe = clone_svm_preserving_config(&ctx.svm);
                 let Some(mut token_state) = probe.get_account(&token_account.pubkey) else {
                     continue;
                 };
@@ -2208,7 +2208,7 @@ fn mutate_account_pubkey_window_probe(
     offset: usize,
     replacement: Pubkey,
 ) -> bool {
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let Some(mut account) = probe.get_account(&target) else {
         return false;
     };
@@ -2255,7 +2255,7 @@ impl MutationStrategy for DuplicateAccountStrategy {
                 }
 
                 let rewritten = rewrite_account(ctx.instructions, *right, *left);
-                let mut probe = ctx.svm.clone();
+                let mut probe = clone_svm_preserving_config(&ctx.svm);
                 if !matches!(
                     send_probe_transaction(
                         &mut probe,
@@ -2344,7 +2344,7 @@ impl MutationStrategy for ForwardedAccountValidationStrategy {
             }
 
             for forged in forgeries {
-                let mut probe = ctx.svm.clone();
+                let mut probe = clone_svm_preserving_config(&ctx.svm);
                 if probe.set_account(target, forged).is_err() {
                     continue;
                 }
@@ -2430,7 +2430,7 @@ impl MutationStrategy for SysvarSubstitutionStrategy {
 }
 
 fn sysvar_substitution_probe(ctx: &ProbeCtx, target: Pubkey, decoy: Pubkey) -> bool {
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let Some(account) = probe.get_account(&target) else {
         return false;
     };
@@ -2489,7 +2489,7 @@ fn poison_canonical_sysvar(svm: &mut LiteSVM, target: Pubkey) -> bool {
         let mut sysvar = svm.get_sysvar::<solana_sysvar::rent::Rent>();
         #[allow(deprecated)]
         {
-            sysvar.lamports_per_byte_year = sysvar.lamports_per_byte_year.wrapping_add(1);
+            sysvar.lamports_per_byte = sysvar.lamports_per_byte.wrapping_add(1);
         }
         svm.set_sysvar(&sysvar);
         return true;
@@ -2722,7 +2722,7 @@ fn replacement_is_load_bearing_under_rewrite(
     }
 
     for data in data_corruption_variants(&account.data) {
-        let mut probe = ctx.svm.clone();
+        let mut probe = clone_svm_preserving_config(&ctx.svm);
         let Some(mut account) = probe.get_account(&replacement) else {
             continue;
         };
@@ -2765,7 +2765,7 @@ fn account_is_load_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
     }
 
     for data in data_corruption_variants(&account.data) {
-        let mut probe = ctx.svm.clone();
+        let mut probe = clone_svm_preserving_config(&ctx.svm);
         let Some(mut account) = probe.get_account(pubkey) else {
             continue;
         };
@@ -2811,7 +2811,7 @@ fn account_is_lamport_bearing(ctx: &ProbeCtx, pubkey: &Pubkey) -> bool {
         return false;
     }
 
-    let mut probe = ctx.svm.clone();
+    let mut probe = clone_svm_preserving_config(&ctx.svm);
     let Some(mut account) = probe.get_account(pubkey) else {
         return false;
     };

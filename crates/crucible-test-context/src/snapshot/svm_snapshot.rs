@@ -1,20 +1,105 @@
 use crate::{FastHashMap, FastHashSet};
 use anchor_lang::prelude::sysvar::SysvarId;
-use anchor_lang::prelude::{Clock, EpochSchedule, SlotHashes, SlotHistory, StakeHistory};
+use anchor_lang::prelude::{Clock, EpochSchedule, StakeHistory};
 use litesvm::LiteSVM;
 use rustc_hash::FxHasher;
-use solana_account::{Account, ReadableAccount};
+use solana_account::Account;
 use solana_pubkey::Pubkey;
 use solana_sysvar::epoch_rewards::EpochRewards;
-use solana_sysvar::fees::Fees;
 use solana_sysvar::last_restart_slot::LastRestartSlot;
-use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use solana_sysvar::rent::Rent;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use super::dirty_tracker::{CreationTracker, DirtyTracker};
+
+const SYSVAR_OWNER: Pubkey = Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111");
+
+/// Managed sysvars are small enough to copy into every state delta and can
+/// change as a test advances. SlotHashes and SlotHistory are intentionally not
+/// included: together they add roughly 150 KiB to every state-pool entry.
+fn managed_sysvar_ids() -> [Pubkey; 8] {
+    [
+        Clock::id(),
+        EpochRewards::id(),
+        EpochSchedule::id(),
+        solana_sysvar::fees::id(),
+        LastRestartSlot::id(),
+        solana_sysvar::recent_blockhashes::id(),
+        Rent::id(),
+        StakeHistory::id(),
+    ]
+}
+
+fn clock_account(clock: &Clock) -> Account {
+    Account {
+        lamports: 1,
+        data: wincode::serialize(clock).expect("snapshot: failed to wincode-serialize Clock"),
+        owner: SYSVAR_OWNER,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+fn clock_from_sysvars(sysvars: &[(Pubkey, Option<Account>)], snapshot_kind: &str) -> Clock {
+    let account = sysvars
+        .iter()
+        .find_map(|(id, account)| (id == &Clock::id()).then_some(account))
+        .unwrap_or_else(|| panic!("{snapshot_kind}: Clock sysvar is missing"))
+        .as_ref()
+        .unwrap_or_else(|| panic!("{snapshot_kind}: Clock sysvar account is absent"));
+
+    wincode::deserialize(&account.data)
+        .unwrap_or_else(|error| panic!("{snapshot_kind}: invalid wincode Clock data: {error:?}"))
+}
+
+fn restore_account_checked(svm: &mut LiteSVM, pubkey: Pubkey, account: Account, operation: &str) {
+    svm.set_account(pubkey, account).unwrap_or_else(|error| {
+        panic!("snapshot: {operation} failed for account {pubkey}: {error:?}")
+    });
+}
+
+/// LiteSVM 0.15 registers executable accounts in its program cache as they are
+/// written. ProgramData must therefore be present before its executable Program
+/// account. Sorting non-executables first also makes restore order independent
+/// of FxHashMap iteration order.
+fn restore_accounts_in_runtime_order(
+    svm: &mut LiteSVM,
+    mut accounts: Vec<(Pubkey, Account)>,
+    operation: &str,
+) -> usize {
+    accounts.sort_unstable_by(|(left_key, left), (right_key, right)| {
+        left.executable
+            .cmp(&right.executable)
+            .then_with(|| left_key.cmp(right_key))
+    });
+    let count = accounts.len();
+    for (pubkey, account) in accounts {
+        restore_account_checked(svm, pubkey, account, operation);
+    }
+    count
+}
+
+fn restore_sysvars_checked(
+    svm: &mut LiteSVM,
+    sysvars: &[(Pubkey, Option<Account>)],
+    operation: &str,
+) -> usize {
+    let mut ordered = sysvars.to_vec();
+    ordered.sort_unstable_by_key(|(pubkey, _)| *pubkey);
+    for (pubkey, account) in ordered {
+        let account = account.unwrap_or_else(|| {
+            panic!("snapshot: {operation} cannot restore absent sysvar account {pubkey}")
+        });
+        restore_account_checked(svm, pubkey, account, operation);
+    }
+    sysvars.len()
+}
+
+fn is_snapshot_sysvar(pubkey: &Pubkey, sysvars: &[(Pubkey, Option<Account>)]) -> bool {
+    sysvars.iter().any(|(sysvar, _)| sysvar == pubkey)
+}
 
 /// Snapshot of account state at setup time. Restores only dirty accounts
 /// instead of cloning the entire SVM.
@@ -53,12 +138,16 @@ impl SvmSnapshot {
     /// - **Deleted**: existed at snapshot, now gone → restore original
     /// - **Created**: not in snapshot, created during iteration → remove (set lamports=0)
     pub fn restore(&self, svm: &mut LiteSVM, dirty: &DirtyTracker) -> usize {
-        let mut count = 0;
+        self.restore_sysvars(svm);
+        let mut accounts = Vec::with_capacity(dirty.dirty_accounts().len());
         for pubkey in dirty.dirty_accounts() {
+            if is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue;
+            }
             match self.accounts.get(pubkey) {
                 Some(original) => {
                     // Existed at snapshot — restore original (covers modified + deleted)
-                    let _ = svm.set_account(*pubkey, (**original).clone());
+                    accounts.push((*pubkey, (**original).clone()));
                 }
                 None => {
                     // Created during iteration — remove by zeroing.
@@ -70,19 +159,17 @@ impl SvmSnapshot {
                             continue;
                         }
                     }
-                    let _ = svm.set_account(
+                    accounts.push((
                         *pubkey,
                         Account {
                             lamports: 0,
                             ..Default::default()
                         },
-                    );
+                    ));
                 }
             }
-            count += 1;
         }
-        self.restore_sysvars(svm);
-        count
+        restore_accounts_in_runtime_order(svm, accounts, "restore dirty account")
     }
 
     /// Get the number of snapshotted accounts.
@@ -160,10 +247,14 @@ impl SvmSnapshot {
     /// Restore ALL accounts in snapshot to the SVM (full state restore).
     /// Used by stateful mode to jump to a saved state. Returns account count.
     pub fn restore_full(&self, svm: &mut LiteSVM) -> usize {
-        for (pubkey, account) in &self.accounts {
-            let _ = svm.set_account(*pubkey, (**account).clone());
-        }
         self.restore_sysvars(svm);
+        let accounts = self
+            .accounts
+            .iter()
+            .filter(|(pubkey, _)| !is_snapshot_sysvar(pubkey, &self.sysvars))
+            .map(|(pubkey, account)| (*pubkey, (**account).clone()))
+            .collect();
+        restore_accounts_in_runtime_order(svm, accounts, "restore full account");
         self.accounts.len()
     }
 
@@ -182,18 +273,18 @@ impl SvmSnapshot {
         divergent_keys: &FastHashSet<Pubkey>,
         delta: &SvmSnapshot,
     ) -> usize {
-        let mut count = self.restore_divergent_to_initial(svm, divergent_keys, &delta.accounts);
-
-        // 2. Overlay delta (accounts that differ from initial in the target state)
-        for (pubkey, account) in &delta.accounts {
-            let _ = svm.set_account(*pubkey, (**account).clone());
-            count += 1;
-        }
-
-        // 3. Restore sysvars from delta
+        // Sysvars are authoritative and must be present before account/program restores.
         delta.restore_sysvars(svm);
+        let mut accounts =
+            self.collect_divergent_restores(svm, divergent_keys, &delta.accounts, &delta.sysvars);
 
-        count
+        // Overlay delta (accounts that differ from initial in the target state).
+        for (pubkey, account) in &delta.accounts {
+            if !is_snapshot_sysvar(pubkey, &delta.sysvars) {
+                accounts.push((*pubkey, (**account).clone()));
+            }
+        }
+        restore_accounts_in_runtime_order(svm, accounts, "restore selective account")
     }
 
     /// Restore SVM state using delta-to-delta comparison to skip redundant set_account calls.
@@ -217,11 +308,19 @@ impl SvmSnapshot {
         next_delta: &SvmSnapshot,
         prev_exec_dirty: &FastHashSet<Pubkey>,
     ) -> usize {
-        let mut count =
-            self.restore_divergent_to_initial(svm, divergent_keys, &next_delta.accounts);
+        next_delta.restore_sysvars(svm);
+        let mut accounts = self.collect_divergent_restores(
+            svm,
+            divergent_keys,
+            &next_delta.accounts,
+            &next_delta.sysvars,
+        );
 
         // 2. Delta accounts — skip if same Arc as prev_delta AND not dirtied by execution
         for (pubkey, next_acct) in &next_delta.accounts {
+            if is_snapshot_sysvar(pubkey, &next_delta.sysvars) {
+                continue;
+            }
             if !prev_exec_dirty.contains(pubkey) {
                 if let Some(prev_acct) = prev_delta.accounts.get(pubkey) {
                     if Arc::ptr_eq(prev_acct, next_acct) {
@@ -230,32 +329,28 @@ impl SvmSnapshot {
                     }
                 }
             }
-            let _ = svm.set_account(*pubkey, (**next_acct).clone());
-            count += 1;
+            accounts.push((*pubkey, (**next_acct).clone()));
         }
-
-        // 3. Restore sysvars from next delta
-        next_delta.restore_sysvars(svm);
-
-        count
+        restore_accounts_in_runtime_order(svm, accounts, "restore selective account from delta")
     }
 
     /// Shared step 1: restore divergent accounts to initial state.
     /// Accounts present in `delta_keys` are skipped (they'll be set by the delta overlay).
     /// Executable (program) accounts are never zeroed to avoid litesvm desync.
-    fn restore_divergent_to_initial(
+    fn collect_divergent_restores(
         &self,
-        svm: &mut LiteSVM,
+        svm: &LiteSVM,
         divergent_keys: &FastHashSet<Pubkey>,
         delta_keys: &FastHashMap<Pubkey, Arc<Account>>,
-    ) -> usize {
-        let mut count = 0;
+        target_sysvars: &[(Pubkey, Option<Account>)],
+    ) -> Vec<(Pubkey, Account)> {
+        let mut accounts = Vec::with_capacity(divergent_keys.len());
         for pubkey in divergent_keys {
-            if delta_keys.contains_key(pubkey) {
+            if delta_keys.contains_key(pubkey) || is_snapshot_sysvar(pubkey, target_sysvars) {
                 continue; // will be set by delta overlay
             }
             if let Some(initial_account) = self.accounts.get(pubkey) {
-                let _ = svm.set_account(*pubkey, (**initial_account).clone());
+                accounts.push((*pubkey, (**initial_account).clone()));
             } else {
                 // Account was created during prev iteration but doesn't exist in initial — zero it.
                 // Skip executable (program) accounts: zeroing them removes from accounts_db but
@@ -265,17 +360,16 @@ impl SvmSnapshot {
                         continue;
                     }
                 }
-                let _ = svm.set_account(
+                accounts.push((
                     *pubkey,
                     Account {
                         lamports: 0,
                         ..Default::default()
                     },
-                );
+                ));
             }
-            count += 1;
         }
-        count
+        accounts
     }
 
     /// Get a reference to the internal accounts map.
@@ -299,6 +393,8 @@ impl SvmSnapshot {
                 acct.lamports.hash(&mut hasher);
                 acct.data.hash(&mut hasher);
                 acct.owner.hash(&mut hasher);
+                acct.executable.hash(&mut hasher);
+                acct.rent_epoch.hash(&mut hasher);
             } else {
                 0u8.hash(&mut hasher);
             }
@@ -308,17 +404,7 @@ impl SvmSnapshot {
 
     /// Get the stored Clock sysvar by deserializing from sysvars.
     pub fn clock(&self) -> Clock {
-        let clock_id = Clock::id();
-        for (id, account) in &self.sysvars {
-            if id == &clock_id {
-                if let Some(acct) = account {
-                    if let Ok(clock) = bincode::deserialize::<Clock>(&acct.data) {
-                        return clock;
-                    }
-                }
-            }
-        }
-        Clock::default()
+        clock_from_sysvars(&self.sysvars, "SvmSnapshot")
     }
 
     /// Minimal tombstone snapshot with zero allocations.
@@ -334,19 +420,9 @@ impl SvmSnapshot {
     /// Create an empty snapshot (no accounts differ from initial state).
     /// Used as the initial delta in the state pool.
     pub fn empty(clock: Clock) -> Self {
-        let clock_data = bincode::serialize(&clock).unwrap_or_default();
         Self {
             accounts: FastHashMap::default(),
-            sysvars: vec![(
-                Clock::id(),
-                Some(Account {
-                    lamports: 1,
-                    data: clock_data,
-                    owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
-                    executable: false,
-                    rent_epoch: 0,
-                }),
-            )],
+            sysvars: vec![(Clock::id(), Some(clock_account(&clock)))],
         }
     }
 
@@ -403,38 +479,14 @@ impl SvmSnapshot {
     }
 
     fn take_sysvars(svm: &LiteSVM) -> Vec<(Pubkey, Option<Account>)> {
-        [
-            Clock::id(),
-            EpochRewards::id(),
-            // EpochSchedule::id(),  // Static after genesis — no need to snapshot
-            Fees::id(),
-            LastRestartSlot::id(),
-            RecentBlockhashes::id(),
-            Rent::id(),
-            // SlotHashes::id(),    // 20 KB — consensus/vote verification, not used by programs
-            // SlotHistory::id(),   // 131 KB — slot occupancy bitvector, irrelevant for fuzzing
-            StakeHistory::id(),
-        ]
-        .iter()
-        .map(|sysvar| (*sysvar, svm.get_account(sysvar)))
-        .collect()
+        managed_sysvar_ids()
+            .iter()
+            .map(|sysvar| (*sysvar, svm.get_account(sysvar)))
+            .collect()
     }
 
     fn restore_sysvars(&self, svm: &mut LiteSVM) -> usize {
-        for (sysvar, account) in &self.sysvars {
-            if let Some(acct) = account {
-                let _ = svm.set_account(*sysvar, acct.clone());
-            } else {
-                let _ = svm.set_account(
-                    *sysvar,
-                    Account {
-                        lamports: 0,
-                        ..Default::default()
-                    },
-                );
-            }
-        }
-        self.sysvars.len()
+        restore_sysvars_checked(svm, &self.sysvars, "restore SvmSnapshot sysvar")
     }
 }
 
@@ -483,6 +535,9 @@ impl AccountPatch {
                 let data = &mut acct.data;
                 for &(word_idx, val) in patches {
                     let offset = word_idx as usize * 8;
+                    if offset >= data.len() {
+                        return None;
+                    }
                     let end = (offset + 8).min(data.len());
                     let bytes = val.to_le_bytes();
                     data[offset..end].copy_from_slice(&bytes[..end - offset]);
@@ -516,21 +571,30 @@ impl CompactDelta {
         }
     }
 
-    /// Initial delta (no account changes, just clock sysvar).
+    /// Initial delta (no account changes, just a synthetic Clock sysvar).
+    ///
+    /// Production state pools should use [`Self::from_initial`] so every
+    /// managed sysvar is inherited from the setup snapshot.
     pub fn empty(clock: Clock) -> Self {
-        let clock_data = bincode::serialize(&clock).unwrap_or_default();
         Self {
             accounts: FastHashMap::default(),
-            sysvars: vec![(
-                Clock::id(),
-                Some(Account {
-                    lamports: 1,
-                    data: clock_data,
-                    owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
-                    executable: false,
-                    rent_epoch: 0,
-                }),
-            )],
+            sysvars: vec![(Clock::id(), Some(clock_account(&clock)))],
+        }
+    }
+
+    /// Construct the root delta from the complete setup snapshot.
+    ///
+    /// This keeps Clock, EpochRewards, EpochSchedule, Fees, LastRestartSlot,
+    /// RecentBlockhashes, Rent, and StakeHistory identical to the initial SVM.
+    /// SlotHashes and SlotHistory are deliberately not managed by compact
+    /// deltas because of their size.
+    pub fn from_initial(initial: &SvmSnapshot) -> Self {
+        // Validate the most frequently consumed sysvar up front rather than
+        // allowing corrupt root state to become a default Clock later.
+        let _ = initial.clock();
+        Self {
+            accounts: FastHashMap::default(),
+            sysvars: initial.sysvars.clone(),
         }
     }
 
@@ -552,7 +616,8 @@ impl CompactDelta {
                 Some(init_arc)
                     if init_arc.data.len() == arc_acct.data.len()
                         && init_arc.owner == arc_acct.owner
-                        && init_arc.executable == arc_acct.executable =>
+                        && init_arc.executable == arc_acct.executable
+                        && init_arc.rent_epoch == arc_acct.rent_epoch =>
                 {
                     // Same size + same metadata — compute u64 word diff
                     let init_data = &init_arc.data;
@@ -722,17 +787,7 @@ impl CompactDelta {
 
     /// Get the stored Clock sysvar.
     pub fn clock(&self) -> Clock {
-        let clock_id = Clock::id();
-        for (id, account) in &self.sysvars {
-            if id == &clock_id {
-                if let Some(acct) = account {
-                    if let Ok(clock) = bincode::deserialize::<Clock>(&acct.data) {
-                        return clock;
-                    }
-                }
-            }
-        }
-        Clock::default()
+        clock_from_sysvars(&self.sysvars, "CompactDelta")
     }
 
     /// Reconstruct a full Account for the given pubkey by applying the patch
@@ -750,63 +805,24 @@ impl CompactDelta {
         svm: &mut LiteSVM,
         divergent_keys: &FastHashSet<Pubkey>,
     ) -> usize {
-        let mut count = 0;
-
-        // 1. Reset divergent accounts to initial (skip those in this delta)
-        for pubkey in divergent_keys {
-            if self.accounts.contains_key(pubkey) {
-                continue; // will be set by patch overlay
-            }
-            match initial.accounts.get(pubkey) {
-                Some(original) => {
-                    let _ = svm.set_account(*pubkey, (**original).clone());
-                }
-                None => {
-                    if let Some(existing) = svm.get_account(pubkey) {
-                        if existing.executable {
-                            continue;
-                        }
-                    }
-                    let _ = svm.set_account(
-                        *pubkey,
-                        Account {
-                            lamports: 0,
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-            count += 1;
-        }
-
-        // 2. Apply patches
-        for (pubkey, patch) in &self.accounts {
-            match patch {
-                AccountPatch::Full(arc) => {
-                    let _ = svm.set_account(*pubkey, (**arc).clone());
-                }
-                AccountPatch::Diff { lamports, patches } => {
-                    // Reconstruct from initial + patches
-                    if let Some(init_acct) = initial.accounts.get(pubkey) {
-                        let mut acct = (**init_acct).clone();
-                        acct.lamports = *lamports;
-                        let data = &mut acct.data;
-                        for &(word_idx, val) in patches {
-                            let offset = word_idx as usize * 8;
-                            let end = (offset + 8).min(data.len());
-                            let bytes = val.to_le_bytes();
-                            data[offset..end].copy_from_slice(&bytes[..end - offset]);
-                        }
-                        let _ = svm.set_account(*pubkey, acct);
-                    }
-                }
-            }
-            count += 1;
-        }
-
-        // 3. Restore sysvars
         self.restore_sysvars(svm);
-        count
+        let mut accounts = self.collect_divergent_restores(initial, svm, divergent_keys);
+
+        // Apply patches after resetting accounts not represented by the target delta.
+        for (pubkey, patch) in &self.accounts {
+            if is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue;
+            }
+            let account = patch
+                .reconstruct(initial.accounts.get(pubkey).map(Arc::as_ref))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "CompactDelta: cannot reconstruct patch for {pubkey}; initial account is missing or patch data is invalid"
+                    )
+                });
+            accounts.push((*pubkey, account));
+        }
+        restore_accounts_in_runtime_order(svm, accounts, "restore CompactDelta account")
     }
 
     /// Optimized restore using delta-to-delta comparison.
@@ -821,37 +837,14 @@ impl CompactDelta {
         prev_delta: &CompactDelta,
         prev_exec_dirty: &FastHashSet<Pubkey>,
     ) -> usize {
-        let mut count = 0;
+        self.restore_sysvars(svm);
+        let mut accounts = self.collect_divergent_restores(initial, svm, divergent_keys);
 
-        // 1. Reset divergent accounts to initial (skip those in this delta)
-        for pubkey in divergent_keys {
-            if self.accounts.contains_key(pubkey) {
+        // Apply patches, skipping unchanged ones.
+        for (pubkey, next_patch) in &self.accounts {
+            if is_snapshot_sysvar(pubkey, &self.sysvars) {
                 continue;
             }
-            match initial.accounts.get(pubkey) {
-                Some(original) => {
-                    let _ = svm.set_account(*pubkey, (**original).clone());
-                }
-                None => {
-                    if let Some(existing) = svm.get_account(pubkey) {
-                        if existing.executable {
-                            continue;
-                        }
-                    }
-                    let _ = svm.set_account(
-                        *pubkey,
-                        Account {
-                            lamports: 0,
-                            ..Default::default()
-                        },
-                    );
-                }
-            }
-            count += 1;
-        }
-
-        // 2. Apply patches, skipping unchanged ones
-        for (pubkey, next_patch) in &self.accounts {
             // Skip if not dirtied by execution AND patch is identical to prev
             if !prev_exec_dirty.contains(pubkey) {
                 if let Some(prev_patch) = prev_delta.accounts.get(pubkey) {
@@ -860,31 +853,16 @@ impl CompactDelta {
                     }
                 }
             }
-
-            match next_patch {
-                AccountPatch::Full(arc) => {
-                    let _ = svm.set_account(*pubkey, (**arc).clone());
-                }
-                AccountPatch::Diff { lamports, patches } => {
-                    if let Some(init_acct) = initial.accounts.get(pubkey) {
-                        let mut acct = (**init_acct).clone();
-                        acct.lamports = *lamports;
-                        let data = &mut acct.data;
-                        for &(word_idx, val) in patches {
-                            let offset = word_idx as usize * 8;
-                            let end = (offset + 8).min(data.len());
-                            let bytes = val.to_le_bytes();
-                            data[offset..end].copy_from_slice(&bytes[..end - offset]);
-                        }
-                        let _ = svm.set_account(*pubkey, acct);
-                    }
-                }
-            }
-            count += 1;
+            let account = next_patch
+                .reconstruct(initial.accounts.get(pubkey).map(Arc::as_ref))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "CompactDelta: cannot reconstruct patch for {pubkey}; initial account is missing or patch data is invalid"
+                    )
+                });
+            accounts.push((*pubkey, account));
         }
-
-        self.restore_sysvars(svm);
-        count
+        restore_accounts_in_runtime_order(svm, accounts, "restore CompactDelta account from delta")
     }
 
     /// Per-account size info for diagnostics. Returns (pubkey_short, patch_bytes) pairs.
@@ -913,19 +891,39 @@ impl CompactDelta {
     }
 
     fn restore_sysvars(&self, svm: &mut LiteSVM) {
-        for (sysvar, account) in &self.sysvars {
-            if let Some(acct) = account {
-                let _ = svm.set_account(*sysvar, acct.clone());
+        restore_sysvars_checked(svm, &self.sysvars, "restore CompactDelta sysvar");
+    }
+
+    fn collect_divergent_restores(
+        &self,
+        initial: &SvmSnapshot,
+        svm: &LiteSVM,
+        divergent_keys: &FastHashSet<Pubkey>,
+    ) -> Vec<(Pubkey, Account)> {
+        let mut accounts = Vec::with_capacity(divergent_keys.len());
+        for pubkey in divergent_keys {
+            if self.accounts.contains_key(pubkey) || is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue;
+            }
+            if let Some(original) = initial.accounts.get(pubkey) {
+                accounts.push((*pubkey, (**original).clone()));
             } else {
-                let _ = svm.set_account(
-                    *sysvar,
+                if svm
+                    .get_account(pubkey)
+                    .is_some_and(|account| account.executable)
+                {
+                    continue;
+                }
+                accounts.push((
+                    *pubkey,
                     Account {
                         lamports: 0,
                         ..Default::default()
                     },
-                );
+                ));
             }
         }
+        accounts
     }
 }
 
@@ -1186,6 +1184,9 @@ pub fn compute_state_fingerprint_from_snapshot(
         let account = svm.get_account(pubkey);
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
         let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let owner = account.as_ref().map(|a| a.owner).unwrap_or_default();
+        let executable = account.as_ref().is_some_and(|a| a.executable);
+        let rent_epoch = account.as_ref().map(|a| a.rent_epoch).unwrap_or(0);
         let canonical_data = canonicalize_created_pubkeys(data, creation);
         let hash_data = canonical_data.as_deref().unwrap_or(data);
 
@@ -1198,6 +1199,9 @@ pub fn compute_state_fingerprint_from_snapshot(
 
         // Hash data length bucket
         value_bucket(data.len() as u64).hash(&mut hasher);
+        owner.hash(&mut hasher);
+        executable.hash(&mut hasher);
+        rent_epoch.hash(&mut hasher);
 
         // Field-boundary-aware diffing: find contiguous changed regions vs initial
         let init_data = initial
@@ -1322,6 +1326,9 @@ pub unsafe fn fingerprint_and_collect_changed(
         let account = svm.get_account(pubkey);
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
         let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let owner = account.as_ref().map(|a| a.owner).unwrap_or_default();
+        let executable = account.as_ref().is_some_and(|a| a.executable);
+        let rent_epoch = account.as_ref().map(|a| a.rent_epoch).unwrap_or(0);
         let canonical_data = canonicalize_created_pubkeys(data, creation);
         let hash_data = canonical_data.as_deref().unwrap_or(data);
 
@@ -1332,6 +1339,9 @@ pub unsafe fn fingerprint_and_collect_changed(
         identity.hash(&mut hasher);
         value_bucket(lamports).hash(&mut hasher);
         value_bucket(data.len() as u64).hash(&mut hasher);
+        owner.hash(&mut hasher);
+        executable.hash(&mut hasher);
+        rent_epoch.hash(&mut hasher);
 
         let init_account = initial.accounts.get(pubkey);
         let init_data = init_account.map(|a| a.data.as_slice()).unwrap_or(&[]);
@@ -1419,12 +1429,16 @@ pub unsafe fn fingerprint_and_collect_changed(
         if lamports != init_lamports {
             any_diff = true;
         }
-        // Owner or executable change — must use Full (Diff only stores lamports+data)
-        let cur_owner = account.as_ref().map(|a| a.owner).unwrap_or_default();
+        // Metadata changes must use Full (Diff only stores lamports + data).
+        let cur_owner = owner;
         let init_owner = init_account.map(|a| a.owner).unwrap_or_default();
-        let cur_executable = account.as_ref().map(|a| a.executable).unwrap_or(false);
+        let cur_executable = executable;
         let init_executable = init_account.map(|a| a.executable).unwrap_or(false);
-        let metadata_changed = cur_owner != init_owner || cur_executable != init_executable;
+        let cur_rent_epoch = rent_epoch;
+        let init_rent_epoch = init_account.map(|a| a.rent_epoch).unwrap_or(0);
+        let metadata_changed = cur_owner != init_owner
+            || cur_executable != init_executable
+            || cur_rent_epoch != init_rent_epoch;
         if metadata_changed {
             any_diff = true;
         }
@@ -1453,7 +1467,7 @@ pub unsafe fn fingerprint_and_collect_changed(
 
         if any_diff {
             // Build patch while data/init_data are still borrowed, then consume account
-            // Use Diff only when same size AND owner/executable unchanged; otherwise Full.
+            // Use Diff only when size and all metadata are unchanged; otherwise Full.
             let patch = if same_size && init_account.is_some() && !metadata_changed {
                 // Same-size account: build u64-word diff
                 let mut patches = Vec::new();

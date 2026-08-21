@@ -185,6 +185,21 @@ pub fn stateful_mode(
                 .expect("snapshot must exist after take_snapshot()")
                 .clone();
 
+            // Runtime configuration such as feature policy, compute budget,
+            // fees, and epoch stakes is not part of the account snapshot.
+            // Capture matching empty SVM templates before swapping the real
+            // setup SVM out of the fixture.
+            let __fast_svm_template = if trace_interval != 1 {
+                Some(template_fixture.ctx.fresh_svm(false))
+            } else {
+                None
+            };
+            let __debug_svm_template = if trace_interval > 1 {
+                Some(template_fixture.ctx.fresh_svm(true))
+            } else {
+                None
+            };
+
             // SVM swap trick (same as singlecore): move real SVM out of template
             // Use LiteSVM::default() as placeholder — bare minimum struct with no builtins
             // or program cache. LiteSVM::new() would load all built-in programs (~hundreds of MB)
@@ -211,24 +226,29 @@ pub fn stateful_mode(
             // and switch to the traced SVM every `trace_interval` iterations.
             // When trace_interval == 0 (--no-tracing), only the fast SVM is used.
             // When trace_interval == 1, only the traced SVM is used (old behavior).
-            let mut __traced_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval != 1 {
+            let mut __traced_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval > 1 {
                 // Keep the traced SVM for periodic coverage collection
-                Some(__real_svm.clone())
+                Some(crucible_test_context::clone_svm_preserving_config(&__real_svm))
             } else {
                 None
             };
 
-            // Helper closure: create an SVM with performance settings.
-            // Consolidates all SVM creation to avoid duplicated env var manipulation.
+            // Helper closure: clone the matching runtime template. Account and
+            // program state is restored from `initial_snapshot` below.
             let __create_svm = |debuggable: bool| -> crucible_test_context::litesvm::LiteSVM {
-                let svm = if debuggable {
-                    crucible_test_context::litesvm::LiteSVM::new_debuggable(true)
+                if debuggable {
+                    crucible_test_context::clone_svm_preserving_config(
+                        __debug_svm_template
+                            .as_ref()
+                            .expect("debug SVM template must exist in dual-SVM mode"),
+                    )
                 } else {
-                    crucible_test_context::litesvm::LiteSVM::new()
-                };
-                svm.with_transaction_history(0)
-                    .with_sigverify(false)
-                    .with_blockhash_check(false)
+                    crucible_test_context::clone_svm_preserving_config(
+                        __fast_svm_template
+                            .as_ref()
+                            .expect("fast SVM template must exist outside full-tracing mode"),
+                    )
+                }
             };
 
             // Create fast (non-debuggable) SVM by restoring snapshot into a fresh SVM.
@@ -248,8 +268,8 @@ pub fn stateful_mode(
             };
 
             // Primary SVM = fast if available, otherwise traced
-            if let Some(ref fast) = __fast_svm {
-                __real_svm = fast.clone();
+            if let Some(fast) = __fast_svm {
+                __real_svm = fast;
             }
 
             // Type-erased fixture wrapper for storing in StatePool.
@@ -517,7 +537,7 @@ fn gen_corpus_seeding(
                 let mut __current_depth: u32 = 0;
                 let mut __current_action_bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
                 let mut __current_delta = std::sync::Arc::new(
-                    CompactDelta::empty(initial_snapshot.clock().clone())
+                    CompactDelta::from_initial(initial_snapshot.as_ref())
                 );
                 // Creation-ordinal tracker for this seed lineage (extended per action)
                 let mut __current_creation = crucible_test_context::snapshot::CreationTracker::new();
@@ -699,10 +719,26 @@ fn stateful_singlecore_body(
 
     quote! {
         // === SINGLE-THREADED STATEFUL ===
+        // A bare panic in the harness/invariant -- a raw `assert!`, `unwrap()`, arithmetic
+        // overflow, a failed PDA derivation -- is a HARNESS BUG, not a finding about the program.
+        // `singlecore.rs`/`multicore.rs` have armed this since the alert-and-stop work, but the
+        // STATEFUL bodies never did, so a stateful harness panic escaped as a bare Rust panic with
+        // no `[HARNESS PANIC]` banner, no action sequence, and no stop signal -- indistinguishable
+        // at a glance from a program crash, and invisible to any caller checking for the alert.
+        crucible_test_context::arm_harness_panic_handler(None);
+        {
+            let __prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if crucible_test_context::harness_panic_alert(&info.to_string()) {
+                    std::process::exit(70);
+                }
+                __prev_hook(info);
+            }));
+        }
+
         let mut state_pool = StatePool::new(pool_capacity, max_depth);
         // Initial pool entry: empty delta (state is identical to initial_snapshot)
-        let initial_clock = initial_snapshot.clock().clone();
-        state_pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
+        state_pool.try_add(0, CompactDelta::from_initial(initial_snapshot.as_ref()), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
 
         // Action success tracking: learns which actions work from which state classes
         let mut action_stats = crucible_test_context::snapshot::ActionStatsMap::new(
@@ -744,6 +780,9 @@ fn stateful_singlecore_body(
         // When trace_interval > 1, this holds the debuggable SVM used every Nth iteration.
         // When trace_interval <= 1, this is None (single-SVM mode).
         let mut __dual_traced_svm = if trace_interval > 1 { __traced_svm.take() } else { None };
+        drop(__create_svm);
+        drop(__fast_svm_template);
+        drop(__debug_svm_template);
         let mut traced_divergent: crucible_test_context::FastHashSet<solana_pubkey::Pubkey> =
             crucible_test_context::FastHashSet::default();
 
@@ -1665,6 +1704,26 @@ fn stateful_multicore_body(
 
     quote! {
         // === MULTI-THREADED STATEFUL ===
+        // A bare panic in the harness/invariant -- a raw `assert!`, `unwrap()`, arithmetic
+        // overflow, a failed PDA derivation -- is a HARNESS BUG, not a finding about the program.
+        // `singlecore.rs`/`multicore.rs` have armed this since the alert-and-stop work, but the
+        // STATEFUL bodies never did, so a stateful harness panic escaped as a bare Rust panic with
+        // no `[HARNESS PANIC]` banner, no action sequence, and no stop signal -- indistinguishable
+        // at a glance from a program crash, and invisible to any caller checking for the alert.
+        // `None`: stateful multicore runs worker THREADS in one process (an `Arc<AtomicBool>`
+        // stop_flag), not forked workers, so there is no stop-signal file to write -- and the
+        // handler's `process::exit(70)` already stops every thread.
+        crucible_test_context::arm_harness_panic_handler(None);
+        {
+            let __prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if crucible_test_context::harness_panic_alert(&info.to_string()) {
+                    std::process::exit(70);
+                }
+                __prev_hook(info);
+            }));
+        }
+
         use std::sync::{Arc, RwLock, atomic::{AtomicU64, AtomicBool, Ordering}};
 
         eprintln!("[STATEFUL] Multi-threaded mode with {} workers", num_cores);
@@ -1695,9 +1754,8 @@ fn stateful_multicore_body(
 
         // Add initial state to shared pool (empty delta = identical to initial_snapshot)
         {
-            let initial_clock = initial_snapshot.clock().clone();
             let mut pool = state_pool.write().unwrap();
-            pool.try_add(0, CompactDelta::empty(initial_clock), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
+            pool.try_add(0, CompactDelta::from_initial(initial_snapshot.as_ref()), 0, None, 0u32.to_le_bytes().to_vec(), String::new(), None, Vec::new(), __initial_fixture_state.clone(), std::sync::Arc::new(crucible_test_context::snapshot::CreationTracker::new()), 0, 0, true, None);
         }
 
         // Shared atomics
@@ -1769,7 +1827,7 @@ fn stateful_multicore_body(
             };
             let worker_state = __SendableWorkerState(
                 template_fixture.clone(),
-                __real_svm.clone(),
+                crucible_test_context::clone_svm_preserving_config(&__real_svm),
                 worker_traced,
             );
             let worker_initial = initial_snapshot.clone();
@@ -2373,6 +2431,19 @@ fn stateful_multicore_body(
             worker_handles.push(handle);
         }
 
+        let __worker0_traced_svm = if trace_interval > 1 {
+            Some(
+                __traced_svm
+                    .take()
+                    .expect("worker 0 traced SVM must exist in dual-SVM mode"),
+            )
+        } else {
+            None
+        };
+        drop(__create_svm);
+        drop(__fast_svm_template);
+        drop(__debug_svm_template);
+
         // Worker 0 (main thread): same pattern — ManuallyDrop, no per-iteration clone
         {
             // Extract raw pointers for worker 0 (main thread)
@@ -2391,17 +2462,8 @@ fn stateful_multicore_body(
             let mut w0_fixture = template_fixture;
             let mut w0_svm = __real_svm;
             // Traced SVM for Worker 0 (take from outer scope)
-            let mut w0_traced_svm: Option<crucible_test_context::litesvm::LiteSVM> = if trace_interval > 1 {
-                __traced_svm.take()
-                    .or_else(|| {
-                        // Fallback: create a new debuggable SVM from snapshot
-                        let mut svm = __create_svm(true);
-                        initial_snapshot.restore_full(&mut svm);
-                        Some(svm)
-                    })
-            } else {
-                None
-            };
+            let mut w0_traced_svm: Option<crucible_test_context::litesvm::LiteSVM> =
+                __worker0_traced_svm;
 
             crucible_test_context::set_stateful_chain_mode(true);
 

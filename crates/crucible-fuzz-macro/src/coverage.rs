@@ -577,8 +577,7 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                 if COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
                     let program_outcomes = state.branch_outcomes.entry(program_hash).or_default();
                     for &(pc, target_pc) in branch_edges {
-                        // taken = jump target is not the fall-through (pc + 8)
-                        let taken = target_pc != pc + 8;
+                        let taken = crucible_test_context::coverage::branch_was_taken(pc, target_pc);
                         *program_outcomes.entry((pc, taken)).or_insert(0) += 1;
                     }
 
@@ -599,15 +598,20 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
         impl crucible_test_context::InvocationInspectCallback for FuzzCallback {
             fn before_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
                 _tx: &crucible_test_context::fuzz_types::SanitizedTransaction,
                 _program_indices: &[crucible_test_context::fuzz_types::IndexOfAccount],
-                _invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
+                _invoke_context: &mut crucible_test_context::fuzz_types::InvokeContext,
+                _register_tracing_enabled: bool,
             ) {
                 // No-op: coverage tracked in after_invocation
             }
 
             fn after_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
+                _tx: &crucible_test_context::fuzz_types::SanitizedTransaction,
+                _program_indices: &[crucible_test_context::fuzz_types::IndexOfAccount],
                 invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
                 register_tracing_enabled: bool,
             ) {
@@ -643,12 +647,11 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
 
                                     let insn = ebpf::get_insn_unchecked(program, pc);
 
-                                    // Only conditional branches
-                                    let is_jmp_class = insn.opc & 7 == ebpf::BPF_JMP;
-                                    if !is_jmp_class { continue; }
-
-                                    let opc = insn.opc;
-                                    if opc == 0x05 || opc == 0x85 || opc == 0x8d || opc == 0x95 { continue; }
+                                    // SBPF 0.21 has both 32-bit and 64-bit
+                                    // conditional jump classes.
+                                    if !crucible_test_context::coverage::is_conditional_branch_opcode(insn.opc) {
+                                        continue;
+                                    }
 
                                     let target_pc = register_trace[i + 1][11] as usize;
                                     branch_edges.push((pc, target_pc));
@@ -1148,6 +1151,10 @@ mod tests {
             output.contains("count_shared_bits"),
             "should have count_shared_bits method"
         );
+        assert!(
+            output.contains("branch_was_taken"),
+            "should classify fallthrough using instruction indexes"
+        );
     }
 
     #[test]
@@ -1179,8 +1186,8 @@ mod tests {
             "should use register trace"
         );
         assert!(
-            output.contains("BPF_JMP"),
-            "should filter for JMP instructions"
+            output.contains("is_conditional_branch_opcode"),
+            "should use the shared SBPF conditional-branch classifier"
         );
     }
 

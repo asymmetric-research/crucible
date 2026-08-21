@@ -397,11 +397,19 @@ pub fn contexts_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStream {
         .map(|(i, field)| {
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
+            let fast_template = quote::format_ident!("__fast_svm_template_{}", i);
             quote! {
-                let #pristine = std::cell::RefCell::new(template_fixture.#field.svm.clone());
+                let mut #fast_template = if std::env::var("FUZZ_NO_TRACING").is_ok() {
+                    Some(template_fixture.#field.fresh_svm(false))
+                } else {
+                    None
+                };
+                let #pristine = std::cell::RefCell::new(
+                    crucible_test_context::clone_svm_preserving_config(&template_fixture.#field.svm)
+                );
                 let #saved = std::cell::RefCell::new(std::mem::replace(
                     &mut template_fixture.#field.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::default(),
                 ));
             }
         })
@@ -418,7 +426,9 @@ pub fn contexts_reset_check(contexts: &[syn::Ident]) -> proc_macro2::TokenStream
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
             quote! {
-                *#saved.borrow_mut() = #pristine.borrow().clone();
+                *#saved.borrow_mut() = crucible_test_context::clone_svm_preserving_config(
+                    &#pristine.borrow()
+                );
             }
         })
         .collect();
@@ -505,16 +515,18 @@ pub fn contexts_no_tracing_switch(
         .map(|(i, field)| {
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
+            let fast_template = quote::format_ident!("__fast_svm_template_{}", i);
             quote! {
                 {
-                    let mut __fast_svm = crucible_test_context::litesvm::LiteSVM::new()
-                        .with_transaction_history(0)
-                        .with_sigverify(false)
-                        .with_blockhash_check(false);
+                    let mut __fast_svm = #fast_template
+                        .take()
+                        .expect("fast SVM template must exist in no-tracing mode")
+                        ;
                     if let Some(ref __snap) = template_fixture.#field.snapshot {
                         __snap.restore_full(&mut __fast_svm);
                     }
-                    *#pristine.borrow_mut() = __fast_svm.clone();
+                    *#pristine.borrow_mut() =
+                        crucible_test_context::clone_svm_preserving_config(&__fast_svm);
                     *#saved.borrow_mut() = __fast_svm;
                 }
             }
@@ -556,7 +568,7 @@ pub fn stateful_extra_swap_out(contexts: &[syn::Ident]) -> proc_macro2::TokenStr
             quote! {
                 let mut #svm_name = std::mem::replace(
                     &mut template_fixture.#field.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
+                    crucible_test_context::litesvm::LiteSVM::default(),
                 );
             }
         })
@@ -898,8 +910,12 @@ mod tests {
             "should use RefCell for swap trick"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
+            output.contains("LiteSVM :: default"),
             "should replace with empty SVM"
+        );
+        assert!(
+            output.contains("fresh_svm"),
+            "should preserve runtime configuration for a fast SVM"
         );
     }
 
@@ -985,8 +1001,8 @@ mod tests {
             "should restore accounts from template snapshot into the fast SVM"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
-            "should build a fresh non-debuggable LiteSVM"
+            output.contains("__fast_svm_template_0") && output.contains("take"),
+            "should move the preconfigured non-debuggable LiteSVM"
         );
         assert!(
             output.contains("__pristine_svm_0"),
@@ -1038,7 +1054,7 @@ mod tests {
             "should not create __extra_svm_0 (primary handled separately)"
         );
         assert!(
-            output.contains("LiteSVM :: new"),
+            output.contains("LiteSVM :: default"),
             "should replace with empty SVM"
         );
     }
@@ -1553,6 +1569,47 @@ mod tests_new {
         assert!(
             output.contains("only supports structured"),
             "should reject non-structured mode"
+        );
+    }
+
+    #[test]
+    fn stateful_arms_the_harness_panic_handler() {
+        // The singlecore and multicore paths have armed this since the alert-and-stop work, and
+        // both have tests above -- but the STATEFUL bodies never did, so a stateful harness panic
+        // escaped as a bare Rust panic (exit 101) with no `[HARNESS PANIC]` banner, no action
+        // sequence, and no stop signal. It read like a program crash and hid a real harness bug.
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let param = format_ident!("fixture");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(crate::stateful::stateful_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &param,
+            "test",
+            true,
+            Some(&action_ty),
+            &[format_ident!("ctx")],
+        ));
+        assert!(
+            output.contains("arm_harness_panic_handler"),
+            "stateful must arm harness-panic handling"
+        );
+        assert!(
+            output.contains("harness_panic_alert"),
+            "stateful panic hook must alert on a harness panic"
+        );
+        assert!(
+            output.contains("std :: process :: exit") || output.contains("process::exit"),
+            "stateful panic hook must stop the run on a genuine harness panic"
+        );
+        // Both stateful bodies (singlecore + multicore) are emitted, so it must appear twice.
+        assert_eq!(
+            output.matches("arm_harness_panic_handler").count(),
+            2,
+            "both the singlecore and multicore stateful bodies must arm it"
         );
     }
 

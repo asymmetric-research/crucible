@@ -2,6 +2,7 @@
 name = "staking_fuzz"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 
 [workspace]
 # Standalone workspace - isolated from parent to avoid Solana version conflicts
@@ -26,7 +27,6 @@ name = "invariant_test"
 path = "src/main.rs"
 
 [features]
-fuzz_staking = []
 invariant_fuzz = []
 fuzz_single_stake = []
 invariant_fuzz_batched = []

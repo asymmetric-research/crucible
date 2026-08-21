@@ -2,6 +2,7 @@
 name = "owner_mutation_airdrop_fuzz"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 
 [workspace]
 # Standalone workspace - isolated from parent project to avoid Solana version conflicts

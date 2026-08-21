@@ -8,6 +8,7 @@ pub fn generate_cargo_toml(program_name: &str) -> String {
 name = "{program_name}_fuzz"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 
 [workspace]
 # Standalone workspace - isolated from parent project to avoid Solana version conflicts
@@ -20,16 +21,13 @@ crucible-idl-gen = "{version}"
 
 anchor-lang = "1.0.1"
 
-# Solana v3.x (required for litesvm 0.9.0)
+# Compatible client facade crates. LiteSVM 0.15.2 uses a mixed modular Solana
+# graph internally, so these should not be blanket-upgraded to 4.x.
 # `serde` feature: generated native-program (bincode) arg structs derive
 # serde::Serialize, so Pubkey fields must implement it too.
 solana-pubkey = {{ version = "3.0", features = ["serde"] }}
-solana-keypair = "3.1"
-solana-signer = "3.0"
-solana-program = "3.0"
-solana-message = "3.0"
-solana-signature = "3.1"
-solana-instruction = "3.1"
+solana-keypair = "3.1.2"
+solana-signer = "3.0.1"
 
 # Fuzzing
 libafl = {{ version = "0.15.1", features = ["std", "cli", "prelude"] }}

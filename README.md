@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  Built on <a href="https://github.com/AFLplusplus/LibAFL">LibAFL</a> and <a href="https://github.com/LiteSVM/litesvm">LiteSVM</a> for fast, local transaction simulation with edge-level coverage tracking.
+  Built on <a href="https://github.com/AFLplusplus/LibAFL">LibAFL</a> and <a href="https://github.com/LiteSVM/litesvm/releases/tag/v0.15.2">LiteSVM 0.15.2</a> for fast, local transaction simulation with edge-level coverage tracking.
 </p>
 
 ---
@@ -18,18 +18,14 @@ Crucible enables property-based testing and stateful invariant checking for Sola
 
 ## Performance
 
-Upperbound throughput on small/medium programs with MacBook Pro M3:
-
-| Mode      | 1 core    | 12 cores   | 12 cores, no tracing |
-|-----------|-----------|------------|----------------------|
-| Stateless | 1,200/s   | 9,600/s    | 22,000/s             |
-| Stateful  | 8,200/s   | 67,000/s   | 130,000/s            |
-
+Throughput depends heavily on the target program, tracing mode, state-pool growth, and worker
+count. Use a release build and benchmark the actual harness when comparing runtime versions;
+historical figures from earlier LiteSVM releases are not representative of 0.15.2.
 
 ## Features
 
 - **Works on any compiled Solana program.** Coverage comes from sBPF edge tracing on the LiteSVM execution trace, so no source-side instrumentation or program rebuild is required. Standard Anchor/Codama/Shank IDL is sufficient to generate typed call bindings at compile time. See [IDL Code Generation](docs/idl-gen.md). When no IDL available, calling can still be done with `raw_call()`
-- **Concise harness API.** TestContext collapses account construction, signing, instruction encoding, and result parsing into one builder chain: `ctx.program(...).call(...).accounts(...).signers(...).send()`. Helpers cover time control (`advance_epoch`, `warp_to_slot`), account creation, and mint setup. Reduces testing boilerplate by 50-70%. See [API Reference](docs/api-reference.md). 
+- **Concise harness API.** TestContext collapses account construction, signing, instruction encoding, and result parsing into one builder chain: `ctx.program(...).call(...).accounts(...).signers(...).send()`. Helpers cover initial-slot selection (`TestContext::builder()`), time control (`advance_slots`, `warp_to_slot`), account creation, and mint setup. See [API Reference](docs/api-reference.md).
 - **Typed-action mutator.** Mutations rewrite typed `Vec<Action>` entries directly. Sequence operations (insert, delete, swap, splice) and parameter rewrites (numeric values biased toward boundaries and declared `#[range(..)]` endpoints) keep every generated input structurally valid. Roughly a 5x improvement in bug discovery rate over `arbitrary`. 
 - **Stateless mode.** Each iteration clones the post-setup snapshot and executes a full mutated sequence against it. Coverage feedback is per-sequence: sequences that reach a new edge survive into the corpus. 
 - **Stateful mode.** Keeps a coverage-indexed pool of live program states and applies one mutated action at a time, picking up where prior iterations left off. Roughly an order-of-magnitude throughput gain over stateless, at the cost of higher memory use as the pool grows with coverage.
@@ -70,6 +66,7 @@ crucible run <program_name> <test_name> --release
 | Topic | Description |
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Setup, running, project structure, feature flags |
+| [LiteSVM 0.15.2 Migration](docs/litesvm-0.15-migration.md) | Runtime behavior, dependency, callback, sysvar, and snapshot changes |
 | [IDL Code Generation](docs/idl-gen.md) | Using `crucible-idl-gen` for standalone harnesses |
 | [API Reference](docs/api-reference.md) | TestContext API — program loading, accounts, transactions, RPC cloning, time, oracles |
 | [Writing Tests](docs/writing-tests.md) | Fixtures, actions, range constraints, simple & invariant fuzzing, assertion macros |

@@ -2,6 +2,7 @@
 name = "crucible-invariant-macro"
 version = "0.2.1"
 edition = "2021"
+rust-version.workspace = true
 license.workspace = true
 description = "Invariant-test attribute macro for crucible-fuzzer"
 

@@ -23,7 +23,7 @@ pub fn clock_to_sysvars(clock: &Clock) -> Vec<(Pubkey, Option<Account>)> {
         Clock::id(),
         Some(Account {
             lamports: 1,
-            data: bincode::serialize(clock).unwrap(),
+            data: wincode::serialize(clock).expect("test Clock must serialize with wincode"),
             owner: Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111"),
             executable: false,
             rent_epoch: 0,
@@ -144,6 +144,16 @@ pub fn verify_full_state(
             assert_eq!(
                 got.owner, expected.owner,
                 "{}: pk {:?} owner mismatch",
+                context, pk
+            );
+            assert_eq!(
+                got.executable, expected.executable,
+                "{}: pk {:?} executable mismatch",
+                context, pk
+            );
+            assert_eq!(
+                got.rent_epoch, expected.rent_epoch,
+                "{}: pk {:?} rent_epoch mismatch",
                 context, pk
             );
         }

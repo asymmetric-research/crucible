@@ -10,13 +10,13 @@ pub use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 pub type FastHashSet<T> = FxHashSet<T>;
 /// Type alias for fast HashMap (uses FxHash)
 pub type FastHashMap<K, V> = FxHashMap<K, V>;
-use solana_account::Account;
+use solana_account::{Account, ReadableAccount};
 use solana_keypair::Keypair;
 use solana_message::inner_instruction::InnerInstructionsList;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
-use solana_transaction_context::TransactionReturnData;
+use solana_transaction_context::transaction::TransactionReturnData;
 use solana_transaction_error::TransactionError;
 
 // Re-export types from anchor-lang for anchor program interactions
@@ -35,7 +35,7 @@ pub use crate::mock_oracles::{
 };
 pub use crate::program_builder::ProgramBuilder;
 pub use crate::transaction_builder::TransactionBuilder;
-use anchor_lang::prelude::{Clock, Rent};
+use anchor_lang::prelude::{Clock, Rent, SlotHashes};
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program_pack::Pack;
 use anchor_lang::solana_program::system_program;
@@ -68,9 +68,25 @@ pub use coverage::{
     ReachableAnalysis,
 };
 
+/// Backwards-compatible name for LiteSVM's no-op invocation callback.
+pub use litesvm::EmptyInvocationInspectCallback as EmptyInvocationCallback;
 pub use litesvm::InvocationInspectCallback;
 // Re-export litesvm for generated code (stateful mode creates placeholder SVMs)
 pub use litesvm;
+
+/// Clone a LiteSVM without losing reserved transaction-history capacity.
+///
+/// LiteSVM 0.15's derived clone copies history entries, but `IndexMap::clone`
+/// does not retain spare capacity. Generated workers use this helper so a
+/// caller-selected nonzero capacity remains part of runtime configuration.
+#[doc(hidden)]
+pub fn clone_svm_preserving_config(svm: &LiteSVM) -> LiteSVM {
+    let entries = svm.transaction_history_entries().clone();
+    let capacity = svm.transaction_history_capacity();
+    let mut cloned = svm.clone();
+    cloned.restore_transaction_history(entries, capacity);
+    cloned
+}
 
 // Re-export serde_json for generated code
 pub use serde_json;
@@ -151,6 +167,11 @@ thread_local! {
     static VIOLATION_ACTION_INDEX: RefCell<Option<usize>> = RefCell::new(None);
     // Error code passthrough from tx_result_to_outcome to push_action_record
     static LAST_ERROR_CODE: Cell<Option<u32>> = const { Cell::new(None) };
+    // Target-program panic passthrough (first-wins latch, per-iteration). Set by
+    // tx_result_to_outcome when a *failed* tx's logs carry a genuine SBF panic/overflow
+    // signature; read by the harness's P-0007 invariant. Additive: does NOT change any
+    // success/failure semantics. Reset by clear_iteration_state at each iteration start.
+    static LAST_TARGET_PANIC: RefCell<Option<String>> = RefCell::new(None);
     // Per-iteration action dispatch count (thread-local, no cross-thread noise).
     // Reset before each fn_name() call, read after to get accurate per-iteration count.
     static ITERATION_DISPATCH_COUNT: Cell<u64> = const { Cell::new(0) };
@@ -267,6 +288,96 @@ pub fn set_last_error_code(code: Option<u32>) {
 /// Take the last error code, resetting it to None (called by push_action_record)
 fn take_last_error_code() -> Option<u32> {
     LAST_ERROR_CODE.with(|c| c.replace(None))
+}
+
+// ============================================================================
+// Target-program panic detection (additive; never alters tx success/failure)
+// ============================================================================
+//
+// A target SBF program that panics (overflow with overflow-checks=true,
+// unwrap/expect on None/Err, slice OOB, assert!, divide-by-zero) is caught by
+// the VM and surfaced as a *failed* transaction — which generated action bodies
+// swallow as `is_success()==false`, so the fuzzer's crash count never moves.
+// We scan the failed tx's logs for panic signatures and latch the first hit so
+// a harness invariant (P-0007) can turn it into a real Crucible violation.
+
+/// Signatures that indicate the *target program itself* aborted (a genuine bug),
+/// as opposed to a graceful `require!`/`err!` revert (a Custom error code).
+///
+/// These are chosen to be PRECISE, not merely suggestive. A genuine Rust panic
+/// in SBF is always logged with the `panicked at` prefix (this covers
+/// unwrap/expect/assert!/slice-OOB/unreachable/divide-by-zero/overflow), so the
+/// overflow payloads below are only a redundant backstop. Loose substrings such
+/// as a bare "index out of bounds" are deliberately NOT included: Anchor's
+/// graceful `ListIndexOutOfBounds` error (Custom 6073) logs the human message
+/// "List index out of bounds." which is a normal revert, not a panic — matching
+/// it would be a false positive.
+const TARGET_PANIC_SIGNATURES: &[&str] = &[
+    "panicked at",
+    "SBF program panicked",
+    "attempt to add with overflow",
+    "attempt to subtract with overflow",
+    "attempt to multiply with overflow",
+    "attempt to divide by zero",
+];
+
+/// Scan tx logs for a genuine target-program panic and return the offending log
+/// line if found. Returns None for graceful reverts.
+///
+/// The one documented false-positive class is deliberately excluded: this
+/// harness's target `.so` faults while *assembling* its first CPI with
+/// "Access violation ... at address 0xffffffffffffffff of size 32" — a
+/// binary/ABI artifact (EM_BPF vs SBF), not a target panic. Any "Access
+/// violation" at that sentinel address is skipped; an Access violation at any
+/// *other* address is a genuine memory fault and is reported.
+pub fn scan_logs_for_target_panic(logs: &[String]) -> Option<String> {
+    for line in logs {
+        // Skip the known CPI-assembly artifact (see harness CLAUDE.md).
+        let cpi_assembly_wall =
+            line.contains("Access violation") && line.contains("0xffffffffffffffff");
+        if cpi_assembly_wall {
+            continue;
+        }
+        for sig in TARGET_PANIC_SIGNATURES {
+            if line.contains(sig) {
+                return Some(line.clone());
+            }
+        }
+        // Access violation at any address other than the CPI-assembly sentinel.
+        if line.contains("Access violation") {
+            return Some(line.clone());
+        }
+    }
+    None
+}
+
+/// Record a target panic from a failed tx's logs (first-wins within an
+/// iteration). No-op if the logs carry no panic signature. Called by
+/// tx_result_to_outcome on the failure path only.
+pub fn record_target_panic_from_logs(logs: &[String]) {
+    LAST_TARGET_PANIC.with(|c| {
+        if c.borrow().is_some() {
+            return; // first-wins: keep the earliest panic in the iteration
+        }
+        if let Some(line) = scan_logs_for_target_panic(logs) {
+            *c.borrow_mut() = Some(line);
+        }
+    });
+}
+
+/// True if a target-program panic was latched since the last iteration reset.
+pub fn target_panic_detected() -> bool {
+    LAST_TARGET_PANIC.with(|c| c.borrow().is_some())
+}
+
+/// The latched target-panic log line, if any (non-clearing read).
+pub fn last_target_panic() -> Option<String> {
+    LAST_TARGET_PANIC.with(|c| c.borrow().clone())
+}
+
+/// Clear the latched target panic (called from clear_iteration_state).
+fn clear_target_panic() {
+    LAST_TARGET_PANIC.with(|c| *c.borrow_mut() = None);
 }
 
 // ============================================================================
@@ -500,6 +611,7 @@ pub fn clear_iteration_state() {
     clear_action_history();
     clear_violation_tracking();
     clear_current_violation();
+    clear_target_panic();
 }
 
 // ============================================================================
@@ -1180,6 +1292,21 @@ pub fn harness_panic_alert(message: &str) -> bool {
          a bare panic/assert!/unwrap()/overflow is treated as a fatal harness bug. Stopping the run."
     );
     print_action_sequence();
+    // The hook exits the process, which skips the default hook -- so without capturing it here the
+    // backtrace is lost and the alert can only name the actions that SUCCEEDED before the panic,
+    // never the one that caused it. That left a real harness bug undiagnosable from its own report.
+    // Gated on RUST_BACKTRACE so ordinary runs stay quiet, matching Rust's own convention.
+    match std::env::var("RUST_BACKTRACE").as_deref() {
+        Ok("1") | Ok("full") => {
+            eprintln!(
+                "[HARNESS PANIC] backtrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        _ => eprintln!(
+            "[HARNESS PANIC] re-run with RUST_BACKTRACE=1 to see which harness frame panicked."
+        ),
+    }
     // Multi-core: signal all workers to stop so the run halts instead of restart-looping.
     HARNESS_PANIC_STOP_PATH.with(|p| {
         if let Some(path) = p.borrow().as_ref() {
@@ -1553,6 +1680,9 @@ pub fn tx_result_to_outcome(result: litesvm::types::TransactionResult) -> TxOutc
         Err(failed) => {
             let error_code = parse_error_code(&failed.err);
             let instruction_index = parse_instruction_index(&failed.err);
+            // Additive: latch a target-program panic if the logs carry one. Does
+            // not change the ProgramError outcome or any success/failure semantics.
+            record_target_panic_from_logs(&failed.meta.logs);
             TxOutcome::ProgramError {
                 error: failed.err,
                 error_code,
@@ -1577,7 +1707,8 @@ pub mod fuzz_types {
     pub use solana_sbpf::ebpf;
     pub use solana_sbpf::static_analysis::Analysis;
     pub use solana_transaction::sanitized::SanitizedTransaction;
-    pub use solana_transaction_context::{IndexOfAccount, InstructionContext};
+    pub use solana_transaction_context::instruction::InstructionContext;
+    pub use solana_transaction_context::IndexOfAccount;
 }
 
 /// Stores program data for reloading into debuggable SVMs
@@ -1585,6 +1716,42 @@ pub mod fuzz_types {
 pub struct ProgramData {
     pub program_id: Pubkey,
     pub data: Vec<u8>,
+}
+
+/// Builder for a [`TestContext`].
+///
+/// Crucible intentionally keeps the historical slot-zero default even though
+/// raw LiteSVM 0.15 instances start at [`litesvm::MAINNET_DEFAULT_SLOT`].
+#[derive(Clone, Copy, Debug)]
+pub struct TestContextBuilder {
+    initial_slot: u64,
+}
+
+impl Default for TestContextBuilder {
+    fn default() -> Self {
+        Self { initial_slot: 0 }
+    }
+}
+
+impl TestContextBuilder {
+    /// Set the initial Clock and SlotHashes baseline.
+    pub fn initial_slot(mut self, slot: u64) -> Self {
+        self.initial_slot = slot;
+        self
+    }
+
+    /// Start at LiteSVM's bundled mainnet feature-activation slot.
+    ///
+    /// This changes the initial slot sysvars. Crucible continues to enable the
+    /// complete feature set for compatibility with existing harnesses.
+    pub fn mainnet_slot(self) -> Self {
+        self.initial_slot(litesvm::MAINNET_DEFAULT_SLOT)
+    }
+
+    /// Construct the context.
+    pub fn build(self) -> TestContext {
+        TestContext::build(self.initial_slot)
+    }
 }
 
 pub struct TestContext {
@@ -1610,12 +1777,22 @@ pub struct TestContext {
     /// When false (default for fuzzing), transactions use dummy signatures
     /// to skip ed25519 computation (~77µs per tx).
     pub sigverify: bool,
+    /// Setup-time epoch stake values. LiteSVM stores these outside the account
+    /// database, so generated fast SVMs must reapply them explicitly.
+    epoch_stakes: Arc<HashMap<Pubkey, u64>>,
+    /// Runtime-only configuration becomes immutable once the setup snapshot is
+    /// captured; otherwise stateful restore could leak it between iterations.
+    runtime_config_frozen: bool,
+    /// Contexts created by Crucible can be rebuilt with or without register
+    /// tracing. Caller-supplied SVMs are opaque and must instead be cloned so
+    /// custom builtins, syscalls, and epoch stakes are never discarded.
+    runtime_rebuild_supported: bool,
 }
 
 impl Clone for TestContext {
     fn clone(&self) -> Self {
         Self {
-            svm: self.svm.clone(),
+            svm: clone_svm_preserving_config(&self.svm),
             pending_instructions: self.pending_instructions.clone(),
             pending_signers: self
                 .pending_signers
@@ -1631,51 +1808,78 @@ impl Clone for TestContext {
             dirty_tracker: self.dirty_tracker.clone(),
             account_mutation: self.account_mutation.clone(),
             sigverify: self.sigverify,
+            epoch_stakes: self.epoch_stakes.clone(),
+            runtime_config_frozen: self.runtime_config_frozen,
+            runtime_rebuild_supported: self.runtime_rebuild_supported,
         }
-    }
-}
-
-/// Empty callback that does nothing - used during setup to avoid DefaultRegisterTracingCallback
-/// trying to find .so files on disk for built-in programs.
-pub struct EmptyInvocationCallback;
-
-impl InvocationInspectCallback for EmptyInvocationCallback {
-    fn before_invocation(
-        &self,
-        _tx: &solana_transaction::sanitized::SanitizedTransaction,
-        _program_indices: &[solana_transaction_context::IndexOfAccount],
-        _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
-    ) {
-    }
-
-    fn after_invocation(
-        &self,
-        _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
-        _register_tracing_enabled: bool,
-    ) {
     }
 }
 
 impl TestContext {
+    /// Create a builder. The default initial slot is zero.
+    pub fn builder() -> TestContextBuilder {
+        TestContextBuilder::default()
+    }
+
     pub fn new() -> Self {
+        Self::builder().build()
+    }
+
+    fn build(initial_slot: u64) -> Self {
         // When CRUCIBLE_FUZZ_DEBUGGABLE is set (by the fuzz macro), create a debuggable SVM
         // so programs are loaded with register tracing support baked in.
         // Use EmptyInvocationCallback to suppress "Error collecting register tracing" messages
         // from DefaultRegisterTracingCallback trying to find .so files for built-in programs.
-        let svm = if std::env::var("CRUCIBLE_FUZZ_DEBUGGABLE").is_ok() {
-            let mut svm = LiteSVM::new_debuggable(true)
-                .with_transaction_history(0)
-                .with_sigverify(false)
-                .with_blockhash_check(false);
-            svm.set_invocation_inspect_callback(EmptyInvocationCallback);
-            svm
+        let register_tracing = std::env::var("CRUCIBLE_FUZZ_DEBUGGABLE").is_ok();
+        let svm = Self::configured_svm(register_tracing, initial_slot);
+        Self::from_configured_svm(svm, true)
+    }
+
+    fn configured_svm(register_tracing: bool, initial_slot: u64) -> LiteSVM {
+        Self::configured_svm_with_feature_set(
+            register_tracing,
+            initial_slot,
+            agave_feature_set::FeatureSet::all_enabled(),
+        )
+    }
+
+    fn configured_svm_with_feature_set(
+        register_tracing: bool,
+        initial_slot: u64,
+        feature_set: agave_feature_set::FeatureSet,
+    ) -> LiteSVM {
+        let svm = if register_tracing {
+            LiteSVM::new_debuggable(true)
         } else {
             LiteSVM::new()
-                .with_transaction_history(0)
-                .with_sigverify(false)
-                .with_blockhash_check(false)
         };
 
+        // LiteSVM 0.15 defaults to the mainnet-active feature set. Earlier
+        // Crucible releases exposed all features, so reapply that policy before rebuilding
+        // feature-dependent sysvars, feature accounts, builtins, and programs.
+        let mut svm = svm
+            .with_feature_set(feature_set)
+            .with_sysvars()
+            .with_feature_accounts()
+            .with_builtins()
+            .with_default_programs()
+            .with_transaction_history(0)
+            .with_sigverify(false)
+            .with_blockhash_check(false);
+        svm.warp_to_slot(initial_slot);
+        let latest_blockhash = svm.latest_blockhash();
+        svm.set_sysvar(&SlotHashes::new(&[(initial_slot, latest_blockhash)]));
+
+        if register_tracing {
+            // Suppress the default callback's attempts to locate built-in .so
+            // files. The fuzz callback is installed after fixture setup.
+            svm.set_invocation_inspect_callback(EmptyInvocationCallback);
+        }
+        svm
+    }
+
+    fn from_configured_svm(svm: LiteSVM, runtime_rebuild_supported: bool) -> Self {
+        let sigverify = svm.get_sigverify();
         Self {
             svm,
             pending_instructions: Vec::new(),
@@ -1686,33 +1890,22 @@ impl TestContext {
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
             account_mutation: account_mutation::config_from_env(),
-            sigverify: false,
+            sigverify,
+            epoch_stakes: Arc::new(HashMap::new()),
+            runtime_config_frozen: false,
+            runtime_rebuild_supported,
         }
     }
 
     pub fn with_invocation_callback<C: InvocationInspectCallback + 'static>(callback: C) -> Self {
-        let mut svm = LiteSVM::new_debuggable(true)
-            .with_transaction_history(0)
-            .with_sigverify(false)
-            .with_blockhash_check(false);
+        let mut svm = Self::configured_svm(true, 0);
         svm.set_invocation_inspect_callback(callback);
-        Self {
-            svm,
-            pending_instructions: Vec::new(),
-            pending_signers: Vec::new(),
-            programs: std::sync::Arc::new(Vec::new()),
-            tracked_accounts: Arc::new(HashSet::new()),
-            program_coverage_totals: Arc::new(HashMap::new()),
-            snapshot: None,
-            dirty_tracker: snapshot::DirtyTracker::new(),
-            account_mutation: account_mutation::config_from_env(),
-            sigverify: false,
-        }
+        Self::from_configured_svm(svm, true)
     }
 
     pub fn with_compute_budget(mut self, compute_unit_limit: u64) -> Self {
         use solana_compute_budget::compute_budget::ComputeBudget;
-        let mut budget = ComputeBudget::new_with_defaults(true, true);
+        let mut budget = ComputeBudget::new_with_defaults(true);
         budget.compute_unit_limit = compute_unit_limit;
         self.svm = self.svm.with_compute_budget(budget);
         self
@@ -1723,7 +1916,6 @@ impl TestContext {
     /// Only counts edges from conditional jump instructions (matching runtime tracking).
     /// Used for coverage percentage calculation.
     pub fn analyze_program_coverage(program_data: &[u8]) -> Option<(usize, usize)> {
-        use solana_sbpf::ebpf;
         use solana_sbpf::elf::Executable;
         use solana_sbpf::program::BuiltinProgram;
         use solana_sbpf::static_analysis::Analysis;
@@ -1734,6 +1926,11 @@ impl TestContext {
             fn consume(&mut self, _amount: u64) {}
             fn get_remaining(&self) -> u64 {
                 0
+            }
+            fn active_mapping_ptr(
+                &mut self,
+            ) -> std::ptr::NonNull<solana_sbpf::memory_region::MemoryMapping> {
+                unreachable!("static ELF analysis never executes the VM")
             }
         }
 
@@ -1788,13 +1985,8 @@ impl TestContext {
             }
 
             let last_insn = &analysis.instructions[cfg_node.instructions.end - 1];
-            let is_jmp = last_insn.opc & 7 == ebpf::BPF_JMP;
-            if is_jmp {
-                let opc = last_insn.opc;
-                let is_conditional = opc != 0x05 && opc != 0x85 && opc != 0x8d && opc != 0x95;
-                if is_conditional {
-                    total_conditional += cfg_node.destinations.len();
-                }
+            if coverage::is_conditional_branch_opcode(last_insn.opc) {
+                total_conditional += cfg_node.destinations.len();
             }
         }
 
@@ -1872,18 +2064,20 @@ impl TestContext {
     }
 
     pub fn from_svm(svm: LiteSVM) -> Self {
-        Self {
-            svm,
-            pending_instructions: Vec::new(),
-            pending_signers: Vec::new(),
-            programs: std::sync::Arc::new(Vec::new()),
-            tracked_accounts: Arc::new(HashSet::new()),
-            program_coverage_totals: Arc::new(HashMap::new()),
-            snapshot: None,
-            dirty_tracker: snapshot::DirtyTracker::new(),
-            account_mutation: account_mutation::config_from_env(),
-            sigverify: false,
-        }
+        // LiteSVM does not expose arbitrary custom syscall/builtin or epoch
+        // stake registries. Mark caller-owned runtimes as opaque so generated
+        // alternate workers clone them exactly instead of guessing at config.
+        Self::from_configured_svm(svm, false)
+    }
+
+    /// Preserve the current LiteSVM verbatim when generated workers are made.
+    ///
+    /// Call this during setup after modifying public `svm` runtime-only state
+    /// that Crucible cannot introspect, such as custom builtins or syscalls.
+    /// The supplied runtime's register-tracing mode is preserved as well.
+    pub fn preserve_runtime_config(&mut self) -> &mut Self {
+        self.runtime_rebuild_supported = false;
+        self
     }
 
     pub fn into_svm(self) -> LiteSVM {
@@ -1903,7 +2097,7 @@ impl TestContext {
     ) -> Self {
         // Just clone the SVM directly and set callback - don't use builder methods
         // as they may create a fresh SVM and lose account data
-        let mut cloned_svm = self.svm.clone();
+        let mut cloned_svm = clone_svm_preserving_config(&self.svm);
         cloned_svm.set_invocation_inspect_callback(callback);
 
         Self {
@@ -1920,8 +2114,104 @@ impl TestContext {
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
             account_mutation: self.account_mutation.clone(),
-            sigverify: false,
+            sigverify: self.sigverify,
+            epoch_stakes: self.epoch_stakes.clone(),
+            runtime_config_frozen: self.runtime_config_frozen,
+            runtime_rebuild_supported: self.runtime_rebuild_supported,
         }
+    }
+
+    /// Create a fresh SVM with the same non-account runtime configuration.
+    ///
+    /// This is public only because generated downstream harness code needs it.
+    /// Accounts and loaded user programs are restored separately from the setup
+    /// snapshot.
+    #[doc(hidden)]
+    pub fn fresh_svm(&self, register_tracing: bool) -> LiteSVM {
+        let tracked_epoch_total = self
+            .epoch_stakes
+            .values()
+            .try_fold(0u64, |total, stake| total.checked_add(*stake));
+        let has_untracked_epoch_stakes = tracked_epoch_total != Some(self.svm.epoch_total_stake());
+        if !self.runtime_rebuild_supported || has_untracked_epoch_stakes {
+            return clone_svm_preserving_config(&self.svm);
+        }
+
+        let mut svm = Self::configured_svm_with_feature_set(
+            register_tracing,
+            self.slot(),
+            self.svm.get_feature_set_ref().clone(),
+        )
+        .with_sigverify(self.sigverify)
+        .with_blockhash_check(self.svm.get_blockhash_check())
+        .with_log_bytes_limit(self.svm.get_log_bytes_limit());
+
+        // Constructors generate and fund a random airdrop account. Reuse the
+        // setup SVM's keypair and remove the transient account so restoring the
+        // snapshot cannot leave a mode-dependent extra balance behind.
+        let transient_airdrop = svm.airdrop_pubkey();
+        let source_airdrop = self.svm.airdrop_pubkey();
+        svm.set_airdrop_keypair(*self.svm.airdrop_keypair_bytes());
+        if transient_airdrop != source_airdrop {
+            svm.set_account(transient_airdrop, Account::default())
+                .expect("the transient airdrop account is a plain system account");
+        }
+
+        if let Some(compute_budget) = self.svm.get_compute_budget() {
+            svm = svm.with_compute_budget(compute_budget);
+        }
+        svm.set_fee_structure(self.svm.get_fee_structure().clone());
+        svm.set_latest_blockhash(self.svm.latest_blockhash());
+        svm.restore_transaction_history(
+            self.svm.transaction_history_entries().clone(),
+            self.svm.transaction_history_capacity(),
+        );
+        Self::apply_epoch_stakes(&mut svm, &self.epoch_stakes)
+            .expect("tracked epoch stakes were previously validated");
+        svm
+    }
+
+    fn apply_epoch_stakes(
+        svm: &mut LiteSVM,
+        stakes: &HashMap<Pubkey, u64>,
+    ) -> std::result::Result<(), litesvm::error::LiteSVMError> {
+        svm.set_epoch_stakes(stakes.iter().map(|(vote, stake)| ((*vote).into(), *stake)))
+    }
+
+    /// Configure the stake returned by `sol_get_epoch_stake(vote_account)`.
+    ///
+    /// Epoch stake lives outside LiteSVM's account database. Configure it
+    /// during fixture setup, before Crucible captures its initial snapshot, so
+    /// traced and fast SVMs can be kept identical.
+    pub fn set_epoch_stake(&mut self, vote_account: Pubkey, stake: u64) -> Result<()> {
+        if self.runtime_config_frozen {
+            anyhow::bail!("epoch stake must be configured before take_snapshot()")
+        }
+        self.svm.set_epoch_stake(vote_account.into(), stake)?;
+        let stakes = Arc::make_mut(&mut self.epoch_stakes);
+        if stake == 0 {
+            stakes.remove(&vote_account);
+        } else {
+            stakes.insert(vote_account, stake);
+        }
+        Ok(())
+    }
+
+    /// Replace every configured epoch stake value.
+    pub fn set_epoch_stakes<I>(&mut self, stakes: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (Pubkey, u64)>,
+    {
+        if self.runtime_config_frozen {
+            anyhow::bail!("epoch stakes must be configured before take_snapshot()")
+        }
+        let stakes: HashMap<Pubkey, u64> = stakes
+            .into_iter()
+            .filter(|(_, stake)| *stake != 0)
+            .collect();
+        Self::apply_epoch_stakes(&mut self.svm, &stakes)?;
+        self.epoch_stakes = Arc::new(stakes);
+        Ok(())
     }
 
     /// Set an invocation callback for coverage tracking on this context.
@@ -2087,6 +2377,7 @@ impl TestContext {
         // and costs only a one-time O(all_accounts) at setup. Per-iteration
         // restore remains O(dirty) since it only touches dirty_tracker accounts.
         self.snapshot = Some(snapshot::SvmSnapshot::take_all(&self.svm));
+        self.runtime_config_frozen = true;
         // Clear the dirty tracker so it's fresh for the first iteration
         self.dirty_tracker.clear();
     }
@@ -2243,9 +2534,9 @@ impl TestContext {
         self.svm.warp_to_slot(target_slot);
     }
 
-    pub fn set_sysvar<T>(&mut self, sysvar: &T) -> ()
+    pub fn set_sysvar<T>(&mut self, sysvar: &T)
     where
-        T: solana_sysvar::SysvarSerialize,
+        T: solana_sysvar::Sysvar + solana_sysvar_id::SysvarId + wincode::Serialize<Src = T>,
     {
         self.svm.set_sysvar::<T>(sysvar);
     }
@@ -2295,6 +2586,19 @@ impl TestContext {
 
     pub fn get_account(&self, address: &Pubkey) -> Result<Account> {
         self.read_account(address)
+    }
+
+    /// Borrow live account data directly from LiteSVM without cloning it.
+    ///
+    /// The returned slice is tied to this immutable context borrow, so callers
+    /// must release it before executing a transaction, restoring a snapshot,
+    /// or otherwise mutating the SVM.
+    pub fn account_data<'a>(&'a self, address: &Pubkey) -> Result<&'a [u8]> {
+        self.svm
+            .accounts_db()
+            .get_account_ref(address)
+            .map(ReadableAccount::data)
+            .ok_or_else(|| anyhow::anyhow!("Account not found: {}", address))
     }
 
     // Read an account at a Pubkey
@@ -2638,6 +2942,247 @@ impl TestContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_context_default_slot_remains_zero() {
+        assert_eq!(TestContext::new().slot(), 0);
+        assert_eq!(
+            TestContext::with_invocation_callback(EmptyInvocationCallback).slot(),
+            0
+        );
+    }
+
+    #[test]
+    fn account_data_borrows_live_litesvm_storage() {
+        let mut ctx = TestContext::new();
+        let address = Pubkey::new_unique();
+        let expected = vec![1, 2, 3, 4];
+        ctx.write_account(
+            &address,
+            Account {
+                lamports: 1,
+                data: expected.clone(),
+                ..Account::default()
+            },
+        )
+        .unwrap();
+
+        let stored = ctx
+            .svm
+            .accounts_db()
+            .get_account_ref(&address)
+            .unwrap()
+            .data();
+        let borrowed = ctx.account_data(&address).unwrap();
+
+        assert_eq!(borrowed, expected);
+        assert_eq!(borrowed.as_ptr(), stored.as_ptr());
+    }
+
+    #[test]
+    fn test_context_builder_selects_initial_slot() {
+        let historical = TestContext::builder().initial_slot(42).build();
+        assert_eq!(historical.slot(), 42);
+        assert_eq!(historical.svm.get_sysvar::<SlotHashes>()[0].0, 42);
+        assert_eq!(
+            TestContext::builder().mainnet_slot().build().slot(),
+            litesvm::MAINNET_DEFAULT_SLOT
+        );
+        assert_eq!(
+            TestContext::builder()
+                .mainnet_slot()
+                .initial_slot(7)
+                .build()
+                .slot(),
+            7
+        );
+    }
+
+    #[test]
+    fn raw_litesvm_and_from_svm_keep_upstream_mainnet_slot() {
+        let svm = LiteSVM::new();
+        let clock: Clock = svm.get_sysvar();
+        assert_eq!(clock.slot, litesvm::MAINNET_DEFAULT_SLOT);
+        assert_eq!(
+            TestContext::from_svm(svm).slot(),
+            litesvm::MAINNET_DEFAULT_SLOT
+        );
+    }
+
+    #[test]
+    fn test_context_preserves_all_enabled_feature_policy() {
+        let ctx = TestContext::new();
+        let mainnet = LiteSVM::mainnet_feature_set();
+        let all = agave_feature_set::FeatureSet::all_enabled();
+        let non_mainnet_feature = all
+            .active()
+            .keys()
+            .find(|feature| !mainnet.is_active(feature))
+            .expect("test requires at least one feature newer than the bundled mainnet set");
+        assert!(
+            ctx.svm.get_account(non_mainnet_feature).is_some(),
+            "all-enabled feature accounts must be present"
+        );
+    }
+
+    #[test]
+    fn epoch_stakes_are_copied_to_fresh_svm_and_frozen_with_snapshot() {
+        let mut ctx = TestContext::new();
+        let vote = Pubkey::new_unique();
+        let vote_address = vote.into();
+        ctx.set_epoch_stake(vote, 123).unwrap();
+        assert_eq!(ctx.svm.epoch_stake(&vote_address), 123);
+        assert_eq!(ctx.svm.epoch_total_stake(), 123);
+
+        let fresh = ctx.fresh_svm(false);
+        assert_eq!(fresh.epoch_stake(&vote_address), 123);
+        assert_eq!(fresh.epoch_total_stake(), 123);
+
+        ctx.take_snapshot();
+        assert!(ctx.set_epoch_stake(vote, 456).is_err());
+        assert!(ctx.clone().set_epoch_stake(vote, 456).is_err());
+    }
+
+    #[test]
+    fn fresh_svm_preserves_managed_runtime_configuration() {
+        let vote = Pubkey::new_unique();
+        let vote_address = vote.into();
+        let mut ctx = TestContext::builder()
+            .initial_slot(99)
+            .build()
+            .with_compute_budget(321_000);
+        ctx.set_epoch_stake(vote, 789).unwrap();
+        ctx.svm.expire_blockhash();
+        ctx.svm = std::mem::take(&mut ctx.svm)
+            .with_transaction_history(7)
+            .with_blockhash_check(true)
+            .with_log_bytes_limit(None);
+
+        let fresh = ctx.fresh_svm(false);
+        assert_eq!(fresh.get_sysvar::<Clock>().slot, 99);
+        assert_eq!(fresh.latest_blockhash(), ctx.svm.latest_blockhash());
+        assert!(fresh.get_blockhash_check());
+        assert_eq!(fresh.get_log_bytes_limit(), None);
+        assert_eq!(
+            fresh.get_compute_budget().unwrap().compute_unit_limit,
+            321_000
+        );
+        assert_eq!(fresh.transaction_history_capacity(), 7);
+        assert_eq!(fresh.airdrop_pubkey(), ctx.svm.airdrop_pubkey());
+        assert_eq!(fresh.epoch_stake(&vote_address), 789);
+        assert_eq!(fresh.epoch_total_stake(), 789);
+    }
+
+    #[test]
+    fn fresh_svm_restore_has_no_transient_airdrop_account() {
+        let mut ctx = TestContext::new();
+        ctx.take_snapshot();
+        let snapshot = ctx.snapshot.as_ref().unwrap();
+        let source_keys: HashSet<_> = ctx.svm.accounts_db().inner.keys().copied().collect();
+
+        let mut fresh = ctx.fresh_svm(false);
+        snapshot.restore_full(&mut fresh);
+        let fresh_keys: HashSet<_> = fresh.accounts_db().inner.keys().copied().collect();
+
+        assert_eq!(fresh.airdrop_pubkey(), ctx.svm.airdrop_pubkey());
+        assert_eq!(fresh_keys, source_keys);
+    }
+
+    #[test]
+    fn caller_supplied_svm_is_cloned_without_reconstructing_opaque_config() {
+        let vote = Pubkey::new_unique();
+        let vote_address = vote.into();
+        let mut svm = LiteSVM::new()
+            .with_transaction_history(0)
+            .with_transaction_history(9)
+            .with_log_bytes_limit(None);
+        svm.set_epoch_stake(vote_address, 456).unwrap();
+        let ctx = TestContext::from_svm(svm);
+
+        // The tracing request is intentionally ignored for an opaque SVM:
+        // cloning is the only lossless option LiteSVM exposes for custom
+        // syscalls, builtins, feature state, and epoch stakes.
+        let fresh = ctx.fresh_svm(true);
+        assert_eq!(fresh.airdrop_pubkey(), ctx.svm.airdrop_pubkey());
+        assert_eq!(
+            fresh.transaction_history_capacity(),
+            ctx.svm.transaction_history_capacity()
+        );
+        assert_eq!(fresh.get_log_bytes_limit(), None);
+        assert_eq!(fresh.epoch_stake(&vote_address), 456);
+        assert_eq!(fresh.epoch_total_stake(), 456);
+        assert_eq!(
+            fresh.get_feature_set_ref().active(),
+            ctx.svm.get_feature_set_ref().active()
+        );
+        assert_eq!(fresh.accounts_db().inner, ctx.svm.accounts_db().inner);
+    }
+
+    #[test]
+    fn preserve_runtime_config_keeps_direct_runtime_customization() {
+        let vote = Pubkey::new_unique();
+        let vote_address = vote.into();
+        let mut ctx = TestContext::new();
+        ctx.svm.set_epoch_stake(vote_address, 987).unwrap();
+        ctx.preserve_runtime_config();
+
+        let fresh = ctx.fresh_svm(false);
+        assert_eq!(fresh.epoch_stake(&vote_address), 987);
+        assert_eq!(fresh.accounts_db().inner, ctx.svm.accounts_db().inner);
+    }
+
+    #[test]
+    fn account_lock_limit_is_enforced_with_crucible_sigverify_disabled() {
+        use anchor_lang::solana_program::system_instruction;
+        use solana_transaction::sanitized::MAX_TX_ACCOUNT_LOCKS;
+
+        let mut ctx = TestContext::new();
+        let payer = Keypair::new();
+        ctx.svm.airdrop(&payer.pubkey(), 1_000_000_000_000).unwrap();
+        let instructions: Vec<_> = (0..MAX_TX_ACCOUNT_LOCKS)
+            .map(|_| system_instruction::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1))
+            .collect();
+        let transaction = solana_transaction::Transaction::new(
+            &[&payer],
+            solana_message::Message::new(&instructions, Some(&payer.pubkey())),
+            ctx.svm.latest_blockhash(),
+        );
+
+        assert_eq!(
+            ctx.svm.send_transaction(transaction).unwrap_err().err,
+            TransactionError::TooManyAccountLocks
+        );
+    }
+
+    #[test]
+    fn failed_transaction_keeps_original_error_before_rent_check() {
+        use anchor_lang::solana_program::system_instruction;
+        use solana_instruction::error::InstructionError;
+
+        let mut ctx = TestContext::new();
+        let payer = Keypair::new();
+        let new_account = Keypair::new();
+        let owner = Pubkey::new_unique();
+        ctx.svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+
+        let create = system_instruction::create_account(
+            &payer.pubkey(),
+            &new_account.pubkey(),
+            1,
+            10,
+            &owner,
+        );
+        let transaction = solana_transaction::Transaction::new(
+            &[&payer, &new_account],
+            solana_message::Message::new(&[create.clone(), create], Some(&payer.pubkey())),
+            ctx.svm.latest_blockhash(),
+        );
+
+        assert_eq!(
+            ctx.svm.send_transaction(transaction).unwrap_err().err,
+            TransactionError::InstructionError(1, InstructionError::Custom(0))
+        );
+    }
 
     // -------------------------------------------------------------------------
     // Violation tracking tests
@@ -5346,6 +5891,11 @@ mod tests {
             fn get_remaining(&self) -> u64 {
                 0
             }
+            fn active_mapping_ptr(
+                &mut self,
+            ) -> std::ptr::NonNull<solana_sbpf::memory_region::MemoryMapping> {
+                unreachable!("static ELF analysis never executes the VM")
+            }
         }
         let loader = Arc::new(BuiltinProgram::<DummyContext>::new_mock());
         let executable = Executable::from_elf(&program_data, loader).unwrap();
@@ -5423,6 +5973,20 @@ mod tests {
         kp
     }
 
+    /// Create a system account that remains rent-exempt after a small transfer.
+    ///
+    /// LiteSVM 0.15 applies the post-transaction rent check to newly materialized
+    /// recipients, so signer-focused tests must not accidentally depend on the
+    /// pre-0.15 behavior that admitted an underfunded destination account.
+    fn rent_exempt_recipient(ctx: &mut TestContext) -> Pubkey {
+        // Keep this on-curve so account-mutation tests do not classify an
+        // otherwise ordinary system recipient as a PDA-spoof candidate.
+        let recipient = Keypair::new().pubkey();
+        let minimum_balance = ctx.svm.minimum_balance_for_rent_exemption(0);
+        ctx.svm.airdrop(&recipient, minimum_balance).unwrap();
+        recipient
+    }
+
     #[test]
     fn account_mutation_enabled_keeps_real_tx_outcome() {
         // The probe runs on a clone and must never change the real transaction's result. The
@@ -5431,8 +5995,7 @@ mod tests {
         reset_probed_account_mutations();
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Keypair::new().pubkey();
-        ctx.svm.airdrop(&recipient, 1).unwrap();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         ctx.enable_account_mutation();
 
@@ -5455,7 +6018,7 @@ mod tests {
             ctx.svm.get_account(&recipient).unwrap().owner,
             original_owner
         );
-        assert!(!has_violation());
+        assert_eq!(take_violation(), None);
     }
 
     #[test]
@@ -5465,8 +6028,7 @@ mod tests {
         reset_probed_account_mutations();
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Keypair::new().pubkey();
-        ctx.svm.airdrop(&recipient, 1).unwrap();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         ctx.enable_account_mutation();
 
@@ -5486,7 +6048,7 @@ mod tests {
             ctx.svm.get_balance(&recipient).unwrap_or(0),
             before_balance + 2000
         );
-        assert!(!has_violation());
+        assert_eq!(take_violation(), None);
     }
 
     #[test]
@@ -5494,7 +6056,7 @@ mod tests {
         // Regression: raw_call().signers(&[payer]).send() should use first signer as fee payer
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5515,7 +6077,7 @@ mod tests {
         // fee_payer() should be used even if it's not in signers list
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5537,7 +6099,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
         let other_signer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5574,7 +6136,7 @@ mod tests {
         // fee_payer same as first signer — should not duplicate
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5595,7 +6157,8 @@ mod tests {
         // send_batch uses pending_signers[0] as fee payer
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
+        let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5613,7 +6176,10 @@ mod tests {
         let outcome = result.unwrap();
         assert!(outcome.is_some());
         assert!(outcome.unwrap().is_success());
-        assert_eq!(ctx.svm.get_balance(&recipient).unwrap_or(0), 2000);
+        assert_eq!(
+            ctx.svm.get_balance(&recipient).unwrap_or(0),
+            before_balance + 2000
+        );
     }
 
     // =========================================================================
@@ -5626,7 +6192,7 @@ mod tests {
         let mut ctx = TestContext::new();
         assert!(!ctx.sigverify, "default sigverify should be false");
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5645,7 +6211,7 @@ mod tests {
         // Re-enable sigverify on the SVM too
         ctx.svm = ctx.svm.with_sigverify(true);
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
 
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &payer.pubkey(),
@@ -5666,7 +6232,8 @@ mod tests {
         // Verify dummy signing works across multiple sequential transactions
         let mut ctx = TestContext::new();
         let payer = fund_keypair(&mut ctx);
-        let recipient = Pubkey::new_unique();
+        let recipient = rent_exempt_recipient(&mut ctx);
+        let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
 
         for i in 0..5 {
             let ix = anchor_lang::solana_program::system_instruction::transfer(
@@ -5691,8 +6258,9 @@ mod tests {
         // Verify lamports moved
         let balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
         assert_eq!(
-            balance, 5000,
-            "recipient should have 5000 lamports after 5 transfers"
+            balance,
+            before_balance + 5000,
+            "recipient should receive 5000 lamports after 5 transfers"
         );
     }
 
