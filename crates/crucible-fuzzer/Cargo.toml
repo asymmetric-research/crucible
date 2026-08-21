@@ -9,10 +9,10 @@ description = "Solana smart contract fuzzing framework"
 [dependencies]
 rand = "0.8"
 anyhow = { workspace = true }
-crucible-test-context = { path = "../crucible-test-context", version = "0.2.1" }
-crucible-fuzz-macro = { path = "../crucible-fuzz-macro", version = "0.2.1" }
-crucible-invariant-macro = { path = "../crucible-invariant-macro", version = "0.2.1" }
-crucible-fuzz-runtime = { path = "../crucible-fuzz-runtime", version = "0.2.1" }
+crucible-test-context = { path = "../crucible-test-context", version = "0.3.0-alpha.1" }
+crucible-fuzz-macro = { path = "../crucible-fuzz-macro", version = "0.3.0-alpha.1" }
+crucible-invariant-macro = { path = "../crucible-invariant-macro", version = "0.3.0-alpha.1" }
+crucible-fuzz-runtime = { path = "../crucible-fuzz-runtime", version = "0.3.0-alpha.1" }
 anchor-lang = { workspace = true }
 anchor-spl = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }

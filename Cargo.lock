@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-cli"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-macro"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-runtime"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "libafl",
  "libafl_bolts",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzzer"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "account-mutations-examples",
  "anchor-lang",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-idl-gen"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anchor-lang-idl",
  "anyhow",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-invariant-macro"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-macro-utils"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-test-context"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 dependencies = [
  "addr2line 0.24.2",
  "agave-feature-set",

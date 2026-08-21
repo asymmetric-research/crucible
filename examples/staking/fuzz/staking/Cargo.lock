@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-macro"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzz-runtime"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "libafl",
  "libafl_bolts",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-fuzzer"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-invariant-macro"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "crucible-macro-utils",
  "proc-macro2",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-macro-utils"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-test-context"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "addr2line 0.24.2",
  "agave-feature-set",

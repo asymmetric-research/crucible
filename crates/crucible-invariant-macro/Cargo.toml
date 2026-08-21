@@ -1,6 +1,6 @@
 [package]
 name = "crucible-invariant-macro"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 edition = "2021"
 rust-version.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ description = "Invariant-test attribute macro for crucible-fuzzer"
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-crucible-macro-utils = { path = "../crucible-macro-utils", version = "0.2.1" }
+crucible-macro-utils = { path = "../crucible-macro-utils", version = "0.3.0-alpha.1" }
 
 [lib]
 proc-macro = true
