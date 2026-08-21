@@ -5,9 +5,12 @@ target/
 # Fuzzing artifacts
 crashes/
 corpus/
+corpus_*/
 *.lcov
 coverage.html/
 .fuzz-cache/
+fc-workdir-*/
+out_explore_*.json
 
 # Claude Code context file
 CLAUDE.md
