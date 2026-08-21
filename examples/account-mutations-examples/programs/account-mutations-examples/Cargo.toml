@@ -1,12 +1,12 @@
 [package]
-name = "owner-mutation-airdrop"
+name = "account-mutations-examples"
 version = "0.1.0"
 description = "Minimal airdrop program with a seeded missing-owner-check bug"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "owner_mutation_airdrop"
+name = "account_mutations_examples"
 
 [features]
 default = []

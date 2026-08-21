@@ -21,7 +21,7 @@ const TOKEN_AMOUNT_OFFSET: usize = 64;
 const TOKEN_STATE_OFFSET: usize = 108;
 
 #[program]
-pub mod owner_mutation_airdrop {
+pub mod account_mutations_examples {
     use super::*;
 
     // ---- CC-1 true positives: read an account's data without verifying its owner ----

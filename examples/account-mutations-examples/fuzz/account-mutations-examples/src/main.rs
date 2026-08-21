@@ -1,4 +1,4 @@
-//! Fuzz harness for the owner-mutation-airdrop example.
+//! Fuzz harness for the account-mutations-examples example.
 //!
 //! It drives the program through every positive (missing-check) and negative (check-present)
 //! instruction path. On its own it fuzzes a lamport-conservation invariant; run with
@@ -6,8 +6,8 @@
 //! sysvar, SPL-token, field-reference, bidirectional/shared-root, semantic-swap,
 //! cross-authority, and duplicate-account bugs as account-mutation findings.
 //!
-//!   crucible run owner-mutation-airdrop invariant_test --release
-//!   crucible run owner-mutation-airdrop invariant_test --release --mutate-accounts
+//!   crucible run account-mutations-examples invariant_test --release
+//!   crucible run account-mutations-examples invariant_test --release --mutate-accounts
 
 use anchor_lang::prelude::sysvar::SysvarId;
 use anchor_lang::prelude::Clock;
@@ -21,8 +21,8 @@ use solana_signer::Signer;
 use std::rc::Rc;
 
 // Generate instruction/account types from the program IDL (no dependency on the program crate).
-crucible_idl_gen::declare_fuzz_program!("idls/owner_mutation_airdrop.json");
-use owner_mutation_airdrop::{accounts, instruction};
+crucible_idl_gen::declare_fuzz_program!("idls/account_mutations_examples.json");
+use account_mutations_examples::{accounts, instruction};
 
 /// Foreign program that is meant to own `foreign_config` (matches the program's
 /// `FOREIGN_PROGRAM_ID = [0x0A; 32]`).
@@ -55,7 +55,7 @@ const EXPECTED_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x86; 32]);
 const ALT_SEMANTIC_CONTEXT: Pubkey = Pubkey::new_from_array([0x87; 32]);
 
 #[derive(Clone)]
-struct OwnerMutationAirdropFixture {
+struct AccountMutationsExamplesFixture {
     ctx: TestContext,
     program_id: Pubkey,
     fee_payer: Rc<Keypair>,
@@ -99,11 +99,11 @@ struct OwnerMutationAirdropFixture {
 }
 
 #[fuzz_fixture]
-impl OwnerMutationAirdropFixture {
+impl AccountMutationsExamplesFixture {
     pub fn setup() -> Self {
         let mut ctx = TestContext::new();
-        let program_id = Pubkey::new_from_array(owner_mutation_airdrop::ID.to_bytes());
-        ctx.add_program(&program_id, "../../target/deploy/owner_mutation_airdrop.so")
+        let program_id = Pubkey::new_from_array(account_mutations_examples::ID.to_bytes());
+        ctx.add_program(&program_id, "../../target/deploy/account_mutations_examples.so")
             .unwrap();
 
         // Seed the Clock sysvar with a positive unix_timestamp (CC-2 target).
@@ -1354,7 +1354,7 @@ impl OwnerMutationAirdropFixture {
 
 /// Payouts only move lamports from the vault to the recipient, so their sum is conserved.
 #[invariant_test]
-fn invariant_test(fixture: &mut OwnerMutationAirdropFixture) {
+fn invariant_test(fixture: &mut AccountMutationsExamplesFixture) {
     let vault = fixture
         .ctx
         .get_account(&fixture.vault)
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn semantic_actions_succeed() {
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         assert_eq!(
             instruction::ConsumeSemanticNoCheck {}.data()[..8],
             [93, 197, 193, 73, 47, 57, 141, 90]
@@ -1397,7 +1397,7 @@ mod tests {
             .unwrap();
         assert!(result.is_success(), "{result:?}");
 
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         let result = fixture
             .ctx
             .program(fixture.program_id)
@@ -1417,7 +1417,7 @@ mod tests {
     /// with-check variant (validates `dest.owner` first) is not.
     #[test]
     fn forward_to_cpi_flags_unvalidated_forwarded_account() {
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         fixture.ctx.enable_account_mutation();
         crucible_test_context::reset_probed_account_mutations();
         let _ = crucible_test_context::take_violation();
@@ -1430,7 +1430,7 @@ mod tests {
             "unexpected violation: {violation}"
         );
 
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         fixture.ctx.enable_account_mutation();
         crucible_test_context::reset_probed_account_mutations();
         let _ = crucible_test_context::take_violation();
@@ -1448,7 +1448,7 @@ mod tests {
     /// flags the CC-1 owner bug that the old probe-once gate would have missed.
     #[test]
     fn read_gated_config_reprobed_after_fast_path_toggle() {
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         fixture.ctx.enable_account_mutation();
         crucible_test_context::reset_probed_account_mutations();
         let _ = crucible_test_context::take_violation();
@@ -1476,7 +1476,7 @@ mod tests {
     /// fires `[CC-1 owner]`, but with the flag set no finding is produced.
     #[test]
     fn skip_account_mutation_suppresses_a_findings_instruction() {
-        let mut fixture = OwnerMutationAirdropFixture::setup();
+        let mut fixture = AccountMutationsExamplesFixture::setup();
         fixture.ctx.enable_account_mutation();
         crucible_test_context::reset_probed_account_mutations();
         let _ = crucible_test_context::take_violation();

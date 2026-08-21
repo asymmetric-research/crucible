@@ -13,6 +13,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "account-mutations-examples"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1333,6 +1340,7 @@ dependencies = [
 name = "crucible-fuzzer"
 version = "0.2.1"
 dependencies = [
+ "account-mutations-examples",
  "anchor-lang",
  "anchor-spl",
  "anyhow",
@@ -1343,7 +1351,6 @@ dependencies = [
  "crucible-test-context",
  "libc",
  "mimalloc",
- "owner-mutation-airdrop",
  "rand 0.8.5",
  "serde_json",
  "solana-keypair",
@@ -3151,13 +3158,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "owner-mutation-airdrop"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
-]
 
 [[package]]
 name = "pairing"

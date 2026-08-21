@@ -1,7 +1,7 @@
 {
   "address": "2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b",
   "metadata": {
-    "name": "owner_mutation_airdrop",
+    "name": "account_mutations_examples",
     "version": "0.1.0",
     "spec": "0.1.0",
     "description": "Minimal airdrop program with a seeded missing-owner-check bug"

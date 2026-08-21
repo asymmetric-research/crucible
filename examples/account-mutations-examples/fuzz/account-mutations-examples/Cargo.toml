@@ -1,5 +1,5 @@
 [package]
-name = "owner_mutation_airdrop_fuzz"
+name = "account_mutations_examples_fuzz"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"

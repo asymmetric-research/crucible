@@ -1,6 +1,6 @@
 //! End-to-end regression for the account-mutation engine.
 //!
-//! The external SBPF program (`examples/owner-mutation-airdrop`) exposes one instruction per
+//! The external SBPF program (`examples/account-mutations-examples`) exposes one instruction per
 //! flavor of the seeded account-constraint classes plus their negatives/edges. Each test enables
 //! account mutation, runs one instruction, and asserts the expected CC label. Together they prove
 //! both detection power and false-positive discipline.
@@ -39,9 +39,9 @@ fn project_root() -> PathBuf {
 }
 
 fn build_airdrop_program() -> PathBuf {
-    let example_dir = project_root().join("examples/owner-mutation-airdrop");
-    let manifest_path = example_dir.join("programs/owner-mutation-airdrop/Cargo.toml");
-    let so_path = example_dir.join("target/deploy/owner_mutation_airdrop.so");
+    let example_dir = project_root().join("examples/account-mutations-examples");
+    let manifest_path = example_dir.join("programs/account-mutations-examples/Cargo.toml");
+    let so_path = example_dir.join("target/deploy/account_mutations_examples.so");
 
     let output = Command::new("cargo")
         .current_dir(&example_dir)
@@ -71,11 +71,11 @@ fn path_str(path: &Path) -> &str {
 }
 
 fn program_id() -> Pubkey {
-    Pubkey::new_from_array(owner_mutation_airdrop::ID.to_bytes())
+    Pubkey::new_from_array(account_mutations_examples::ID.to_bytes())
 }
 
 fn foreign_owner() -> Pubkey {
-    Pubkey::new_from_array(owner_mutation_airdrop::FOREIGN_PROGRAM_ID.to_bytes())
+    Pubkey::new_from_array(account_mutations_examples::FOREIGN_PROGRAM_ID.to_bytes())
 }
 
 /// Shared per-test setup: program loaded, vault funded, recipient + fee payer funded, account
@@ -174,8 +174,8 @@ fn flags_missing_owner_check_on_program_config() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ClaimAirdrop {})
-        .accounts(owner_mutation_airdrop::accounts::ClaimAirdrop {
+        .call(account_mutations_examples::instruction::ClaimAirdrop {})
+        .accounts(account_mutations_examples::accounts::ClaimAirdrop {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -196,8 +196,8 @@ fn flags_missing_owner_check_on_second_program_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadStateNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadState {
+        .call(account_mutations_examples::instruction::ReadStateNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadState {
             recipient: h.recipient.pubkey(),
             state,
             vault: h.vault,
@@ -223,8 +223,8 @@ fn flags_missing_owner_check_on_foreign_owned_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadForeignOwnedNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadForeign {
+        .call(account_mutations_examples::instruction::ReadForeignOwnedNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadForeign {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -245,8 +245,8 @@ fn flags_missing_owner_check_on_tiny_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTinyConfigNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTiny {
+        .call(account_mutations_examples::instruction::ReadTinyConfigNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTiny {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -274,8 +274,8 @@ fn no_finding_when_program_owner_check_present() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ClaimWithOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ClaimAirdrop {
+        .call(account_mutations_examples::instruction::ClaimWithOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ClaimAirdrop {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -301,8 +301,8 @@ fn no_finding_when_foreign_owner_check_present() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadForeignOwnedWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadForeign {
+        .call(account_mutations_examples::instruction::ReadForeignOwnedWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadForeign {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -324,8 +324,8 @@ fn no_finding_for_inert_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::WithInertAccount {})
-        .accounts(owner_mutation_airdrop::accounts::WithInert {
+        .call(account_mutations_examples::instruction::WithInertAccount {})
+        .accounts(account_mutations_examples::accounts::WithInert {
             recipient: h.recipient.pubkey(),
             inert,
             vault: h.vault,
@@ -352,8 +352,8 @@ fn flags_pda_substitution_when_no_derivation_check() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPdaConfigNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPda {
+        .call(account_mutations_examples::instruction::ReadPdaConfigNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPda {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -375,9 +375,9 @@ fn no_finding_for_same_owner_singleton_pda_content_binding() {
     h.ctx
         .program(h.program_id)
         .call(
-            owner_mutation_airdrop::instruction::ReadSingletonPdaWithOwnerTypeCheckNoDerivationCheck {},
+            account_mutations_examples::instruction::ReadSingletonPdaWithOwnerTypeCheckNoDerivationCheck {},
         )
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -403,8 +403,8 @@ fn no_finding_when_pda_derivation_checked_without_owner_check() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithPdaCheckNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPda {
+        .call(account_mutations_examples::instruction::ReadPdaConfigWithPdaCheckNoOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPda {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -430,8 +430,8 @@ fn no_finding_when_pda_derivation_and_owner_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPdaConfigWithOwnerAndPdaCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPda {
+        .call(account_mutations_examples::instruction::ReadPdaConfigWithOwnerAndPdaCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPda {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -452,8 +452,8 @@ fn flags_pda_address_check_without_data_read() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+        .call(account_mutations_examples::instruction::UsePdaAuthorityNoCheck {})
+        .accounts(account_mutations_examples::accounts::UsePdaAuthority {
             recipient: h.recipient.pubkey(),
             authority,
             vault: h.vault,
@@ -474,8 +474,8 @@ fn no_finding_when_pda_authority_checked_without_data_read() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+        .call(account_mutations_examples::instruction::UsePdaAuthorityWithCheck {})
+        .accounts(account_mutations_examples::accounts::UsePdaAuthority {
             recipient: h.recipient.pubkey(),
             authority,
             vault: h.vault,
@@ -496,8 +496,8 @@ fn no_finding_for_key_only_pda_authority_bug() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::UsePdaAuthorityKeyNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::UsePdaAuthority {
+        .call(account_mutations_examples::instruction::UsePdaAuthorityKeyNoCheck {})
+        .accounts(account_mutations_examples::accounts::UsePdaAuthority {
             recipient: h.recipient.pubkey(),
             authority,
             vault: h.vault,
@@ -518,8 +518,8 @@ fn no_finding_for_inert_empty_pda_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::WithInertPdaAccount {})
-        .accounts(owner_mutation_airdrop::accounts::WithInertPda {
+        .call(account_mutations_examples::instruction::WithInertPdaAccount {})
+        .accounts(account_mutations_examples::accounts::WithInertPda {
             recipient: h.recipient.pubkey(),
             inert_pda,
             vault: h.vault,
@@ -547,8 +547,8 @@ fn flags_missing_owner_check_on_writable_config() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadWritableConfigNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadWritable {
+        .call(account_mutations_examples::instruction::ReadWritableConfigNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadWritable {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -580,8 +580,8 @@ fn gated_config_data(amount: u64) -> Vec<u8> {
 fn read_gated_config(h: &mut Harness, gate: Pubkey, config: Pubkey) {
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadGatedConfig {})
-        .accounts(owner_mutation_airdrop::accounts::ReadGatedConfig {
+        .call(account_mutations_examples::instruction::ReadGatedConfig {})
+        .accounts(account_mutations_examples::accounts::ReadGatedConfig {
             recipient: h.recipient.pubkey(),
             gate,
             config,
@@ -595,8 +595,8 @@ fn read_gated_config(h: &mut Harness, gate: Pubkey, config: Pubkey) {
 fn set_gate_fast_path(h: &mut Harness, gate: Pubkey, fast_path: u8) {
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::SetGateFastPath { fast_path })
-        .accounts(owner_mutation_airdrop::accounts::SetGate {
+        .call(account_mutations_examples::instruction::SetGateFastPath { fast_path })
+        .accounts(account_mutations_examples::accounts::SetGate {
             recipient: h.recipient.pubkey(),
             gate,
         })
@@ -661,7 +661,7 @@ fn seed_token_account(ctx: &mut TestContext, pubkey: Pubkey, mint: Pubkey, owner
 }
 
 fn seed_pool_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, lp_mint: Pubkey) {
-    let mut data = owner_mutation_airdrop::PoolState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::PoolState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(lp_mint.as_ref());
     data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
@@ -691,8 +691,8 @@ fn flags_fake_mint_owner() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadMintNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadMint {
+        .call(account_mutations_examples::instruction::ReadMintNoOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadMint {
             recipient: h.recipient.pubkey(),
             mint,
             vault: h.vault,
@@ -713,8 +713,8 @@ fn no_finding_when_mint_owner_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadMintWithOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadMint {
+        .call(account_mutations_examples::instruction::ReadMintWithOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadMint {
             recipient: h.recipient.pubkey(),
             mint,
             vault: h.vault,
@@ -737,8 +737,8 @@ fn flags_fake_token_account_owner() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTokenAccountNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+        .call(account_mutations_examples::instruction::ReadTokenAccountNoOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTokenAccountOnly {
             recipient: h.recipient.pubkey(),
             token_account,
             vault: h.vault,
@@ -761,8 +761,8 @@ fn no_finding_when_token_account_owner_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTokenAccountWithOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+        .call(account_mutations_examples::instruction::ReadTokenAccountWithOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTokenAccountOnly {
             recipient: h.recipient.pubkey(),
             token_account,
             vault: h.vault,
@@ -785,8 +785,8 @@ fn flags_wrong_token_mint_relation() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTokenWithMintNoMintCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTokenWithMint {
+        .call(account_mutations_examples::instruction::ReadTokenWithMintNoMintCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTokenWithMint {
             recipient: h.recipient.pubkey(),
             token_account,
             mint,
@@ -810,8 +810,8 @@ fn no_finding_when_token_mint_relation_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTokenWithMintCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTokenWithMint {
+        .call(account_mutations_examples::instruction::ReadTokenWithMintCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTokenWithMint {
             recipient: h.recipient.pubkey(),
             token_account,
             mint,
@@ -837,8 +837,8 @@ fn flags_forged_mint_pair_when_canonical_lp_mint_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLpPairNoCanonicalMintCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLpPair {
+        .call(account_mutations_examples::instruction::ReadLpPairNoCanonicalMintCheck {})
+        .accounts(account_mutations_examples::accounts::ReadLpPair {
             recipient: h.recipient.pubkey(),
             pool_state,
             token_account,
@@ -865,8 +865,8 @@ fn no_finding_when_canonical_lp_mint_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLpPairWithCanonicalMintCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLpPair {
+        .call(account_mutations_examples::instruction::ReadLpPairWithCanonicalMintCheck {})
+        .accounts(account_mutations_examples::accounts::ReadLpPair {
             recipient: h.recipient.pubkey(),
             pool_state,
             token_account,
@@ -891,8 +891,8 @@ fn no_wrong_mint_probe_without_mint_account() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTokenWithoutMintRelationContext {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTokenAccountOnly {
+        .call(account_mutations_examples::instruction::ReadTokenWithoutMintRelationContext {})
+        .accounts(account_mutations_examples::accounts::ReadTokenAccountOnly {
             recipient: h.recipient.pubkey(),
             token_account,
             vault: h.vault,
@@ -955,7 +955,7 @@ fn flags_missing_signer_check() {
     create_system_account(&mut h.ctx, authority.pubkey());
     create_system_account(&mut h.ctx, dest);
 
-    let data = owner_mutation_airdrop::instruction::WithdrawNoSignerCheck {}.data();
+    let data = account_mutations_examples::instruction::WithdrawNoSignerCheck {}.data();
     let accounts = vec![
         AccountMeta::new(dest, false),
         AccountMeta::new_readonly(authority.pubkey(), true),
@@ -981,7 +981,7 @@ fn no_finding_when_signer_check_present() {
     create_system_account(&mut h.ctx, authority.pubkey());
     create_system_account(&mut h.ctx, dest);
 
-    let data = owner_mutation_airdrop::instruction::WithdrawWithSignerCheck {}.data();
+    let data = account_mutations_examples::instruction::WithdrawWithSignerCheck {}.data();
     let accounts = vec![
         AccountMeta::new(dest, false),
         AccountMeta::new_readonly(authority.pubkey(), true),
@@ -1009,7 +1009,7 @@ fn flags_unchecked_cosigner_in_multisig() {
     create_system_account(&mut h.ctx, cosigner.pubkey());
     create_system_account(&mut h.ctx, dest);
 
-    let data = owner_mutation_airdrop::instruction::WithdrawMultisigOneUnchecked {}.data();
+    let data = account_mutations_examples::instruction::WithdrawMultisigOneUnchecked {}.data();
     let accounts = vec![
         AccountMeta::new(dest, false),
         AccountMeta::new_readonly(admin.pubkey(), true),
@@ -1052,7 +1052,7 @@ fn documents_false_positive_for_redundant_cosigner() {
     create_system_account(&mut h.ctx, cosigner.pubkey());
     create_system_account(&mut h.ctx, dest);
 
-    let data = owner_mutation_airdrop::instruction::WithdrawRedundantCosigner {}.data();
+    let data = account_mutations_examples::instruction::WithdrawRedundantCosigner {}.data();
     let accounts = vec![
         AccountMeta::new(dest, false),
         AccountMeta::new_readonly(admin.pubkey(), true),
@@ -1078,7 +1078,7 @@ fn no_finding_when_signer_is_fee_payer() {
     create_system_account(&mut h.ctx, dest);
 
     // The only signer in the instruction is the fee payer; the engine must skip it.
-    let data = owner_mutation_airdrop::instruction::WithdrawNoSignerCheck {}.data();
+    let data = account_mutations_examples::instruction::WithdrawNoSignerCheck {}.data();
     let accounts = vec![
         AccountMeta::new(dest, false),
         AccountMeta::new_readonly(h.fee_payer.pubkey(), true),
@@ -1098,77 +1098,78 @@ fn register_config_schema() {
         crucible_test_context::register_account_schemas(vec![
             crucible_test_context::AccountSchema {
                 type_name: "Config".into(),
-                discriminator: owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::Config::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "AlternateConfig".into(),
-                discriminator: owner_mutation_airdrop::AlternateConfig::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::AlternateConfig::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "TraderState".into(),
-                discriminator: owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::TraderState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "PoolState".into(),
-                discriminator: owner_mutation_airdrop::PoolState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::PoolState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "LinkedState".into(),
-                discriminator: owner_mutation_airdrop::LinkedState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::LinkedState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "TargetState".into(),
-                discriminator: owner_mutation_airdrop::TargetState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::TargetState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "ValueSourceState".into(),
-                discriminator: owner_mutation_airdrop::ValueSourceState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::ValueSourceState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "PriceState".into(),
-                discriminator: owner_mutation_airdrop::PriceState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::PriceState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "RootState".into(),
-                discriminator: owner_mutation_airdrop::RootState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::RootState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "PairLeftState".into(),
-                discriminator: owner_mutation_airdrop::PairLeftState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::PairLeftState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "PairRightState".into(),
-                discriminator: owner_mutation_airdrop::PairRightState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::PairRightState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "AuthorityState".into(),
-                discriminator: owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::AuthorityState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "SemanticState".into(),
-                discriminator: owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::SemanticState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "ScopedTraderState".into(),
-                discriminator: owner_mutation_airdrop::ScopedTraderState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::ScopedTraderState::DISCRIMINATOR
+                    .to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
             crucible_test_context::AccountSchema {
                 type_name: "CollateralState".into(),
-                discriminator: owner_mutation_airdrop::CollateralState::DISCRIMINATOR.to_vec(),
+                discriminator: account_mutations_examples::CollateralState::DISCRIMINATOR.to_vec(),
                 diff_fn: Box::new(|_, _| Vec::new()),
             },
         ]);
@@ -1176,19 +1177,19 @@ fn register_config_schema() {
 }
 
 fn seed_config(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
-    let mut data = owner_mutation_airdrop::Config::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::Config::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
 fn seed_alternate_config(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
-    let mut data = owner_mutation_airdrop::AlternateConfig::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::AlternateConfig::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
 fn seed_trader_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, authority: Pubkey) {
-    let mut data = owner_mutation_airdrop::TraderState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::TraderState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(authority.as_ref());
     data.extend_from_slice(&CLAIM_AMOUNT.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
@@ -1201,14 +1202,14 @@ fn seed_linked_state(
     target: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::LinkedState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::LinkedState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(target.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
 fn seed_target_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
-    let mut data = owner_mutation_airdrop::TargetState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::TargetState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
@@ -1220,14 +1221,14 @@ fn seed_value_source_state(
     price: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::ValueSourceState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::ValueSourceState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(price.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
 
 fn seed_price_state(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, price: u64) {
-    let mut data = owner_mutation_airdrop::PriceState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::PriceState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&price.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
@@ -1239,7 +1240,7 @@ fn seed_root_state(
     child: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::RootState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::RootState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(child.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
@@ -1253,7 +1254,7 @@ fn seed_pair_left_state(
     root: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::PairLeftState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::PairLeftState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(right.as_ref());
     data.extend_from_slice(root.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
@@ -1268,7 +1269,7 @@ fn seed_pair_right_state(
     root: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::PairRightState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::PairRightState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(left.as_ref());
     data.extend_from_slice(root.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
@@ -1282,7 +1283,7 @@ fn seed_authority_state(
     authority: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::AuthorityState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::AuthorityState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(authority.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
@@ -1295,7 +1296,7 @@ fn seed_semantic_state(
     context: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::SemanticState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::SemanticState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(context.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
@@ -1309,7 +1310,7 @@ fn seed_scoped_trader(
     delegate: Pubkey,
     amount: u64,
 ) {
-    let mut data = owner_mutation_airdrop::ScopedTraderState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::ScopedTraderState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(authority.as_ref());
     data.extend_from_slice(delegate.as_ref());
     data.extend_from_slice(&amount.to_le_bytes());
@@ -1317,7 +1318,7 @@ fn seed_scoped_trader(
 }
 
 fn seed_collateral(ctx: &mut TestContext, pubkey: Pubkey, owner: Pubkey, amount: u64) {
-    let mut data = owner_mutation_airdrop::CollateralState::DISCRIMINATOR.to_vec();
+    let mut data = account_mutations_examples::CollateralState::DISCRIMINATOR.to_vec();
     data.extend_from_slice(&amount.to_le_bytes());
     create_data_account(ctx, pubkey, owner, &data);
 }
@@ -1345,8 +1346,8 @@ fn flags_missing_type_tag_check() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTypedNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .call(account_mutations_examples::instruction::ReadTypedNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -1368,8 +1369,8 @@ fn no_finding_when_type_tag_check_present() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadTypedWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTypedChecked {
+        .call(account_mutations_examples::instruction::ReadTypedWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTypedChecked {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -1391,8 +1392,8 @@ fn no_finding_when_optional_type_tag_fallback_noops() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadOptionalTypedConfig {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .call(account_mutations_examples::instruction::ReadOptionalTypedConfig {})
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -1414,8 +1415,8 @@ fn no_finding_for_valid_but_wrong_type_confusion() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadAllowedTypeNoExpectedTypeCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .call(account_mutations_examples::instruction::ReadAllowedTypeNoExpectedTypeCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -1447,14 +1448,16 @@ fn no_finding_for_custom_cross_account_invariant_bug() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::TransferBetweenTradersNoCrossCheck {})
-        .accounts(owner_mutation_airdrop::accounts::TransferBetweenTraders {
-            recipient: h.recipient.pubkey(),
-            authority: authority.pubkey(),
-            source_trader,
-            destination_trader,
-            vault: h.vault,
-        })
+        .call(account_mutations_examples::instruction::TransferBetweenTradersNoCrossCheck {})
+        .accounts(
+            account_mutations_examples::accounts::TransferBetweenTraders {
+                recipient: h.recipient.pubkey(),
+                authority: authority.pubkey(),
+                source_trader,
+                destination_trader,
+                vault: h.vault,
+            },
+        )
         .signers(&[&h.fee_payer, &h.recipient, &authority])
         .send()
         .unwrap();
@@ -1484,8 +1487,8 @@ fn flags_cc7_field_ref_when_linked_target_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLinkedNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+        .call(account_mutations_examples::instruction::ReadLinkedNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadLinked {
             recipient: h.recipient.pubkey(),
             source,
             target,
@@ -1520,8 +1523,8 @@ fn no_finding_when_linked_target_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLinkedWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+        .call(account_mutations_examples::instruction::ReadLinkedWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadLinked {
             recipient: h.recipient.pubkey(),
             source,
             target,
@@ -1556,8 +1559,8 @@ fn flags_cc7_value_ref_when_referenced_value_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPriceRefNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPriceRef {
+        .call(account_mutations_examples::instruction::ReadPriceRefNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPriceRef {
             recipient: h.recipient.pubkey(),
             source,
             price,
@@ -1592,8 +1595,8 @@ fn no_finding_when_referenced_value_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPriceRefWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPriceRef {
+        .call(account_mutations_examples::instruction::ReadPriceRefWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPriceRef {
             recipient: h.recipient.pubkey(),
             source,
             price,
@@ -1618,8 +1621,8 @@ fn no_cc7_finding_for_singleton_classes() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadLinkedNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadLinked {
+        .call(account_mutations_examples::instruction::ReadLinkedNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadLinked {
             recipient: h.recipient.pubkey(),
             source,
             target,
@@ -1646,8 +1649,8 @@ fn flags_cc7_root_ref_when_child_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadRootChildNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadRootChild {
+        .call(account_mutations_examples::instruction::ReadRootChildNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadRootChild {
             recipient: h.recipient.pubkey(),
             root,
             child,
@@ -1674,8 +1677,8 @@ fn no_finding_when_root_child_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadRootChildWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadRootChild {
+        .call(account_mutations_examples::instruction::ReadRootChildWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadRootChild {
             recipient: h.recipient.pubkey(),
             root,
             child,
@@ -1722,8 +1725,8 @@ fn flags_cc73_bidirectional_ref_when_counterpart_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPairBidirectionalNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+        .call(account_mutations_examples::instruction::ReadPairBidirectionalNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPair {
             recipient: h.recipient.pubkey(),
             left,
             right,
@@ -1771,8 +1774,8 @@ fn no_finding_when_bidirectional_pair_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPairBidirectionalWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+        .call(account_mutations_examples::instruction::ReadPairBidirectionalWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPair {
             recipient: h.recipient.pubkey(),
             left,
             right,
@@ -1834,8 +1837,8 @@ fn flags_cc73_bidirectional_ref_when_shared_root_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPairSharedRootNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+        .call(account_mutations_examples::instruction::ReadPairSharedRootNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPair {
             recipient: h.recipient.pubkey(),
             left,
             right,
@@ -1897,8 +1900,8 @@ fn no_finding_when_shared_root_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadPairSharedRootWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadPair {
+        .call(account_mutations_examples::instruction::ReadPairSharedRootWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadPair {
             recipient: h.recipient.pubkey(),
             left,
             right,
@@ -1921,13 +1924,13 @@ fn flags_cc77_semantic_swap_when_same_class_context_unchecked() {
     let semantic_alt = Keypair::new().pubkey();
     seed_target_state(
         &mut h.ctx,
-        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        account_mutations_examples::EXPECTED_SEMANTIC_CONTEXT,
         h.program_id,
         CLAIM_AMOUNT,
     );
     seed_target_state(
         &mut h.ctx,
-        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        account_mutations_examples::ALT_SEMANTIC_CONTEXT,
         h.program_id,
         CLAIM_AMOUNT,
     );
@@ -1935,21 +1938,21 @@ fn flags_cc77_semantic_swap_when_same_class_context_unchecked() {
         &mut h.ctx,
         semantic,
         h.program_id,
-        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        account_mutations_examples::EXPECTED_SEMANTIC_CONTEXT,
         CLAIM_AMOUNT,
     );
     seed_semantic_state(
         &mut h.ctx,
         semantic_alt,
         h.program_id,
-        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        account_mutations_examples::ALT_SEMANTIC_CONTEXT,
         CLAIM_AMOUNT,
     );
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ConsumeSemanticNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ConsumeSemantic {
+        .call(account_mutations_examples::instruction::ConsumeSemanticNoCheck {})
+        .accounts(account_mutations_examples::accounts::ConsumeSemantic {
             recipient: h.recipient.pubkey(),
             semantic,
             vault: h.vault,
@@ -1970,13 +1973,13 @@ fn no_cc77_finding_when_semantic_context_checked() {
     let semantic_alt = Keypair::new().pubkey();
     seed_target_state(
         &mut h.ctx,
-        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        account_mutations_examples::EXPECTED_SEMANTIC_CONTEXT,
         h.program_id,
         CLAIM_AMOUNT,
     );
     seed_target_state(
         &mut h.ctx,
-        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        account_mutations_examples::ALT_SEMANTIC_CONTEXT,
         h.program_id,
         CLAIM_AMOUNT,
     );
@@ -1984,21 +1987,21 @@ fn no_cc77_finding_when_semantic_context_checked() {
         &mut h.ctx,
         semantic,
         h.program_id,
-        owner_mutation_airdrop::EXPECTED_SEMANTIC_CONTEXT,
+        account_mutations_examples::EXPECTED_SEMANTIC_CONTEXT,
         CLAIM_AMOUNT,
     );
     seed_semantic_state(
         &mut h.ctx,
         semantic_alt,
         h.program_id,
-        owner_mutation_airdrop::ALT_SEMANTIC_CONTEXT,
+        account_mutations_examples::ALT_SEMANTIC_CONTEXT,
         CLAIM_AMOUNT,
     );
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ConsumeSemanticWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ConsumeSemantic {
+        .call(account_mutations_examples::instruction::ConsumeSemanticWithCheck {})
+        .accounts(account_mutations_examples::accounts::ConsumeSemantic {
             recipient: h.recipient.pubkey(),
             semantic,
             vault: h.vault,
@@ -2028,13 +2031,15 @@ fn flags_cc9_wrong_signer_when_authority_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::WithdrawAuthorityNoAuthorityCheck {})
-        .accounts(owner_mutation_airdrop::accounts::WithdrawAuthorityState {
-            recipient: h.recipient.pubkey(),
-            authority: authority.pubkey(),
-            state,
-            vault: h.vault,
-        })
+        .call(account_mutations_examples::instruction::WithdrawAuthorityNoAuthorityCheck {})
+        .accounts(
+            account_mutations_examples::accounts::WithdrawAuthorityState {
+                recipient: h.recipient.pubkey(),
+                authority: authority.pubkey(),
+                state,
+                vault: h.vault,
+            },
+        )
         .signers(&[&h.fee_payer, &authority])
         .send()
         .unwrap();
@@ -2060,13 +2065,15 @@ fn no_finding_when_authority_relation_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::WithdrawAuthorityWithAuthorityCheck {})
-        .accounts(owner_mutation_airdrop::accounts::WithdrawAuthorityState {
-            recipient: h.recipient.pubkey(),
-            authority: authority.pubkey(),
-            state,
-            vault: h.vault,
-        })
+        .call(account_mutations_examples::instruction::WithdrawAuthorityWithAuthorityCheck {})
+        .accounts(
+            account_mutations_examples::accounts::WithdrawAuthorityState {
+                recipient: h.recipient.pubkey(),
+                authority: authority.pubkey(),
+                state,
+                vault: h.vault,
+            },
+        )
         .signers(&[&h.fee_payer, &authority])
         .send()
         .unwrap();
@@ -2088,8 +2095,8 @@ fn state_keyed_probe_finds_later_present_account_bug() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadMaybeConfigNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .call(account_mutations_examples::instruction::ReadMaybeConfigNoOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config: placeholder,
             vault: h.vault,
@@ -2109,8 +2116,8 @@ fn state_keyed_probe_finds_later_present_account_bug() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadMaybeConfigNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadTyped {
+        .call(account_mutations_examples::instruction::ReadMaybeConfigNoOwnerCheck {})
+        .accounts(account_mutations_examples::accounts::ReadTyped {
             recipient: h.recipient.pubkey(),
             config: present,
             vault: h.vault,
@@ -2145,8 +2152,8 @@ fn flags_sysvar_substitution_when_no_identity_check() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadClockNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadClock {
+        .call(account_mutations_examples::instruction::ReadClockNoCheck {})
+        .accounts(account_mutations_examples::accounts::ReadClock {
             recipient: h.recipient.pubkey(),
             clock,
             vault: h.vault,
@@ -2167,8 +2174,8 @@ fn no_finding_when_sysvar_identity_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ReadClockWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ReadClock {
+        .call(account_mutations_examples::instruction::ReadClockWithCheck {})
+        .accounts(account_mutations_examples::accounts::ReadClock {
             recipient: h.recipient.pubkey(),
             clock,
             vault: h.vault,
@@ -2199,8 +2206,8 @@ fn skip_account_mutation_excludes_instruction_from_probes() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ClaimAirdrop {})
-        .accounts(owner_mutation_airdrop::accounts::ClaimAirdrop {
+        .call(account_mutations_examples::instruction::ClaimAirdrop {})
+        .accounts(account_mutations_examples::accounts::ClaimAirdrop {
             recipient: h.recipient.pubkey(),
             config,
             vault: h.vault,
@@ -2227,8 +2234,8 @@ fn flags_forwarded_account_not_validated_before_cpi() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ForwardToCpiNoCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ForwardToCpi {
+        .call(account_mutations_examples::instruction::ForwardToCpiNoCheck {})
+        .accounts(account_mutations_examples::accounts::ForwardToCpi {
             payer: h.recipient.pubkey(),
             dest,
             system_program: system_program::id(),
@@ -2251,8 +2258,8 @@ fn no_finding_when_forwarded_account_validated_before_cpi() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::ForwardToCpiWithCheck {})
-        .accounts(owner_mutation_airdrop::accounts::ForwardToCpi {
+        .call(account_mutations_examples::instruction::ForwardToCpiWithCheck {})
+        .accounts(account_mutations_examples::accounts::ForwardToCpi {
             payer: h.recipient.pubkey(),
             dest,
             system_program: system_program::id(),
@@ -2267,7 +2274,7 @@ fn no_finding_when_forwarded_account_validated_before_cpi() {
 // ---- Integration through the generated #[fuzz_fixture] / #[invariant_test] harness ----
 
 #[derive(Clone)]
-struct OwnerMutationAirdropFixture {
+struct AccountMutationsExamplesFixture {
     ctx: TestContext,
     program_id: Pubkey,
     fee_payer: Rc<Keypair>,
@@ -2277,7 +2284,7 @@ struct OwnerMutationAirdropFixture {
 }
 
 #[fuzz_fixture]
-impl OwnerMutationAirdropFixture {
+impl AccountMutationsExamplesFixture {
     pub fn setup() -> Self {
         let _ = crucible_test_context::take_violation();
         crucible_test_context::reset_probed_account_mutations();
@@ -2338,8 +2345,8 @@ impl OwnerMutationAirdropFixture {
     pub fn action_claim_airdrop(&mut self) -> bool {
         self.ctx
             .program(self.program_id)
-            .call(owner_mutation_airdrop::instruction::ClaimAirdrop {})
-            .accounts(owner_mutation_airdrop::accounts::ClaimAirdrop {
+            .call(account_mutations_examples::instruction::ClaimAirdrop {})
+            .accounts(account_mutations_examples::accounts::ClaimAirdrop {
                 recipient: self.recipient.pubkey(),
                 config: self.config,
                 vault: self.vault,
@@ -2352,17 +2359,17 @@ impl OwnerMutationAirdropFixture {
 }
 
 #[invariant_test]
-fn owner_mutation_airdrop_invariant(_fixture: &mut OwnerMutationAirdropFixture) {}
+fn account_mutations_examples_invariant(_fixture: &mut AccountMutationsExamplesFixture) {}
 
 #[test]
 #[ignore = "requires cargo-build-sbf / Solana platform tools"]
 fn owner_mutation_harness_finds_missing_airdrop_owner_check() {
-    let mut fixture = OwnerMutationAirdropFixture::setup();
+    let mut fixture = AccountMutationsExamplesFixture::setup();
 
-    owner_mutation_airdrop_invariant(
+    account_mutations_examples_invariant(
         &mut fixture,
         vec![
-            __owner_mutation_airdrop_fixture_fuzz::OwnerMutationAirdropFixtureActions::ClaimAirdrop,
+            __account_mutations_examples_fixture_fuzz::AccountMutationsExamplesFixtureActions::ClaimAirdrop,
         ],
     );
 
@@ -2408,14 +2415,16 @@ fn flags_cc95_cross_authority_when_owner_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::TransferScopedNoOwnerCheck {})
-        .accounts(owner_mutation_airdrop::accounts::TransferScopedTraders {
-            recipient: h.recipient.pubkey(),
-            delegate: delegate.pubkey(),
-            source_trader,
-            destination_trader,
-            vault: h.vault,
-        })
+        .call(account_mutations_examples::instruction::TransferScopedNoOwnerCheck {})
+        .accounts(
+            account_mutations_examples::accounts::TransferScopedTraders {
+                recipient: h.recipient.pubkey(),
+                delegate: delegate.pubkey(),
+                source_trader,
+                destination_trader,
+                vault: h.vault,
+            },
+        )
         .signers(&[&h.fee_payer, &h.recipient, &delegate])
         .send()
         .unwrap();
@@ -2452,14 +2461,16 @@ fn no_finding_when_cross_authority_owner_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::TransferScopedOwnerChecked {})
-        .accounts(owner_mutation_airdrop::accounts::TransferScopedTraders {
-            recipient: h.recipient.pubkey(),
-            delegate: delegate.pubkey(),
-            source_trader,
-            destination_trader,
-            vault: h.vault,
-        })
+        .call(account_mutations_examples::instruction::TransferScopedOwnerChecked {})
+        .accounts(
+            account_mutations_examples::accounts::TransferScopedTraders {
+                recipient: h.recipient.pubkey(),
+                delegate: delegate.pubkey(),
+                source_trader,
+                destination_trader,
+                vault: h.vault,
+            },
+        )
         .signers(&[&h.fee_payer, &h.recipient, &delegate])
         .send()
         .unwrap();
@@ -2482,8 +2493,8 @@ fn flags_cc14_duplicate_when_distinctness_unchecked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateral {})
-        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+        .call(account_mutations_examples::instruction::BorrowAgainstTwoCollateral {})
+        .accounts(account_mutations_examples::accounts::BorrowTwoCollateral {
             recipient: h.recipient.pubkey(),
             collateral_a,
             collateral_b,
@@ -2508,8 +2519,8 @@ fn no_finding_when_collateral_distinctness_checked() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateralChecked {})
-        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+        .call(account_mutations_examples::instruction::BorrowAgainstTwoCollateralChecked {})
+        .accounts(account_mutations_examples::accounts::BorrowTwoCollateral {
             recipient: h.recipient.pubkey(),
             collateral_a,
             collateral_b,
@@ -2535,8 +2546,8 @@ fn no_finding_for_cc14_when_collateral_identical() {
 
     h.ctx
         .program(h.program_id)
-        .call(owner_mutation_airdrop::instruction::BorrowAgainstTwoCollateral {})
-        .accounts(owner_mutation_airdrop::accounts::BorrowTwoCollateral {
+        .call(account_mutations_examples::instruction::BorrowAgainstTwoCollateral {})
+        .accounts(account_mutations_examples::accounts::BorrowTwoCollateral {
             recipient: h.recipient.pubkey(),
             collateral_a,
             collateral_b,

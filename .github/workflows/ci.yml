@@ -41,4 +41,4 @@ jobs:
       - run: cargo check --manifest-path examples/staking/fuzz/staking/Cargo.toml --all-targets --no-default-features --features invariant_fuzz --locked
       - run: cargo check --manifest-path examples/staking/fuzz/staking/Cargo.toml --all-targets --no-default-features --features invariant_fuzz_batched --locked
       # This harness intentionally keeps its generated lockfile untracked.
-      - run: cargo check --manifest-path examples/owner-mutation-airdrop/fuzz/owner-mutation-airdrop/Cargo.toml --all-targets --all-features
+      - run: cargo check --manifest-path examples/account-mutations-examples/fuzz/account-mutations-examples/Cargo.toml --all-targets --all-features

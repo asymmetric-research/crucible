@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-owner_mutation_airdrop = "2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b"
+account_mutations_examples = "2eJW8mrzmW3Gy88VZ5oqn4qSRoTRYqQfucG69mx99F1b"
 
 [registry]
 url = "https://api.apr.dev"
