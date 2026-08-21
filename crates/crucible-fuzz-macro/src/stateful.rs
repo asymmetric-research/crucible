@@ -1462,8 +1462,8 @@ fn stateful_singlecore_body(
                 };
                 let __show_stats = std::env::var("FUZZ_STATS").is_ok();
                 let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
-                // Color only a live terminal; piped output (parsed by action_health.py /
-                // scout doctor) stays byte-identical because the codes are empty strings.
+                // Color only a live terminal; piped output stays byte-identical because
+                // the SGR codes are empty strings, so downstream log parsers are unaffected.
                 let (tag, rate, crash, rst): (&str, &str, &str, &str) =
                     if std::io::IsTerminal::is_terminal(&std::io::stderr())
                         && std::env::var_os("NO_COLOR").is_none() {
@@ -3177,8 +3177,8 @@ fn stateful_multicore_body(
                     };
                     let __show_stats = std::env::var("FUZZ_STATS").is_ok();
                     let __mem_suffix = if __show_stats { format!(", memory_kib: {}", __memory_kib) } else { String::new() };
-                    // Color only a live terminal; piped output (parsed by action_health.py /
-                    // scout doctor) stays byte-identical because the codes are empty strings.
+                    // Color only a live terminal; piped output stays byte-identical because
+                    // the SGR codes are empty strings, so downstream log parsers are unaffected.
                     let (tag, rate, crash, rst): (&str, &str, &str, &str) =
                         if std::io::IsTerminal::is_terminal(&std::io::stderr())
                             && std::env::var_os("NO_COLOR").is_none() {
