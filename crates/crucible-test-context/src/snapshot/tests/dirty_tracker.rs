@@ -250,3 +250,123 @@ fn test_edge_dirty_tracker_clone_is_fresh() {
         "cloned tracker should not have clock dirty"
     );
 }
+
+// =========================================================================
+// CreationTracker — deterministic creation-ordinal assignment
+// =========================================================================
+
+#[test]
+fn test_creation_tracker_assigns_sequential_ordinals() {
+    let mut tracker = CreationTracker::new();
+    let pk0 = Pubkey::new_unique();
+    let pk1 = Pubkey::new_unique();
+    let pk2 = Pubkey::new_unique();
+
+    assert_eq!(tracker.observe(pk0), 0);
+    assert_eq!(tracker.observe(pk1), 1);
+    assert_eq!(tracker.observe(pk2), 2);
+    // Idempotent: re-observing keeps the original ordinal
+    assert_eq!(tracker.observe(pk1), 1);
+    assert_eq!(tracker.len(), 3);
+
+    assert_eq!(tracker.ordinal(&pk0), Some(0));
+    assert_eq!(tracker.ordinal(&pk1), Some(1));
+    assert_eq!(tracker.ordinal(&pk2), Some(2));
+    assert_eq!(tracker.ordinal(&Pubkey::new_unique()), None);
+}
+
+#[test]
+fn test_creation_tracker_extends_in_first_mark_order() {
+    // Ordinals must follow DirtyTracker first-mark order, not HashMap iteration.
+    let initial = SvmSnapshot {
+        accounts: crate::FastHashMap::default(),
+        sysvars: Vec::new(),
+    };
+    let pks: Vec<Pubkey> = (0..8).map(|_| Pubkey::new_unique()).collect();
+    let mut dirty = DirtyTracker::new();
+    for pk in &pks {
+        dirty.mark_account_dirty(pk);
+        dirty.mark_account_dirty(pk); // duplicate marks don't re-append
+    }
+
+    let tracker =
+        CreationTracker::extended_with_iteration(&CreationTracker::new(), &dirty, &initial);
+    for (i, pk) in pks.iter().enumerate() {
+        assert_eq!(
+            tracker.ordinal(pk),
+            Some(i as u32),
+            "ordinal must match mark order"
+        );
+    }
+}
+
+#[test]
+fn test_creation_tracker_extends_from_seeded_base() {
+    let mut base = CreationTracker::new();
+    let path_a = Pubkey::new_unique();
+    let path_b = Pubkey::new_unique();
+    base.observe(path_a); // 0
+    base.observe(path_b); // 1
+
+    // Initial snapshot contains a pre-existing account that must be skipped.
+    let preexisting = Pubkey::new_unique();
+    let mut accounts = crate::FastHashMap::default();
+    accounts.insert(preexisting, std::sync::Arc::new(make_account_simple(100)));
+    let initial = SvmSnapshot {
+        accounts,
+        sysvars: Vec::new(),
+    };
+
+    // This iteration re-touches a path account, touches the pre-existing one,
+    // and creates a new account.
+    let created = Pubkey::new_unique();
+    let mut dirty = DirtyTracker::new();
+    dirty.mark_account_dirty(&path_b);
+    dirty.mark_account_dirty(&preexisting);
+    dirty.mark_account_dirty(&created);
+
+    let tracker = CreationTracker::extended_with_iteration(&base, &dirty, &initial);
+    assert_eq!(tracker.ordinal(&path_a), Some(0), "base ordinals preserved");
+    assert_eq!(
+        tracker.ordinal(&path_b),
+        Some(1),
+        "re-touched path account keeps its ordinal"
+    );
+    assert_eq!(
+        tracker.ordinal(&preexisting),
+        None,
+        "pre-existing accounts are skipped"
+    );
+    assert_eq!(
+        tracker.ordinal(&created),
+        Some(2),
+        "new creation continues the sequence"
+    );
+    // The base is not mutated (clone-on-extend)
+    assert_eq!(base.len(), 2);
+}
+
+#[test]
+fn test_dirty_tracker_mark_order_resets_on_clear() {
+    let mut tracker = DirtyTracker::new();
+    let pk = Pubkey::new_unique();
+    tracker.mark_account_dirty(&pk);
+    assert_eq!(tracker.mark_order(), &[pk]);
+
+    tracker.clear();
+    assert!(tracker.mark_order().is_empty());
+
+    let pk2 = Pubkey::new_unique();
+    tracker.mark_account_dirty(&pk2);
+    assert_eq!(tracker.mark_order(), &[pk2]);
+}
+
+fn make_account_simple(lamports: u64) -> solana_account::Account {
+    solana_account::Account {
+        lamports,
+        data: vec![],
+        owner: Pubkey::new_unique(),
+        executable: false,
+        rent_epoch: 0,
+    }
+}

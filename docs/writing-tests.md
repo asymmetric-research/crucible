@@ -94,6 +94,30 @@ pub fn action_stake(
 
 ---
 
+## Account-Mutation Checks
+
+Run a harness with `--mutate-accounts` to probe common missing account checks:
+
+```bash
+crucible run myproject invariant_test --release --mutate-accounts --timeout 60
+```
+
+Probes are deterministic and run when an action/instruction shape first
+completes. See [Constraint-Check Engine](constraint-check-engine.md) for the
+current label/probe table and common false-positive notes.
+
+Harness shape matters:
+
+- Seed at least two valid same-class accounts for same-class relation probes.
+- Register discriminators or schemas for type-tagged accounts where possible.
+- Pass both a token account and mint account for SPL token relation probes.
+- Expect one probe per instruction shape per worker; if a bug is state-dependent,
+  drive the vulnerable state before the first successful call to that instruction.
+- Treat findings as triage inputs when the program intentionally permits
+  same-class swaps, duplicate aliases, public value reads, or redundant signers.
+
+---
+
 ## Simple Fuzzing (`#[crucible_fuzz]`)
 
 For testing individual operations with random inputs:

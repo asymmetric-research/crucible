@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
+use super::dirty_tracker::CreationTracker;
 use super::svm_snapshot::{CompactDelta, SvmSnapshot, FINGERPRINT_BITS};
 
 // ============================================================================
@@ -87,35 +88,50 @@ impl PoolMemoryStats {
 // FingerprintBitmap — lock-free pre-check for fingerprint novelty
 // ============================================================================
 
+/// Derive the fingerprint dedup width (in bits) from the configured pool capacity.
+///
+/// The dedup keyspace must scale with `--pool-size`: with a fixed width, a large
+/// pool silently caps at 2^bits distinct states no matter what the user asked
+/// for. `FINGERPRINT_BITS` (18 → 256K keys) is the floor so small pools keep
+/// the tuned default novel rate.
+pub fn fingerprint_bits_for_capacity(capacity: usize) -> u32 {
+    let needed = (capacity.max(1) as u64)
+        .next_power_of_two()
+        .trailing_zeros();
+    needed.max(FINGERPRINT_BITS)
+}
+
 /// Lock-free bitmap for fast fingerprint novelty pre-checking.
 ///
 /// Workers check this bitmap BEFORE doing expensive save-phase work
-/// (take_delta, fixture clone under mutex, etc.). Since FINGERPRINT_BITS=17,
-/// there are 131072 possible dedup keys → 16384 bytes of bitmap.
+/// (take_delta, fixture clone under mutex, etc.). Sized at construction from
+/// the dedup width: `bits` fingerprint bits → 2^bits dedup keys → 2^bits / 8
+/// bytes of bitmap (the default 18 bits → 256K keys → 32KB).
 ///
 /// False negatives are impossible: if a fingerprint IS in the bitmap,
 /// it was definitely already added to the pool.
 /// False positives (bitmap says not-seen but pool has it) can occur in a
 /// tiny race window but are harmless — `try_add()` does authoritative dedup.
 pub struct FingerprintBitmap {
-    /// 131072 bits = 16384 bytes, stored as 16384 AtomicU8 values.
-    bits: Box<[AtomicU8; Self::SIZE]>,
+    /// 2^fingerprint_bits bits, stored as AtomicU8 values.
+    bits: Box<[AtomicU8]>,
+    /// Mask applied to fingerprints to derive the dedup key.
+    mask: u64,
 }
 
 impl FingerprintBitmap {
-    const SIZE: usize = (1u64 << FINGERPRINT_BITS) as usize / 8;
-
-    pub fn new() -> Self {
-        // AtomicU8 is not Copy, so we init via Box
-        let mut v: Vec<AtomicU8> = Vec::with_capacity(Self::SIZE);
-        for _ in 0..Self::SIZE {
+    /// Create a bitmap covering 2^`fingerprint_bits` dedup keys.
+    /// Use `fingerprint_bits_for_capacity` to derive the width from `--pool-size`.
+    pub fn new(fingerprint_bits: u32) -> Self {
+        let size = (1u64 << fingerprint_bits) as usize / 8;
+        // AtomicU8 is not Copy, so we init via Vec
+        let mut v: Vec<AtomicU8> = Vec::with_capacity(size);
+        for _ in 0..size {
             v.push(AtomicU8::new(0));
         }
         Self {
-            bits: v
-                .into_boxed_slice()
-                .try_into()
-                .unwrap_or_else(|_| unreachable!()),
+            bits: v.into_boxed_slice(),
+            mask: (1u64 << fingerprint_bits) - 1,
         }
     }
 
@@ -123,7 +139,7 @@ impl FingerprintBitmap {
     /// Returns true if definitely seen, false if possibly novel.
     #[inline]
     pub fn is_seen(&self, fingerprint: u64) -> bool {
-        let key = (fingerprint & ((1u64 << FINGERPRINT_BITS) - 1)) as usize;
+        let key = (fingerprint & self.mask) as usize;
         let byte_idx = key / 8;
         let bit_idx = key % 8;
         (self.bits[byte_idx].load(Ordering::Relaxed) >> bit_idx) & 1 == 1
@@ -132,7 +148,7 @@ impl FingerprintBitmap {
     /// Mark a fingerprint as seen (called when pool.try_add succeeds).
     #[inline]
     pub fn mark(&self, fingerprint: u64) {
-        let key = (fingerprint & ((1u64 << FINGERPRINT_BITS) - 1)) as usize;
+        let key = (fingerprint & self.mask) as usize;
         let byte_idx = key / 8;
         let bit_idx = key % 8;
         self.bits[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
@@ -171,6 +187,11 @@ pub struct StateEntry {
     /// instead of reusing a stale worker fixture that grows unboundedly.
     /// The SVM is swapped out before storage, making clones cheap.
     pub fixture_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Creation ordinals for accounts created along this state's lineage.
+    /// Loaded as the base tracker when this state is picked, so accounts the
+    /// next iteration re-touches (or newly creates) get deterministic,
+    /// lineage-relative identities in the fingerprint.
+    pub creation: Arc<CreationTracker>,
     // --- Power scheduling fields ---
     /// Number of times this state was selected as parent (atomic for lock-free concurrent picking).
     pub pick_count: AtomicU32,
@@ -550,6 +571,10 @@ pub struct StatePool {
     /// Hashes of crash input bytes already written. Prevents duplicate crash files.
     crash_hashes: FastHashSet<u64>,
     capacity: usize,
+    /// Runtime dedup width, derived from `capacity` (see `fingerprint_bits_for_capacity`).
+    fingerprint_bits: u32,
+    /// Mask applied to fingerprints to derive dedup keys: `(1 << fingerprint_bits) - 1`.
+    dedup_mask: u64,
     /// Maximum depth (action chain length) for states in the pool.
     /// States deeper than this are rejected to bound per-iteration cost.
     max_depth: u32,
@@ -586,12 +611,15 @@ impl StatePool {
     /// `depth > max_depth` are rejected by `try_add()`, bounding the number
     /// of accounts any single chain can create and keeping per-iteration cost flat.
     pub fn new(capacity: usize, max_depth: u32) -> Self {
+        let fingerprint_bits = fingerprint_bits_for_capacity(capacity);
         Self {
             states: Vec::with_capacity(capacity.min(1024)), // pre-alloc up to 1K
             seen: FastHashSet::default(),
             active_indices: Vec::with_capacity(capacity.min(1024)),
             crash_hashes: FastHashSet::default(),
             capacity,
+            fingerprint_bits,
+            dedup_mask: (1u64 << fingerprint_bits) - 1,
             max_depth,
             total_picks: AtomicU64::new(0),
             edge_freq: vec![0u16; 65536],
@@ -749,6 +777,7 @@ impl StatePool {
         action_variant: Option<u16>,
         action_field_bytes: Vec<u8>,
         fixture_state: Option<Arc<dyn std::any::Any + Send + Sync>>,
+        creation: Arc<CreationTracker>,
         novelty_bits: u32,
         edge_novelty: u32,
         action_succeeded: bool,
@@ -759,8 +788,7 @@ impl StatePool {
             if let Some(evict_pos) = self.find_weakest_active() {
                 let evict_idx = self.active_indices[evict_pos];
                 self.active_indices.swap_remove(evict_pos);
-                let evict_dedup =
-                    self.states[evict_idx].fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+                let evict_dedup = self.states[evict_idx].fingerprint & self.dedup_mask;
                 self.seen.remove(&evict_dedup);
                 // Decrement edge frequency for evicted state
                 if let Some(ref positions) = self.states[evict_idx].edge_positions {
@@ -798,7 +826,7 @@ impl StatePool {
                 for i in (0..self.states.len()).rev() {
                     let is_active = self.active_indices.contains(&i);
                     if !is_active {
-                        let dedup = self.states[i].fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+                        let dedup = self.states[i].fingerprint & self.dedup_mask;
                         self.seen.remove(&dedup);
                         self.states.swap_remove(i);
                         // Fix up active_indices: swap_remove moves the last element to position i
@@ -826,7 +854,7 @@ impl StatePool {
         }
         // Truncate fingerprint for dedup to force collisions.
         // Full fingerprint is still stored in the entry for state_class extraction.
-        let dedup_key = fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+        let dedup_key = fingerprint & self.dedup_mask;
         if !self.seen.insert(dedup_key) {
             return false; // already seen this fingerprint class
         }
@@ -868,6 +896,7 @@ impl StatePool {
             action_variant,
             action_field_bytes: Arc::new(action_field_bytes),
             fixture_state,
+            creation,
             pick_count: AtomicU32::new(0),
             novel_children: 0,
             violation_count: 0,
@@ -944,13 +973,18 @@ impl StatePool {
         true
     }
 
+    /// Runtime dedup width in bits, derived from the pool capacity.
+    pub fn fingerprint_bits(&self) -> u32 {
+        self.fingerprint_bits
+    }
+
     /// Check if a fingerprint would be novel (not yet in the seen set).
     /// Used as a lightweight admission gate before computing expensive deltas.
     pub fn is_novel(&self, fingerprint: u64) -> bool {
         if self.states.len() >= self.capacity && self.active_indices.is_empty() {
             return false; // full with no evictable states
         }
-        let dedup_key = fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+        let dedup_key = fingerprint & self.dedup_mask;
         !self.seen.contains(&dedup_key)
     }
 
@@ -1227,7 +1261,7 @@ impl StatePool {
     /// More efficient than calling pick_weighted() in a loop because it computes
     /// weights once and samples multiple times.
     ///
-    /// Output tuple: (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state)
+    /// Output tuple: (delta, depth, state_idx, action_bytes, parent_variant, parent_field_bytes, fingerprint, fixture_state, creation)
     ///
     /// Pick a batch of states using a pre-built weight distribution.
     /// Use `build_weight_distribution()` to compute `(cumulative, total)` once,
@@ -1244,6 +1278,7 @@ impl StatePool {
             Arc<Vec<u8>>,
             u64,
             Option<Arc<dyn std::any::Any + Send + Sync>>,
+            Arc<CreationTracker>,
         )>,
     ) -> usize {
         let (cumulative, total) = self.build_weight_distribution();
@@ -1267,6 +1302,7 @@ impl StatePool {
             Arc<Vec<u8>>,
             u64,
             Option<Arc<dyn std::any::Any + Send + Sync>>,
+            Arc<CreationTracker>,
         )>,
     ) -> usize {
         if self.active_indices.is_empty() {
@@ -1293,6 +1329,7 @@ impl StatePool {
                     entry.action_field_bytes.clone(),
                     entry.fingerprint,
                     entry.fixture_state.clone(),
+                    entry.creation.clone(),
                 ));
                 count += 1;
             }
@@ -1320,6 +1357,7 @@ impl StatePool {
                 entry.action_field_bytes.clone(),
                 entry.fingerprint,
                 entry.fixture_state.clone(),
+                entry.creation.clone(),
             ));
             count += 1;
         }
@@ -2509,6 +2547,7 @@ mod tests {
             None,
             vec![],
             None,
+            Arc::new(CreationTracker::new()),
             0,
             0,
             true,
@@ -2528,6 +2567,7 @@ mod tests {
             Some(0),
             vec![0xAA],
             None,
+            Arc::new(CreationTracker::new()),
             5,
             0,
             true,
@@ -2547,6 +2587,7 @@ mod tests {
             Some(1),
             vec![0xBB],
             None,
+            Arc::new(CreationTracker::new()),
             3,
             3,
             true,
@@ -2590,6 +2631,7 @@ mod tests {
             Some(2),
             vec![0xCC],
             None,
+            Arc::new(CreationTracker::new()),
             2,
             2,
             true,
@@ -2659,6 +2701,7 @@ mod tests {
             None,
             vec![],
             None,
+            Arc::new(CreationTracker::new()),
             0,
             0,
             true,
@@ -2675,6 +2718,7 @@ mod tests {
             Some(0),
             vec![],
             None,
+            Arc::new(CreationTracker::new()),
             1,
             1,
             true,

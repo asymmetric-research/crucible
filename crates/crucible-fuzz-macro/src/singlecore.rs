@@ -98,7 +98,8 @@ pub fn singlecore_mode(
                     if now - start_time >= timeout {
                         eprintln!("\n[FUZZ] Timeout reached ({}s). Exiting gracefully.", timeout);
                         if #mod_name::COVERAGE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-                            #mod_name::write_lcov_coverage("coverage.lcov");
+                            let coverage_output = #mod_name::lcov_output_path();
+                            #mod_name::write_lcov_coverage(&coverage_output);
                         }
                         std::process::exit(0);
                     }
@@ -144,13 +145,37 @@ pub fn singlecore_mode(
             #ctx_swap_back
             // fixture is dropped here (cheap: only empty SVM + small fields)
 
-            // On panic: resume unwinding so the default panic handler prints
-            // the message with file/line, then the process exits naturally
+            // On panic: resume unwinding. NOTE: for a panic raised inside the harness, LibAFL's
+            // InProcessExecutor panic hook runs at panic time and calls libc::_exit before unwinding
+            // ever returns here — so this branch is effectively unreachable. A harness panic is
+            // handled by our panic hook (installed before the executor via `arm_harness_panic_handler`),
+            // which LibAFL chains as its `old_hook` and calls first; that hook alerts and stops the run.
             if let Err(__panic_payload) = __panic_result {
                 std::panic::resume_unwind(__panic_payload);
             }
 
             if let Some(msg) = crucible_test_context::take_violation() {
+                // Account-mutation findings dedup on the finding identity (fixed by
+                // the final probed action), not the action sequence — so different
+                // inputs reaching the same probed instruction (a…k, b…k) are one
+                // finding. Skip repeats so the crash artifact is written once.
+                if let Some(__fid) = crucible_test_context::mutation_finding_id() {
+                    if !crucible_test_context::is_novel_mutation_finding(&__fid) {
+                        // Already reported this finding — suppress the duplicate.
+                        return ExitKind::Ok;
+                    }
+                    let input_hash = hash_std(__fid.as_bytes());
+                    let crash_id = format!("crash_{:016x}", input_hash);
+                    println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                    eprintln!("[FUZZ_FINDING] {}: {}", crash_id, msg);
+                    crucible_test_context::print_action_sequence();
+                    crucible_test_context::write_crash_metadata(&crash_dir, input_hash, Some(seed), slice);
+                    if std::env::var("FUZZ_STOP_ON_CRASH").is_ok() {
+                        eprintln!("[FUZZ] First crash found. Exiting (--stop-on-crash).");
+                        std::process::exit(0);
+                    }
+                    return ExitKind::Crash;
+                }
                 // Use the same hash as LibAFL (xxh3_64) so our metadata matches LibAFL's crash filenames
                 let input_hash = hash_std(slice);
                 let crash_id = format!("crash_{:016x}", input_hash);
@@ -189,6 +214,15 @@ pub fn singlecore_mode(
         let crash_dir = crashes_dir_env.unwrap_or_else(|| format!("crashes/{}", #feature_name));
         std::fs::create_dir_all(&crash_dir).expect("failed to create crash directory");
 
+        // LibAFL's solutions (objective) corpus is the fuzzer's own bookkeeping — hex-named
+        // inputs, 1-byte refcount markers, and per-entry `.metadata`. Keep it in a hidden subdir
+        // so the crash dir holds ONLY crucible's canonical `crash_<id>` + `.meta.json` artifacts
+        // (the triageable, replayable ones) instead of being polluted with LibAFL internals that
+        // look like empty crashes and don't carry the mutation-finding metadata for replay.
+        let crash_corpus_dir = format!("{}/.crash_corpus", crash_dir);
+        std::fs::create_dir_all(&crash_corpus_dir)
+            .expect("failed to create crash corpus directory");
+
         // Internal macro to avoid code duplication between corpus modes
         // This works around Rust's type system (StdState is generic over corpus type)
         macro_rules! run_fuzz_loop {
@@ -197,7 +231,7 @@ pub fn singlecore_mode(
                 #observer_feedback_setup
 
                 let rand = StdRand::with_seed(seed);
-                let solutions = OnDiskCorpus::new(&crash_dir).expect("failed to create crash corpus");
+                let solutions = OnDiskCorpus::new(&crash_corpus_dir).expect("failed to create crash corpus");
                 let mut state = StdState::new(rand, $corpus, solutions, &mut feedback, &mut objective)
                     .expect("failed to create StdState");
 
@@ -211,6 +245,25 @@ pub fn singlecore_mode(
 
                 let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
                 let timeout = Duration::from_millis(10000);
+
+                // Install our panic hook BEFORE the executor. A bare panic in the harness/invariant
+                // is a HARNESS BUG, not a finding. LibAFL's InProcessExecutor panic hook would
+                // otherwise save the input as an objective and libc::_exit; instead we alert the
+                // author and stop. LibAFL chains the previous hook (`old_hook`) FIRST, so installing
+                // ours here lets it run before LibAFL records anything — and we exit immediately on a
+                // real harness panic (the `false` branch lets the framework's own shutdown panics
+                // pass through to the default hook).
+                crucible_test_context::arm_harness_panic_handler(None);
+                {
+                    let __default_hook = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(move |info| {
+                        if crucible_test_context::harness_panic_alert(&info.to_string()) {
+                            std::process::exit(70);
+                        }
+                        __default_hook(info);
+                    }));
+                }
+
                 let mut executor = InProcessExecutor::with_timeout(
                     &mut harness_wrapper,
                     tuple_list!(edges_observer, time_observer),

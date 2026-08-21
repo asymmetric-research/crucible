@@ -2190,6 +2190,7 @@ fn test_pool_coverage_novel_3x_boost() {
         Some(0),
         vec![],
         None,
+        std::sync::Arc::new(crate::snapshot::CreationTracker::new()),
         10,
         10,
         true,

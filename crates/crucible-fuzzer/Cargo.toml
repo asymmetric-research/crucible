@@ -19,7 +19,12 @@ libc = "0.2"
 serde_json = "1.0"
 
 [dev-dependencies]
+arbitrary = { version = "1", features = ["derive"] }
 tempfile = "3.10"
+owner-mutation-airdrop = { path = "../../examples/owner-mutation-airdrop/programs/owner-mutation-airdrop", features = ["no-entrypoint"] }
+solana-keypair.workspace = true
+solana-pubkey.workspace = true
+solana-signer.workspace = true
 
 [features]
 no-entrypoint = []

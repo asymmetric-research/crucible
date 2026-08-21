@@ -47,6 +47,13 @@ ctx.create_token_account()
     .create()?;
 ```
 
+**Lamports default to rent-exempt.** If you don't call `.lamports(...)`, the account
+is created with the SVM's rent-exempt minimum for its final data length — matching real
+Solana, where a non-rent-exempt account can't exist. (Otherwise a tx touching the account
+as writable fails at commit with `InsufficientFundsForRent`, even after the program logic
+succeeds.) `.lamports(n)` overrides this exactly, including a deliberately low balance for
+negative tests (note: a 0-lamport account does not persist).
+
 ## Program Calls
 
 ```rust

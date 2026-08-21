@@ -1,4 +1,3 @@
-use anchor_lang::prelude::sysvar::SysvarId;
 use litesvm::LiteSVM;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -25,6 +24,10 @@ pub use crate::account_builders::AccountBuilderBase;
 pub use crate::account_builders::GenericAccountBuilder;
 pub use crate::account_builders::MintAccountBuilder;
 pub use crate::account_builders::TokenAccountBuilder;
+pub use crate::account_mutation::{
+    probe_edge_capture_begin, probe_edge_capture_take, record_probe_edge,
+    reset_probed_account_mutations, AccountMutationConfig,
+};
 pub use crate::instruction_builder::InstructionBuilder;
 pub use crate::mock_oracles::{
     MockPythOracleBuilder, PriceFeedMessage, PriceUpdateV2, VerificationLevel,
@@ -41,13 +44,14 @@ use anyhow::{Context, Result};
 use spl_token::solana_program::program_option::COption;
 
 mod account_builders;
+mod account_mutation;
 mod instruction_builder;
 mod program_builder;
 pub mod schema;
 pub mod snapshot;
 
 // Re-export schema types for generated code (register_schemas())
-pub use schema::{register_account_schemas, AccountSchema};
+pub use schema::{register_account_discriminators, register_account_schemas, AccountSchema};
 mod transaction_builder;
 
 // Coverage analysis and visualization
@@ -58,7 +62,7 @@ pub use coverage::{
     build_cached_analysis, extract_functions, generate_bytecode_lcov, generate_coverage_html,
     generate_coverage_html_cached, generate_source_lcov,
 };
-pub use coverage::{build_dwarf_source_map, DwarfSourceMap, SourceLocation};
+pub use coverage::{build_dwarf_source_map, build_symbol_name_map, DwarfSourceMap, SourceLocation};
 pub use coverage::{
     CachedFunctionInfo, CachedProgramAnalysis, CoverageStats, CoverageWriteStats, FunctionInfo,
     ReachableAnalysis,
@@ -121,6 +125,21 @@ use std::cell::{Cell, RefCell};
 thread_local! {
     // Invariant violation tracking for fuzz_assert! macros
     static VIOLATION: RefCell<Option<String>> = RefCell::new(None);
+    // Whether the recorded violation came from the account-mutation engine (vs an invariant).
+    // Set atomically with VIOLATION so it always matches the stored (first-wins) violation.
+    static VIOLATION_FROM_MUTATION: Cell<bool> = const { Cell::new(false) };
+    // Stable account-mutation finding identity/message for metadata and replay. The ID omits
+    // per-run pubkeys, so replay targets the same constraint class and instruction/action even
+    // with fresh setup keys.
+    static MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
+    static MUTATION_FINDING_MESSAGE: RefCell<Option<String>> = RefCell::new(None);
+    static EXPECTED_MUTATION_FINDING_ID: RefCell<Option<String>> = RefCell::new(None);
+    // Account-mutation finding identities already reported as crashes this run.
+    // Mutation findings dedup on the finding identity ({class}:{program}:{disc}),
+    // which is fixed by the final (probed) action — so two different action
+    // sequences that reach the same probed instruction collapse to one finding.
+    static SEEN_MUTATION_FINDINGS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
     // Per-instruction coverage tracking
     static CURRENT_INSTRUCTION: RefCell<Option<String>> = RefCell::new(None);
     // Crash metadata
@@ -290,6 +309,17 @@ pub struct CrashMetadata {
     pub seed: Option<u64>,
     /// Sequence of actions that led to the crash
     pub actions: Vec<ActionRecord>,
+    /// True if the finding came from the account-mutation engine. Replay must re-enable the
+    /// engine (set `FUZZ_MUTATE_ACCOUNTS`) for such crashes to reproduce.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mutation_finding: bool,
+    /// Stable mutation finding identity: `<class>:<program_id>:<instruction-discriminator>`.
+    /// Used by replay/tmin to target the original probe and instruction/action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_finding_id: Option<String>,
+    /// Human-readable finding observed when the crash was first written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_finding_message: Option<String>,
 }
 
 /// Set the current test name (called at test start)
@@ -456,12 +486,20 @@ pub fn clear_violation_tracking() {
     VIOLATION_ACTION_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
+fn clear_current_violation() {
+    VIOLATION.with(|v| *v.borrow_mut() = None);
+    VIOLATION_FROM_MUTATION.with(|m| m.set(false));
+    MUTATION_FINDING_ID.with(|id| *id.borrow_mut() = None);
+    MUTATION_FINDING_MESSAGE.with(|msg| *msg.borrow_mut() = None);
+}
+
 /// Clear all per-iteration state: action history + violation tracking.
 /// Convenience wrapper — call at the start of each fuzzing iteration.
 #[inline]
 pub fn clear_iteration_state() {
     clear_action_history();
     clear_violation_tracking();
+    clear_current_violation();
 }
 
 // ============================================================================
@@ -544,6 +582,9 @@ pub fn build_crash_metadata(seed: Option<u64>) -> CrashMetadata {
         iteration: get_current_iteration(),
         seed,
         actions: get_action_history(),
+        mutation_finding: violation_from_mutation(),
+        mutation_finding_id: mutation_finding_id(),
+        mutation_finding_message: mutation_finding_message(),
     }
 }
 
@@ -719,10 +760,63 @@ pub fn write_crash_metadata_with_actions(
     input_bytes: &[u8],
     full_actions: Option<Vec<ActionRecord>>,
 ) {
+    write_crash_metadata_with_actions_impl(
+        crash_dir,
+        input_hash,
+        seed,
+        input_bytes,
+        full_actions,
+        None,
+    )
+}
+
+/// Write crash metadata with an explicit mutation-finding override. Stateful mode queues crashes
+/// and writes them later, after the thread-local violation state may have been cleared; queued
+/// mutation crashes must carry their captured identity/message through to disk for replay.
+pub fn write_crash_metadata_with_actions_and_mutation(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+    full_actions: Option<Vec<ActionRecord>>,
+    mutation_finding: Option<(String, String)>,
+) {
+    write_crash_metadata_with_actions_impl(
+        crash_dir,
+        input_hash,
+        seed,
+        input_bytes,
+        full_actions,
+        Some(mutation_finding),
+    )
+}
+
+fn write_crash_metadata_with_actions_impl(
+    crash_dir: &str,
+    input_hash: u64,
+    seed: Option<u64>,
+    input_bytes: &[u8],
+    full_actions: Option<Vec<ActionRecord>>,
+    mutation_override: Option<Option<(String, String)>>,
+) {
     let crash_id = format!("crash_{:016x}", input_hash);
     let mut metadata = build_crash_metadata(seed);
     if let Some(actions) = full_actions {
         metadata.actions = actions;
+    }
+    if let Some(mutation_finding) = mutation_override {
+        match mutation_finding {
+            Some((id, message)) => {
+                metadata.mutation_finding = true;
+                metadata.mutation_finding_id = Some(id);
+                metadata.mutation_finding_message = Some(message);
+            }
+            None => {
+                metadata.mutation_finding = false;
+                metadata.mutation_finding_id = None;
+                metadata.mutation_finding_message = None;
+            }
+        }
     }
     let meta_dir = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| crash_dir.to_string());
     let meta_filename = format!("{}/{}.meta.json", meta_dir, crash_id);
@@ -881,6 +975,14 @@ pub fn register_instruction_discriminators(discriminators: &[(&str, Vec<u8>)]) {
     let _ = DISCRIMINATOR_MAP.set((disc_len, map));
 }
 
+/// Length of the registered instruction discriminator (1 for some native programs, 4 for
+/// bincode, 8 for Anchor), or `None` if no discriminators were registered. Used by the
+/// account-mutation engine to key findings on the real discriminator rather than a fixed
+/// 8-byte prefix (which would fold variable instruction arguments into the finding identity).
+pub fn instruction_discriminator_len() -> Option<usize> {
+    DISCRIMINATOR_MAP.get().map(|(len, _)| *len)
+}
+
 /// Look up instruction name from discriminator bytes at the start of instruction data.
 /// Automatically uses the correct discriminator length (4 or 8 bytes).
 /// Returns None if discriminator is not registered or if the data is too short.
@@ -911,8 +1013,114 @@ pub fn record_violation(msg: String) {
         let mut guard = v.borrow_mut();
         if guard.is_none() {
             *guard = Some(msg);
+            VIOLATION_FROM_MUTATION.with(|m| m.set(false));
+            MUTATION_FINDING_ID.with(|id| *id.borrow_mut() = None);
+            MUTATION_FINDING_MESSAGE.with(|mutation_msg| *mutation_msg.borrow_mut() = None);
         }
     });
+}
+
+/// Record a violation produced by the account-mutation engine. Identical to
+/// [`record_violation`] but also flags the violation's origin so crash metadata can mark it
+/// (and replay can re-enable the engine).
+pub(crate) fn record_mutation_violation(msg: String, id: String) {
+    VIOLATION.with(|v| {
+        let mut guard = v.borrow_mut();
+        if guard.is_none() {
+            MUTATION_FINDING_ID.with(|finding_id| *finding_id.borrow_mut() = Some(id));
+            MUTATION_FINDING_MESSAGE
+                .with(|finding_msg| *finding_msg.borrow_mut() = Some(msg.clone()));
+            *guard = Some(msg);
+            VIOLATION_FROM_MUTATION.with(|m| m.set(true));
+        }
+    });
+}
+
+/// Whether the currently-recorded violation was produced by the account-mutation engine.
+pub fn violation_from_mutation() -> bool {
+    VIOLATION_FROM_MUTATION.with(|m| m.get())
+}
+
+/// Stable identity of the current account-mutation finding, if any.
+pub fn mutation_finding_id() -> Option<String> {
+    if violation_from_mutation() {
+        MUTATION_FINDING_ID.with(|id| id.borrow().clone())
+    } else {
+        None
+    }
+}
+
+/// Human-readable current account-mutation finding, if any.
+pub fn mutation_finding_message() -> Option<String> {
+    if violation_from_mutation() {
+        MUTATION_FINDING_MESSAGE.with(|msg| msg.borrow().clone())
+    } else {
+        None
+    }
+}
+
+/// Record an account-mutation finding identity and report whether it is the
+/// first time this identity has been seen this run. The identity
+/// (`{class}:{program}:{disc}:{role}`) is determined by the final probed action —
+/// the constraint class, program, instruction *discriminator* (registered length, not
+/// the full data, so variable arguments don't fork the identity), and mutated account
+/// role — not the action-sequence prefix. So distinct sequences ending at the same
+/// probed instruction (a…k and b…k), and the same instruction sent with different
+/// argument values, are treated as one finding. Returns `false` for a repeat (caller
+/// should suppress the duplicate crash).
+pub fn is_novel_mutation_finding(id: &str) -> bool {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow_mut().insert(id.to_string()))
+}
+
+/// Whether an account-mutation finding identity has already been reported this run, without
+/// recording it (peek, unlike [`is_novel_mutation_finding`]). The probe selector consults this so
+/// that across the repeated probes of one instruction it surfaces each *distinct* finding once,
+/// rather than letting the single highest-priority finding mask the others (it would be reported
+/// on the first probe and then dedup-suppressed on every later probe, hiding the rest).
+pub fn mutation_finding_seen(id: &str) -> bool {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().contains(id))
+}
+
+/// Number of distinct account-mutation findings reported this run.
+pub fn seen_mutation_finding_count() -> usize {
+    SEEN_MUTATION_FINDINGS.with(|seen| seen.borrow().len())
+}
+
+/// Restrict replay/tmin to the original account-mutation finding identity.
+pub fn set_expected_mutation_finding_id(id: Option<String>) {
+    EXPECTED_MUTATION_FINDING_ID.with(|expected| *expected.borrow_mut() = id);
+}
+
+/// Current replay/tmin mutation finding identity filter.
+pub fn expected_mutation_finding_id() -> Option<String> {
+    EXPECTED_MUTATION_FINDING_ID.with(|expected| expected.borrow().clone())
+}
+
+/// Load `mutation_finding_id` from the `.meta.json` associated with a crash input path.
+pub fn load_expected_mutation_finding_id_from_metadata(input_path: &str) {
+    set_expected_mutation_finding_id(None);
+
+    let input = std::path::Path::new(input_path);
+    let mut candidates = Vec::new();
+    if let Some(name) = input.file_name().and_then(|n| n.to_str()) {
+        if let Ok(meta_dir) = std::env::var("FUZZ_META_DIR") {
+            candidates.push(std::path::Path::new(&meta_dir).join(format!("{name}.meta.json")));
+        }
+    }
+    candidates.push(std::path::PathBuf::from(format!("{input_path}.meta.json")));
+
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if let Some(id) = meta.get("mutation_finding_id").and_then(|v| v.as_str()) {
+            set_expected_mutation_finding_id(Some(id.to_string()));
+            return;
+        }
+    }
 }
 
 /// Take the current violation (clearing it). Returns Some if violated.
@@ -923,6 +1131,62 @@ pub fn take_violation() -> Option<String> {
 /// Check if a violation has been recorded (without consuming it)
 pub fn has_violation() -> bool {
     VIOLATION.with(|v| v.borrow().is_some())
+}
+
+// Harness-panic handling: a bare panic in the harness/invariant is a HARNESS BUG, not a finding.
+//
+// A panic raised by a raw `assert!`/`unwrap()`/arithmetic overflow does NOT reach the harness's
+// `catch_unwind`/`take_violation` path: LibAFL's InProcessExecutor installs a panic hook that, at
+// panic time, saves the input to its hidden solutions corpus, bumps the objective counter, and
+// calls `libc::_exit` — unwinding never returns to the harness. That is wrong twice over: such a
+// panic is a bug in the *test code*, not a discovery about the program, and silently saving it as a
+// crash (and, in multi-core, restart-looping on it) buries a harness bug as a phantom finding.
+//
+// Proper invariant violations go through `fuzz_assert!`/`record_violation` (those stay real
+// crashes). Anything that bare-panics we treat as a fatal harness bug: alert loudly and stop the
+// run so the author fixes it — no crash file, no objective recorded.
+//
+// Mechanism: LibAFL's hook calls the previous hook (`old_hook(panic_info)`) FIRST, before `_exit`.
+// So the harness installs its hook BEFORE creating the executor; LibAFL chains it as `old_hook` and
+// runs it first. Our hook calls [`harness_panic_alert`]; if that returns `true` (a real harness
+// panic) the harness `std::process::exit`s immediately — before LibAFL can save/count it.
+thread_local! {
+    /// Path to the multi-core stop-signal file, so a panic in one worker halts the whole run.
+    /// `None` in single-core (the panic exits the only process).
+    static HARNESS_PANIC_STOP_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Arm harness-panic handling for this worker. Call once, before the LibAFL executor is created
+/// (so LibAFL chains our hook). `stop_signal_path` is the multi-core stop-signal file (or `None`).
+pub fn arm_harness_panic_handler(stop_signal_path: Option<String>) {
+    HARNESS_PANIC_STOP_PATH.with(|p| *p.borrow_mut() = stop_signal_path);
+}
+
+/// Report a harness panic. Called from the harness's panic hook with the formatted panic message
+/// (location + payload). Returns `true` when this is a genuine harness panic the caller should stop
+/// on (after printing a prominent alert and signaling other workers to stop); returns `false` for
+/// the framework's own intentional shutdown panics (stop-signal / timeout), which must pass through
+/// to the normal shutdown path untouched.
+pub fn harness_panic_alert(message: &str) -> bool {
+    // The fuzzer stops workers by panicking with these messages — not harness bugs; ignore them.
+    if message.contains("Stop signal") || message.contains("Timeout reached") {
+        return false;
+    }
+    let summary = message.replace('\n', " ");
+    eprintln!("\n[HARNESS PANIC] The harness/invariant code panicked: {summary}");
+    eprintln!(
+        "[HARNESS PANIC] This is a bug in the harness, not a finding about the program. \
+         Express invariant checks with `fuzz_assert!`/`record_violation` (which become crashes); \
+         a bare panic/assert!/unwrap()/overflow is treated as a fatal harness bug. Stopping the run."
+    );
+    print_action_sequence();
+    // Multi-core: signal all workers to stop so the run halts instead of restart-looping.
+    HARNESS_PANIC_STOP_PATH.with(|p| {
+        if let Some(path) = p.borrow().as_ref() {
+            let _ = std::fs::write(path, b"stop");
+        }
+    });
+    true
 }
 
 /// Assert a condition is true
@@ -1340,6 +1604,8 @@ pub struct TestContext {
     pub snapshot: Option<snapshot::SvmSnapshot>,
     /// Tracks dirty accounts across all transactions in an iteration
     pub dirty_tracker: snapshot::DirtyTracker,
+    /// Optional preflight engine that mutates account owners to detect missing owner checks.
+    account_mutation: account_mutation::AccountMutationConfig,
     /// Whether signature verification is enabled on the SVM.
     /// When false (default for fuzzing), transactions use dummy signatures
     /// to skip ed25519 computation (~77µs per tx).
@@ -1363,6 +1629,7 @@ impl Clone for TestContext {
             snapshot: None,
             // Fresh tracker for each clone
             dirty_tracker: self.dirty_tracker.clone(),
+            account_mutation: self.account_mutation.clone(),
             sigverify: self.sigverify,
         }
     }
@@ -1418,6 +1685,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -1437,6 +1705,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -1612,6 +1881,7 @@ impl TestContext {
             program_coverage_totals: Arc::new(HashMap::new()),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
+            account_mutation: account_mutation::config_from_env(),
             sigverify: false,
         }
     }
@@ -1649,6 +1919,7 @@ impl TestContext {
             program_coverage_totals: self.program_coverage_totals.clone(),
             snapshot: None,
             dirty_tracker: snapshot::DirtyTracker::new(),
+            account_mutation: self.account_mutation.clone(),
             sigverify: false,
         }
     }
@@ -1673,6 +1944,80 @@ impl TestContext {
     /// Called internally by account builders.
     pub fn track_account(&mut self, pubkey: Pubkey) {
         Arc::make_mut(&mut self.tracked_accounts).insert(pubkey);
+    }
+
+    /// Enable account-mutation probes.
+    ///
+    /// The first time each instruction type executes with a succeeding baseline transaction, its
+    /// accounts are probed for missing constraint checks (owner, ...). Probes run on cloned SVMs
+    /// and never change the real transaction's outcome.
+    pub fn enable_account_mutation(&mut self) -> &mut Self {
+        self.account_mutation.enable();
+        self
+    }
+
+    /// Disable account-mutation probes.
+    pub fn disable_account_mutation(&mut self) -> &mut Self {
+        self.account_mutation.disable();
+        self
+    }
+
+    /// Set whether owner mutation should skip off-curve account addresses.
+    ///
+    /// This is enabled by default because mutating owner in-place at a
+    /// key-pinned PDA fabricates a state attackers cannot normally create.
+    /// Set this to `false` only when the harness intentionally wants to probe
+    /// reachable wrong-owner PDA states.
+    pub fn set_owner_mutation_skip_pdas(&mut self, skip_pdas: bool) -> &mut Self {
+        self.account_mutation.set_skip_pda_candidates(skip_pdas);
+        self
+    }
+
+    /// Mark an account as unverified for account-mutation identity probes.
+    ///
+    /// Unverified accounts are skipped by owner/PDA probes because their
+    /// identity is not security-relevant for the harness.
+    pub fn mark_owner_unverified(&mut self, pubkey: Pubkey) -> &mut Self {
+        self.account_mutation.mark_unverified(pubkey);
+        self
+    }
+
+    /// Mark multiple accounts as unverified for owner mutation.
+    pub fn mark_owners_unverified<I, P>(&mut self, pubkeys: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+        P: std::borrow::Borrow<Pubkey>,
+    {
+        for pubkey in pubkeys {
+            self.account_mutation.mark_unverified(*pubkey.borrow());
+        }
+        self
+    }
+
+    /// Exclude an instruction type from `--mutate-accounts` probing (blanket: all constraint
+    /// classes). Keyed by the instruction's `(program, discriminator)`, so every send of it —
+    /// including via `send_batch` — is skipped. Use for an instruction a harness author knows only
+    /// produces false positives. The per-call builder form is `…call(ix).skip_account_mutation()`.
+    pub fn skip_account_mutation_for(&mut self, ix: &Instruction) -> &mut Self {
+        self.account_mutation.skip_instruction(ix);
+        self
+    }
+
+    pub(crate) fn maybe_probe_account_mutation(
+        &self,
+        instructions: &[Instruction],
+        signers: &[&Keypair],
+        payer: &Keypair,
+    ) {
+        account_mutation::maybe_probe_account_mutation(
+            &self.svm,
+            &self.account_mutation,
+            self.tracked_accounts.as_ref(),
+            instructions,
+            signers,
+            payer,
+            self.sigverify,
+        );
     }
 
     /// Get count of tracked accounts (for debugging)
@@ -1789,6 +2134,8 @@ impl TestContext {
                 executable: false,
                 rent_epoch: 0,
             },
+            owner_unverified: false,
+            lamports_explicit: false,
         }
     }
 
@@ -1805,6 +2152,8 @@ impl TestContext {
                 executable: false,
                 rent_epoch: 0,
             },
+            owner_unverified: false,
+            lamports_explicit: false,
             mint: spl_token::state::Mint {
                 mint_authority: COption::None,
                 supply: 0,
@@ -1826,6 +2175,8 @@ impl TestContext {
                 executable: false,
                 rent_epoch: 0,
             },
+            owner_unverified: false,
+            lamports_explicit: false,
             token_state: spl_token::state::Account {
                 mint: Pubkey::default(),
                 owner: Pubkey::default(),
@@ -2150,6 +2501,7 @@ impl TestContext {
             instruction,
             signers: vec![],
             fee_payer: None,
+            skip_mutation: false,
         }
     }
 
@@ -2164,6 +2516,7 @@ impl TestContext {
             },
             signers: vec![],
             fee_payer: None, // Use first signer by default
+            skip_mutation: false,
         }
     }
 
@@ -2198,8 +2551,6 @@ impl TestContext {
             .map(|k| k.pubkey())
             .unwrap_or_default();
 
-        let default_kp = Keypair::new();
-
         let fee_payer = unique_signers.first().map(|k| *k).ok_or(anyhow::anyhow!(
             "At least one signer required for send_batch. The first signer is the fee payer."
         ))?;
@@ -2216,6 +2567,9 @@ impl TestContext {
         self.dirty_tracker
             .record_tx(&self.pending_instructions, &fee_payer_pubkey);
         SEND_BATCH_PRE_NS.with(|c| c.set(c.get() + __t_pre.elapsed().as_nanos() as u64));
+
+        // Owner-mutation probe runs on a cloned SVM and never replaces the real outcome.
+        self.maybe_probe_account_mutation(&self.pending_instructions, &unique_signers, fee_payer);
 
         // SVM execution: send transaction
         let __t_svm = std::time::Instant::now();
@@ -3524,6 +3878,144 @@ mod tests {
         assert!(meta.seed.is_none());
     }
 
+    #[test]
+    fn mutation_finding_flag_round_trips_through_crash_metadata() {
+        // A plain invariant violation is not a mutation finding.
+        let _ = take_violation();
+        record_violation("plain invariant".to_string());
+        assert!(!build_crash_metadata(None).mutation_finding);
+
+        // An account-mutation finding is, and the replay identity survives serde.
+        let _ = take_violation();
+        record_mutation_violation(
+            "[CC-1 owner] ...".to_string(),
+            "CC-1 owner:Program:disc".to_string(),
+        );
+        let meta = build_crash_metadata(None);
+        assert!(meta.mutation_finding);
+        assert_eq!(
+            meta.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
+        assert_eq!(
+            meta.mutation_finding_message.as_deref(),
+            Some("[CC-1 owner] ...")
+        );
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: CrashMetadata = serde_json::from_str(&json).unwrap();
+        assert!(back.mutation_finding);
+        assert_eq!(
+            back.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
+
+        let _ = take_violation();
+        clear_iteration_state();
+    }
+
+    #[test]
+    fn deferred_metadata_uses_explicit_mutation_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path().to_string_lossy().into_owned();
+
+        record_mutation_violation(
+            "[stale mutation]".to_string(),
+            "CC-1 owner:stale:00".to_string(),
+        );
+        clear_iteration_state();
+
+        write_crash_metadata_with_actions_and_mutation(
+            &crash_dir,
+            0xabc,
+            Some(7),
+            b"input",
+            None,
+            Some((
+                "CC-1 owner:Program:disc".to_string(),
+                "[CC-1 owner] ...".to_string(),
+            )),
+        );
+        let meta_path = tmp.path().join("crash_0000000000000abc.meta.json");
+        let meta: CrashMetadata =
+            serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
+        assert!(meta.mutation_finding);
+        assert_eq!(
+            meta.mutation_finding_id.as_deref(),
+            Some("CC-1 owner:Program:disc")
+        );
+        assert_eq!(
+            meta.mutation_finding_message.as_deref(),
+            Some("[CC-1 owner] ...")
+        );
+
+        record_mutation_violation(
+            "[stale mutation]".to_string(),
+            "CC-1 owner:stale:00".to_string(),
+        );
+        write_crash_metadata_with_actions_and_mutation(
+            &crash_dir, 0xdef, None, b"input", None, None,
+        );
+        let plain_meta_path = tmp.path().join("crash_0000000000000def.meta.json");
+        let plain_meta: CrashMetadata =
+            serde_json::from_slice(&std::fs::read(plain_meta_path).unwrap()).unwrap();
+        assert!(!plain_meta.mutation_finding);
+        assert!(plain_meta.mutation_finding_id.is_none());
+        assert!(plain_meta.mutation_finding_message.is_none());
+
+        let _ = take_violation();
+        clear_iteration_state();
+    }
+
+    #[test]
+    fn is_novel_mutation_finding_dedups_by_identity() {
+        // Same identity reported via two different sequences (a…k, b…k) is one
+        // finding: first is novel, the second is suppressed.
+        let id = "CC-1 owner:Program:abc";
+        assert!(
+            is_novel_mutation_finding(id),
+            "first sighting of a finding identity is novel"
+        );
+        assert!(
+            !is_novel_mutation_finding(id),
+            "a different sequence reaching the same finding identity is a duplicate"
+        );
+        // A different constraint class on the same instruction is distinct.
+        assert!(is_novel_mutation_finding("CC-4 signer:Program:abc"));
+        assert!(seen_mutation_finding_count() >= 2);
+    }
+
+    #[test]
+    fn harness_panic_alert_signals_stop_and_ignores_shutdown_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = dir.path().join("STOP");
+        arm_harness_panic_handler(Some(stop.to_str().unwrap().to_string()));
+
+        // A genuine harness panic ⇒ handled (caller stops) and the stop signal is written.
+        assert!(harness_panic_alert(
+            "panicked at src/foo.rs:1:1:\nattempt to subtract with overflow"
+        ));
+        assert!(
+            stop.exists(),
+            "a harness panic must signal other workers to stop"
+        );
+        // It must NOT write any crash artifact — a harness bug is not a finding.
+        let crash_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("crash_"))
+            .collect();
+        assert!(
+            crash_files.is_empty(),
+            "harness panic must not write a crash file"
+        );
+
+        // The framework's intentional shutdown panics are not harness bugs ⇒ pass through.
+        assert!(!harness_panic_alert("Stop signal received"));
+        assert!(!harness_panic_alert("Timeout reached, stopping"));
+
+        arm_harness_panic_handler(None);
+    }
+
     // =========================================================================
     // GenericAccountBuilder
     // =========================================================================
@@ -3549,6 +4041,52 @@ mod tests {
         assert_eq!(acc.lamports, 1_000_000);
         assert_eq!(acc.data.len(), 128);
         assert!(!acc.executable);
+    }
+
+    #[test]
+    fn generic_builder_defaults_to_rent_exempt_lamports() {
+        // Regression: a created account with no explicit .lamports() must be rent-exempt for its
+        // final data length, else any tx touching it as a writable account fails at commit with
+        // InsufficientFundsForRent (even though the program logic succeeded).
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+
+        ctx.create_account().pubkey(pk).size(200).create().unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        let expected = ctx.svm.minimum_balance_for_rent_exemption(200);
+        assert!(expected > 0);
+        assert_eq!(
+            acc.lamports, expected,
+            "generic account should default to rent-exempt lamports for its data size"
+        );
+    }
+
+    #[test]
+    fn generic_builder_explicit_lamports_override_is_preserved() {
+        // The rent-exempt default must only apply when the caller did not set .lamports(...).
+        // A deliberately non-rent-exempt account (a low, non-zero balance — a 0-lamport account
+        // does not persist in Solana) must be honored exactly, not silently bumped to rent-exempt.
+        let mut ctx = TestContext::new();
+        let pk = Pubkey::new_unique();
+        let rent_exempt = ctx.svm.minimum_balance_for_rent_exemption(200);
+
+        ctx.create_account()
+            .pubkey(pk)
+            .size(200)
+            .lamports(1)
+            .create()
+            .unwrap();
+
+        let acc = ctx.svm.get_account(&pk).unwrap();
+        assert_eq!(
+            acc.lamports, 1,
+            "explicit .lamports(1) must be preserved, not overridden by the rent-exempt default"
+        );
+        assert!(
+            acc.lamports < rent_exempt,
+            "test premise: 1 is below rent-exempt"
+        );
     }
 
     #[test]
@@ -4883,6 +5421,72 @@ mod tests {
         let kp = Keypair::new();
         ctx.svm.airdrop(&kp.pubkey(), 10_000_000_000).unwrap();
         kp
+    }
+
+    #[test]
+    fn account_mutation_enabled_keeps_real_tx_outcome() {
+        // The probe runs on a clone and must never change the real transaction's result. The
+        // dataless system recipient is also (correctly) not a candidate, so no violation fires.
+        let _ = take_violation();
+        reset_probed_account_mutations();
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Keypair::new().pubkey();
+        ctx.svm.airdrop(&recipient, 1).unwrap();
+
+        ctx.enable_account_mutation();
+
+        let original_owner = ctx.svm.get_account(&recipient).unwrap().owner;
+        let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(),
+            &recipient,
+            1000,
+        );
+
+        let outcome = ctx.raw_call(ix).signers(&[&payer]).send().unwrap();
+
+        assert!(outcome.is_success());
+        assert_eq!(
+            ctx.svm.get_balance(&recipient).unwrap_or(0),
+            before_balance + 1000
+        );
+        assert_eq!(
+            ctx.svm.get_account(&recipient).unwrap().owner,
+            original_owner
+        );
+        assert!(!has_violation());
+    }
+
+    #[test]
+    fn account_mutation_probe_runs_in_send_batch_path() {
+        // Same guarantee through the send_batch hook.
+        let _ = take_violation();
+        reset_probed_account_mutations();
+        let mut ctx = TestContext::new();
+        let payer = fund_keypair(&mut ctx);
+        let recipient = Keypair::new().pubkey();
+        ctx.svm.airdrop(&recipient, 1).unwrap();
+
+        ctx.enable_account_mutation();
+
+        let before_balance = ctx.svm.get_balance(&recipient).unwrap_or(0);
+        let ix = anchor_lang::solana_program::system_instruction::transfer(
+            &payer.pubkey(),
+            &recipient,
+            2000,
+        );
+
+        ctx.pending_instructions.push(ix);
+        ctx.pending_signers.push(payer.insecure_clone());
+        let outcome = ctx.send_batch().unwrap().expect("batch should send");
+
+        assert!(outcome.is_success());
+        assert_eq!(
+            ctx.svm.get_balance(&recipient).unwrap_or(0),
+            before_balance + 2000
+        );
+        assert!(!has_violation());
     }
 
     #[test]

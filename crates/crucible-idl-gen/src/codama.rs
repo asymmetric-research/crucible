@@ -8,12 +8,12 @@
 use std::collections::HashSet;
 
 use anchor_lang_idl::types::{
-    Idl, IdlArrayLen, IdlDefinedFields, IdlEnumVariant, IdlField, IdlInstruction,
+    Idl, IdlAccount, IdlArrayLen, IdlDefinedFields, IdlEnumVariant, IdlField, IdlInstruction,
     IdlInstructionAccount, IdlInstructionAccountItem, IdlMetadata, IdlType, IdlTypeDef,
     IdlTypeDefTy,
 };
 use codama_nodes::{
-    DefaultValueStrategy, DefinedTypeNode, EnumTypeNode, EnumVariantTypeNode,
+    AccountNode, DefaultValueStrategy, DefinedTypeNode, EnumTypeNode, EnumVariantTypeNode,
     InstructionAccountNode, InstructionArgumentNode, InstructionInputValueNode, InstructionNode,
     IsAccountSigner, NestedTypeNodeTrait, Number, NumberFormat, NumberValueNode, OptionTypeNode,
     PublicKeyValueNode, RootNode, StructFieldTypeNode, StructTypeNode, TypeNode,
@@ -43,6 +43,21 @@ pub fn convert(root: &RootNode) -> anyhow::Result<Idl> {
         .iter()
         .filter_map(|dt| convert_defined_type(dt).ok())
         .collect::<Vec<_>>();
+
+    // Convert program accounts (state types). Each Codama `accountNode` carries
+    // its data layout inline; convert it into a typedef (so the `state` module
+    // and field-diff schemas can find it by name) plus an `IdlAccount` entry
+    // carrying the account's discriminator (empty if the account has no byte
+    // type-tag, e.g. size-discriminated native accounts).
+    let mut accounts = Vec::new();
+    for acc in &program.accounts {
+        if let Ok((idl_account, type_def)) = convert_program_account(acc) {
+            if !types.iter().any(|t| t.name == type_def.name) {
+                types.push(type_def);
+            }
+            accounts.push(idl_account);
+        }
+    }
 
     // Post-process: find unresolved type references in instruction args and add
     // type aliases. Codama IDLs sometimes reference types by a different name
@@ -94,7 +109,7 @@ pub fn convert(root: &RootNode) -> anyhow::Result<Idl> {
         },
         docs: vec![],
         instructions,
-        accounts: vec![],
+        accounts,
         events: vec![],
         errors: vec![],
         types,
@@ -202,6 +217,144 @@ fn convert_account(acc: &InstructionAccountNode) -> IdlInstructionAccountItem {
         pda: None,
         relations: vec![],
     })
+}
+
+// ---------------------------------------------------------------------------
+// Program accounts (state types)
+// ---------------------------------------------------------------------------
+
+/// Convert a Codama `accountNode` into an `IdlAccount` entry plus the typedef
+/// describing its data layout.
+fn convert_program_account(acc: &AccountNode) -> anyhow::Result<(IdlAccount, IdlTypeDef)> {
+    let name = acc.name.to_upper_camel_case();
+    let data = acc.data.get_nested_type_node();
+
+    // Convert the account's struct fields, skipping "omitted" fields (e.g. the
+    // embedded discriminator field in Anchor-derived Codama IDLs) — mirroring
+    // how instruction args filter the discriminator argument.
+    let fields = data
+        .fields
+        .iter()
+        .filter(|f| f.default_value_strategy != Some(DefaultValueStrategy::Omitted))
+        .map(convert_struct_field)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let ty = IdlTypeDefTy::Struct {
+        fields: if fields.is_empty() {
+            None
+        } else {
+            Some(IdlDefinedFields::Named(fields))
+        },
+    };
+
+    let type_def = IdlTypeDef {
+        name: name.clone(),
+        docs: vec![],
+        serialization: anchor_lang_idl::types::IdlSerialization::default(),
+        repr: None,
+        generics: vec![],
+        ty,
+    };
+
+    let discriminator = account_discriminator_bytes(acc);
+
+    Ok((
+        IdlAccount {
+            name,
+            discriminator,
+        },
+        type_def,
+    ))
+}
+
+/// Extract an account's byte discriminator (type tag), if it has one.
+///
+/// Codama models account discriminators as a list of `DiscriminatorNode`s:
+/// - `constantDiscriminatorNode` at offset 0 → constant bytes (extracted)
+/// - `fieldDiscriminatorNode` at offset 0 → the default value of the named
+///   account-data field (extracted; this is how Anchor-derived Codama IDLs
+///   encode the 8-byte discriminator)
+/// - `sizeDiscriminatorNode` → no byte tag; returns empty
+fn account_discriminator_bytes(acc: &AccountNode) -> Vec<u8> {
+    use codama_nodes::DiscriminatorNode;
+
+    for disc in &acc.discriminators {
+        match disc {
+            DiscriminatorNode::Constant(c) => {
+                if c.offset == 0 {
+                    if let Some(bytes) = constant_value_bytes(&c.constant) {
+                        return bytes;
+                    }
+                }
+            }
+            DiscriminatorNode::Field(f) => {
+                if f.offset == 0 {
+                    let data = acc.data.get_nested_type_node();
+                    if let Some(field) = data.fields.iter().find(|fl| fl.name == f.name) {
+                        if let Some(bytes) = field.default_value.as_ref().and_then(value_node_bytes)
+                        {
+                            return bytes;
+                        }
+                    }
+                }
+            }
+            DiscriminatorNode::Size(_) => {}
+        }
+    }
+    vec![]
+}
+
+/// Extract literal bytes from a `ConstantValueNode`.
+fn constant_value_bytes(constant: &codama_nodes::ConstantValueNode) -> Option<Vec<u8>> {
+    let bytes = value_node_bytes(&constant.value)?;
+    // For number-typed constants, truncate to the declared byte width.
+    if let TypeNode::Number(nt) = &*constant.r#type {
+        let width = number_format_byte_width(&nt.format);
+        return Some(bytes[..width.min(bytes.len())].to_vec());
+    }
+    Some(bytes)
+}
+
+/// Extract literal bytes from a `ValueNode` (bytes / number values).
+fn value_node_bytes(value: &codama_nodes::ValueNode) -> Option<Vec<u8>> {
+    use codama_nodes::{BytesEncoding, ValueNode};
+
+    match value {
+        ValueNode::Bytes(b) => match b.encoding {
+            BytesEncoding::Base16 => decode_hex(&b.data),
+            BytesEncoding::Base58 => bs58::decode(&b.data).into_vec().ok(),
+            BytesEncoding::Utf8 => Some(b.data.as_bytes().to_vec()),
+            _ => None,
+        },
+        ValueNode::Number(NumberValueNode { number }) => {
+            Some(number_to_u64(number).to_le_bytes().to_vec())
+        }
+        ValueNode::Array(arr) => {
+            // Anchor-derived Codama IDLs encode discriminators as an array of
+            // u8 number values.
+            let mut out = Vec::with_capacity(arr.items.len());
+            for item in &arr.items {
+                match item {
+                    ValueNode::Number(NumberValueNode { number }) => {
+                        out.push(number_to_u64(number) as u8);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +921,124 @@ mod tests {
             "token should have >= 20 instructions, got {}",
             idl.instructions.len()
         );
+    }
+
+    #[test]
+    fn test_convert_token_accounts() {
+        let root = load_token_idl();
+        let idl = convert(&root).expect("Token conversion failed");
+
+        // codama_token.json defines 3 accounts: mint, token, multisig
+        assert_eq!(idl.accounts.len(), 3, "token should have 3 accounts");
+        let names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"Mint"), "accounts: {names:?}");
+        assert!(names.contains(&"Token"), "accounts: {names:?}");
+        assert!(names.contains(&"Multisig"), "accounts: {names:?}");
+
+        // Each account must have a matching typedef so the state module,
+        // field-diff schemas, and discriminator registry can find it by name.
+        for acc in &idl.accounts {
+            let td = idl
+                .types
+                .iter()
+                .find(|t| t.name == acc.name)
+                .unwrap_or_else(|| panic!("account '{}' should have a typedef", acc.name));
+            match &td.ty {
+                IdlTypeDefTy::Struct {
+                    fields: Some(IdlDefinedFields::Named(fields)),
+                } => assert!(!fields.is_empty(), "{} should have fields", acc.name),
+                other => panic!(
+                    "account '{}' should be a named struct, got {other:?}",
+                    acc.name
+                ),
+            }
+            // Token accounts are size-discriminated — no byte type tag.
+            assert!(
+                acc.discriminator.is_empty(),
+                "size-discriminated account '{}' should have empty discriminator",
+                acc.name
+            );
+        }
+
+        // -- Deep: Mint layout --
+        let mint = idl.types.iter().find(|t| t.name == "Mint").unwrap();
+        if let IdlTypeDefTy::Struct {
+            fields: Some(IdlDefinedFields::Named(fields)),
+        } = &mint.ty
+        {
+            assert_eq!(fields[0].name, "mintAuthority");
+            assert_eq!(
+                fields[0].ty,
+                IdlType::Option(Box::new(IdlType::Pubkey)),
+                "mintAuthority should be Option<Pubkey>"
+            );
+            assert_eq!(fields[1].name, "supply");
+            assert_eq!(fields[1].ty, IdlType::U64);
+        } else {
+            panic!("Mint should be a struct");
+        }
+    }
+
+    #[test]
+    fn test_account_field_discriminator_extraction() {
+        // Anchor-derived Codama IDLs encode the 8-byte discriminator as a
+        // fieldDiscriminatorNode pointing at an omitted account-data field.
+        let json = r#"{
+            "kind": "accountNode",
+            "name": "myAccount",
+            "docs": [],
+            "data": {
+                "kind": "structTypeNode",
+                "fields": [
+                    {
+                        "kind": "structFieldTypeNode",
+                        "name": "discriminator",
+                        "type": {
+                            "kind": "arrayTypeNode",
+                            "item": { "kind": "numberTypeNode", "format": "u8", "endian": "le" },
+                            "count": { "kind": "fixedCountNode", "value": 8 }
+                        },
+                        "defaultValue": {
+                            "kind": "bytesValueNode",
+                            "data": "0102030405060708",
+                            "encoding": "base16"
+                        },
+                        "defaultValueStrategy": "omitted",
+                        "docs": []
+                    },
+                    {
+                        "kind": "structFieldTypeNode",
+                        "name": "owner",
+                        "type": { "kind": "publicKeyTypeNode" },
+                        "docs": []
+                    }
+                ]
+            },
+            "discriminators": [
+                { "kind": "fieldDiscriminatorNode", "name": "discriminator", "offset": 0 }
+            ]
+        }"#;
+        let acc: AccountNode = serde_json::from_str(json).expect("should parse accountNode");
+        let (idl_account, type_def) =
+            convert_program_account(&acc).expect("conversion should succeed");
+
+        assert_eq!(idl_account.name, "MyAccount");
+        assert_eq!(
+            idl_account.discriminator,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            "field discriminator default bytes should be extracted"
+        );
+
+        // The omitted discriminator field must not appear in the typedef.
+        if let IdlTypeDefTy::Struct {
+            fields: Some(IdlDefinedFields::Named(fields)),
+        } = &type_def.ty
+        {
+            assert_eq!(fields.len(), 1, "omitted discriminator field is filtered");
+            assert_eq!(fields[0].name, "owner");
+        } else {
+            panic!("expected named struct");
+        }
     }
 
     #[test]

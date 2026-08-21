@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use super::dirty_tracker::DirtyTracker;
+use super::dirty_tracker::{CreationTracker, DirtyTracker};
 
 /// Snapshot of account state at setup time. Restores only dirty accounts
 /// instead of cloning the entire SVM.
@@ -88,6 +88,12 @@ impl SvmSnapshot {
     /// Get the number of snapshotted accounts.
     pub fn account_count(&self) -> usize {
         self.accounts.len()
+    }
+
+    /// Whether an account existed in this snapshot (pre-existing vs created later).
+    #[inline]
+    pub fn contains_account(&self, pubkey: &Pubkey) -> bool {
+        self.accounts.contains_key(pubkey)
     }
 
     /// Estimate heap bytes owned by this snapshot (HashMap overhead + Account data).
@@ -1016,21 +1022,135 @@ pub fn slot_diff_bucket(diff: u64) -> u8 {
     }
 }
 
-/// Number of bits in the final fingerprint for dedup. Controls novel rate:
+/// Default/minimum number of bits in the final fingerprint for dedup. Controls novel rate:
 /// - Too many bits → every state is "novel", pool grows unbounded
 /// - Too few bits → states collapse, pool stays tiny
 /// 18 bits = 256K possible fingerprints (32KB bitmap).
+///
+/// This is the floor: the actual dedup width is derived at runtime from the
+/// configured pool capacity (`--pool-size`) via
+/// `state_pool::fingerprint_bits_for_capacity`, so larger pools get a
+/// proportionally larger distinct-state ceiling.
 pub(super) const FINGERPRINT_BITS: u32 = 18;
+
+/// Stable identity hash for an account in fingerprint/novelty hashing.
+///
+/// - Accounts present in the initial snapshot are keyed by **pubkey** (stable
+///   across runs by construction).
+/// - Accounts created during fuzzing are keyed by **creation ordinal + owner +
+///   canonical type prefix**. Fresh keypairs/PDAs/ATAs get a different pubkey
+///   every run, so hashing the pubkey would make semantically identical states
+///   hash as novel; the creation ordinal is deterministic for a replayed action
+///   sequence. Salting with owner + discriminator/fallback prefix prevents
+///   over-collapse when different inputs create different account types at the
+///   same ordinal, while embedded created pubkeys are canonicalized before any
+///   fallback bytes are hashed.
+pub fn account_identity_hash(
+    pubkey: &Pubkey,
+    account: Option<&Account>,
+    creation: &CreationTracker,
+    initial: &SvmSnapshot,
+) -> u64 {
+    let mut h = FxHasher::default();
+    if initial.accounts.contains_key(pubkey) {
+        pubkey.hash(&mut h);
+    } else if let Some(ordinal) = creation.ordinal(pubkey) {
+        ordinal.hash(&mut h);
+        if let Some(acct) = account {
+            acct.owner.hash(&mut h);
+            if let Some(disc_len) = crate::schema::lookup_registered_discriminator_len(&acct.data) {
+                acct.data[..disc_len.min(acct.data.len())].hash(&mut h);
+            } else if let Some(disc_len) = crate::schema::fallback_discriminator_len(&acct.data) {
+                let canonical_data = canonicalize_created_pubkeys(&acct.data, creation);
+                let hash_data = canonical_data.as_deref().unwrap_or(&acct.data);
+                hash_data[..disc_len.min(hash_data.len())].hash(&mut h);
+            } else {
+                acct.data.len().hash(&mut h);
+            }
+        }
+    } else {
+        // Not in initial and no ordinal recorded (caller without creation
+        // tracking) — fall back to pubkey identity.
+        pubkey.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Replace embedded created pubkeys with deterministic ordinal markers before
+/// hashing account data. This keeps fingerprints stable when an account stores
+/// freshly-created account keys in its fields.
+fn canonicalize_created_pubkeys(data: &[u8], creation: &CreationTracker) -> Option<Vec<u8>> {
+    if creation.is_empty() || data.len() < 32 {
+        return None;
+    }
+
+    let mut first_byte_candidates = [false; 256];
+    for pubkey in creation.pubkeys() {
+        first_byte_candidates[pubkey.to_bytes()[0] as usize] = true;
+    }
+
+    let mut canonical = None;
+    let mut i = 0usize;
+    while i + 32 <= data.len() {
+        if !first_byte_candidates[data[i] as usize] {
+            i += 1;
+            continue;
+        }
+        if let Some(ordinal) = creation.ordinal_for_bytes(&data[i..i + 32]) {
+            let out = canonical.get_or_insert_with(|| data.to_vec());
+            out[i..i + 32].copy_from_slice(&canonical_created_pubkey_marker(ordinal));
+            i += 32;
+        } else {
+            i += 1;
+        }
+    }
+    canonical
+}
+
+fn canonical_created_pubkey_marker(ordinal: u32) -> [u8; 32] {
+    let mut marker = [0xA5u8; 32];
+    marker[..8].copy_from_slice(b"CRUCPUBK");
+    for (chunk_idx, chunk) in marker[8..].chunks_exact_mut(4).enumerate() {
+        let value = ordinal.wrapping_add((chunk_idx as u32).wrapping_mul(0x9E37_79B9));
+        for (dst, src) in chunk.iter_mut().zip(value.to_le_bytes()) {
+            *dst = if src == 0 { 0x7F } else { src };
+        }
+    }
+    marker
+}
+
+/// Sort dirty accounts for deterministic hash ordering: pre-existing accounts
+/// (and any without a creation ordinal) sorted by pubkey, then created accounts
+/// in creation order. Created accounts must NOT be ordered by their random
+/// pubkeys — that would make the hash order (and thus the fingerprint) vary
+/// across runs for identical states.
+fn sort_dirty_for_fingerprint<'a>(
+    dirty: &'a DirtyTracker,
+    creation: &CreationTracker,
+) -> Vec<&'a Pubkey> {
+    let mut sorted_dirty: Vec<&Pubkey> = dirty.dirty_accounts().iter().collect();
+    sorted_dirty.sort();
+    // Stable sort: pubkey order is preserved within the no-ordinal group.
+    sorted_dirty.sort_by_key(|pk| match creation.ordinal(pk) {
+        None => (0u8, 0u32),
+        Some(ord) => (1u8, ord),
+    });
+    sorted_dirty
+}
 
 /// Compute an absolute state fingerprint from the current SVM state.
 ///
 /// Uses field-boundary-aware diffing against initial state for layout-aware bucketing.
-/// The hash is truncated to FINGERPRINT_BITS for dedup (in StatePool::try_add)
+/// The hash is truncated to the pool's runtime dedup width (in StatePool::try_add)
 /// while the full 64-bit value is kept for state_class action selection.
+///
+/// `creation` maps accounts created along this state's lineage to their
+/// deterministic creation ordinals (see `account_identity_hash`).
 pub fn compute_state_fingerprint_from_snapshot(
     svm: &LiteSVM,
     dirty: &DirtyTracker,
     initial: &SvmSnapshot,
+    creation: &CreationTracker,
 ) -> u64 {
     let mut hasher = FxHasher::default();
 
@@ -1057,8 +1177,7 @@ pub fn compute_state_fingerprint_from_snapshot(
     // Sort dirty accounts for deterministic hash ordering.
     // FxHasher is order-dependent, so iterating a HashSet (non-deterministic order)
     // would produce different fingerprints for the same logical state.
-    let mut sorted_dirty: Vec<&Pubkey> = dirty.dirty_accounts().iter().collect();
-    sorted_dirty.sort();
+    let sorted_dirty = sort_dirty_for_fingerprint(dirty, creation);
 
     // Hash account count first (different account sets = different state)
     (sorted_dirty.len() as u64).hash(&mut hasher);
@@ -1067,9 +1186,12 @@ pub fn compute_state_fingerprint_from_snapshot(
         let account = svm.get_account(pubkey);
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
         let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let canonical_data = canonicalize_created_pubkeys(data, creation);
+        let hash_data = canonical_data.as_deref().unwrap_or(data);
 
-        // Per-pubkey identity: each account is tracked individually.
-        pubkey.hash(&mut hasher);
+        // Per-account identity: pubkey for pre-existing accounts, creation
+        // ordinal (+ owner + discriminator) for accounts created during fuzzing.
+        account_identity_hash(pubkey, account.as_ref(), creation, initial).hash(&mut hasher);
 
         // Hash absolute lamports bucket (not differential)
         value_bucket(lamports).hash(&mut hasher);
@@ -1083,30 +1205,30 @@ pub fn compute_state_fingerprint_from_snapshot(
             .get(pubkey)
             .map(|a| a.data.as_slice())
             .unwrap_or(&[]);
-        let min_len = data.len().min(init_data.len());
+        let min_len = hash_data.len().min(init_data.len());
         let mut i = 0usize;
         while i < min_len {
-            if data[i] != init_data[i] {
+            if hash_data[i] != init_data[i] {
                 let start = i;
-                while i < min_len && data[i] != init_data[i] {
+                while i < min_len && hash_data[i] != init_data[i] {
                     i += 1;
                 }
-                let val = read_region_value(&data[start..i]);
+                let val = read_region_value(&hash_data[start..i]);
                 (start as u32, value_bucket(val)).hash(&mut hasher);
             } else {
                 i += 1;
             }
         }
         // Handle data beyond init_data (new/grown accounts): diff against zero.
-        if data.len() > min_len {
+        if hash_data.len() > min_len {
             let mut i = min_len;
-            while i < data.len() {
-                if data[i] != 0 {
+            while i < hash_data.len() {
+                if hash_data[i] != 0 {
                     let start = i;
-                    while i < data.len() && data[i] != 0 {
+                    while i < hash_data.len() && hash_data[i] != 0 {
                         i += 1;
                     }
-                    let val = read_region_value(&data[start..i]);
+                    let val = read_region_value(&hash_data[start..i]);
                     (start as u32, value_bucket(val)).hash(&mut hasher);
                 } else {
                     i += 1;
@@ -1131,11 +1253,15 @@ pub fn compute_state_fingerprint_from_snapshot(
 ///
 /// Pass `field_bitmap_ptr` as null to skip field novelty (non-stateful modes).
 ///
+/// `creation` maps accounts created along this state's lineage to their
+/// deterministic creation ordinals (see `account_identity_hash`).
+///
 /// Returns (fingerprint, patches_map, field_novel_bits).
 pub unsafe fn fingerprint_and_collect_changed(
     svm: &LiteSVM,
     dirty: &DirtyTracker,
     initial: &SvmSnapshot,
+    creation: &CreationTracker,
     field_bitmap_ptr: *mut u8,
     field_bitmap_len: usize,
 ) -> (u64, FastHashMap<Pubkey, AccountPatch>, u32) {
@@ -1186,16 +1312,24 @@ pub unsafe fn fingerprint_and_collect_changed(
         return (hasher.finish(), changed, field_novel_count);
     }
 
-    let mut sorted_dirty: Vec<&Pubkey> = dirty.dirty_accounts().iter().collect();
-    sorted_dirty.sort();
+    let sorted_dirty = sort_dirty_for_fingerprint(dirty, creation);
     (sorted_dirty.len() as u64).hash(&mut hasher);
+
+    // Per-account identity hashes, collected for the set-novelty pass below.
+    let mut identities: Vec<u64> = Vec::with_capacity(sorted_dirty.len());
 
     for pubkey in &sorted_dirty {
         let account = svm.get_account(pubkey);
         let lamports = account.as_ref().map(|a| a.lamports).unwrap_or(0);
         let data = account.as_ref().map(|a| a.data.as_slice()).unwrap_or(&[]);
+        let canonical_data = canonicalize_created_pubkeys(data, creation);
+        let hash_data = canonical_data.as_deref().unwrap_or(data);
 
-        pubkey.hash(&mut hasher);
+        // Per-account identity: pubkey for pre-existing accounts, creation
+        // ordinal (+ owner + discriminator) for accounts created during fuzzing.
+        let identity = account_identity_hash(pubkey, account.as_ref(), creation, initial);
+        identities.push(identity);
+        identity.hash(&mut hasher);
         value_bucket(lamports).hash(&mut hasher);
         value_bucket(data.len() as u64).hash(&mut hasher);
 
@@ -1204,7 +1338,7 @@ pub unsafe fn fingerprint_and_collect_changed(
         let init_lamports = init_account.map(|a| a.lamports).unwrap_or(0);
         let same_size = data.len() == init_data.len();
 
-        let type_key = pubkey_key(pubkey);
+        let type_key = identity;
 
         // Field novelty: combined account×clock + lamports
         if do_field_novelty {
@@ -1223,17 +1357,17 @@ pub unsafe fn fingerprint_and_collect_changed(
         }
 
         // Walk bytes for changed regions: fingerprint + field novelty + patch collection
-        let min_len = data.len().min(init_data.len());
+        let min_len = hash_data.len().min(init_data.len());
         let mut any_diff = false;
         let mut i = 0usize;
         while i < min_len {
-            if data[i] != init_data[i] {
+            if hash_data[i] != init_data[i] {
                 any_diff = true;
                 let start = i;
-                while i < min_len && data[i] != init_data[i] {
+                while i < min_len && hash_data[i] != init_data[i] {
                     i += 1;
                 }
-                let val = read_region_value(&data[start..i]);
+                let val = read_region_value(&hash_data[start..i]);
                 let vb = value_bucket(val);
                 (start as u32, vb).hash(&mut hasher);
                 if do_field_novelty {
@@ -1247,16 +1381,16 @@ pub unsafe fn fingerprint_and_collect_changed(
                 i += 1;
             }
         }
-        if data.len() > min_len {
+        if hash_data.len() > min_len {
             any_diff = true;
             let mut i = min_len;
-            while i < data.len() {
-                if data[i] != 0 {
+            while i < hash_data.len() {
+                if hash_data[i] != 0 {
                     let start = i;
-                    while i < data.len() && data[i] != 0 {
+                    while i < hash_data.len() && hash_data[i] != 0 {
                         i += 1;
                     }
-                    let val = read_region_value(&data[start..i]);
+                    let val = read_region_value(&hash_data[start..i]);
                     let vb = value_bucket(val);
                     (start as u32, vb).hash(&mut hasher);
                     if do_field_novelty {
@@ -1298,7 +1432,7 @@ pub unsafe fn fingerprint_and_collect_changed(
         // Field novelty: per-identity and per-identity×clock
         if do_field_novelty {
             let mut id_hasher = FxHasher::default();
-            pubkey.hash(&mut id_hasher);
+            identity.hash(&mut id_hasher);
             value_bucket(lamports).hash(&mut id_hasher);
             value_bucket(data.len() as u64).hash(&mut id_hasher);
             field_novel_count +=
@@ -1306,7 +1440,7 @@ pub unsafe fn fingerprint_and_collect_changed(
 
             if slot_diff > 0 {
                 let mut id_clock_hasher = FxHasher::default();
-                pubkey.hash(&mut id_clock_hasher);
+                identity.hash(&mut id_clock_hasher);
                 value_bucket(lamports).hash(&mut id_clock_hasher);
                 sdb.hash(&mut id_clock_hasher);
                 field_novel_count += check_and_set_bit_atomic(
@@ -1367,19 +1501,20 @@ pub unsafe fn fingerprint_and_collect_changed(
         }
     }
 
-    // Field novelty: combined set of dirty pubkeys
+    // Field novelty: combined set of dirty account identities (stable across
+    // runs, unlike raw pubkeys of accounts created during fuzzing)
     if do_field_novelty && sorted_dirty.len() > 1 {
         let mut set_hasher = FxHasher::default();
-        for pk in &sorted_dirty {
-            pk.hash(&mut set_hasher);
+        for identity in &identities {
+            identity.hash(&mut set_hasher);
         }
         field_novel_count +=
             check_and_set_bit_atomic(field_bitmap_ptr, total_bits, set_hasher.finish());
 
         if slot_diff > 0 {
             let mut set_clock_hasher = FxHasher::default();
-            for pk in &sorted_dirty {
-                pk.hash(&mut set_clock_hasher);
+            for identity in &identities {
+                identity.hash(&mut set_clock_hasher);
             }
             sdb.hash(&mut set_clock_hasher);
             field_novel_count +=

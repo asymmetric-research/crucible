@@ -50,6 +50,7 @@ pub fn generate_bytecode_lcov<W, S1, S2>(
     functions: &[FunctionInfo],
     total_instructions: usize,
     total_branches: usize,
+    symbol_names: Option<&HashMap<usize, String>>,
 ) -> std::io::Result<()>
 where
     W: Write,
@@ -64,27 +65,33 @@ where
     let mut sorted_functions = functions.to_vec();
     sorted_functions.sort_by_key(|f| f.entry_pc);
 
-    // LCOV expects line numbers starting from 1, so we offset all PCs by 1
-    for func in &sorted_functions {
-        // Use function name if available, otherwise use "fn_<entry_pc>"
-        let name = if func.name.is_empty() {
+    // Resolve a display name for a function entry.
+    //
+    // The program loaded into the SVM is usually stripped, so `extract_functions`
+    // only recovers `fn_<pc>` / `function_<pc>` placeholders. When a symbol-name
+    // map from the unstripped `symbols.so` is available, prefer its demangled
+    // name so bytecode-level LCOV carries real Rust function names.
+    let resolve_name = |func: &FunctionInfo| -> String {
+        if let Some(name) = symbol_names.and_then(|m| m.get(&func.entry_pc)) {
+            return name.clone();
+        }
+        if func.name.is_empty() {
             format!("fn_{}", func.entry_pc)
         } else {
             func.name.clone()
-        };
-        writeln!(writer, "FN:{},{}", func.entry_pc + 1, name)?;
+        }
+    };
+
+    // LCOV expects line numbers starting from 1, so we offset all PCs by 1
+    for func in &sorted_functions {
+        writeln!(writer, "FN:{},{}", func.entry_pc + 1, resolve_name(func))?;
     }
 
     // Function hit counts
     let mut functions_hit = 0usize;
     for func in &sorted_functions {
-        let name = if func.name.is_empty() {
-            format!("fn_{}", func.entry_pc)
-        } else {
-            func.name.clone()
-        };
         let hits = pc_hits.get(&func.entry_pc).copied().unwrap_or(0);
-        writeln!(writer, "FNDA:{},{}", hits, name)?;
+        writeln!(writer, "FNDA:{},{}", hits, resolve_name(func))?;
         if hits > 0 {
             functions_hit += 1;
         }
