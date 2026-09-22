@@ -36,6 +36,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
 | `--pool-size <N>` | State pool capacity in stateful mode (default: 256000). Also scales the fingerprint-dedup keyspace, so a larger pool raises the distinct-state ceiling |
 | `--program-so <PATH>` | Override the program `.so` loaded by the harness |
+| `--program-id <PUBKEY>` | Scope `--program-so` to one program id (default: every program the harness loads) |
 | `--mode <MODE>` | Remote fuzzing operational mode (see [Remote Fuzzing Integration](remote-fuzzing.md)) |
 | `--lcov-out <PATH>` | Custom LCOV coverage output file path |
 

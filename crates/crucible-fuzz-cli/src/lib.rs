@@ -97,6 +97,9 @@ pub enum FuzzCmd {
         /// Path to alternative program .so binary
         #[arg(long)]
         program_so: Option<PathBuf>,
+        /// Pubkey the --program-so override applies to (default: every program)
+        #[arg(long)]
+        program_id: Option<String>,
         /// Path to debug binary with DWARF symbols (for source-level coverage with --coverage)
         #[arg(long)]
         symbols: Option<PathBuf>,
@@ -234,6 +237,7 @@ pub fn run(cli: Cli) -> Result<()> {
             max_depth,
             pool_size,
             program_so,
+            program_id,
             symbols,
             stats,
             mode,
@@ -262,6 +266,7 @@ pub fn run(cli: Cli) -> Result<()> {
             max_depth,
             pool_size,
             program_so,
+            program_id,
             symbols,
             stats,
             mode,
@@ -456,6 +461,7 @@ fn fuzz_run(
     max_depth: Option<u32>,
     pool_size: Option<u64>,
     program_so: Option<PathBuf>,
+    program_id: Option<String>,
     symbols: Option<PathBuf>,
     stats: bool,
     mode: Option<String>,
@@ -729,6 +735,12 @@ fn fuzz_run(
         let abs_path = resolve_path(&cwd, program_so_path);
         cmd.env("FUZZ_PROGRAM_SO", &abs_path);
         println!("[FUZZ] Program binary override: {}", abs_path.display());
+        if let Some(ref id) = program_id {
+            cmd.env("FUZZ_PROGRAM_ID", id);
+            println!("[FUZZ] Override scoped to program: {}", id);
+        } else {
+            println!("[FUZZ] Override applies to every add_program call (scope with --program-id)");
+        }
     }
 
     if let Some(ref symbols_path) = symbols {
