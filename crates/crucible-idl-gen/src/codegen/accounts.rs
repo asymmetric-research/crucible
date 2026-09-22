@@ -33,6 +33,7 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
     // `addresses` sub-module.
     let mut address_constants: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut seen_addresses: HashMap<String, String> = HashMap::new(); // address → const_name
+    let mut taken_const_names: HashMap<String, usize> = HashMap::new(); // const_name → uses
 
     let account_structs = idl.instructions.iter().map(|ix| {
         let name = format_ident!("{}", ix.name.to_upper_camel_case());
@@ -106,9 +107,19 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
                     }
                 };
 
-                // Register address constant
-                let const_name = single.name.to_snake_case().to_uppercase();
+                // Register address constant. The same account name can carry a
+                // different fixed address in another instruction (e.g. SPL-Token
+                // vs Token-2022 variants), so the const name must be uniquified
+                // per address or the module defines it twice (E0428).
                 if !seen_addresses.contains_key(address) {
+                    let base_const_name = single.name.to_snake_case().to_uppercase();
+                    let uses = taken_const_names.entry(base_const_name.clone()).or_insert(0);
+                    let const_name = if *uses == 0 {
+                        base_const_name
+                    } else {
+                        format!("{}_{}", base_const_name, *uses + 1)
+                    };
+                    *uses += 1;
                     seen_addresses.insert(address.clone(), const_name.clone());
                     let const_ident = format_ident!("{}", const_name);
                     address_constants.push(quote! {
@@ -551,6 +562,50 @@ mod tests {
             rent_const_count, 1,
             "same address across instructions should produce one constant, got {}",
             rent_const_count
+        );
+    }
+
+    #[test]
+    fn test_same_name_two_addresses_uniquifies_constants() {
+        // One account name bound to two different fixed addresses across
+        // instructions (SPL-Token vs Token-2022 variants) must not define the
+        // same constant twice (E0428).
+        let idl = make_idl(vec![
+            IdlInstruction {
+                name: "Initialize".to_string(),
+                docs: vec![],
+                discriminator: vec![],
+                accounts: vec![make_fixed_account(
+                    "baseTokenProgram",
+                    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                )],
+                args: vec![],
+                returns: None,
+            },
+            IdlInstruction {
+                name: "InitializeWithToken2022".to_string(),
+                docs: vec![],
+                discriminator: vec![],
+                accounts: vec![make_fixed_account(
+                    "baseTokenProgram",
+                    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+                )],
+                args: vec![],
+                returns: None,
+            },
+        ]);
+
+        let output = generate(&idl).to_string();
+
+        assert_eq!(
+            output.matches("pub static BASE_TOKEN_PROGRAM :").count(),
+            1,
+            "base constant should be defined exactly once, got: {output}"
+        );
+        assert_eq!(
+            output.matches("pub static BASE_TOKEN_PROGRAM_2 :").count(),
+            1,
+            "second address should get a uniquified constant, got: {output}"
         );
     }
 
