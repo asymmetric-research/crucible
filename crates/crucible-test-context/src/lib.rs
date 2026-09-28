@@ -1815,6 +1815,35 @@ impl Clone for TestContext {
     }
 }
 
+/// Resolve the `FUZZ_PROGRAM_SO` binary override for one program.
+///
+/// `--program-so` targets the program under test, but a harness may deploy
+/// additional programs it CPIs into; replacing those with the target's binary
+/// breaks setup, or worse, silently measures coverage against the wrong world.
+/// When `FUZZ_PROGRAM_ID` is set, the override applies only to that program.
+/// Without it, the override applies to every program (correct for the common
+/// single-program harness).
+fn program_so_override(program_id: &Pubkey) -> Option<String> {
+    let override_path = std::env::var("FUZZ_PROGRAM_SO").ok()?;
+    match std::env::var("FUZZ_PROGRAM_ID") {
+        Ok(target) => match target.parse::<Pubkey>() {
+            Ok(target) if target == *program_id => Some(override_path),
+            Ok(_) => None,
+            Err(_) => {
+                // A broken filter must not silently disable the requested
+                // override: unscoped coverage fails loudly, a skipped
+                // override corrupts coverage with no error at all.
+                eprintln!(
+                    "[COVERAGE] warning: FUZZ_PROGRAM_ID {target:?} is not a valid pubkey; \
+                     applying --program-so override to every program"
+                );
+                Some(override_path)
+            }
+        },
+        Err(_) => Some(override_path),
+    }
+}
+
 impl TestContext {
     /// Create a builder. The default initial slot is zero.
     pub fn builder() -> TestContextBuilder {
@@ -1994,7 +2023,7 @@ impl TestContext {
     }
 
     pub fn add_program(&mut self, program_id: &Pubkey, program_path: &str) -> Result<()> {
-        let actual_path = if let Ok(override_path) = std::env::var("FUZZ_PROGRAM_SO") {
+        let actual_path = if let Some(override_path) = program_so_override(program_id) {
             eprintln!(
                 "[COVERAGE] Program binary override: {} -> {}",
                 program_path, override_path
@@ -2021,7 +2050,7 @@ impl TestContext {
         // Without this, `--program-so` silently does nothing for rpc-cloned
         // programs and coverage replay ends up executing the wrong binary.
         let override_bytes;
-        let program_data: &[u8] = if let Ok(override_path) = std::env::var("FUZZ_PROGRAM_SO") {
+        let program_data: &[u8] = if let Some(override_path) = program_so_override(program_id) {
             eprintln!(
                 "[COVERAGE] Program binary override: <{} bytes> -> {}",
                 program_data.len(),
@@ -5589,6 +5618,105 @@ mod tests {
         assert!(
             result.is_err(),
             "Override pointing to nonexistent file should error"
+        );
+    }
+
+    #[test]
+    fn test_add_program_override_applies_to_matching_program_id() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let so_path = find_test_so();
+
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+
+        std::env::set_var("FUZZ_PROGRAM_SO", &so_path);
+        std::env::set_var("FUZZ_PROGRAM_ID", program_id.to_string());
+
+        let result = ctx.add_program(&program_id, "/nonexistent/bogus.so");
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+        std::env::remove_var("FUZZ_PROGRAM_ID");
+
+        assert!(
+            result.is_ok(),
+            "Override should apply when FUZZ_PROGRAM_ID matches"
+        );
+    }
+
+    #[test]
+    fn test_add_program_override_skips_non_target_program() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let so_path = find_test_so();
+
+        let mut ctx = TestContext::new();
+        let target = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+
+        std::env::set_var("FUZZ_PROGRAM_SO", &so_path);
+        std::env::set_var("FUZZ_PROGRAM_ID", target.to_string());
+
+        // Non-target program keeps its own binary: loading from a bogus path
+        // must fail instead of being silently replaced by the override.
+        let bogus = ctx.add_program(&other, "/nonexistent/bogus.so");
+        // ...and its real binary loads untouched.
+        let real = ctx.add_program(&other, &so_path);
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+        std::env::remove_var("FUZZ_PROGRAM_ID");
+
+        assert!(
+            bogus.is_err(),
+            "Override must not apply to a program other than FUZZ_PROGRAM_ID"
+        );
+        assert!(
+            real.is_ok(),
+            "Non-target program should load its own binary"
+        );
+    }
+
+    #[test]
+    fn test_add_program_from_bytes_override_skips_non_target_program() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let so_path = find_test_so();
+
+        let mut ctx = TestContext::new();
+        let target = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+
+        // Override path does not exist: if the override wrongly applied to the
+        // non-target program, this would error trying to read it.
+        std::env::set_var("FUZZ_PROGRAM_SO", "/tmp/does_not_exist_xyz.so");
+        std::env::set_var("FUZZ_PROGRAM_ID", target.to_string());
+
+        let bytes = std::fs::read(&so_path).unwrap();
+        let result = ctx.add_program_from_bytes(&other, &bytes);
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+        std::env::remove_var("FUZZ_PROGRAM_ID");
+
+        assert!(
+            result.is_ok(),
+            "Non-target program should keep the caller-supplied bytes"
+        );
+    }
+
+    #[test]
+    fn test_add_program_override_invalid_program_id_applies_everywhere() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let so_path = find_test_so();
+
+        let mut ctx = TestContext::new();
+        let program_id = Pubkey::new_unique();
+
+        std::env::set_var("FUZZ_PROGRAM_SO", &so_path);
+        std::env::set_var("FUZZ_PROGRAM_ID", "not-a-valid-pubkey");
+
+        // Fail loudly, not silently: a broken filter falls back to the old
+        // override-everything behavior rather than skipping the override.
+        let result = ctx.add_program(&program_id, "/nonexistent/bogus.so");
+        std::env::remove_var("FUZZ_PROGRAM_SO");
+        std::env::remove_var("FUZZ_PROGRAM_ID");
+
+        assert!(
+            result.is_ok(),
+            "Unparseable FUZZ_PROGRAM_ID should keep the override active"
         );
     }
 

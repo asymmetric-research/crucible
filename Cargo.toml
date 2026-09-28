@@ -9,6 +9,13 @@ members = [
     "crates/crucible-idl-gen",
     "crates/crucible-fuzz-cli",
 ]
+# Nested workspaces must be excluded or `cargo install --git` rejects the repo:
+# crucible-fuzzer's dev-dependency path into examples/ would otherwise pull the
+# example program into this workspace while examples/*/Cargo.toml also claims it.
+exclude = [
+    "examples",
+    "crates/crucible-fuzzer/test-program",
+]
 resolver = "2"
 
 [workspace.package]

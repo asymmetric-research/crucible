@@ -303,6 +303,7 @@ helpers/delegate.rs: validate_delegated_amount (lines 89-102) — partial
 | `--coverage` | `FUZZ_COVERAGE` | Enable LCOV output (sets `COVERAGE_ENABLED`) |
 | `--symbols <path>` | `FUZZ_SYMBOLS` | Path to unstripped `.so` with DWARF debug info |
 | `--program-so <path>` | `FUZZ_PROGRAM_SO` | Override which `.so` litesvm loads (for coverage with different opt-level) |
+| `--program-id <pubkey>` | `FUZZ_PROGRAM_ID` | Scope `--program-so` to one program id. Without it the override applies to **every** `add_program` call, which breaks harnesses that also deploy CPI-dependency programs |
 | `--lcov-out <path>` | `FUZZ_COVERAGE_OUT` | Custom LCOV output path (default: `./coverage/coverage.lcov`) |
 | `--corpus-in <dir>` | `FUZZ_CORPUS_IN` | Load corpus for replay (with `--coverage`, triggers coverage-only mode) |
 
