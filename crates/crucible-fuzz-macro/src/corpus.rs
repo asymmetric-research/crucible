@@ -24,8 +24,8 @@ pub fn cmin_mode(
 
     quote! {
         // === CORPUS MINIMIZATION MODE (CMIN) ===
-        // Run each input once to collect coverage, then use greedy set-cover
-        // to find minimum set of inputs that preserve all coverage
+        // Stream the corpus once tracking the best input per edge, re-run only
+        // those winners, then greedy set-cover drops the redundant ones.
         if cmin_mode {
             let corpus_dir = match &corpus_in_dir {
                 Some(dir) => dir.clone(),
@@ -40,65 +40,34 @@ pub fn cmin_mode(
             eprintln!("[CMIN] Minimizing corpus from: {}", corpus_dir);
             eprintln!("[CMIN] Output directory: {}", corpus_out);
 
-            // Collect input files (excluding metadata)
-            let mut input_files: Vec<_> = match std::fs::read_dir(&corpus_dir) {
-                Ok(entries) => entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        let path = e.path();
-                        path.is_file() && is_corpus_input(&path)
-                    })
-                    .map(|e| e.path())
-                    .collect(),
+            let corpus_path = std::path::Path::new(&corpus_dir);
+
+            let input_count = match crucible_fuzzer::cmin::corpus_dir::count_inputs(corpus_path, is_corpus_input) {
+                Ok(n) => n,
                 Err(e) => {
                     eprintln!("[CMIN] Failed to read corpus directory: {}", e);
                     std::process::exit(1);
                 }
             };
 
-            // Sort by file size (prefer smaller inputs for tie-breaking)
-            input_files.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
+            eprintln!("[CMIN] Found {} input files", input_count);
 
-            eprintln!("[CMIN] Found {} input files", input_files.len());
-
-            if input_files.is_empty() {
+            if input_count == 0 {
                 eprintln!("[CMIN] No input files found in corpus directory");
                 std::process::exit(1);
             }
 
-            // Setup tracing for coverage
             std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
-            // Run setup
             let template_fixture = #fixture_name::setup();
 
-            // Initialize coverage totals
             { #init_coverage_totals }
 
-            // Data structure: for each input, track which edges it covers
-            // edges_per_input[i] = set of edge IDs covered by input i
-            let mut edges_per_input: Vec<std::collections::HashSet<u64>> = Vec::with_capacity(input_files.len());
-            let mut input_paths: Vec<std::path::PathBuf> = Vec::with_capacity(input_files.len());
-
-            // Phase 1: Execute each input and record coverage
-            eprintln!("[CMIN] Phase 1: Collecting coverage from {} inputs...", input_files.len());
-            let start_time = std::time::Instant::now();
-
-            for (idx, path) in input_files.iter().enumerate() {
-                let input_bytes = match std::fs::read(path) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        eprintln!("[CMIN] Failed to read {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-
-                // Reset coverage map for this input
+            let run_input = |input_bytes: Vec<u8>| -> crucible_test_context::FastHashSet<u64> {
                 unsafe {
                     std::ptr::write_bytes(cov_ptr, 0, #mod_name::MAP_SIZE);
                 }
 
-                // Create fresh fixture for each input
                 // Use set_invocation_callback to avoid double SVM clone (critical for performance)
                 let mut callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
                 // Skip global COVERAGE_STATE lock — cmin doesn't use it
@@ -106,50 +75,95 @@ pub fn cmin_mode(
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
 
-                // Enable exact edge tracking (immune to u8 wrapping in the AFL map)
+                // Exact (pc, target_pc) edge tracking, immune to u8 wrapping and AFL map index inflation
                 #mod_name::cmin_edge_set_enable();
 
-                // Run the test in a closure to handle deserialization failures
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     #deser_block
                     #fn_name(#(#call_args),*);
                 }));
 
-                // Clear any violation flag
                 let _ = crucible_test_context::take_violation();
 
-                // Collect edges from the exact edge set (not the u8 AFL map).
-                // The set tracks unique (pc, target_pc) pairs — the same metric
-                // as COVERAGE_STATE.edges used by the normal fuzzing monitor.
-                // This is immune to both u8 wrapping and AFL map index inflation
-                // from context-sensitivity (prev_location XOR).
-                let edges: std::collections::HashSet<u64> = #mod_name::cmin_edge_set_take()
-                    .map(|set| set.into_iter().collect())
-                    .unwrap_or_default();
+                #mod_name::cmin_edge_set_take().unwrap_or_default()
+            };
 
-                if !edges.is_empty() {
-                    edges_per_input.push(edges);
-                    input_paths.push(path.clone());
+            // Phase 1: stream every input, keeping only the best input per edge
+            eprintln!("[CMIN] Phase 1: Collecting coverage from {} inputs...", input_count);
+            let start_time = std::time::Instant::now();
+
+            let input_paths = match crucible_fuzzer::cmin::corpus_dir::input_paths(corpus_path, is_corpus_input) {
+                Ok(paths) => paths,
+                Err(e) => {
+                    eprintln!("[CMIN] Failed to read corpus directory: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let mut winners = crucible_fuzzer::cmin::winners::WinnerTable::new();
+
+            for (idx, path) in input_paths.enumerate() {
+                let input_bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        eprintln!("[CMIN] Failed to read {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
+                let size = input_bytes.len() as u64;
+                let edges = run_input(input_bytes);
+                if let Some(name) = path.file_name() {
+                    winners.offer(name, size, edges);
                 }
 
                 if (idx + 1) % 50 == 0 {
-                    eprintln!("[CMIN] Processed {}/{} inputs...", idx + 1, input_files.len());
+                    eprintln!("[CMIN] Processed {}/{} inputs...", idx + 1, input_count);
                 }
             }
 
-            let phase1_time = start_time.elapsed();
-            eprintln!("[CMIN] Phase 1 complete: {} inputs with coverage in {:.1}s",
-                edges_per_input.len(), phase1_time.as_secs_f64());
+            eprintln!("[CMIN] Phase 1 complete: {} candidate inputs in {:.1}s",
+                winners.live_winners(), start_time.elapsed().as_secs_f64());
+            eprintln!("[CMIN] Total unique edges: {}", winners.edge_count());
 
-            // Collect all unique edges
-            let mut all_edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
-            for edges in &edges_per_input {
-                all_edges.extend(edges);
+            let candidates = winners.winners();
+
+            // Phase 2: re-run the winners to recover their edge sets
+            eprintln!("[CMIN] Phase 2: Re-running {} candidate inputs...", candidates.len());
+
+            let mut edges_per_input: Vec<std::collections::HashSet<u64>> = Vec::with_capacity(candidates.len());
+            let mut input_names: Vec<std::ffi::OsString> = Vec::with_capacity(candidates.len());
+
+            for candidate in &candidates {
+                let path = corpus_path.join(&candidate.name);
+                let input_bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        eprintln!("[CMIN] Failed to read {}: {}", path.display(), e);
+                        continue;
+                    }
+                };
+
+                let edges: std::collections::HashSet<u64> = run_input(input_bytes).into_iter().collect();
+                if !edges.is_empty() {
+                    edges_per_input.push(edges);
+                    input_names.push(candidate.name.clone());
+                }
             }
-            eprintln!("[CMIN] Total unique edges: {}", all_edges.len());
 
-            // Phase 2: Greedy set-cover algorithm
-            eprintln!("[CMIN] Phase 2: Computing minimum corpus...");
+            let mut rerun_edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            for edges in &edges_per_input {
+                rerun_edges.extend(edges);
+            }
+            // A nondeterministic harness can hit an edge in phase 1 and miss it here, losing it
+            let missing = winners.edges().filter(|e| !rerun_edges.contains(e)).count();
+            if missing > 0 {
+                eprintln!("[CMIN] Warning: {} edges not reproduced on re-run", missing);
+            }
+            drop(winners);
+
+            // Phase 3: Greedy set-cover over the winners
+            eprintln!("[CMIN] Phase 3: Computing minimum corpus...");
 
             let cmin_result = crucible_fuzzer::cmin::greedy_set_cover(&edges_per_input);
             let selected = cmin_result.selected;
@@ -157,51 +171,35 @@ pub fn cmin_mode(
             eprintln!("[CMIN] Selected {} inputs (reduced from {})",
                 selected.len(), edges_per_input.len());
 
-            // Phase 3: Copy selected inputs to output directory
+            // Phase 4: write the output
             if corpus_out != corpus_dir {
                 std::fs::create_dir_all(&corpus_out)
                     .unwrap_or_else(|e| panic!("[CMIN] Failed to create output directory {}: {}", corpus_out, e));
-            }
 
-            let mut copied = 0usize;
-            for idx in &selected {
-                let src_path = &input_paths[*idx];
-                let filename = src_path.file_name().unwrap_or_default();
-                let dst_path = std::path::Path::new(&corpus_out).join(filename);
-
-                if corpus_out == corpus_dir {
-                    // In-place: mark as kept (will delete others later)
-                    copied += 1;
-                } else {
-                    // Different directory: copy file
-                    if std::fs::copy(src_path, &dst_path).is_ok() {
-                        copied += 1;
-                    }
+                for idx in &selected {
+                    let name = &input_names[*idx];
+                    let dst_path = std::path::Path::new(&corpus_out).join(name);
+                    let _ = std::fs::copy(corpus_path.join(name), &dst_path);
                 }
-            }
-
-            // If in-place minimization, remove non-selected files
-            if corpus_out == corpus_dir {
-                let selected_set: std::collections::HashSet<_> = selected.iter()
-                    .map(|&idx| input_paths[idx].clone())
+            } else {
+                let keep: std::collections::HashSet<std::ffi::OsString> = selected.iter()
+                    .map(|&idx| input_names[idx].clone())
                     .collect();
 
-                let mut removed = 0usize;
-                for path in &input_files {
-                    if !selected_set.contains(path) {
-                        if std::fs::remove_file(path).is_ok() {
-                            removed += 1;
-                        }
+                match crucible_fuzzer::cmin::corpus_dir::remove_unselected(corpus_path, is_corpus_input, &keep) {
+                    Ok(removed) => eprintln!("[CMIN] Removed {} redundant inputs", removed),
+                    Err(e) => {
+                        eprintln!("[CMIN] Failed to read corpus directory: {}", e);
+                        std::process::exit(1);
                     }
                 }
-                eprintln!("[CMIN] Removed {} redundant inputs", removed);
             }
 
             let total_time = start_time.elapsed();
             eprintln!("[CMIN] Complete! {} -> {} inputs ({:.1}% reduction) in {:.1}s",
-                input_files.len(),
+                input_count,
                 selected.len(),
-                (1.0 - (selected.len() as f64 / input_files.len() as f64)) * 100.0,
+                (1.0 - (selected.len() as f64 / input_count as f64)) * 100.0,
                 total_time.as_secs_f64());
             eprintln!("[CMIN] Output: {}", corpus_out);
 

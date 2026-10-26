@@ -150,7 +150,7 @@ Merges and deduplicates the corpus, writing the effective (minimized) subset to 
 |--------|----------|
 | Corpus in | `./corpus` |
 | Output | `./output` (merged corpus files) |
-| Method | Greedy set-cover: replays all inputs, keeps minimum set preserving all coverage |
+| Method | Streams all inputs keeping the smallest input per coverage edge, then greedy set-cover over those |
 | Exit code | 0 = success |
 
 ```bash
