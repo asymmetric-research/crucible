@@ -116,7 +116,7 @@ fn test_compact_delta_basic_diff_roundtrip() {
     // Restore and verify
     let _ = svm.set_account(pk, initial_acct.clone()); // reset to initial
     let divergent = FastHashSet::from_iter([pk]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(
         &svm,
         &pk,
@@ -178,7 +178,7 @@ fn test_compact_delta_large_account_few_changes() {
     // Restore and verify
     let _ = svm.set_account(pk, initial_acct.clone());
     let divergent = FastHashSet::from_iter([pk]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &modified_acct, "large_account");
 }
 
@@ -209,7 +209,7 @@ fn test_compact_delta_account_creation() {
 
     // Restore and verify
     let divergent = FastHashSet::from_iter([pk_created]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk_created, &created_acct, "created");
 }
 
@@ -272,7 +272,7 @@ fn test_compact_delta_account_resize() {
     // Restore and verify
     let _ = svm.set_account(pk, initial_acct);
     let divergent = FastHashSet::from_iter([pk]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &resized_acct, "resized");
 }
 
@@ -308,7 +308,7 @@ fn test_compact_delta_lamports_only() {
     // Restore and verify
     let _ = svm.set_account(pk, initial_acct);
     let divergent = FastHashSet::from_iter([pk]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &modified_acct, "lamports_only");
 }
 
@@ -359,7 +359,7 @@ fn test_compact_delta_mixed_diff_and_full() {
     let _ = svm.set_account(pk_diff, diff_acct);
     let _ = svm.set_account(pk_full, full_acct);
     let divergent = FastHashSet::from_iter([pk_diff, pk_full]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk_diff, &mod_diff, "mixed_diff");
     assert_account_eq(&svm, &pk_full, &mod_full, "mixed_full");
     assert_account_eq(&svm, &pk_untouched, &untouched_acct, "mixed_untouched");
@@ -378,7 +378,7 @@ fn test_compact_delta_empty() {
     assert_eq!(delta.account_count(), 0);
 
     let divergent = FastHashSet::default();
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     // Should be no-op
     assert_account_eq(&svm, &pk, &initial_acct, "empty_delta");
 }
@@ -416,7 +416,7 @@ fn test_compact_delta_restore_resets_divergent() {
 
     // Divergent includes both
     let divergent = FastHashSet::from_iter([pk_in_delta, pk_divergent]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
 
     // pk_in_delta should be the delta value
     assert_account_eq(&svm, &pk_in_delta, &mod_acct, "delta_account");
@@ -454,14 +454,14 @@ fn test_compact_delta_restore_selective_from_skips_unchanged() {
     // First restore
     let _ = svm.set_account(pk, initial_acct.clone());
     let divergent = FastHashSet::from_iter([pk]);
-    delta1.restore_selective(&initial, &mut svm, &divergent);
+    delta1.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &mod_acct, "first_restore");
 
     // Second restore using restore_selective_from — should skip since patches are equal
     let prev_exec_dirty = FastHashSet::default(); // not dirtied by execution
     let divergent2 = FastHashSet::from_iter([pk]);
     let count =
-        delta2.restore_selective_from(&initial, &mut svm, &divergent2, &delta1, &prev_exec_dirty);
+        delta2.restore_selective_from(&initial, &mut svm, &divergent2, &delta1, &prev_exec_dirty, &crate::snapshot::CreationTracker::new());
     // The account wasn't in prev_exec_dirty and patches are equal, so it should be skipped
     // Only the sysvar restore runs
     assert_eq!(count, 0);
@@ -480,7 +480,7 @@ fn test_compact_delta_sysvar_restore() {
     // Create delta with a specific clock
     let delta = CompactDelta::empty(make_test_clock(42));
     svm.warp_to_slot(99);
-    delta.restore_selective(&initial, &mut svm, &FastHashSet::default());
+    delta.restore_selective(&initial, &mut svm, &FastHashSet::default(), &crate::snapshot::CreationTracker::new());
     assert_eq!(svm.get_sysvar::<Clock>().slot, 42);
 }
 
@@ -590,7 +590,7 @@ fn test_compact_delta_tail_bytes() {
     // Restore and verify all bytes match
     let _ = svm.set_account(pk, initial_acct);
     let divergent = FastHashSet::from_iter([pk]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &mod_acct, "tail_bytes");
 }
 
@@ -679,7 +679,7 @@ fn test_fingerprint_collect_deleted_account_produces_tombstone() {
     let _ = svm.set_account(pk_deleted, delete_acct.clone());
 
     let divergent = FastHashSet::from_iter([pk_stays, pk_deleted]);
-    delta.restore_selective(&initial, &mut svm, &divergent);
+    delta.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
 
     // pk_stays should be at modified value
     assert_account_eq(&svm, &pk_stays, &mod_stay, "stays_after_restore");
@@ -774,7 +774,7 @@ fn test_child_delta_inherits_parent_patches() {
     let _ = svm.set_account(pk_a, initial_a.clone());
     let _ = svm.set_account(pk_b, initial_b.clone());
     let divergent = FastHashSet::from_iter([pk_a, pk_b]);
-    child.restore_selective(&initial, &mut svm, &divergent);
+    child.restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
 
     assert_account_eq(
         &svm,
@@ -874,7 +874,7 @@ fn test_compact_delta_root_inherits_managed_sysvars_and_refreshes_cache() {
     });
     svm.set_sysvar(&EpochSchedule::custom(2_048, 128, false));
 
-    root.restore_selective(&initial, &mut svm, &FastHashSet::default());
+    root.restore_selective(&initial, &mut svm, &FastHashSet::default(), &crate::snapshot::CreationTracker::new());
 
     assert_eq!(svm.get_sysvar::<Clock>(), initial_clock);
     assert_eq!(svm.get_sysvar::<EpochSchedule>(), initial_schedule);
@@ -935,7 +935,7 @@ fn test_compact_delta_rent_epoch_change_uses_full_patch_and_roundtrips() {
         changed_fingerprint, initial_fingerprint,
         "state fingerprints must include rent_epoch"
     );
-    delta.restore_selective(&initial, &mut svm, &FastHashSet::from_iter([pk]));
+    delta.restore_selective(&initial, &mut svm, &FastHashSet::from_iter([pk]), &crate::snapshot::CreationTracker::new());
     assert_account_eq(&svm, &pk, &changed_account, "rent_epoch roundtrip");
 }
 
@@ -963,7 +963,7 @@ fn test_compact_delta_restore_rejects_corrupt_sysvar_account() {
         .unwrap()
         .data = vec![0xFF];
 
-    delta.restore_selective(&initial, &mut svm, &FastHashSet::default());
+    delta.restore_selective(&initial, &mut svm, &FastHashSet::default(), &crate::snapshot::CreationTracker::new());
 }
 
 #[test]
@@ -1012,6 +1012,63 @@ fn test_snapshot_restore_paths_load_programdata_before_executable_program() {
     assert_program_reaches_sbf(&mut selective_restored, program_id);
 
     let mut compact_restored = LiteSVM::new();
-    compact_delta.restore_selective(&initial, &mut compact_restored, &FastHashSet::default());
+    compact_delta.restore_selective(&initial, &mut compact_restored, &FastHashSet::default(), &crate::snapshot::CreationTracker::new());
     assert_program_reaches_sbf(&mut compact_restored, program_id);
+}
+
+// Finding 2 (F-13/F-17 class): restore_selective / restore_selective_from build
+// the restore set from divergent_keys only. An account created along a DIFFERENT
+// branch of the state tree is not in the current divergent set, not in the target
+// delta, and not in the initial snapshot — it must be tombstoned anyway, using the
+// per-entry CreationTracker that travels with the picked state's delta.
+
+#[test]
+fn restore_selective_tombstones_created_account_absent_from_target_and_initial() {
+    let mut svm = LiteSVM::new();
+    let base = Pubkey::new_unique();
+    svm.set_account(base, make_account(100, &[1])).unwrap();
+    let initial = SvmSnapshot::take_all(&svm);
+
+    // Branch A created this account; branch B's target delta does not contain it.
+    let branch_a_created = Pubkey::new_unique();
+    svm.set_account(branch_a_created, make_account(42, &[9])).unwrap();
+
+    // Empty target delta (nothing diverged on branch B), divergent set is empty,
+    // but the branch A lineage tracker records the created account.
+    let delta = CompactDelta::from_initial(&initial);
+    let divergent = FastHashSet::default();
+    let mut created = crate::snapshot::CreationTracker::new();
+    created.observe(branch_a_created);
+
+    delta.restore_selective(&initial, &mut svm, &divergent, &created);
+    assert!(
+        svm.get_account(&branch_a_created).is_none(),
+        "branch-A created account survived restore_selective to a state that does not contain it"
+    );
+    assert_eq!(svm.get_account(&base).unwrap().lamports, 100);
+}
+
+#[test]
+fn restore_selective_from_tombstones_created_account_absent_from_target_and_initial() {
+    let mut svm = LiteSVM::new();
+    let base = Pubkey::new_unique();
+    svm.set_account(base, make_account(100, &[1])).unwrap();
+    let initial = SvmSnapshot::take_all(&svm);
+
+    let branch_a_created = Pubkey::new_unique();
+    svm.set_account(branch_a_created, make_account(42, &[9])).unwrap();
+
+    let delta = CompactDelta::from_initial(&initial);
+    let prev = CompactDelta::from_initial(&initial); // same empty delta
+    let divergent = FastHashSet::default();
+    let prev_exec_dirty = FastHashSet::default();
+    let mut created = crate::snapshot::CreationTracker::new();
+    created.observe(branch_a_created);
+
+    delta.restore_selective_from(&initial, &mut svm, &divergent, &prev, &prev_exec_dirty, &created);
+    assert!(
+        svm.get_account(&branch_a_created).is_none(),
+        "branch-A created account survived restore_selective_from to a state that does not contain it"
+    );
+    assert_eq!(svm.get_account(&base).unwrap().lamports, 100);
 }

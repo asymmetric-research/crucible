@@ -258,6 +258,46 @@ impl SvmSnapshot {
         self.accounts.len()
     }
 
+    /// Restore ALL accounts in snapshot to the SVM, then tombstone (zero)
+    /// every account in `created` that is absent from this snapshot.
+    ///
+    /// `restore_full` leaves accounts created *after* the snapshot in place
+    /// (it only overlays saved accounts), which leaks an account created by
+    /// one corpus input into the next. This variant makes the initial-state
+    /// reset ownership-complete: accounts created along the given lineage that
+    /// the snapshot does not contain are removed (lamports = 0).
+    ///
+    /// Skips snapshot sysvars and executable (program) accounts — zeroing an
+    /// executable account removes it from accounts_db but NOT from
+    /// programs_cache, desyncing litesvm (same guard as `restore`).
+    pub fn restore_full_removing(&self, svm: &mut LiteSVM, created: &CreationTracker) -> usize {
+        self.restore_sysvars(svm);
+        let mut accounts = self
+            .accounts
+            .iter()
+            .filter(|(pubkey, _)| !is_snapshot_sysvar(pubkey, &self.sysvars))
+            .map(|(pubkey, account)| (*pubkey, (**account).clone()))
+            .collect::<Vec<_>>();
+        for pubkey in created.pubkeys() {
+            if self.accounts.contains_key(pubkey) || is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue; // restored above (or sysvar)
+            }
+            if let Some(existing) = svm.get_account(pubkey) {
+                if existing.executable || existing.lamports == 0 {
+                    continue; // never zero executable; nothing to remove if already empty
+                }
+                accounts.push((
+                    *pubkey,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+        restore_accounts_in_runtime_order(svm, accounts, "restore full account")
+    }
+
     /// Restore only the given set of keys to initial state, then overlay a delta.
     ///
     /// This is the fast path for stateful mode: instead of restoring ALL ~200
@@ -799,14 +839,47 @@ impl CompactDelta {
 
     /// Restore SVM state from this delta. Resets divergent accounts to initial,
     /// then applies patches. Returns number of set_account calls.
+    ///
+    /// `created` is the per-entry `CreationTracker` that travels with this delta
+    /// (the picked state's lineage). Accounts created along that lineage but
+    /// absent from BOTH this target delta and the initial snapshot are
+    /// tombstoned (lamports = 0): an account created along a *different*
+    /// branch, or created-then-deleted along this one, would otherwise survive
+    /// from the template SVM into the restored state (restore-boundary leak,
+    /// F-13/F-17 class). Snapshot sysvars and executable accounts are skipped
+    /// (litesvm programs_cache desync guard, same as `collect_divergent_restores`).
     pub fn restore_selective(
         &self,
         initial: &SvmSnapshot,
         svm: &mut LiteSVM,
         divergent_keys: &FastHashSet<Pubkey>,
+        created: &CreationTracker,
     ) -> usize {
         self.restore_sysvars(svm);
         let mut accounts = self.collect_divergent_restores(initial, svm, divergent_keys);
+
+
+        // New: tombstone created accounts that the target state does not contain.
+        for pubkey in created.pubkeys() {
+            if self.accounts.contains_key(pubkey) || initial.accounts.contains_key(pubkey) {
+                continue; // present in the target delta, or existed at setup — not a stray
+            }
+            if is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue;
+            }
+            if let Some(existing) = svm.get_account(pubkey) {
+                if existing.executable || existing.lamports == 0 {
+                    continue; // never zero executable; nothing to remove if already empty
+                }
+                accounts.push((
+                    *pubkey,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
 
         // Apply patches after resetting accounts not represented by the target delta.
         for (pubkey, patch) in &self.accounts {
@@ -836,9 +909,34 @@ impl CompactDelta {
         divergent_keys: &FastHashSet<Pubkey>,
         prev_delta: &CompactDelta,
         prev_exec_dirty: &FastHashSet<Pubkey>,
+        created: &CreationTracker,
     ) -> usize {
         self.restore_sysvars(svm);
         let mut accounts = self.collect_divergent_restores(initial, svm, divergent_keys);
+
+
+        // New: tombstone created accounts that the target state does not contain
+        // (same rationale as `restore_selective`).
+        for pubkey in created.pubkeys() {
+            if self.accounts.contains_key(pubkey) || initial.accounts.contains_key(pubkey) {
+                continue;
+            }
+            if is_snapshot_sysvar(pubkey, &self.sysvars) {
+                continue;
+            }
+            if let Some(existing) = svm.get_account(pubkey) {
+                if existing.executable || existing.lamports == 0 {
+                    continue;
+                }
+                accounts.push((
+                    *pubkey,
+                    Account {
+                        lamports: 0,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
 
         // Apply patches, skipping unchanged ones.
         for (pubkey, next_patch) in &self.accounts {
