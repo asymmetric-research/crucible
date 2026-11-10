@@ -518,6 +518,18 @@ fn gen_corpus_seeding(
             };
 
             let mut __seeded = 0u64;
+            // `restore_full` overlays saved accounts; it cannot remove an account
+            // created by an earlier corpus input. Chosen fix: keep a pristine
+            // SVM template and clone it between inputs and before the pool loop.
+            // Measured (work/cyberpolicy-refusal-2026-11-04.md Task 2,
+            // corpus_seeding_reset_cost_bench): a clone is ~280x faster than the
+            // tracker-based tombstone pass (5.2us vs 1.46ms on a 200-account
+            // world) because LiteSVM::Clone shares Arc account data, and it is
+            // airtight (restores account absence without depending on tracker
+            // completeness). The tombstone primitive restore_full_removing is
+            // retained in crucible-test-context with its own unit test.
+            let __seed_svm_template =
+                crucible_test_context::clone_svm_preserving_config(&__real_svm);
             #pre_loop
             for __seed_path in &__seed_files {
                 let __seed_bytes = match std::fs::read(__seed_path) {
@@ -527,8 +539,8 @@ fn gen_corpus_seeding(
                 let __fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&__seed_bytes);
                 if __fuzz_input.actions.is_empty() { continue; }
 
-                // Reset SVM to initial state for this sequence
-                initial_snapshot.restore_full(&mut __real_svm);
+                // Reset the complete world, including account absence.
+                __real_svm = crucible_test_context::clone_svm_preserving_config(&__seed_svm_template);
 
                 // One fixture per sequence — accumulates mutable state across actions
                 let mut __seed_fixture = template_fixture.clone();
@@ -655,8 +667,9 @@ fn gen_corpus_seeding(
                 }
             }
 
-            // Reset SVM to initial for the main loop
-            initial_snapshot.restore_full(&mut __real_svm);
+            // The main loop starts with an empty divergent-key set, so it must
+            // not inherit any account left by the final corpus input.
+            __real_svm = crucible_test_context::clone_svm_preserving_config(&__seed_svm_template);
             let __seed_edges = #edge_count_expr;
             eprintln!("[STATEFUL] Seeded {} states from {} corpus files, edges after loading: {}",
                 __seeded, __seed_files.len(), __seed_edges);
@@ -972,15 +985,15 @@ fn stateful_singlecore_body(
                 }
                 // Simple selective restore for traced SVM (no delta-to-delta optimization
                 // since the traced SVM is used infrequently — prior state may be stale)
-                delta_arc.restore_selective(&*initial_snapshot, &mut __real_svm, &traced_divergent);
+                delta_arc.restore_selective(&*initial_snapshot, &mut __real_svm, &traced_divergent, &*__parent_creation);
                 traced_divergent.clear();
                 traced_divergent.extend(delta_arc.keys().copied());
             } else {
                 // Optimized delta-to-delta restore for fast SVM (or always-traced when trace_interval==1)
                 if let Some(ref prev) = prev_delta_arc {
-                    delta_arc.restore_selective_from(&*initial_snapshot, &mut __real_svm, &divergent_keys, prev, &prev_exec_dirty);
+                    delta_arc.restore_selective_from(&*initial_snapshot, &mut __real_svm, &divergent_keys, prev, &prev_exec_dirty, &*__parent_creation);
                 } else {
-                    delta_arc.restore_selective(&*initial_snapshot, &mut __real_svm, &divergent_keys);
+                    delta_arc.restore_selective(&*initial_snapshot, &mut __real_svm, &divergent_keys, &*__parent_creation);
                 }
                 divergent_keys.clear();
                 divergent_keys.extend(delta_arc.keys().copied());
@@ -2157,15 +2170,15 @@ fn stateful_multicore_body(
                                 std::mem::swap(&mut *worker_svm, &mut **traced);
                             }
                             // Simple restore for traced SVM (infrequent, no delta-to-delta)
-                            delta_arc.restore_selective(&*worker_initial, &mut *worker_svm, &traced_divergent);
+                            delta_arc.restore_selective(&*worker_initial, &mut *worker_svm, &traced_divergent, &*__parent_creation);
                             traced_divergent.clear();
                             traced_divergent.extend(delta_arc.keys().copied());
                         } else {
                             // Optimized delta-to-delta restore for fast SVM
                             if let Some(ref prev) = prev_delta_arc {
-                                delta_arc.restore_selective_from(&*worker_initial, &mut *worker_svm, &divergent_keys, prev, &prev_exec_dirty);
+                                delta_arc.restore_selective_from(&*worker_initial, &mut *worker_svm, &divergent_keys, prev, &prev_exec_dirty, &*__parent_creation);
                             } else {
-                                delta_arc.restore_selective(&*worker_initial, &mut *worker_svm, &divergent_keys);
+                                delta_arc.restore_selective(&*worker_initial, &mut *worker_svm, &divergent_keys, &*__parent_creation);
                             }
                             divergent_keys.clear();
                             divergent_keys.extend(delta_arc.keys().copied());
@@ -2813,15 +2826,15 @@ fn stateful_multicore_body(
                         std::mem::swap(&mut w0_svm, traced);
                     }
                     // Simple restore for traced SVM (infrequent, no delta-to-delta)
-                    delta_arc.restore_selective(&*w0_initial, &mut w0_svm, &traced_divergent);
+                    delta_arc.restore_selective(&*w0_initial, &mut w0_svm, &traced_divergent, &*__parent_creation);
                     traced_divergent.clear();
                     traced_divergent.extend(delta_arc.keys().copied());
                 } else {
                     // Optimized delta-to-delta restore for fast SVM
                     if let Some(ref prev) = prev_delta_arc {
-                        delta_arc.restore_selective_from(&*w0_initial, &mut w0_svm, &divergent_keys, prev, &prev_exec_dirty);
+                        delta_arc.restore_selective_from(&*w0_initial, &mut w0_svm, &divergent_keys, prev, &prev_exec_dirty, &*__parent_creation);
                     } else {
-                        delta_arc.restore_selective(&*w0_initial, &mut w0_svm, &divergent_keys);
+                        delta_arc.restore_selective(&*w0_initial, &mut w0_svm, &divergent_keys, &*__parent_creation);
                     }
                     divergent_keys.clear();
                     divergent_keys.extend(delta_arc.keys().copied());

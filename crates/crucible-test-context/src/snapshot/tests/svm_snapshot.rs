@@ -2054,3 +2054,100 @@ fn test_field_novelty_same_clock_not_novel() {
         novel
     );
 }
+
+// Regression tests for restore-boundary account leakage (see
+// work/cyberpolicy-refusal-2026-11-04.md findings 1/2).
+//
+// Finding 1: corpus seeding resets the SVM with `restore_full` between inputs,
+// but `restore_full` only restores accounts present in the snapshot — an account
+// created by the previous input survives into the next input.
+
+#[test]
+fn corpus_seed_reset_removes_accounts_created_by_previous_input() {
+    let mut svm = LiteSVM::new();
+    let initial_key = Pubkey::new_unique();
+    let seed_only = Pubkey::new_unique();
+    svm.set_account(initial_key, make_account(100, &[1]))
+        .unwrap();
+    let initial = SvmSnapshot::take_all(&svm);
+    // Equivalent to one corpus input creating a fresh non-executable account.
+    svm.set_account(seed_only, make_account(999, &[9])).unwrap();
+    svm.set_account(initial_key, make_account(50, &[2]))
+        .unwrap();
+    // The fixed seeding macro calls this between corpus inputs and again
+    // before the pool loop, passing the previous input's creation tracker:
+    // restore_full_removing restores the snapshot AND tombstones accounts
+    // created along that lineage which the snapshot does not contain.
+    let mut created = CreationTracker::new();
+    created.observe(seed_only);
+    initial.restore_full_removing(&mut svm, &created);
+    assert_eq!(svm.get_account(&initial_key).unwrap().lamports, 100);
+    assert!(
+        svm.get_account(&seed_only).is_none(),
+        "previous corpus input account survived the claimed initial-state reset"
+    );
+}
+
+// Control: the selective path *does* clear a created account when its key is in
+// the divergent set. Proves the leak is a missing-key problem, not a mechanism
+// problem (created accounts are meant to be tombstoned).
+#[test]
+fn corpus_seed_selective_reset_control_clears_tracked_created_accounts() {
+    let mut svm = LiteSVM::new();
+    let initial = SvmSnapshot::take_all(&svm);
+    let seed_only = Pubkey::new_unique();
+    svm.set_account(seed_only, make_account(999, &[9])).unwrap();
+    let mut divergent = FastHashSet::default();
+    divergent.insert(seed_only);
+    CompactDelta::from_initial(&initial).restore_selective(&initial, &mut svm, &divergent, &crate::snapshot::CreationTracker::new());
+    assert!(svm.get_account(&seed_only).is_none());
+}
+
+// Cost measurement for the corpus-seeding reset decision (notes in
+// work/cyberpolicy-refusal-2026-11-04.md Task 2): tracker pass
+// (restore_full_removing) vs pristine-SVM clone fallback
+// (clone_svm_preserving_config). Ignored by default; run with
+// `cargo test --release corpus_seeding_reset_cost_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "benchmark; run explicitly with --release"]
+fn corpus_seeding_reset_cost_bench() {
+    use std::time::Instant;
+    let mut svm = LiteSVM::new();
+    // Representative loaded world: 200 non-executable accounts + one large
+    // program-like account.
+    let count = 200usize;
+    for i in 0..count {
+        let pk = Pubkey::new_unique();
+        svm.set_account(pk, make_account(1_000_000 + i as u64, &[i as u8; 128]))
+            .unwrap();
+    }
+    let initial = SvmSnapshot::take_all(&svm);
+    // Created accounts typically a handful (5) per seed input.
+    let mut created = CreationTracker::new();
+    for i in 0..5 {
+        created.observe(Pubkey::new_unique());
+    }
+    let mut svm2 = crate::clone_svm_preserving_config(&svm);
+
+    const ITERS: u32 = 2000;
+    let t0 = Instant::now();
+    for _ in 0..ITERS {
+        // Re-dirty between iterations like the seeding loop does.
+        svm.set_account(Pubkey::new_unique(), make_account(7, &[1])).unwrap();
+        initial.restore_full_removing(&mut svm, &created);
+    }
+    let tracker_ns = t0.elapsed().as_nanos() as f64 / ITERS as f64;
+
+    let t1 = Instant::now();
+    for _ in 0..ITERS {
+        svm2 = crate::clone_svm_preserving_config(&svm2);
+    }
+    let clone_ns = t1.elapsed().as_nanos() as f64 / ITERS as f64;
+
+    println!(
+        "corpus seeding reset cost (ns/op): tracker pass {:.0}  vs  pristine clone {:.0}  (ratio {:.2}x)",
+        tracker_ns, clone_ns, clone_ns / tracker_ns
+    );
+    // Record for the note; keep as soft evidence, not a hard assert.
+    assert!(tracker_ns > 0.0 && clone_ns > 0.0);
+}
